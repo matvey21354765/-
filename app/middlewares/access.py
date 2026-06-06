@@ -1,4 +1,5 @@
 from typing import Callable, Awaitable, Any
+import asyncio
 import time
 from aiogram import BaseMiddleware
 from aiogram.fsm.context import FSMContext
@@ -23,7 +24,7 @@ REQUIRED_CHANNELS = [
 
 # Cache: user_id -> (is_subscribed, timestamp)
 _sub_cache: dict[int, tuple[bool, float]] = {}
-_CACHE_TTL = 60  # seconds
+_CACHE_TTL = 300  # 5 minutes
 
 
 def _sub_kb() -> InlineKeyboardMarkup:
@@ -34,30 +35,26 @@ def _sub_kb() -> InlineKeyboardMarkup:
 
 async def _check_channel(bot, channel: str, user_id: int) -> bool:
     try:
-        member = await bot.get_chat_member(channel, user_id)
+        member = await asyncio.wait_for(
+            bot.get_chat_member(channel, user_id), timeout=5.0
+        )
         return member.status not in ("left", "kicked", "banned")
     except Exception:
         return False
 
 
-async def _is_subscribed(bot, user_id: int, force: bool = False) -> bool:
-    import asyncio
-    now = time.monotonic()
-    if not force and user_id in _sub_cache:
-        cached, ts = _sub_cache[user_id]
-        if now - ts < _CACHE_TTL:
-            return cached
-
+async def _live_check(bot, user_id: int) -> bool:
     results = await asyncio.gather(*[
         _check_channel(bot, ch, user_id) for ch, _ in REQUIRED_CHANNELS
     ])
     ok = all(results)
-    _sub_cache[user_id] = (ok, now)
+    _sub_cache[user_id] = (ok, time.monotonic())
     return ok
 
 
-def invalidate_sub_cache(user_id: int) -> None:
-    _sub_cache.pop(user_id, None)
+# Events that trigger a live Telegram API check
+_LIVE_CHECK_CMDS = {"/start"}
+_LIVE_CHECK_CBS = {"check_sub"}
 
 
 class AccessMiddleware(BaseMiddleware):
@@ -65,14 +62,19 @@ class AccessMiddleware(BaseMiddleware):
                        event: TelegramObject, data: dict) -> Any:
         uid = None
         is_free = False
+        needs_live_check = False
 
         if isinstance(event, Message):
             uid = event.from_user.id
-            is_free = any((event.text or "").startswith(c) for c in _FREE_CMDS)
+            cmd = (event.text or "").split()[0] if event.text else ""
+            is_free = cmd in _FREE_CMDS
+            needs_live_check = cmd in _LIVE_CHECK_CMDS
             bot = event.bot
         elif isinstance(event, CallbackQuery):
             uid = event.from_user.id
-            is_free = (event.data or "") in _FREE_CBS
+            cb = event.data or ""
+            is_free = cb in _FREE_CBS
+            needs_live_check = cb in _LIVE_CHECK_CBS
             bot = event.bot
         else:
             return await handler(event, data)
@@ -84,24 +86,29 @@ class AccessMiddleware(BaseMiddleware):
         if uid in settings.ADMIN_IDS:
             return await handler(event, data)
 
-        # Channel subscription gate — runs for ALL events including /start
-        force_check = isinstance(event, CallbackQuery) and event.data == "check_sub"
-        if not await _is_subscribed(bot, uid, force=force_check):
-            sub_text = "Подпишись на наши каналы"
-            if isinstance(event, Message):
-                await event.answer(sub_text, reply_markup=_sub_kb(), parse_mode="HTML")
-            elif isinstance(event, CallbackQuery):
-                if event.data == "check_sub":
-                    await event.answer("❌ Ты ещё не подписан на все каналы", show_alert=True)
-                else:
-                    await event.answer("❗ Сначала подпишись на каналы", show_alert=True)
-                    try:
-                        await event.message.edit_text(sub_text, reply_markup=_sub_kb(), parse_mode="HTML")
-                    except Exception:
-                        pass
-            return
+        # Use cache if available and not a live-check event
+        now = time.monotonic()
+        cached = _sub_cache.get(uid)
+        if cached and not needs_live_check:
+            ok, ts = cached
+            if now - ts < _CACHE_TTL:
+                if not ok:
+                    await _block(event, bot)
+                    return
+                # subscribed — continue below
+            else:
+                # cache expired — do live check
+                ok = await _live_check(bot, uid)
+                if not ok:
+                    await _block(event, bot)
+                    return
+        else:
+            # no cache or needs fresh check
+            ok = await _live_check(bot, uid)
+            if not ok:
+                await _block(event, bot)
+                return
 
-        # check_sub succeeded — show main menu (handled in handler)
         if is_free:
             return await handler(event, data)
 
@@ -111,7 +118,6 @@ class AccessMiddleware(BaseMiddleware):
 
         data["db_user"] = user
 
-        # Allow through if user is in FSM state (e.g. entering promo code)
         fsm: FSMContext = data.get("state")
         if fsm:
             state_name = await fsm.get_state()
@@ -127,3 +133,19 @@ class AccessMiddleware(BaseMiddleware):
             return
 
         return await handler(event, data)
+
+
+async def _block(event, bot) -> None:
+    sub_text = "Подпишись на наши каналы"
+    kb = _sub_kb()
+    if isinstance(event, Message):
+        await event.answer(sub_text, reply_markup=kb, parse_mode="HTML")
+    elif isinstance(event, CallbackQuery):
+        if event.data == "check_sub":
+            await event.answer("❌ Ты ещё не подписан на все каналы", show_alert=True)
+        else:
+            await event.answer("❗ Сначала подпишись на каналы", show_alert=True)
+            try:
+                await event.message.edit_text(sub_text, reply_markup=kb, parse_mode="HTML")
+            except Exception:
+                pass
