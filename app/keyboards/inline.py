@@ -1,5 +1,7 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton as Btn
 
+POLY_URL = "https://polymarket.com/markets/crypto?via=max-chron0n"
+
 
 def main_menu(notifications: bool = False) -> InlineKeyboardMarkup:
     notif_text = "🔔 Уведомления: ВКЛ" if notifications else "🔕 Уведомления: ВЫКЛ"
@@ -10,6 +12,7 @@ def main_menu(notifications: bool = False) -> InlineKeyboardMarkup:
          Btn(text="◎ SOL", callback_data="sig_SOL")],
         [Btn(text="📊 Статистика", callback_data="stats_menu"),
          Btn(text="📋 История", callback_data="hist_ALL_0")],
+        [Btn(text="🎯 Polymarket", url=POLY_URL)],
         [Btn(text="💳 Подписка", callback_data="subscription"),
          Btn(text=notif_text, callback_data="toggle_notifications")],
     ])
@@ -69,6 +72,7 @@ def overview_kb() -> InlineKeyboardMarkup:
         [Btn(text="₿ BTC", callback_data="sig_BTC"),
          Btn(text="Ξ ETH", callback_data="sig_ETH"),
          Btn(text="◎ SOL", callback_data="sig_SOL")],
+        [Btn(text="🎯 Polymarket", url=POLY_URL)],
         [Btn(text="🔄 Обновить обзор", callback_data="overview")],
         [Btn(text="« Меню", callback_data="main_menu")],
     ])
@@ -81,7 +85,6 @@ def subscription_kb() -> InlineKeyboardMarkup:
         [Btn(text="💬 Написать @n3m1r", url="https://t.me/n3m1r")],
         [Btn(text="« Меню", callback_data="main_menu")],
     ])
-
 
 
 def back_kb() -> InlineKeyboardMarkup:
