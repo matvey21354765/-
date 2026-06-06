@@ -11,6 +11,15 @@ logger = logging.getLogger(__name__)
 SYMBOL_MAP = {"BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT"}
 _TIMEOUT = aiohttp.ClientTimeout(total=20)
 
+# Binance public REST endpoints (hardcoded to avoid misconfiguration via env)
+_SPOT_URLS = [
+    "https://api.binance.com",
+    "https://api1.binance.com",
+    "https://api2.binance.com",
+    "https://api3.binance.com",
+]
+_FUTURES_URL = "https://fapi.binance.com"
+
 
 async def _get(url: str, params: dict = None) -> dict | list:
     async with aiohttp.ClientSession(timeout=_TIMEOUT) as s:
@@ -19,9 +28,21 @@ async def _get(url: str, params: dict = None) -> dict | list:
             return await r.json()
 
 
+async def _get_spot(path: str, params: dict = None) -> dict | list:
+    """Try each Binance spot mirror in order until one responds."""
+    last_err: Exception = RuntimeError("No spot URL available")
+    for base in _SPOT_URLS:
+        try:
+            return await _get(f"{base}{path}", params)
+        except Exception as e:
+            last_err = e
+            logger.debug(f"Spot mirror {base} failed: {e}")
+    raise last_err
+
+
 async def fetch_klines(symbol: str, interval: str, limit: int = 200) -> pd.DataFrame:
-    raw = await _get(f"{settings.BINANCE_SPOT_URL}/api/v3/klines",
-                     {"symbol": symbol, "interval": interval, "limit": limit})
+    raw = await _get_spot("/api/v3/klines",
+                          {"symbol": symbol, "interval": interval, "limit": limit})
     cols = ["open_time", "open", "high", "low", "close", "volume",
             "close_time", "quote_vol", "trades", "taker_buy_base", "taker_buy_quote", "ignore"]
     df = pd.DataFrame(raw, columns=cols)
@@ -31,12 +52,12 @@ async def fetch_klines(symbol: str, interval: str, limit: int = 200) -> pd.DataF
 
 
 async def fetch_ticker(symbol: str) -> dict:
-    return await _get(f"{settings.BINANCE_SPOT_URL}/api/v3/ticker/24hr", {"symbol": symbol})
+    return await _get_spot("/api/v3/ticker/24hr", {"symbol": symbol})
 
 
 async def fetch_funding_rate(symbol: str) -> float:
     try:
-        d = await _get(f"{settings.BINANCE_FUTURES_URL}/fapi/v1/premiumIndex", {"symbol": symbol})
+        d = await _get(f"{_FUTURES_URL}/fapi/v1/premiumIndex", {"symbol": symbol})
         return float(d.get("lastFundingRate", 0))
     except Exception:
         return 0.0
@@ -44,7 +65,7 @@ async def fetch_funding_rate(symbol: str) -> float:
 
 async def fetch_open_interest(symbol: str) -> float:
     try:
-        d = await _get(f"{settings.BINANCE_FUTURES_URL}/fapi/v1/openInterest", {"symbol": symbol})
+        d = await _get(f"{_FUTURES_URL}/fapi/v1/openInterest", {"symbol": symbol})
         return float(d.get("openInterest", 0))
     except Exception:
         return 0.0
@@ -52,7 +73,7 @@ async def fetch_open_interest(symbol: str) -> float:
 
 async def fetch_long_short_ratio(symbol: str) -> float:
     try:
-        d = await _get(f"{settings.BINANCE_FUTURES_URL}/futures/data/globalLongShortAccountRatio",
+        d = await _get(f"{_FUTURES_URL}/futures/data/globalLongShortAccountRatio",
                        {"symbol": symbol, "period": "1h", "limit": 1})
         return float(d[0]["longShortRatio"]) if d else 1.0
     except Exception:
