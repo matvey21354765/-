@@ -87,12 +87,7 @@ class AccessMiddleware(BaseMiddleware):
         # Channel subscription gate — runs for ALL events including /start
         force_check = isinstance(event, CallbackQuery) and event.data == "check_sub"
         if not await _is_subscribed(bot, uid, force=force_check):
-            sub_text = (
-                "📢 <b>Для использования PredictBot</b>\n"
-                "подпишись на наши каналы:\n\n"
-                + "\n".join(f"• {ch[0]}" for ch in REQUIRED_CHANNELS)
-                + "\n\nПосле подписки нажми кнопку ниже 👇"
-            )
+            sub_text = "Подпишись на наши каналы"
             if isinstance(event, Message):
                 await event.answer(sub_text, reply_markup=_sub_kb(), parse_mode="HTML")
             elif isinstance(event, CallbackQuery):
