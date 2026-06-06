@@ -1,18 +1,41 @@
 from typing import Callable, Awaitable, Any
 from aiogram import BaseMiddleware
 from aiogram.fsm.context import FSMContext
-from aiogram.types import TelegramObject, Message, CallbackQuery
+from aiogram.types import TelegramObject, Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton as Btn
 from app.services.user_service import get_user
 from app.keyboards.inline import subscription_kb
 from config.settings import settings
 
 _FREE_CMDS = {"/start", "/help"}
 _FREE_CBS = {
-    "subscription", "enter_promo", "main_menu",
+    "subscription", "enter_promo", "main_menu", "open_menu",
     "buy_stars_1", "buy_stars_3", "buy_stars_6",
     "buy_1", "buy_3", "buy_6",
+    "check_sub",
 }
 _MSG = "⏰ <b>Пробный период закончился</b>\n\nОформите подписку или введите промокод:"
+
+REQUIRED_CHANNELS = [
+    ("@n000ll", "https://t.me/n000ll"),
+    ("@nemiroffcall", "https://t.me/nemiroffcall"),
+]
+
+
+def _sub_kb() -> InlineKeyboardMarkup:
+    rows = [[Btn(text=f"📢 {ch[0]}", url=ch[1])] for ch in REQUIRED_CHANNELS]
+    rows.append([Btn(text="✅ Проверить подписку", callback_data="check_sub")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _is_subscribed(bot, user_id: int) -> bool:
+    for channel, _ in REQUIRED_CHANNELS:
+        try:
+            member = await bot.get_chat_member(channel, user_id)
+            if member.status in ("left", "kicked", "banned"):
+                return False
+        except Exception:
+            return False
+    return True
 
 
 class AccessMiddleware(BaseMiddleware):
@@ -24,11 +47,37 @@ class AccessMiddleware(BaseMiddleware):
         if isinstance(event, Message):
             uid = event.from_user.id
             is_free = any((event.text or "").startswith(c) for c in _FREE_CMDS)
+            bot = event.bot
         elif isinstance(event, CallbackQuery):
             uid = event.from_user.id
             is_free = (event.data or "") in _FREE_CBS
+            bot = event.bot
+        else:
+            return await handler(event, data)
 
-        if not uid or is_free:
+        if not uid:
+            return await handler(event, data)
+
+        # Channel subscription gate (admins bypass)
+        if uid not in settings.ADMIN_IDS:
+            if not await _is_subscribed(bot, uid):
+                sub_text = (
+                    "📢 <b>Для использования PredictBot</b>\n"
+                    "подпишись на наши каналы:\n\n"
+                    + "\n".join(f"• {ch[0]}" for ch in REQUIRED_CHANNELS)
+                    + "\n\nПосле подписки нажми кнопку ниже 👇"
+                )
+                if isinstance(event, Message):
+                    await event.answer(sub_text, reply_markup=_sub_kb(), parse_mode="HTML")
+                elif isinstance(event, CallbackQuery):
+                    await event.answer("❗ Сначала подпишись на каналы", show_alert=True)
+                    try:
+                        await event.message.edit_text(sub_text, reply_markup=_sub_kb(), parse_mode="HTML")
+                    except Exception:
+                        pass
+                return
+
+        if is_free:
             return await handler(event, data)
 
         # Admins always pass through

@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 async def main():
-    logger.info("🚀 Starting DAO Signals Bot (Groq)...")
+    logger.info("🚀 Starting PredictBot...")
 
     await init_db()
     logger.info("✅ Database ready")

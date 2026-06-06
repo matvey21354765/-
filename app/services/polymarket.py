@@ -107,7 +107,7 @@ def _analyze_market(market: dict, snaps: dict) -> Optional[dict]:
     reasons = result.get("reasons", [])[:2]
     price = snap["price"]
     slug = market.get("slug", "")
-    url = f"https://polymarket.com/event/{slug}"
+    url = f"https://polymarket.com/event/{slug}?via=max-chron0n"
 
     # Determine our answer to the market question
     # Detect if it's a price UP/DOWN question

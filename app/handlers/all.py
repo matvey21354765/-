@@ -17,7 +17,7 @@ from app.services.signal_service import (
 from app.services.notifier import format_signal, format_full_analysis, format_market_overview, broadcast_signal
 from app.keyboards.inline import (
     main_menu, signal_kb, full_analysis_kb, stats_kb, history_kb,
-    subscription_kb, back_kb, overview_kb,
+    subscription_kb, back_kb, overview_kb, start_kb,
 )
 from config.settings import settings
 
@@ -35,36 +35,55 @@ class PromoState(StatesGroup):
 @router.message(CommandStart())
 async def cmd_start(msg: Message, state: FSMContext):
     await state.clear()
-    user, is_new = await get_or_create_user(
+    user, _ = await get_or_create_user(
         msg.from_user.id, msg.from_user.username, msg.from_user.first_name)
 
-    if is_new:
-        ends = user.trial_ends_at.strftime("%d.%m.%Y %H:%M") if user.trial_ends_at else "—"
-        text = (
-            f"👋 <b>Добро пожаловать в DAO Signals!</b>\n\n"
-            f"🎁 Бесплатный доступ на <b>{settings.TRIAL_DAYS} дня</b>\n"
-            f"Пробный период до: <b>{ends} UTC</b>\n\n"
-            f"<b>Анализирую BTC, ETH, SOL — AI сигналы LONG/SHORT</b>\n\n"
-            f"Нажми 🔕 <b>Уведомления</b> чтобы получать сигналы автоматически 👇"
+    name = user.first_name or "трейдер"
+    ends = user.trial_ends_at.strftime("%d.%m.%Y") if user.trial_ends_at else "—"
+    text = (
+        f"👋 Привет, <b>{name}</b>!\n\n"
+        f"🤖 <b>PredictBot</b> — AI-сигналы LONG/SHORT для BTC, ETH, SOL\n\n"
+        f"✅ Техана лиз: RSI, MACD, EMA, Bollinger, ADX\n"
+        f"✅ Фандинг, OI, Fear & Greed\n"
+        f"✅ Уровни поддержки/сопротивления\n"
+        f"✅ Рекомендации по плечу\n\n"
+        f"🎁 <b>Бесплатный доступ</b> до {ends}\n\n"
+        f"Нажми кнопку ниже ↓"
+    )
+    await msg.answer(text, reply_markup=start_kb(), parse_mode="HTML")
+
+
+@router.callback_query(F.data == "check_sub")
+async def cb_check_sub(call: CallbackQuery):
+    from app.middlewares.access import _is_subscribed, _sub_kb
+    if await _is_subscribed(call.bot, call.from_user.id):
+        user = await get_user(call.from_user.id)
+        notif = getattr(user, "notifications_enabled", False) if user else False
+        await call.message.edit_text(
+            "📡 <b>PredictBot</b> — выберите действие:",
+            reply_markup=main_menu(notif), parse_mode="HTML"
         )
     else:
-        days = user.trial_days_left()
-        status = (
-            "✅ Подписка активна" if user.is_subscribed
-            else f"⏳ Пробный период: {days}д" if days > 0
-            else "❌ Доступ истёк"
-        )
-        text = f"👋 С возвращением, <b>{user.first_name or 'трейдер'}</b>!\n{status}"
+        await call.answer("❌ Ты ещё не подписан на все каналы", show_alert=True)
+    await call.answer()
 
-    notif = user.notifications_enabled if hasattr(user, 'notifications_enabled') else False
-    await msg.answer(text, reply_markup=main_menu(notif), parse_mode="HTML")
+
+@router.callback_query(F.data == "open_menu")
+async def cb_open_menu(call: CallbackQuery):
+    user = await get_user(call.from_user.id)
+    notif = getattr(user, "notifications_enabled", False) if user else False
+    await call.message.edit_text(
+        "📡 <b>PredictBot</b> — выберите действие:",
+        reply_markup=main_menu(notif), parse_mode="HTML"
+    )
+    await call.answer()
 
 
 @router.callback_query(F.data == "main_menu")
 async def cb_main(call: CallbackQuery):
     user = await get_user(call.from_user.id)
     notif = user.notifications_enabled if user and hasattr(user, 'notifications_enabled') else False
-    await call.message.edit_text("📡 <b>DAO Signals</b> — выберите действие:",
+    await call.message.edit_text("📡 <b>PredictBot</b> — выберите действие:",
                                   reply_markup=main_menu(notif), parse_mode="HTML")
     await call.answer()
 
@@ -268,7 +287,7 @@ async def cb_subscription(call: CallbackQuery):
     else:
         status = "❌ Нет доступа"
     text = (
-        f"💳 <b>Подписка DAO Signals</b>\n\n"
+        f"💳 <b>Подписка PredictBot</b>\n\n"
         f"Статус: {status}\n\n"
         f"<b>Тарифы:</b>\n"
         f"  • 1 месяц   — <b>$29</b>\n"

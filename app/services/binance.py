@@ -8,7 +8,7 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 SYMBOL_MAP = {"BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT"}
-_TIMEOUT = aiohttp.ClientTimeout(total=20)
+_TIMEOUT = aiohttp.ClientTimeout(total=10)
 
 # Binance public REST — hardcoded, never read from .env
 _SPOT_URLS = [
@@ -19,6 +19,13 @@ _SPOT_URLS = [
 ]
 _FUTURES_URL = "https://fapi.binance.com"
 
+_binance_blocked: bool = False
+
+# OKX fallback mappings
+_OKX_MAP = {"BTCUSDT": "BTC-USDT", "ETHUSDT": "ETH-USDT", "SOLUSDT": "SOL-USDT"}
+_OKX_SWAP_MAP = {"BTCUSDT": "BTC-USDT-SWAP", "ETHUSDT": "ETH-USDT-SWAP", "SOLUSDT": "SOL-USDT-SWAP"}
+_OKX_INTERVAL = {"1h": "1H", "4h": "4H", "1d": "1D"}
+
 
 async def _get(url: str, params: dict = None) -> dict | list:
     async with aiohttp.ClientSession(timeout=_TIMEOUT) as s:
@@ -28,20 +35,71 @@ async def _get(url: str, params: dict = None) -> dict | list:
 
 
 async def _get_spot(path: str, params: dict = None) -> dict | list:
-    """Try each Binance spot mirror until one responds."""
+    """Try each Binance spot mirror; on geo-block fall back to OKX immediately."""
+    global _binance_blocked
+    if _binance_blocked:
+        raise RuntimeError("Binance geo-blocked")
     last_err: Exception = RuntimeError("All Binance spot mirrors failed")
     for base in _SPOT_URLS:
         try:
             return await _get(f"{base}{path}", params)
+        except aiohttp.ClientResponseError as e:
+            if e.status in (451, 403):
+                _binance_blocked = True
+                raise
+            last_err = e
+            logger.debug(f"Spot mirror {base} failed: {e}")
         except Exception as e:
             last_err = e
             logger.debug(f"Spot mirror {base} failed: {e}")
     raise last_err
 
 
+async def _okx_klines(symbol: str, interval: str, limit: int) -> list:
+    inst = _OKX_MAP.get(symbol, symbol)
+    bar = _OKX_INTERVAL.get(interval, "1H")
+    url = "https://www.okx.com/api/v5/market/candles"
+    async with aiohttp.ClientSession(timeout=_TIMEOUT) as s:
+        async with s.get(url, params={"instId": inst, "bar": bar, "limit": limit}) as r:
+            r.raise_for_status()
+            d = await r.json()
+    # OKX returns newest first; reverse to oldest-first like Binance
+    candles = d.get("data", [])
+    candles.reverse()
+    # Convert to Binance kline format: [open_time,open,high,low,close,volume,...]
+    result = []
+    for c in candles:
+        ts, o, h, l, cl, vol = c[0], c[1], c[2], c[3], c[4], c[5]
+        result.append([int(ts), o, h, l, cl, vol, int(ts), vol, 0, vol, vol, "0"])
+    return result
+
+
+async def _okx_ticker(symbol: str) -> dict:
+    inst = _OKX_MAP.get(symbol, symbol)
+    url = "https://www.okx.com/api/v5/market/ticker"
+    async with aiohttp.ClientSession(timeout=_TIMEOUT) as s:
+        async with s.get(url, params={"instId": inst}) as r:
+            r.raise_for_status()
+            d = await r.json()
+    t = d["data"][0]
+    open24 = float(t.get("open24h") or t["last"])
+    last = float(t["last"])
+    change_pct = (last - open24) / open24 * 100 if open24 else 0
+    return {
+        "lastPrice": t["last"],
+        "priceChangePercent": str(round(change_pct, 2)),
+        "quoteVolume": t.get("volCcy24h", "0"),
+        "highPrice": t.get("high24h", t["last"]),
+        "lowPrice": t.get("low24h", t["last"]),
+    }
+
+
 async def fetch_klines(symbol: str, interval: str, limit: int = 200) -> pd.DataFrame:
-    raw = await _get_spot("/api/v3/klines",
-                          {"symbol": symbol, "interval": interval, "limit": limit})
+    try:
+        raw = await _get_spot("/api/v3/klines",
+                              {"symbol": symbol, "interval": interval, "limit": limit})
+    except Exception:
+        raw = await _okx_klines(symbol, interval, limit)
     cols = ["open_time", "open", "high", "low", "close", "volume",
             "close_time", "quote_vol", "trades", "taker_buy_base", "taker_buy_quote", "ignore"]
     df = pd.DataFrame(raw, columns=cols)
@@ -51,7 +109,10 @@ async def fetch_klines(symbol: str, interval: str, limit: int = 200) -> pd.DataF
 
 
 async def fetch_ticker(symbol: str) -> dict:
-    return await _get_spot("/api/v3/ticker/24hr", {"symbol": symbol})
+    try:
+        return await _get_spot("/api/v3/ticker/24hr", {"symbol": symbol})
+    except Exception:
+        return await _okx_ticker(symbol)
 
 
 async def fetch_funding_rate(symbol: str) -> float:
