@@ -17,11 +17,14 @@ def setup_scheduler(scheduler: AsyncIOScheduler, bot: Bot):
 
 
 async def _run_signals(bot: Bot):
+    import asyncio
     logger.info("⚙️ Generating scheduled signals...")
     for coin in settings.COINS:
         try:
-            sig = await generate_signal(coin)
-            if sig and sig.direction != "NO TRADE" and sig.signal_rating >= settings.MIN_SIGNAL_RATING:
-                await broadcast_signal(bot, sig)
+            sig = await generate_signal(coin, use_cache=False)
+            if sig:
+                sent, _ = await broadcast_signal(bot, sig)
+                logger.info(f"[{coin}] Broadcast {sig.direction} → {sent} users")
+            await asyncio.sleep(3)  # avoid Groq rate limits between coins
         except Exception as e:
             logger.error(f"[{coin}] Scheduled error: {e}")

@@ -52,6 +52,25 @@ async def activate_subscription(telegram_id: int, months: int) -> bool:
         return True
 
 
+async def toggle_notifications(telegram_id: int) -> bool:
+    """Toggle notifications, return new state."""
+    async with AsyncSessionLocal() as db:
+        res = await db.execute(select(User).where(User.telegram_id == telegram_id))
+        user = res.scalar_one_or_none()
+        if not user:
+            return False
+        user.notifications_enabled = not user.notifications_enabled
+        await db.commit()
+        return user.notifications_enabled
+
+
+async def get_users_with_notifications() -> list[User]:
+    async with AsyncSessionLocal() as db:
+        res = await db.execute(
+            select(User).where(User.notifications_enabled == True, User.is_active == True))
+        return res.scalars().all()
+
+
 async def get_all_active_users() -> list[User]:
     async with AsyncSessionLocal() as db:
         res = await db.execute(select(User).where(User.is_active == True))

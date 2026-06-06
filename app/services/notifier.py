@@ -226,7 +226,8 @@ def format_market_overview(signals: list[Signal]) -> str:
 
 async def broadcast_signal(bot: Bot, sig: Signal) -> tuple[int, int]:
     from app.keyboards.inline import signal_kb
-    users = await get_all_active_users()
+    from app.services.user_service import get_users_with_notifications
+    users = await get_users_with_notifications()
     text = format_signal(sig)
     kb = signal_kb(sig.coin, sig.id)
     sent = blocked = 0

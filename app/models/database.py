@@ -28,6 +28,7 @@ class User(Base):
     subscription_ends_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     registered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     virtual_deposit: Mapped[float] = mapped_column(Float, default=10000.0)
+    notifications_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
 
     def has_access(self) -> bool:
         now = datetime.now(timezone.utc)

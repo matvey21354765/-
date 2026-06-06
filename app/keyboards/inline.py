@@ -1,16 +1,17 @@
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton as Btn
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton as Btn, LabeledPrice
 
 
-def main_menu() -> InlineKeyboardMarkup:
+def main_menu(notifications: bool = False) -> InlineKeyboardMarkup:
+    notif_text = "🔔 Уведомления: ВКЛ" if notifications else "🔕 Уведомления: ВЫКЛ"
     return InlineKeyboardMarkup(inline_keyboard=[
         [Btn(text="🌐 Обзор рынка", callback_data="overview")],
-        [Btn(text="📡 BTC", callback_data="sig_BTC"),
-         Btn(text="📡 ETH", callback_data="sig_ETH"),
-         Btn(text="📡 SOL", callback_data="sig_SOL")],
+        [Btn(text="₿ BTC", callback_data="sig_BTC"),
+         Btn(text="Ξ ETH", callback_data="sig_ETH"),
+         Btn(text="◎ SOL", callback_data="sig_SOL")],
         [Btn(text="📊 Статистика", callback_data="stats_menu"),
-         Btn(text="📈 Депозит", callback_data="deposit")],
-        [Btn(text="📋 История", callback_data="hist_ALL_0"),
-         Btn(text="💳 Подписка", callback_data="subscription")],
+         Btn(text="📋 История", callback_data="hist_ALL_0")],
+        [Btn(text="💳 Подписка", callback_data="subscription"),
+         Btn(text=notif_text, callback_data="toggle_notifications")],
     ])
 
 
@@ -65,9 +66,9 @@ def history_kb(coin: str, page: int, has_next: bool) -> InlineKeyboardMarkup:
 
 def overview_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [Btn(text="📡 BTC", callback_data="sig_BTC"),
-         Btn(text="📡 ETH", callback_data="sig_ETH"),
-         Btn(text="📡 SOL", callback_data="sig_SOL")],
+        [Btn(text="₿ BTC", callback_data="sig_BTC"),
+         Btn(text="Ξ ETH", callback_data="sig_ETH"),
+         Btn(text="◎ SOL", callback_data="sig_SOL")],
         [Btn(text="🔄 Обновить обзор", callback_data="overview")],
         [Btn(text="« Меню", callback_data="main_menu")],
     ])
@@ -75,10 +76,17 @@ def overview_kb() -> InlineKeyboardMarkup:
 
 def subscription_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [Btn(text="1 месяц — $29", callback_data="buy_1")],
-        [Btn(text="3 месяца — $69  (−21%)", callback_data="buy_3")],
-        [Btn(text="6 месяцев — $119  (−32%)", callback_data="buy_6")],
+        [Btn(text="⭐ 1 месяц — 500 Stars", callback_data="buy_stars_1")],
+        [Btn(text="⭐ 3 месяца — 1200 Stars  (−20%)", callback_data="buy_stars_3")],
+        [Btn(text="⭐ 6 месяцев — 2100 Stars  (−30%)", callback_data="buy_stars_6")],
         [Btn(text="« Меню", callback_data="main_menu")],
+    ])
+
+
+def pay_kb(months: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [Btn(text="⭐ Оплатить Telegram Stars", pay=True)],
+        [Btn(text="✖ Отмена", callback_data="subscription")],
     ])
 
 

@@ -1,9 +1,12 @@
 from aiogram import Router, F
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, PreCheckoutQuery, LabeledPrice
 import logging
 
-from app.services.user_service import get_or_create_user, get_user, activate_subscription, get_user_count
+from app.services.user_service import (
+    get_or_create_user, get_user, activate_subscription, get_user_count,
+    toggle_notifications,
+)
 from app.services.signal_service import (
     generate_signal, get_stats, get_recent_signals,
     get_deposit_history, get_current_balance, recompute_stats,
@@ -12,13 +15,17 @@ from app.services.signal_service import (
 from app.services.notifier import format_signal, format_full_analysis, format_market_overview, broadcast_signal
 from app.keyboards.inline import (
     main_menu, signal_kb, full_analysis_kb, stats_kb, history_kb,
-    subscription_kb, back_kb, overview_kb,
+    subscription_kb, back_kb, overview_kb, pay_kb,
 )
 from config.settings import settings
 
 logger = logging.getLogger(__name__)
 router = Router()
 PAGE_SIZE = 8
+
+# Stars prices per month count
+STARS_PRICES = {1: 500, 3: 1200, 6: 2100}
+STARS_LABELS = {1: "1 месяц", 3: "3 месяца", 6: "6 месяцев"}
 
 
 # ── /start ────────────────────────────────────────────────────────────────────
@@ -34,13 +41,8 @@ async def cmd_start(msg: Message):
             f"👋 <b>Добро пожаловать в DAO Signals!</b>\n\n"
             f"🎁 Бесплатный доступ на <b>{settings.TRIAL_DAYS} дня</b>\n"
             f"Пробный период до: <b>{ends} UTC</b>\n\n"
-            f"<b>Анализирую BTC, ETH, SOL по:</b>\n"
-            f"• RSI · MACD · EMA 20/50/200 · Bollinger · Stochastic · ADX · ATR\n"
-            f"• Open Interest · Funding Rate · Long/Short Ratio\n"
-            f"• Уровни поддержки и сопротивления\n"
-            f"• Fear & Greed · паттерны свечей\n"
-            f"• AI-анализ (Groq LLaMA 70B)\n\n"
-            f"Выбери монету 👇"
+            f"<b>Анализирую BTC, ETH, SOL — AI сигналы LONG/SHORT</b>\n\n"
+            f"Нажми 🔕 <b>Уведомления</b> чтобы получать сигналы автоматически 👇"
         )
     else:
         days = user.trial_days_left()
@@ -51,14 +53,28 @@ async def cmd_start(msg: Message):
         )
         text = f"👋 С возвращением, <b>{user.first_name or 'трейдер'}</b>!\n{status}"
 
-    await msg.answer(text, reply_markup=main_menu(), parse_mode="HTML")
+    notif = user.notifications_enabled if hasattr(user, 'notifications_enabled') else False
+    await msg.answer(text, reply_markup=main_menu(notif), parse_mode="HTML")
 
 
 @router.callback_query(F.data == "main_menu")
 async def cb_main(call: CallbackQuery):
+    user = await get_user(call.from_user.id)
+    notif = user.notifications_enabled if user and hasattr(user, 'notifications_enabled') else False
     await call.message.edit_text("📡 <b>DAO Signals</b> — выберите действие:",
-                                  reply_markup=main_menu(), parse_mode="HTML")
+                                  reply_markup=main_menu(notif), parse_mode="HTML")
     await call.answer()
+
+
+# ── Notifications toggle ──────────────────────────────────────────────────────
+
+@router.callback_query(F.data == "toggle_notifications")
+async def cb_toggle_notifications(call: CallbackQuery):
+    new_state = await toggle_notifications(call.from_user.id)
+    icon = "🔔" if new_state else "🔕"
+    state_text = "включены" if new_state else "выключены"
+    await call.answer(f"{icon} Уведомления {state_text}", show_alert=True)
+    await call.message.edit_reply_markup(reply_markup=main_menu(new_state))
 
 
 # ── Signals ───────────────────────────────────────────────────────────────────
@@ -119,11 +135,9 @@ async def cb_full_analysis(call: CallbackQuery):
         await call.message.edit_text("⚠️ Сигнал не найден.", reply_markup=back_kb())
         return
     text = format_full_analysis(sig)
-    # Telegram limit: 4096 chars. Split if needed.
     if len(text) > 4096:
-        await call.message.edit_text(text[:4090] + "…", reply_markup=full_analysis_kb(sig.coin, sig.id), parse_mode="HTML")
-    else:
-        await call.message.edit_text(text, reply_markup=full_analysis_kb(sig.coin, sig.id), parse_mode="HTML")
+        text = text[:4090] + "…"
+    await call.message.edit_text(text, reply_markup=full_analysis_kb(sig.coin, sig.id), parse_mode="HTML")
 
 
 @router.callback_query(F.data.startswith("back_sig_"))
@@ -205,44 +219,6 @@ async def cb_stats(call: CallbackQuery):
     await call.answer()
 
 
-# ── Deposit ───────────────────────────────────────────────────────────────────
-
-@router.callback_query(F.data == "deposit")
-async def cb_deposit(call: CallbackQuery):
-    history = await get_deposit_history(30)
-    current = await get_current_balance()
-    start = settings.VIRTUAL_DEPOSIT
-    total_pnl = (current / start - 1) * 100
-
-    if not history:
-        text = (
-            f"📈 <b>Виртуальный депозит</b>\n\n"
-            f"Старт:   <b>${start:,.2f}</b>\n"
-            f"Текущий: <b>${current:,.2f}</b>\n\n"
-            f"Сделок пока не было."
-        )
-    else:
-        values = [s.balance for s in history]
-        mn, mx = min(values), max(values)
-        chars = "▁▂▃▄▅▆▇█"
-        spark = "".join(chars[int((v - mn) / (mx - mn) * 7)] if mx > mn else "─" for v in values)
-        rows = []
-        for s in history[-10:]:
-            sign = "+" if s.pnl_pct >= 0 else ""
-            rows.append(f"<code>{s.recorded_at.strftime('%d.%m')}  ${s.balance:>10,.2f}  ({sign}{s.pnl_pct:.2f}%)</code>")
-        text = (
-            f"📈 <b>Виртуальный депозит</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"Старт:    <b>${start:,.2f}</b>\n"
-            f"Текущий:  <b>${current:,.2f}</b>\n"
-            f"Доходность: <b>{'+' if total_pnl >= 0 else ''}{total_pnl:.2f}%</b>\n\n"
-            f"<code>{spark}</code>\n\n"
-            f"<b>Последние сделки:</b>\n" + "\n".join(rows)
-        )
-    await call.message.edit_text(text, reply_markup=back_kb(), parse_mode="HTML")
-    await call.answer()
-
-
 # ── History ───────────────────────────────────────────────────────────────────
 
 @router.callback_query(F.data.startswith("hist_"))
@@ -291,35 +267,58 @@ async def cb_subscription(call: CallbackQuery):
     text = (
         f"💳 <b>Подписка DAO Signals</b>\n\n"
         f"Статус: {status}\n\n"
-        f"<b>Тарифы:</b>\n"
-        f"  1 месяц   — <b>$29</b>\n"
-        f"  3 месяца  — <b>$69</b>  (−21%)\n"
-        f"  6 месяцев — <b>$119</b>  (−32%)\n\n"
+        f"<b>Тарифы (Telegram Stars):</b>\n"
+        f"  ⭐ 1 месяц   — <b>500 Stars</b>\n"
+        f"  ⭐ 3 месяца  — <b>1 200 Stars</b>  (−20%)\n"
+        f"  ⭐ 6 месяцев — <b>2 100 Stars</b>  (−30%)\n\n"
         f"<b>Включено:</b>\n"
-        f"  • Сигналы BTC, ETH, SOL каждый час\n"
-        f"  • AI-анализ на Groq LLaMA 70B\n"
-        f"  • Рейтинг сигнала 1–10\n"
-        f"  • Статистика и история\n"
-        f"  • График виртуального депозита\n"
+        f"  • AI-сигналы LONG/SHORT каждый час\n"
+        f"  • BTC, ETH, SOL\n"
+        f"  • Push-уведомления при новом сигнале\n"
+        f"  • Полный анализ и история\n\n"
+        f"<i>Оплата через встроенный кошелёк Telegram Stars</i>"
     )
     await call.message.edit_text(text, reply_markup=subscription_kb(), parse_mode="HTML")
     await call.answer()
 
 
-@router.callback_query(F.data.startswith("buy_"))
-async def cb_buy(call: CallbackQuery):
-    months = int(call.data.split("_")[1])
-    prices = {1: 29, 3: 69, 6: 119}
-    ok = await activate_subscription(call.from_user.id, months)
+@router.callback_query(F.data.startswith("buy_stars_"))
+async def cb_buy_stars(call: CallbackQuery):
+    months = int(call.data.split("_")[2])
+    stars = STARS_PRICES.get(months, 500)
+    label = STARS_LABELS.get(months, "1 месяц")
+    await call.message.answer_invoice(
+        title=f"DAO Signals — {label}",
+        description=f"Подписка на {label}: AI-сигналы LONG/SHORT для BTC, ETH, SOL",
+        payload=f"sub_{months}",
+        currency="XTR",
+        prices=[LabeledPrice(label=f"Подписка {label}", amount=stars)],
+        reply_markup=pay_kb(months),
+    )
+    await call.answer()
+
+
+@router.pre_checkout_query()
+async def pre_checkout(query: PreCheckoutQuery):
+    await query.answer(ok=True)
+
+
+@router.message(F.successful_payment)
+async def successful_payment(msg: Message):
+    payload = msg.successful_payment.invoice_payload
+    months = int(payload.split("_")[1]) if payload.startswith("sub_") else 1
+    ok = await activate_subscription(msg.from_user.id, months)
     if ok:
-        await call.message.edit_text(
-            f"✅ <b>Подписка активирована!</b>\n\n"
-            f"Срок: <b>{months} мес.</b>  ·  ${prices.get(months, 29)}\n\n"
-            f"Сигналы приходят автоматически каждый час.",
-            reply_markup=main_menu(), parse_mode="HTML")
-        await call.answer("✅ Подписка активирована!")
-    else:
-        await call.answer("❌ Ошибка. Напиши в поддержку.", show_alert=True)
+        user = await get_user(msg.from_user.id)
+        notif = user.notifications_enabled if user and hasattr(user, 'notifications_enabled') else False
+        await msg.answer(
+            f"✅ <b>Оплата прошла успешно!</b>\n\n"
+            f"Подписка активирована на <b>{months} мес.</b>\n"
+            f"Сигналы LONG/SHORT приходят автоматически.\n\n"
+            f"Нажми 🔔 <b>Уведомления</b> в меню чтобы получать их.",
+            reply_markup=main_menu(notif),
+            parse_mode="HTML",
+        )
 
 
 # ── Admin ─────────────────────────────────────────────────────────────────────
@@ -334,7 +333,9 @@ async def cmd_admin(msg: Message):
         f"🔧 <b>Admin Panel</b>\n\n"
         f"Всего: {counts['total']} | Триал: {counts['trial']} | Подписка: {counts['subscribed']}\n\n"
         f"30д: сделок={s30.total_signals if s30 else 0} winrate={s30.win_rate if s30 else 0:.1f}%\n\n"
-        f"/force BTC|ETH|SOL\n/give_sub ID MONTHS\n/recompute",
+        f"/force BTC|ETH|SOL — принудительный сигнал\n"
+        f"/give_sub ID MONTHS — выдать подписку\n"
+        f"/recompute — пересчитать статистику",
         parse_mode="HTML")
 
 
@@ -348,12 +349,12 @@ async def cmd_force(msg: Message):
         await msg.answer("BTC, ETH или SOL")
         return
     await msg.answer(f"⏳ Генерирую {coin}...")
-    sig = await generate_signal(coin)
+    sig = await generate_signal(coin, use_cache=False)
     if sig:
         sent, _ = await broadcast_signal(msg.bot, sig)
-        await msg.answer(f"✅ #{sig.id} разослан {sent} пользователям")
+        await msg.answer(f"✅ #{sig.id} {sig.direction} разослан {sent} подписчикам")
     else:
-        await msg.answer("❌ Ошибка")
+        await msg.answer("❌ Ошибка генерации")
 
 
 @router.message(Command("give_sub"))
