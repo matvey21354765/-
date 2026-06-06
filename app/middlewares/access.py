@@ -32,26 +32,28 @@ def _sub_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+async def _check_channel(bot, channel: str, user_id: int) -> bool:
+    try:
+        member = await bot.get_chat_member(channel, user_id)
+        return member.status not in ("left", "kicked", "banned")
+    except Exception:
+        return False
+
+
 async def _is_subscribed(bot, user_id: int, force: bool = False) -> bool:
+    import asyncio
     now = time.monotonic()
     if not force and user_id in _sub_cache:
         cached, ts = _sub_cache[user_id]
         if now - ts < _CACHE_TTL:
             return cached
 
-    for channel, _ in REQUIRED_CHANNELS:
-        try:
-            member = await bot.get_chat_member(channel, user_id)
-            if member.status in ("left", "kicked", "banned"):
-                _sub_cache[user_id] = (False, now)
-                return False
-        except Exception:
-            # Bot not admin in channel — fail closed (block)
-            _sub_cache[user_id] = (False, now)
-            return False
-
-    _sub_cache[user_id] = (True, now)
-    return True
+    results = await asyncio.gather(*[
+        _check_channel(bot, ch, user_id) for ch, _ in REQUIRED_CHANNELS
+    ])
+    ok = all(results)
+    _sub_cache[user_id] = (ok, now)
+    return ok
 
 
 def invalidate_sub_cache(user_id: int) -> None:
