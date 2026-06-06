@@ -7,7 +7,7 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 SYMBOL_MAP = {"BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT"}
-_TIMEOUT = aiohttp.ClientTimeout(total=20)
+_TIMEOUT = aiohttp.ClientTimeout(total=10)
 
 _SPOT_URLS = [
     "https://api.binance.com",
@@ -18,10 +18,12 @@ _SPOT_URLS = [
 _FUTURES_URL = "https://fapi.binance.com"
 _OKX_URL = "https://www.okx.com"
 
-# BinanceSymbol -> OKX instId
 _OKX_MAP = {"BTCUSDT": "BTC-USDT", "ETHUSDT": "ETH-USDT", "SOLUSDT": "SOL-USDT"}
 _OKX_SWAP_MAP = {"BTCUSDT": "BTC-USDT-SWAP", "ETHUSDT": "ETH-USDT-SWAP", "SOLUSDT": "SOL-USDT-SWAP"}
 _OKX_INTERVAL = {"1h": "1H", "4h": "4H", "1d": "1D"}
+
+# Once we detect geo-block, skip Binance for this process lifetime
+_binance_blocked: bool = False
 
 
 async def _get(url: str, params: dict = None) -> dict | list:
@@ -32,25 +34,32 @@ async def _get(url: str, params: dict = None) -> dict | list:
 
 
 async def _get_spot(path: str, params: dict = None) -> dict | list:
+    global _binance_blocked
+    if _binance_blocked:
+        raise RuntimeError("Binance geo-blocked")
     last_err: Exception = RuntimeError("All Binance spot mirrors failed")
     for base in _SPOT_URLS:
         try:
             return await _get(f"{base}{path}", params)
+        except aiohttp.ClientResponseError as e:
+            if e.status in (451, 403):
+                _binance_blocked = True
+                logger.warning(f"Binance geo-blocked ({e.status}), switching to OKX permanently")
+                raise
+            last_err = e
         except Exception as e:
             last_err = e
-            logger.debug(f"Spot mirror {base} failed: {e}")
     raise last_err
 
 
-# ── OKX fallback ───────────────────────────────────────────────────
+# ── OKX ──────────────────────────────────────────────────────────────
 
 async def _okx_klines(symbol: str, interval: str, limit: int) -> pd.DataFrame:
     inst_id = _OKX_MAP.get(symbol, symbol.replace("USDT", "-USDT"))
     bar = _OKX_INTERVAL.get(interval, interval.upper())
     d = await _get(f"{_OKX_URL}/api/v5/market/candles",
                    {"instId": inst_id, "bar": bar, "limit": str(limit)})
-    rows = list(reversed(d["data"]))  # OKX: newest first
-    # [ts, open, high, low, close, vol, volCcy, volCcyQuote, confirm]
+    rows = list(reversed(d["data"]))
     df = pd.DataFrame(rows, columns=["open_time","open","high","low","close",
                                       "volume","vol_ccy","quote_vol","confirm"])
     for c in ("open", "high", "low", "close", "volume", "quote_vol"):
@@ -86,16 +95,14 @@ async def fetch_klines(symbol: str, interval: str, limit: int = 200) -> pd.DataF
         for c in ("open", "high", "low", "close", "volume", "quote_vol", "taker_buy_base", "taker_buy_quote"):
             df[c] = df[c].astype(float)
         return df
-    except Exception as e:
-        logger.warning(f"Binance klines failed ({e}), trying OKX...")
+    except Exception:
         return await _okx_klines(symbol, interval, limit)
 
 
 async def fetch_ticker(symbol: str) -> dict:
     try:
         return await _get_spot("/api/v3/ticker/24hr", {"symbol": symbol})
-    except Exception as e:
-        logger.warning(f"Binance ticker failed ({e}), trying OKX...")
+    except Exception:
         return await _okx_ticker(symbol)
 
 
@@ -117,13 +124,7 @@ async def fetch_open_interest(symbol: str) -> float:
         d = await _get(f"{_FUTURES_URL}/fapi/v1/openInterest", {"symbol": symbol})
         return float(d.get("openInterest", 0))
     except Exception:
-        try:
-            inst_id = _OKX_SWAP_MAP.get(symbol, symbol.replace("USDT", "-USDT-SWAP"))
-            d = await _get(f"{_OKX_URL}/api/v5/rubik/stat/contracts/open-interest-volume",
-                           {"ccy": symbol.replace("USDT", ""), "period": "1H"})
-            return float(d["data"][0][1]) if d.get("data") else 0.0
-        except Exception:
-            return 0.0
+        return 0.0
 
 
 async def fetch_long_short_ratio(symbol: str) -> float:
