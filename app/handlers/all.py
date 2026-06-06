@@ -273,7 +273,7 @@ async def cb_subscription(call: CallbackQuery):
         f"<b>Тарифы:</b>\n"
         f"  • 1 месяц   — <b>$29</b>\n"
         f"  • 3 месяца  — <b>$69</b>  (−21%)\n"
-        f"  • 6 месяцев — <b>$119</b>  (−32%)\n\n"
+        f"  • 6 месяцев — <b>$149</b>  (−14%)\n\n"
         f"<b>Как оплатить:</b>\n"
         f"  1. Напиши @nn0likkkkk или @n3m1r\n"
         f"  2. Получи промокод\n"
@@ -389,6 +389,20 @@ async def cmd_promocodes(msg: Message):
     # split if too long
     for i in range(0, len(text), 4000):
         await msg.answer(text[i:i+4000], parse_mode="HTML")
+
+
+@router.message(Command("polymarket"))
+async def cmd_polymarket(msg: Message):
+    if msg.from_user.id not in settings.ADMIN_IDS:
+        return
+    await msg.answer("⏳ Ищу лучшие ставки на Polymarket...")
+    from app.services.polymarket import get_high_confidence_markets, format_polymarket_alert
+    markets = await get_high_confidence_markets(min_conf=70.0)
+    if not markets:
+        await msg.answer("😔 Нет рынков с уверенностью ≥70% прямо сейчас")
+        return
+    text = format_polymarket_alert(markets)
+    await msg.answer(text, parse_mode="HTML", disable_web_page_preview=False)
 
 
 @router.message(Command("reload_promos"))
