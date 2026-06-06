@@ -33,11 +33,14 @@ async def _fetch(url: str, params: dict = None) -> list | dict | None:
 async def find_daily_market(coin: str) -> Optional[dict]:
     """Find today's up/down market for a coin."""
     today = datetime.now(timezone.utc)
+    day = str(today.day)  # "6" without leading zero, cross-platform
+    month = today.strftime("%B").lower()  # "june"
+    year = today.strftime("%Y")
     date_strs = [
-        today.strftime("%B %-d").lower(),       # "june 6"
-        today.strftime("%B %d").lower(),         # "june 06"
-        today.strftime("%-d %B").lower(),        # "6 june"
-        today.strftime("%Y").lower(),             # "2026"
+        f"{month} {day}",    # "june 6"
+        f"{month} {day.zfill(2)}",  # "june 06"
+        f"{day} {month}",    # "6 june"
+        year,                 # "2026"
     ]
 
     for term in _SEARCH_TERMS.get(coin, []):
