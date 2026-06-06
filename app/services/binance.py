@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 SYMBOL_MAP = {"BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT"}
 _TIMEOUT = aiohttp.ClientTimeout(total=20)
 
-# Binance public REST endpoints (hardcoded to avoid misconfiguration via env)
+# Binance public REST — hardcoded, never read from .env
 _SPOT_URLS = [
     "https://api.binance.com",
     "https://api1.binance.com",
@@ -28,8 +28,8 @@ async def _get(url: str, params: dict = None) -> dict | list:
 
 
 async def _get_spot(path: str, params: dict = None) -> dict | list:
-    """Try each Binance spot mirror in order until one responds."""
-    last_err: Exception = RuntimeError("No spot URL available")
+    """Try each Binance spot mirror until one responds."""
+    last_err: Exception = RuntimeError("All Binance spot mirrors failed")
     for base in _SPOT_URLS:
         try:
             return await _get(f"{base}{path}", params)

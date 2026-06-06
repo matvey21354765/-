@@ -1,4 +1,5 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import field_validator
 from typing import List
 
 
@@ -15,6 +16,7 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "postgresql+asyncpg://postgres:2004@localhost:5432/dao_signals"
     POSTGRES_PASSWORD: str = "2004"
 
+    # These are always forced to Binance regardless of .env value
     BINANCE_SPOT_URL: str = "https://api.binance.com"
     BINANCE_FUTURES_URL: str = "https://fapi.binance.com"
 
@@ -33,6 +35,20 @@ class Settings(BaseSettings):
     COINS: List[str] = ["BTC", "ETH", "SOL"]
     ADMIN_IDS: List[int] = [749256529]
     LOG_LEVEL: str = "INFO"
+
+    @field_validator("BINANCE_SPOT_URL", mode="before")
+    @classmethod
+    def force_binance_spot(cls, v: str) -> str:
+        if "binance.com" not in str(v):
+            return "https://api.binance.com"
+        return v
+
+    @field_validator("BINANCE_FUTURES_URL", mode="before")
+    @classmethod
+    def force_binance_futures(cls, v: str) -> str:
+        if "binance.com" not in str(v):
+            return "https://fapi.binance.com"
+        return v
 
 
 settings = Settings()
