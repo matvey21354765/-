@@ -99,30 +99,9 @@ Fear & Greed: {snap['fear_greed']}/100 {'ЖАДНОСТЬ' if snap['fear_greed']
 - TP1/2/3 ставь на реальные уровни из данных выше
 - full_analysis — 3 абзаца простым языком для обычного человека, без технических терминов
 
-Верни ТОЛЬКО JSON без какого-либо текста до или после:
+Верни ТОЛЬКО JSON (без текста до/после, без markdown):
 
-{{
-  "direction": "LONG или SHORT",
-  "confidence": число от 40 до 85,
-  "signal_rating": число от 1 до 10,
-  "trend_strength": "STRONG BULL или WEAK BULL или NEUTRAL или WEAK BEAR или STRONG BEAR",
-  "prob_up": число от 0 до 100,
-  "prob_down": число от 0 до 100,
-  "entry_price": число,
-  "entry_type": "MARKET или LIMIT",
-  "stop_loss": число,
-  "take_profit_1": число,
-  "take_profit_2": число,
-  "take_profit_3": число,
-  "risk_reward": число,
-  "sl_distance_pct": число,
-  "timeframe": "4-12 часов или 1-3 дня или 3-7 дней",
-  "reasons": ["конкретная причина 1 с числами", "конкретная причина 2 с числами", "конкретная причина 3 с числами"],
-  "bull_scenario": "что нужно для роста",
-  "bear_scenario": "что сломает структуру",
-  "key_trigger": "ключевой уровень или событие",
-  "full_analysis": "2 абзаца простым языком (максимум 200 слов): куда движется рынок и почему, что делать трейдеру. Без технических аббревиатур."
-}}"""
+{{"direction":"LONG или SHORT","confidence":число 40-85,"signal_rating":число 1-10,"trend_strength":"STRONG BULL или WEAK BULL или NEUTRAL или WEAK BEAR или STRONG BEAR","prob_up":число,"prob_down":число,"entry_price":число,"entry_type":"MARKET","stop_loss":число,"take_profit_1":число,"take_profit_2":число,"take_profit_3":число,"risk_reward":число,"sl_distance_pct":число,"timeframe":"4-12ч или 1-3д или 3-7д","reasons":["причина1 с числами","причина2 с числами","причина3 с числами"],"bull_scenario":"1 предложение","bear_scenario":"1 предложение","key_trigger":"уровень или событие","full_analysis":"2-3 предложения простым языком куда пойдёт цена и почему"}}"""
 
 
 def _parse(raw: str) -> Optional[dict]:
