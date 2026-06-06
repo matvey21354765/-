@@ -48,6 +48,12 @@ class Settings(BaseSettings):
     ADMIN_IDS: List[int] = [749256529]
     LOG_LEVEL: str = "INFO"
 
+    # TikTok Content Posting API
+    TIKTOK_CLIENT_KEY: str = ""
+    TIKTOK_CLIENT_SECRET: str = ""
+    TIKTOK_ACCESS_TOKEN: str = ""
+    TIKTOK_ENABLED: bool = False
+
     @field_validator("BINANCE_SPOT_URL", mode="before")
     @classmethod
     def force_binance_spot(cls, v: str) -> str:

@@ -7,3 +7,9 @@ pandas==2.2.2
 numpy==1.26.4
 pydantic-settings==2.3.4
 python-dotenv==1.0.1
+# TikTok video generation
+moviepy==1.0.3
+Pillow==10.3.0
+gTTS==2.5.1
+imageio==2.34.1
+imageio-ffmpeg==0.4.9
