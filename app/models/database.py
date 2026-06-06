@@ -1,7 +1,7 @@
 from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
-from sqlalchemy import BigInteger, Boolean, DateTime, Float, Integer, String, Text, func, Index
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, Integer, String, Text, func, Index, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from config.settings import settings
@@ -132,6 +132,10 @@ class StrategyStats(Base):
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Auto-migrate: add new columns if they don't exist
+        await conn.execute(text(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS notifications_enabled BOOLEAN DEFAULT FALSE"
+        ))
 
 
 async def get_db():
