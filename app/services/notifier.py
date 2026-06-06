@@ -74,6 +74,31 @@ def _profit_line(sig: Signal) -> str:
         return ""
 
 
+def _leverage_block(sig: Signal) -> str:
+    lc = sig.leverage_conservative
+    la = sig.leverage_aggressive
+    if not lc or not la:
+        return ""
+
+    ep = sig.entry_price
+    tp1 = sig.take_profit_1
+    if sig.direction == "LONG":
+        pnl_cons = (tp1 - ep) / ep * lc * 100
+        pnl_aggr = (tp1 - ep) / ep * la * 100
+    else:
+        pnl_cons = (ep - tp1) / ep * lc * 100
+        pnl_aggr = (ep - tp1) / ep * la * 100
+
+    liq_cons = _p(sig.liq_price_conservative) if sig.liq_price_conservative else "—"
+    liq_aggr = _p(sig.liq_price_aggressive) if sig.liq_price_aggressive else "—"
+
+    return (
+        f"⚡ <b>Плечо:</b>\n"
+        f"  Консервативно: <b>x{lc}</b>  →  TP1 <b><u>+{pnl_cons:.1f}%</u></b>  ·  Ликвидация: {liq_cons}\n"
+        f"  Агрессивно:    <b>x{la}</b>  →  TP1 <b><u>+{pnl_aggr:.1f}%</u></b>  ·  Ликвидация: {liq_aggr}"
+    )
+
+
 def format_signal(sig: Signal) -> str:
     stars = _STARS.get(sig.signal_rating, "⭐⭐⭐✩✩")
     header = _DIR_HEADER.get(sig.direction, sig.direction)
@@ -91,7 +116,11 @@ def format_signal(sig: Signal) -> str:
     reasons_text = "\n".join(f"  • {r}" for r in reasons[:3])
 
     profit = _profit_line(sig)
+    leverage = _leverage_block(sig)
     time_str = datetime.now(timezone.utc).strftime("%H:%M UTC")
+
+    lev_sep = "━━━━━━━━━━━━━━━━━━━━\n" if leverage else ""
+    lev_line = f"{leverage}\n" if leverage else ""
 
     return (
         f"{header}  <b>{sig.coin}/USDT</b>  {stars}\n"
@@ -112,6 +141,8 @@ def format_signal(sig: Signal) -> str:
         f"{reasons_text}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"{profit}\n"
+        f"{lev_sep}"
+        f"{lev_line}"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"🔗 <a href=\"{POLYMARKET_URL}\">Ставка на Polymarket</a>\n"
         f"<i>💡 Нажми «Полный анализ» для подробного разбора</i>"
@@ -153,6 +184,7 @@ def format_full_analysis(sig: Signal) -> str:
     reasons_text = "\n".join(f"  {i+1}. {r}" for i, r in enumerate(reasons))
 
     profit = _profit_line(sig)
+    leverage = _leverage_block(sig)
 
     return (
         f"🔬 <b>ПОЛНЫЙ АНАЛИЗ — {sig.coin}/USDT</b>\n"
@@ -177,6 +209,8 @@ def format_full_analysis(sig: Signal) -> str:
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"{profit}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"{leverage + chr(10) if leverage else ''}"
+        f"{'━━━━━━━━━━━━━━━━━━━━' + chr(10) if leverage else ''}"
         f"🔗 <a href=\"{POLYMARKET_URL}\">Поставить на Polymarket</a>\n"
         f"<i>🕐 {sig.created_at.strftime('%d.%m.%Y %H:%M') if sig.created_at else '—'} UTC  ·  #{sig.id}</i>"
     )

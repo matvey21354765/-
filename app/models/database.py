@@ -91,6 +91,10 @@ class Signal(Base):
     funding_rate: Mapped[Optional[float]] = mapped_column(Float)
     open_interest: Mapped[Optional[float]] = mapped_column(Float)
     fear_greed: Mapped[Optional[int]] = mapped_column(Integer)
+    leverage_conservative: Mapped[Optional[int]] = mapped_column(Integer)
+    leverage_aggressive: Mapped[Optional[int]] = mapped_column(Integer)
+    liq_price_conservative: Mapped[Optional[float]] = mapped_column(Float)
+    liq_price_aggressive: Mapped[Optional[float]] = mapped_column(Float)
     status: Mapped[str] = mapped_column(String(16), default="ACTIVE")
     outcome_price: Mapped[Optional[float]] = mapped_column(Float)
     outcome_tp_hit: Mapped[Optional[int]] = mapped_column(Integer)
@@ -148,6 +152,15 @@ async def init_db():
         await conn.execute(text(
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS notifications_enabled BOOLEAN DEFAULT FALSE"
         ))
+        for col, typ in [
+            ("leverage_conservative", "INTEGER"),
+            ("leverage_aggressive", "INTEGER"),
+            ("liq_price_conservative", "DOUBLE PRECISION"),
+            ("liq_price_aggressive", "DOUBLE PRECISION"),
+        ]:
+            await conn.execute(text(
+                f"ALTER TABLE signals ADD COLUMN IF NOT EXISTS {col} {typ}"
+            ))
 
 
 async def get_db():

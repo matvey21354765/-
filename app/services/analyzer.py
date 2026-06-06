@@ -4,6 +4,25 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# Leverage caps by SL distance: wider stop = lower max leverage
+_LEV_CAPS = [(1.0, 10), (1.5, 8), (2.5, 5), (4.0, 3), (7.0, 2), (999, 1)]
+
+
+def _recommend_leverage(sl_dist_pct: float, confidence: float, trend: str) -> tuple[int, int]:
+    """Return (conservative_leverage, aggressive_leverage) as integers."""
+    max_lev = 1
+    for threshold, cap in _LEV_CAPS:
+        if sl_dist_pct <= threshold:
+            max_lev = cap
+            break
+
+    # Boost by +1 if confidence >= 70% and strong trend
+    if confidence >= 70 and trend in ("STRONG BULL", "STRONG BEAR"):
+        max_lev = min(max_lev + 1, 10)
+
+    conservative = max(1, max_lev // 2)
+    return conservative, max_lev
+
 
 def analyze_coin(snap: dict) -> Optional[dict]:
     """Rule-based technical analysis — no AI API needed."""
@@ -156,6 +175,9 @@ def analyze_coin(snap: dict) -> Optional[dict]:
     tp1_dist = abs(tp1 - p) / p * 100
     rr = round(tp1_dist / sl_dist, 2) if sl_dist > 0 else 1.5
 
+    # Leverage recommendation based on SL distance and confidence
+    lev_cons, lev_aggr = _recommend_leverage(sl_dist, conf, trend)
+
     # ── Reasons (top 3 for chosen direction) ─────────────────────────────────
     chosen_reasons = (reasons_bull if direction == "LONG" else reasons_bear)[:3]
     if len(chosen_reasons) < 3:
@@ -201,7 +223,15 @@ def analyze_coin(snap: dict) -> Optional[dict]:
         else f"ATR зона ${round(p - atr, 0):,.0f}–${round(p + atr, 0):,.0f}"
     )
 
-    logger.info(f"[{snap['coin']}] Rule-based: {direction} conf={conf}% rating={rating} bull={bull} bear={bear}")
+    # Liquidation price at conservative leverage (LONG: liq below entry, SHORT: above)
+    if direction == "LONG":
+        liq_cons  = round(p * (1 - 0.9 / lev_cons), 2)
+        liq_aggr  = round(p * (1 - 0.9 / lev_aggr), 2)
+    else:
+        liq_cons  = round(p * (1 + 0.9 / lev_cons), 2)
+        liq_aggr  = round(p * (1 + 0.9 / lev_aggr), 2)
+
+    logger.info(f"[{snap['coin']}] Rule-based: {direction} conf={conf}% rating={rating} bull={bull} bear={bear} lev={lev_cons}x/{lev_aggr}x")
 
     return {
         "direction": direction,
@@ -224,4 +254,8 @@ def analyze_coin(snap: dict) -> Optional[dict]:
         "bear_scenario": bear_scenario,
         "key_trigger": key_trigger,
         "full_analysis": full,
+        "leverage_conservative": lev_cons,
+        "leverage_aggressive": lev_aggr,
+        "liq_price_conservative": liq_cons,
+        "liq_price_aggressive": liq_aggr,
     }
