@@ -11,7 +11,9 @@ class Settings(BaseSettings):
     )
 
     BOT_TOKEN: str
-    GROQ_API_KEY: str
+    GROQ_API_KEY: str = ""
+    GEMINI_API_KEY: str = ""
+    OPENROUTER_API_KEY: str = ""
 
     DATABASE_URL: str = "postgresql+asyncpg://postgres:2004@localhost:5432/dao_signals"
     POSTGRES_PASSWORD: str = "2004"

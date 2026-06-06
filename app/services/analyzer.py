@@ -2,20 +2,30 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from typing import Optional
 import aiohttp
 from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent"
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL = "llama-3.3-70b-versatile"
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+OPENROUTER_MODEL = "meta-llama/llama-3.1-8b-instruct:free"
+
+_groq_blocked_until: float = 0.0
 
 REQUIRED = {
     "direction", "confidence", "signal_rating", "entry_price",
     "stop_loss", "take_profit_1", "take_profit_2", "take_profit_3",
     "risk_reward", "reasons", "full_analysis",
 }
+
+
+def _key_valid(key: str) -> bool:
+    return bool(key) and key not in ("", "ВСТАВЬ_СВОЙ_КЛЮЧ_СЮДА", "YOUR_KEY_HERE", "None", "none")
 
 
 def _f(v: float, d: int = 2) -> str:
@@ -38,8 +48,9 @@ def build_prompt(snap: dict) -> str:
     res_str = " | ".join(f"${_f(r)}" for r in snap["resistances"]) or "нет данных"
     patterns_str = "\n".join(f"  - {pt}" for pt in snap["patterns"]) if snap["patterns"] else "  - Нет явных паттернов"
 
-    return f"""Ты — старший квантовый аналитик DAO-фонда. Специализация: поиск сделок с максимальным математическим ожиданием.
-Твой принцип: лучше пропустить 10 сигналов, чем войти в одну плохую сделку.
+    return f"""Ты — старший квантовый аналитик крипто-рынка. Твоя задача: дать чёткий торговый сигнал на основе реальных данных.
+
+ВАЖНО: Ты ОБЯЗАН выдать LONG или SHORT. Никогда не пиши NO TRADE. Каждая монета должна иметь уникальный анализ с конкретными числами из данных ниже.
 
 РЫНОЧНЫЙ СНИМОК: {c}/USDT
 Цена: ${_f(p)} | Изм.24ч: {snap['change_24h']:+.2f}%
@@ -80,19 +91,19 @@ Open Interest: {snap['open_interest']:,.0f} | L/S Ratio: {snap['long_short_ratio
 НАСТРОЕНИЯ:
 Fear & Greed: {snap['fear_greed']}/100 {'ЖАДНОСТЬ' if snap['fear_greed'] > 60 else 'СТРАХ' if snap['fear_greed'] < 40 else 'НЕЙТРАЛЬНО'}
 
-ЗАДАЧА:
-1. Проведи полный мультитаймфреймовый анализ (1H + 4H + 1D)
-2. Найди сетап с R/R >= 1.8 и уверенностью >= 55%
-3. Если сетапа нет — верни NO TRADE
-4. SL — за ближайшим уровнем + буфер ATR*0.5
-5. TP должны совпадать с реальными уровнями
-6. full_analysis пиши на русском языке, 4-5 абзацев
+ПРАВИЛА:
+- direction: ТОЛЬКО "LONG" или "SHORT" — никогда NO TRADE
+- confidence: реальное число 40-85, основанное на силе сигнала (не всегда 55!)
+- reasons: 3 конкретные причины с реальными числами из данных выше (RSI={i1['rsi']}, цена ${_f(p)}, ATR={_f(i1['atr'])}, и т.д.)
+- SL ставь за ближайший уровень поддержки/сопротивления + ATR*0.3 буфер
+- TP1/2/3 ставь на реальные уровни из данных выше
+- full_analysis — 3 абзаца простым языком для обычного человека, без технических терминов
 
 Верни ТОЛЬКО JSON без какого-либо текста до или после:
 
 {{
-  "direction": "LONG или SHORT или NO TRADE",
-  "confidence": число от 0 до 100,
+  "direction": "LONG или SHORT",
+  "confidence": число от 40 до 85,
   "signal_rating": число от 1 до 10,
   "trend_strength": "STRONG BULL или WEAK BULL или NEUTRAL или WEAK BEAR или STRONG BEAR",
   "prob_up": число от 0 до 100,
@@ -106,11 +117,11 @@ Fear & Greed: {snap['fear_greed']}/100 {'ЖАДНОСТЬ' if snap['fear_greed']
   "risk_reward": число,
   "sl_distance_pct": число,
   "timeframe": "4-12 часов или 1-3 дня или 3-7 дней",
-  "reasons": ["причина 1", "причина 2", "причина 3", "причина 4", "причина 5"],
+  "reasons": ["конкретная причина 1 с числами", "конкретная причина 2 с числами", "конкретная причина 3 с числами"],
   "bull_scenario": "что нужно для роста",
   "bear_scenario": "что сломает структуру",
   "key_trigger": "ключевой уровень или событие",
-  "full_analysis": "4-5 абзацев на русском: структура рынка, индикаторы, объёмы, позиционирование участников, итог и рекомендация. Без markdown."
+  "full_analysis": "3 абзаца простым языком: куда движется рынок и почему, что говорят объёмы и настроения, что делать трейдеру. Без технических аббревиатур."
 }}"""
 
 
@@ -131,11 +142,9 @@ def _parse(raw: str) -> Optional[dict]:
 
 def _validate(data: dict, snap: dict) -> dict:
     price = snap["price"]
-    confidence = float(data.get("confidence", 0))
-    rr = float(data.get("risk_reward", 0))
-    if data.get("direction") != "NO TRADE":
-        if confidence < settings.MIN_CONFIDENCE or rr < settings.MIN_RR:
-            data["direction"] = "NO TRADE"
+    # Force LONG/SHORT only
+    if data.get("direction") not in ("LONG", "SHORT"):
+        data["direction"] = "LONG" if snap["i1h"]["rsi"] < 50 else "SHORT"
     for field in ("entry_price", "stop_loss", "take_profit_1", "take_profit_2", "take_profit_3"):
         if not isinstance(data.get(field), (int, float)) or data[field] <= 0:
             data[field] = price
@@ -144,35 +153,106 @@ def _validate(data: dict, snap: dict) -> dict:
     data["signal_rating"] = max(1, min(10, data["signal_rating"]))
     if not isinstance(data.get("reasons"), list):
         data["reasons"] = [str(data.get("reasons", "—"))]
+    conf = float(data.get("confidence", 55))
+    data["confidence"] = max(40.0, min(85.0, conf))
     return data
 
 
-async def analyze_coin(snap: dict) -> Optional[dict]:
-    headers = {
-        "Authorization": f"Bearer {settings.GROQ_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": GROQ_MODEL,
-        "messages": [{"role": "user", "content": build_prompt(snap)}],
-        "max_tokens": 2048,
-        "temperature": 0.3,
-    }
+async def _call_gemini(prompt: str) -> Optional[str]:
+    key = getattr(settings, "GEMINI_API_KEY", "")
+    if not _key_valid(key):
+        return None
+    payload = {"contents": [{"parts": [{"text": prompt}]}],
+               "generationConfig": {"temperature": 0.3, "maxOutputTokens": 2048}}
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as s:
+            async with s.post(f"{GEMINI_URL}?key={key}", json=payload) as r:
+                if r.status != 200:
+                    text = await r.text()
+                    logger.warning(f"Gemini error: {r.status} {text[:200]}")
+                    return None
+                result = await r.json()
+        return result["candidates"][0]["content"]["parts"][0]["text"]
+    except Exception as e:
+        logger.warning(f"Gemini exception: {e}")
+        return None
+
+
+async def _call_openrouter(prompt: str) -> Optional[str]:
+    key = getattr(settings, "OPENROUTER_API_KEY", "")
+    if not _key_valid(key):
+        return None
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json",
+               "HTTP-Referer": "https://t.me/dao_signals_bot"}
+    payload = {"model": OPENROUTER_MODEL,
+               "messages": [{"role": "user", "content": prompt}],
+               "max_tokens": 2048, "temperature": 0.3}
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as s:
+            async with s.post(OPENROUTER_URL, headers=headers, json=payload) as r:
+                if r.status != 200:
+                    logger.warning(f"OpenRouter error: {r.status}")
+                    return None
+                result = await r.json()
+        return result["choices"][0]["message"]["content"]
+    except Exception as e:
+        logger.warning(f"OpenRouter exception: {e}")
+        return None
+
+
+async def _call_groq(prompt: str) -> Optional[str]:
+    global _groq_blocked_until
+    if time.time() < _groq_blocked_until:
+        logger.info(f"Groq blocked for {_groq_blocked_until - time.time():.0f}s more")
+        return None
+    key = getattr(settings, "GROQ_API_KEY", "")
+    if not _key_valid(key):
+        return None
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    payload = {"model": GROQ_MODEL,
+               "messages": [{"role": "user", "content": prompt}],
+               "max_tokens": 2048, "temperature": 0.3}
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as s:
             async with s.post(GROQ_URL, headers=headers, json=payload) as r:
-                r.raise_for_status()
+                if r.status == 429:
+                    _groq_blocked_until = time.time() + 60
+                    logger.warning("Groq 429 — blocked for 60s")
+                    return None
+                if r.status != 200:
+                    logger.warning(f"Groq error: {r.status}")
+                    return None
                 result = await r.json()
-        raw = result["choices"][0]["message"]["content"]
+        return result["choices"][0]["message"]["content"]
+    except Exception as e:
+        logger.warning(f"Groq exception: {e}")
+        return None
+
+
+async def analyze_coin(snap: dict) -> Optional[dict]:
+    prompt = build_prompt(snap)
+    providers = [
+        ("Gemini", _call_gemini(prompt)),
+        ("OpenRouter", _call_openrouter(prompt)),
+        ("Groq", _call_groq(prompt)),
+    ]
+    for name, coro in providers:
+        try:
+            raw = await coro
+        except Exception as e:
+            logger.warning(f"[{snap['coin']}] {name} error: {e}")
+            continue
+        if not raw:
+            continue
         data = _parse(raw)
         if data is None:
-            logger.error(f"[{snap['coin']}] JSON parse failed. Raw: {raw[:400]}")
-            return None
+            logger.warning(f"[{snap['coin']}] {name} JSON parse failed. Raw: {raw[:200]}")
+            continue
         missing = REQUIRED - set(data.keys())
         if missing:
-            logger.error(f"[{snap['coin']}] Missing: {missing}")
-            return None
+            logger.warning(f"[{snap['coin']}] {name} missing fields: {missing}")
+            continue
+        logger.info(f"[{snap['coin']}] {name} OK")
         return _validate(data, snap)
-    except Exception as e:
-        logger.error(f"[{snap['coin']}] Groq error: {e}")
-        return None
+    logger.error(f"[{snap['coin']}] All providers failed")
+    return None
