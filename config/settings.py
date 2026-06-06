@@ -16,6 +16,16 @@ class Settings(BaseSettings):
     OPENROUTER_API_KEY: str = ""
 
     DATABASE_URL: str = "postgresql+asyncpg://postgres:2004@localhost:5432/dao_signals"
+
+    @field_validator("DATABASE_URL", mode="before")
+    @classmethod
+    def fix_db_url(cls, v: str) -> str:
+        # Railway provides postgresql:// but asyncpg needs postgresql+asyncpg://
+        if v.startswith("postgres://"):
+            return v.replace("postgres://", "postgresql+asyncpg://", 1)
+        if v.startswith("postgresql://") and "+asyncpg" not in v:
+            return v.replace("postgresql://", "postgresql+asyncpg://", 1)
+        return v
     POSTGRES_PASSWORD: str = "2004"
 
     # These are always forced to Binance regardless of .env value
