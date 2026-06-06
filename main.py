@@ -8,7 +8,7 @@ from app.models.database import init_db, PromoCode, AsyncSessionLocal
 from app.handlers.all import router
 from app.middlewares.access import AccessMiddleware
 from app.services.scheduler import setup_scheduler
-from app.services.user_service import generate_promo_codes, save_promo_codes
+from app.services.user_service import save_promo_codes
 from sqlalchemy import select, func
 
 logging.basicConfig(
@@ -30,9 +30,8 @@ async def main():
         res = await db.execute(select(func.count()).select_from(PromoCode))
         count = res.scalar()
     if count == 0:
-        codes = generate_promo_codes()
-        total = await save_promo_codes(codes)
-        logger.info(f"✅ Generated {total} promo codes (100x1m + 100x3m + 100x6m)")
+        total = await save_promo_codes()
+        logger.info(f"✅ Seeded {total} promo codes (100x1m + 100x3m + 100x6m)")
 
     bot = Bot(token=settings.BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())

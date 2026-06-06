@@ -77,7 +77,7 @@ def overview_kb() -> InlineKeyboardMarkup:
 def subscription_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [Btn(text="🎁 Ввести промокод", callback_data="enter_promo")],
-        [Btn(text="💬 Написать @n0likkkk", url="https://t.me/n0likkkk")],
+        [Btn(text="💬 Написать @nn0likkkkk", url="https://t.me/nn0likkkkk")],
         [Btn(text="💬 Написать @n3m1r", url="https://t.me/n3m1r")],
         [Btn(text="« Меню", callback_data="main_menu")],
     ])

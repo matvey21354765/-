@@ -1,6 +1,4 @@
 from __future__ import annotations
-import random
-import string
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 from sqlalchemy import select
@@ -100,30 +98,13 @@ async def activate_promo_code(telegram_id: int, code: str) -> tuple[bool, str]:
     return False, "❌ Ошибка активации"
 
 
-def generate_promo_codes() -> dict[str, list[str]]:
-    """Generate 300 unique promo codes: 100x1m, 100x3m, 100x6m."""
-    def make_code(prefix: str) -> str:
-        chars = string.ascii_uppercase + string.digits
-        return prefix + "-" + "".join(random.choices(chars, k=8))
-
-    codes = {"1M": [], "3M": [], "6M": []}
-    used = set()
-    for prefix, key in [("DAO1M", "1M"), ("DAO3M", "3M"), ("DAO6M", "6M")]:
-        while len(codes[key]) < 100:
-            c = make_code(prefix)
-            if c not in used:
-                used.add(c)
-                codes[key].append(c)
-    return codes
-
-
-async def save_promo_codes(codes: dict[str, list[str]]) -> int:
-    months_map = {"1M": 1, "3M": 3, "6M": 6}
+async def save_promo_codes() -> int:
+    from app.seeds.promo_list import PROMO_CODES
     count = 0
     async with AsyncSessionLocal() as db:
-        for key, code_list in codes.items():
+        for months, code_list in PROMO_CODES.items():
             for code in code_list:
-                db.add(PromoCode(code=code, months=months_map[key]))
+                db.add(PromoCode(code=code, months=months))
                 count += 1
         await db.commit()
     return count

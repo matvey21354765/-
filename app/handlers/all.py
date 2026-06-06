@@ -275,7 +275,7 @@ async def cb_subscription(call: CallbackQuery):
         f"  • 3 месяца  — <b>$69</b>  (−21%)\n"
         f"  • 6 месяцев — <b>$119</b>  (−32%)\n\n"
         f"<b>Как оплатить:</b>\n"
-        f"  1. Напиши @n0likkkk или @n3m1r\n"
+        f"  1. Напиши @nn0likkkkk или @n3m1r\n"
         f"  2. Получи промокод\n"
         f"  3. Введи его кнопкой ниже 👇\n\n"
         f"<b>Включено:</b>\n"
@@ -307,7 +307,7 @@ async def msg_promo_code(msg: Message, state: FSMContext):
     user = await get_user(msg.from_user.id)
     notif = user.notifications_enabled if user and hasattr(user, 'notifications_enabled') else False
     await msg.answer(
-        f"{text}\n\n{'Теперь у тебя есть полный доступ к сигналам!' if success else 'Попробуй другой код или напиши @n0likkkk'}",
+        f"{text}\n\n{'Теперь у тебя есть полный доступ к сигналам!' if success else 'Попробуй другой код или напиши @nn0likkkkk'}",
         reply_markup=main_menu(notif),
         parse_mode="HTML",
     )
