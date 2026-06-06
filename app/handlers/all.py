@@ -38,7 +38,7 @@ async def cmd_start(msg: Message, state: FSMContext):
     if is_new:
         ends = user.trial_ends_at.strftime("%d.%m.%Y %H:%M") if user.trial_ends_at else "—"
         text = (
-            f"👋 <b>Добро пожаловать в DAO Signals!</b>\n\n"
+            f"👋 <b>Добро пожаловать в PredictBot!</b>\n\n"
             f"🎁 Бесплатный доступ на <b>{settings.TRIAL_DAYS} дня</b>\n"
             f"Пробный период до: <b>{ends} UTC</b>\n\n"
             f"<b>Анализирую BTC, ETH, SOL — AI сигналы LONG/SHORT</b>\n\n"
@@ -60,7 +60,7 @@ async def cmd_start(msg: Message, state: FSMContext):
 async def cb_main(call: CallbackQuery):
     user = await get_user(call.from_user.id)
     notif = user.notifications_enabled if user and hasattr(user, 'notifications_enabled') else False
-    await call.message.edit_text("📡 <b>DAO Signals</b> — выберите действие:",
+    await call.message.edit_text("📡 <b>PredictBot</b> — выберите действие:",
                                   reply_markup=main_menu(notif), parse_mode="HTML")
     await call.answer()
 
@@ -246,7 +246,7 @@ async def cb_subscription(call: CallbackQuery):
     else:
         status = "❌ Нет доступа"
     text = (
-        f"💳 <b>Подписка DAO Signals</b>\n\n"
+        f"💳 <b>Подписка PredictBot</b>\n\n"
         f"Статус: {status}\n\n"
         f"<b>Тарифы:</b>\n"
         f"  • 1 месяц   — <b>$29</b>\n"

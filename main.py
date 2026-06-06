@@ -20,12 +20,11 @@ logger = logging.getLogger(__name__)
 
 
 async def main():
-    logger.info("🚀 Starting DAO Signals Bot (Groq)...")
+    logger.info("🚀 Starting PredictBot...")
 
     await init_db()
     logger.info("✅ Database ready")
 
-    # Seed promo codes — check by known first code
     from app.seeds.promo_list import PROMO_CODES
     first_code = PROMO_CODES[1][0]
     async with AsyncSessionLocal() as db:
@@ -33,7 +32,6 @@ async def main():
         res = await db.execute(select(PromoCode).where(PromoCode.code == first_code))
         exists = res.scalar_one_or_none()
     if not exists:
-        # Clear wrong codes and reload correct ones
         async with AsyncSessionLocal() as db:
             await db.execute(delete(PromoCode).where(PromoCode.is_used == False))
             await db.commit()
