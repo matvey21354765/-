@@ -1,14 +1,12 @@
 from __future__ import annotations
 import asyncio
 import logging
-from typing import Optional
 import aiohttp
 import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
 SYMBOL_MAP = {"BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT"}
-_BYBIT_SYMBOL_MAP = {"BTCUSDT": "BTCUSDT", "ETHUSDT": "ETHUSDT", "SOLUSDT": "SOLUSDT"}
 _TIMEOUT = aiohttp.ClientTimeout(total=20)
 
 _SPOT_URLS = [
@@ -18,7 +16,12 @@ _SPOT_URLS = [
     "https://api3.binance.com",
 ]
 _FUTURES_URL = "https://fapi.binance.com"
-_BYBIT_URL = "https://api.bybit.com"
+_OKX_URL = "https://www.okx.com"
+
+# BinanceSymbol -> OKX instId
+_OKX_MAP = {"BTCUSDT": "BTC-USDT", "ETHUSDT": "ETH-USDT", "SOLUSDT": "SOL-USDT"}
+_OKX_SWAP_MAP = {"BTCUSDT": "BTC-USDT-SWAP", "ETHUSDT": "ETH-USDT-SWAP", "SOLUSDT": "SOL-USDT-SWAP"}
+_OKX_INTERVAL = {"1h": "1H", "4h": "4H", "1d": "1D"}
 
 
 async def _get(url: str, params: dict = None) -> dict | list:
@@ -39,20 +42,17 @@ async def _get_spot(path: str, params: dict = None) -> dict | list:
     raise last_err
 
 
-# ── Bybit fallback ────────────────────────────────────────────────────────────
+# ── OKX fallback ───────────────────────────────────────────────────
 
-async def _bybit_klines(symbol: str, interval: str, limit: int) -> pd.DataFrame:
-    """Fetch klines from Bybit v5 (linear/spot)."""
-    interval_map = {"1h": "60", "4h": "240", "1d": "D"}
-    bybit_interval = interval_map.get(interval, interval)
-    url = f"{_BYBIT_URL}/v5/market/kline"
-    params = {"category": "linear", "symbol": symbol, "interval": bybit_interval, "limit": limit}
-    d = await _get(url, params)
-    rows = d["result"]["list"]
-    # Bybit returns [startTime, open, high, low, close, volume, turnover] newest first
-    rows = list(reversed(rows))
-    cols = ["open_time", "open", "high", "low", "close", "volume", "quote_vol"]
-    df = pd.DataFrame(rows, columns=cols)
+async def _okx_klines(symbol: str, interval: str, limit: int) -> pd.DataFrame:
+    inst_id = _OKX_MAP.get(symbol, symbol.replace("USDT", "-USDT"))
+    bar = _OKX_INTERVAL.get(interval, interval.upper())
+    d = await _get(f"{_OKX_URL}/api/v5/market/candles",
+                   {"instId": inst_id, "bar": bar, "limit": str(limit)})
+    rows = list(reversed(d["data"]))  # OKX: newest first
+    # [ts, open, high, low, close, vol, volCcy, volCcyQuote, confirm]
+    df = pd.DataFrame(rows, columns=["open_time","open","high","low","close",
+                                      "volume","vol_ccy","quote_vol","confirm"])
     for c in ("open", "high", "low", "close", "volume", "quote_vol"):
         df[c] = df[c].astype(float)
     df["taker_buy_base"] = df["volume"] * 0.5
@@ -60,18 +60,19 @@ async def _bybit_klines(symbol: str, interval: str, limit: int) -> pd.DataFrame:
     return df
 
 
-async def _bybit_ticker(symbol: str) -> dict:
-    url = f"{_BYBIT_URL}/v5/market/tickers"
-    d = await _get(url, {"category": "linear", "symbol": symbol})
-    t = d["result"]["list"][0]
+async def _okx_ticker(symbol: str) -> dict:
+    inst_id = _OKX_MAP.get(symbol, symbol.replace("USDT", "-USDT"))
+    d = await _get(f"{_OKX_URL}/api/v5/market/ticker", {"instId": inst_id})
+    t = d["data"][0]
+    last = float(t["last"])
+    open24 = float(t["open24h"]) if t.get("open24h") else last
+    change_pct = round((last / open24 - 1) * 100, 2) if open24 > 0 else 0.0
     return {
-        "lastPrice": t["lastPrice"],
-        "priceChangePercent": str(round(
-            (float(t["lastPrice"]) / float(t["prevPrice24h"]) - 1) * 100, 2
-        ) if t.get("prevPrice24h") and float(t["prevPrice24h"]) > 0 else 0),
-        "quoteVolume": t.get("turnover24h", "0"),
-        "highPrice": t.get("highPrice24h", t["lastPrice"]),
-        "lowPrice": t.get("lowPrice24h", t["lastPrice"]),
+        "lastPrice": t["last"],
+        "priceChangePercent": str(change_pct),
+        "quoteVolume": t.get("volCcy24h", "0"),
+        "highPrice": t.get("high24h", t["last"]),
+        "lowPrice": t.get("low24h", t["last"]),
     }
 
 
@@ -86,16 +87,16 @@ async def fetch_klines(symbol: str, interval: str, limit: int = 200) -> pd.DataF
             df[c] = df[c].astype(float)
         return df
     except Exception as e:
-        logger.warning(f"Binance klines failed ({e}), trying Bybit...")
-        return await _bybit_klines(symbol, interval, limit)
+        logger.warning(f"Binance klines failed ({e}), trying OKX...")
+        return await _okx_klines(symbol, interval, limit)
 
 
 async def fetch_ticker(symbol: str) -> dict:
     try:
         return await _get_spot("/api/v3/ticker/24hr", {"symbol": symbol})
     except Exception as e:
-        logger.warning(f"Binance ticker failed ({e}), trying Bybit...")
-        return await _bybit_ticker(symbol)
+        logger.warning(f"Binance ticker failed ({e}), trying OKX...")
+        return await _okx_ticker(symbol)
 
 
 async def fetch_funding_rate(symbol: str) -> float:
@@ -104,8 +105,9 @@ async def fetch_funding_rate(symbol: str) -> float:
         return float(d.get("lastFundingRate", 0))
     except Exception:
         try:
-            d = await _get(f"{_BYBIT_URL}/v5/market/tickers", {"category": "linear", "symbol": symbol})
-            return float(d["result"]["list"][0].get("fundingRate", 0))
+            inst_id = _OKX_SWAP_MAP.get(symbol, symbol.replace("USDT", "-USDT-SWAP"))
+            d = await _get(f"{_OKX_URL}/api/v5/public/funding-rate", {"instId": inst_id})
+            return float(d["data"][0].get("fundingRate", 0))
         except Exception:
             return 0.0
 
@@ -116,9 +118,10 @@ async def fetch_open_interest(symbol: str) -> float:
         return float(d.get("openInterest", 0))
     except Exception:
         try:
-            d = await _get(f"{_BYBIT_URL}/v5/market/open-interest",
-                           {"category": "linear", "symbol": symbol, "intervalTime": "1h", "limit": 1})
-            return float(d["result"]["list"][0].get("openInterest", 0))
+            inst_id = _OKX_SWAP_MAP.get(symbol, symbol.replace("USDT", "-USDT-SWAP"))
+            d = await _get(f"{_OKX_URL}/api/v5/rubik/stat/contracts/open-interest-volume",
+                           {"ccy": symbol.replace("USDT", ""), "period": "1H"})
+            return float(d["data"][0][1]) if d.get("data") else 0.0
         except Exception:
             return 0.0
 
