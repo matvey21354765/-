@@ -1,11 +1,13 @@
 from aiogram import Router, F
 from aiogram.filters import CommandStart, Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, CallbackQuery, PreCheckoutQuery, LabeledPrice
 import logging
 
 from app.services.user_service import (
     get_or_create_user, get_user, activate_subscription, get_user_count,
-    toggle_notifications,
+    toggle_notifications, activate_promo_code,
 )
 from app.services.signal_service import (
     generate_signal, get_stats, get_recent_signals,
@@ -23,6 +25,10 @@ logger = logging.getLogger(__name__)
 router = Router()
 PAGE_SIZE = 8
 
+
+class PromoState(StatesGroup):
+    waiting_code = State()
+
 # Stars prices per month count
 STARS_PRICES = {1: 500, 3: 1200, 6: 2100}
 STARS_LABELS = {1: "1 месяц", 3: "3 месяца", 6: "6 месяцев"}
@@ -31,7 +37,8 @@ STARS_LABELS = {1: "1 месяц", 3: "3 месяца", 6: "6 месяцев"}
 # ── /start ────────────────────────────────────────────────────────────────────
 
 @router.message(CommandStart())
-async def cmd_start(msg: Message):
+async def cmd_start(msg: Message, state: FSMContext):
+    await state.clear()
     user, is_new = await get_or_create_user(
         msg.from_user.id, msg.from_user.username, msg.from_user.first_name)
 
@@ -267,19 +274,46 @@ async def cb_subscription(call: CallbackQuery):
     text = (
         f"💳 <b>Подписка DAO Signals</b>\n\n"
         f"Статус: {status}\n\n"
-        f"<b>Тарифы (Telegram Stars):</b>\n"
+        f"<b>Тарифы:</b>\n"
         f"  ⭐ 1 месяц   — <b>500 Stars</b>\n"
         f"  ⭐ 3 месяца  — <b>1 200 Stars</b>  (−20%)\n"
         f"  ⭐ 6 месяцев — <b>2 100 Stars</b>  (−30%)\n\n"
         f"<b>Включено:</b>\n"
-        f"  • AI-сигналы LONG/SHORT каждый час\n"
-        f"  • BTC, ETH, SOL\n"
+        f"  • Сигналы LONG/SHORT по BTC, ETH, SOL\n"
         f"  • Push-уведомления при новом сигнале\n"
         f"  • Полный анализ и история\n\n"
-        f"<i>Оплата через встроенный кошелёк Telegram Stars</i>"
+        f"<b>💬 Оплата напрямую (крипта / перевод):</b>\n"
+        f"  Написать: @n0likkkk или @n3m1r\n\n"
+        f"<b>🎁 Есть промокод?</b> Нажми кнопку ниже 👇"
     )
     await call.message.edit_text(text, reply_markup=subscription_kb(), parse_mode="HTML")
     await call.answer()
+
+
+@router.callback_query(F.data == "enter_promo")
+async def cb_enter_promo(call: CallbackQuery, state: FSMContext):
+    await state.set_state(PromoState.waiting_code)
+    await call.message.edit_text(
+        "🎁 <b>Введи промокод:</b>\n\n"
+        "<i>Промокод чувствителен к регистру — вводи заглавными буквами</i>",
+        reply_markup=back_kb(),
+        parse_mode="HTML",
+    )
+    await call.answer()
+
+
+@router.message(PromoState.waiting_code)
+async def msg_promo_code(msg: Message, state: FSMContext):
+    await state.clear()
+    code = msg.text.strip().upper()
+    success, text = await activate_promo_code(msg.from_user.id, code)
+    user = await get_user(msg.from_user.id)
+    notif = user.notifications_enabled if user and hasattr(user, 'notifications_enabled') else False
+    await msg.answer(
+        f"{text}\n\n{'Теперь у тебя есть полный доступ к сигналам!' if success else 'Попробуй другой код или напиши @n0likkkk'}",
+        reply_markup=main_menu(notif),
+        parse_mode="HTML",
+    )
 
 
 @router.callback_query(F.data.startswith("buy_stars_"))
@@ -370,6 +404,31 @@ async def cmd_give_sub(msg: Message):
         await msg.answer(f"{'✅' if ok else '❌'} Подписка {parts[2]}мес для {parts[1]}")
     except ValueError:
         await msg.answer("❌ Неверные параметры")
+
+
+@router.message(Command("promocodes"))
+async def cmd_promocodes(msg: Message):
+    if msg.from_user.id not in settings.ADMIN_IDS:
+        return
+    from app.models.database import PromoCode, AsyncSessionLocal
+    from sqlalchemy import select
+    async with AsyncSessionLocal() as db:
+        res = await db.execute(select(PromoCode).where(PromoCode.is_used == False).order_by(PromoCode.months))
+        codes = res.scalars().all()
+    by_months: dict[int, list] = {1: [], 3: [], 6: []}
+    for c in codes:
+        by_months.setdefault(c.months, []).append(c.code)
+    lines = ["📋 <b>Активные промокоды</b>\n"]
+    for m, lst in sorted(by_months.items()):
+        lines.append(f"<b>{m} мес. ({len(lst)} шт.):</b>")
+        lines.append("\n".join(lst[:50]))  # first 50 per group
+        if len(lst) > 50:
+            lines.append(f"... и ещё {len(lst)-50}")
+        lines.append("")
+    text = "\n".join(lines)
+    # split if too long
+    for i in range(0, len(text), 4000):
+        await msg.answer(text[i:i+4000], parse_mode="HTML")
 
 
 @router.message(Command("recompute"))

@@ -79,6 +79,7 @@ def subscription_kb() -> InlineKeyboardMarkup:
         [Btn(text="⭐ 1 месяц — 500 Stars", callback_data="buy_stars_1")],
         [Btn(text="⭐ 3 месяца — 1200 Stars  (−20%)", callback_data="buy_stars_3")],
         [Btn(text="⭐ 6 месяцев — 2100 Stars  (−30%)", callback_data="buy_stars_6")],
+        [Btn(text="🎁 Ввести промокод", callback_data="enter_promo")],
         [Btn(text="« Меню", callback_data="main_menu")],
     ])
 

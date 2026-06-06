@@ -14,6 +14,7 @@ class Base(DeclarativeBase):
     pass
 
 
+
 class User(Base):
     __tablename__ = "users"
 
@@ -129,10 +130,21 @@ class StrategyStats(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class PromoCode(Base):
+    __tablename__ = "promo_codes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    code: Mapped[str] = mapped_column(String(32), unique=True, nullable=False, index=True)
+    months: Mapped[int] = mapped_column(Integer, nullable=False)  # 1, 3, or 6
+    is_used: Mapped[bool] = mapped_column(Boolean, default=False)
+    used_by: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        # Auto-migrate: add new columns if they don't exist
         await conn.execute(text(
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS notifications_enabled BOOLEAN DEFAULT FALSE"
         ))

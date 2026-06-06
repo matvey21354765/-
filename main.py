@@ -4,10 +4,12 @@ from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from config.settings import settings
-from app.models.database import init_db
+from app.models.database import init_db, PromoCode, AsyncSessionLocal
 from app.handlers.all import router
 from app.middlewares.access import AccessMiddleware
 from app.services.scheduler import setup_scheduler
+from app.services.user_service import generate_promo_codes, save_promo_codes
+from sqlalchemy import select, func
 
 logging.basicConfig(
     level=getattr(logging, settings.LOG_LEVEL),
@@ -22,6 +24,15 @@ async def main():
 
     await init_db()
     logger.info("✅ Database ready")
+
+    # Generate promo codes on first launch
+    async with AsyncSessionLocal() as db:
+        res = await db.execute(select(func.count()).select_from(PromoCode))
+        count = res.scalar()
+    if count == 0:
+        codes = generate_promo_codes()
+        total = await save_promo_codes(codes)
+        logger.info(f"✅ Generated {total} promo codes (100x1m + 100x3m + 100x6m)")
 
     bot = Bot(token=settings.BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
