@@ -5,7 +5,7 @@ from aiogram.exceptions import TelegramForbiddenError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from app.services.signal_service import generate_signal, resolve_signals
 from app.services.notifier import broadcast_signal
-from app.services.polymarket import get_daily_poly_signals
+from app.services.polymarket import get_crypto_predictions
 from app.services.user_service import get_users_with_notifications
 from config.settings import settings
 
@@ -52,7 +52,7 @@ async def _run_polymarket(bot: Bot):
         if not snaps:
             return
 
-        texts = await get_daily_poly_signals(snaps)
+        texts = await get_crypto_predictions(snaps)
         if not texts:
             logger.info("No Polymarket daily markets found today")
             return

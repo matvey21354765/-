@@ -1,126 +1,137 @@
 from __future__ import annotations
 import asyncio
 import logging
-from datetime import datetime, timezone
+import re
 from typing import Optional
 import aiohttp
 
 logger = logging.getLogger(__name__)
 
-GAMMA_URL = "https://gamma-api.polymarket.com/markets"
+GAMMA_URL = "https://gamma-api.polymarket.com"
 
-_SEARCH_TERMS = {
-    "BTC": ["bitcoin up or down", "bitcoin higher", "bitcoin price june", "btc up or down"],
-    "ETH": ["ethereum up or down", "ethereum higher", "ethereum price june", "eth up or down"],
-    "SOL": ["solana up or down", "solana higher", "solana price june", "sol up or down"],
+# Map coin keywords in market question → our coin symbol
+_COIN_MAP = {
+    "bitcoin": "BTC", "btc": "BTC",
+    "ethereum": "ETH", "eth": "ETH",
+    "solana": "SOL", "sol": "SOL",
 }
-
-_COIN_NAME = {"BTC": "Bitcoin", "ETH": "Ethereum", "SOL": "Solana"}
 
 
 async def _fetch(url: str, params: dict = None) -> list | dict | None:
     try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as s:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=20),
+            headers={"Accept": "application/json"},
+        ) as s:
             async with s.get(url, params=params) as r:
                 if r.status != 200:
+                    logger.warning(f"Polymarket {url}: HTTP {r.status}")
                     return None
                 return await r.json(content_type=None)
     except Exception as e:
-        logger.warning(f"Polymarket fetch: {e}")
+        logger.warning(f"Polymarket fetch error: {e}")
         return None
 
 
-async def find_daily_market(coin: str) -> Optional[dict]:
-    """Find today's up/down market for a coin."""
-    today = datetime.now(timezone.utc)
-    day = str(today.day)  # "6" without leading zero, cross-platform
-    month = today.strftime("%B").lower()  # "june"
-    year = today.strftime("%Y")
-    date_strs = [
-        f"{month} {day}",    # "june 6"
-        f"{month} {day.zfill(2)}",  # "june 06"
-        f"{day} {month}",    # "6 june"
-        year,                 # "2026"
-    ]
+def _parse_prices(market: dict) -> tuple[float, float]:
+    """Return (yes_prob, no_prob) as 0-100 floats."""
+    prices = market.get("outcomePrices") or []
+    if isinstance(prices, str):
+        import json as _j
+        try:
+            prices = _j.loads(prices)
+        except Exception:
+            return 50.0, 50.0
+    if not prices:
+        return 50.0, 50.0
+    try:
+        yes = float(prices[0])
+        if yes > 1:
+            yes /= 100
+        return round(yes * 100, 1), round((1 - yes) * 100, 1)
+    except Exception:
+        return 50.0, 50.0
 
-    for term in _SEARCH_TERMS.get(coin, []):
-        data = await _fetch(GAMMA_URL, {
-            "active": "true", "closed": "false",
-            "keyword": term, "limit": 30,
-        })
-        if not data:
-            continue
-        markets = data if isinstance(data, list) else data.get("markets", [])
 
-        for m in markets:
-            q = (m.get("question") or "").lower()
-            slug = (m.get("slug") or "").lower()
-
-            # Prefer markets mentioning today's date
-            has_today = any(ds in q or ds in slug for ds in date_strs)
-            is_updown = any(w in q for w in ["up or down", "higher or lower", "above", "below"])
-
-            if not is_updown:
-                continue
-
-            try:
-                prices = m.get("outcomePrices") or []
-                if isinstance(prices, str):
-                    import json as _j
-                    prices = _j.loads(prices)
-                if not prices:
-                    continue
-                yes_prob = float(prices[0])
-                if yes_prob > 1:
-                    yes_prob /= 100
-            except Exception:
-                continue
-
-            slug_val = m.get("slug", "")
-            url = f"https://polymarket.com/event/{slug_val}"
-
-            return {
-                "coin": coin,
-                "question": m.get("question", ""),
-                "yes_prob": round(yes_prob * 100, 1),
-                "no_prob": round((1 - yes_prob) * 100, 1),
-                "slug": slug_val,
-                "url": url,
-                "has_today": has_today,
-                "market_prob_edge": abs(yes_prob - 0.5) < 0.15,  # crowd uncertain (35-65%)
-            }
-
+def _detect_coin(text: str) -> Optional[str]:
+    text = text.lower()
+    for kw, coin in _COIN_MAP.items():
+        if kw in text:
+            return coin
     return None
 
 
-def build_poly_signal(coin: str, market: dict, snap: dict) -> str:
-    """Combine technical analysis with Polymarket market."""
+async def fetch_crypto_markets(limit: int = 50) -> list[dict]:
+    """Fetch active crypto markets from Polymarket predictions/crypto page."""
+    # Try tag_slug=crypto first
+    data = await _fetch(f"{GAMMA_URL}/markets", {
+        "active": "true", "closed": "false",
+        "tag_slug": "crypto", "limit": limit,
+    })
+    markets = []
+    if data:
+        markets = data if isinstance(data, list) else data.get("markets", [])
+
+    # Also try events endpoint
+    if not markets:
+        data = await _fetch(f"{GAMMA_URL}/events", {
+            "active": "true", "closed": "false",
+            "tag_slug": "crypto", "limit": limit,
+        })
+        if data:
+            events = data if isinstance(data, list) else data.get("events", [])
+            for ev in events:
+                for m in (ev.get("markets") or []):
+                    markets.append(m)
+
+    return markets
+
+
+def _analyze_market(market: dict, snaps: dict) -> Optional[dict]:
+    """Match market to a coin and return analysis."""
     from app.services.analyzer import analyze_coin
+
+    question = market.get("question") or market.get("title") or ""
+    coin = _detect_coin(question)
+    if not coin or coin not in snaps:
+        return None
+
+    snap = snaps[coin]
     result = analyze_coin(snap)
     if not result:
-        return ""
+        return None
 
+    yes_prob, no_prob = _parse_prices(market)
     direction = result["direction"]
     confidence = result["confidence"]
     reasons = result.get("reasons", [])[:2]
     price = snap["price"]
+    slug = market.get("slug", "")
+    url = f"https://polymarket.com/event/{slug}"
 
-    # Map our direction to market outcome
-    # Most "up or down" markets: YES = price goes UP
-    q_lower = market["question"].lower()
-    if direction == "LONG":
-        our_bet = "ДА (вырастет) 🟢"
-        market_prob = market["yes_prob"]
-        edge = market["no_prob"] - market["yes_prob"]  # market undervalues YES
+    # Determine our answer to the market question
+    # Detect if it's a price UP/DOWN question
+    q_low = question.lower()
+    is_bullish_q = any(w in q_low for w in ["up", "higher", "above", "rise", "pump", "bull", "gain"])
+    is_bearish_q = any(w in q_low for w in ["down", "lower", "below", "fall", "drop", "bear", "loss"])
+
+    if is_bullish_q:
+        our_bet = "ДА 🟢" if direction == "LONG" else "НЕТ 🔴"
+        our_prob = yes_prob if direction == "LONG" else no_prob
+        crowd_prob = yes_prob
+    elif is_bearish_q:
+        our_bet = "ДА 🟢" if direction == "SHORT" else "НЕТ 🔴"
+        our_prob = yes_prob if direction == "SHORT" else no_prob
+        crowd_prob = yes_prob
     else:
-        our_bet = "НЕТ (упадёт) 🔴"
-        market_prob = market["no_prob"]
-        edge = market["yes_prob"] - market["no_prob"]  # market undervalues NO
+        # Generic question - just show direction
+        our_bet = "ВВЕРХ 📈" if direction == "LONG" else "ВНИЗ 📉"
+        our_prob = confidence
+        crowd_prob = yes_prob
 
-    edge_text = f"+{edge:.0f}%" if edge > 0 else f"{edge:.0f}%"
-    crowd_says = f"рынок даёт {market_prob:.0f}% на {'рост' if direction == 'LONG' else 'падение'}"
-
-    reasons_text = "\n".join(f"  • {r}" for r in reasons)
+    # Edge = difference between our confidence and crowd probability
+    crowd_on_our_side = crowd_prob if our_bet.startswith("ДА") or our_bet.startswith("ВВЕРХ") else (100 - crowd_prob)
+    edge = round(confidence - crowd_on_our_side, 1)
 
     trend_map = {
         "STRONG BULL": "🐂🐂 сильный рост",
@@ -130,34 +141,62 @@ def build_poly_signal(coin: str, market: dict, snap: dict) -> str:
         "STRONG BEAR": "🐻🐻 сильное падение",
     }
     trend = trend_map.get(result.get("trend_strength", ""), "↔️")
+    reasons_text = "\n".join(f"  • {r}" for r in reasons)
 
+    return {
+        "coin": coin,
+        "question": question,
+        "url": url,
+        "our_bet": our_bet,
+        "confidence": confidence,
+        "crowd_prob": crowd_prob,
+        "edge": edge,
+        "trend": trend,
+        "price": price,
+        "reasons_text": reasons_text,
+    }
+
+
+def _format_market_signal(m: dict) -> str:
+    edge_str = f"+{m['edge']:.0f}%" if m['edge'] > 0 else f"{m['edge']:.0f}%"
+    edge_label = "наш перевес" if m['edge'] > 0 else "рынок лучше"
     return (
-        f"🎯 <b>СТАВКА НА POLYMARKET — {coin}/USDT</b>\n"
+        f"🎯 <b>POLYMARKET — {m['coin']}/USDT</b>\n"
+        f"🔗 <a href=\"{m['url']}\">{m['question']}</a>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"❓ <i>{market['question']}</i>\n"
+        f"📊 Тренд: {m['trend']}\n"
+        f"  Цена: <b>${m['price']:,.2f}</b>  ·  Уверенность: <b>{m['confidence']:.0f}%</b>\n"
+        f"{m['reasons_text']}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 <b>Наш анализ:</b> {trend}\n"
-        f"  Цена: <b>${price:,.2f}</b>  ·  Уверенность: <b>{confidence:.0f}%</b>\n"
-        f"{reasons_text}\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"💡 <b>Ставить:</b> {our_bet}\n"
-        f"  Толпа даёт: <b>{market_prob:.0f}%</b>  ·  Наш прогноз даёт перевес: <b>{edge_text}</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"🔗 <a href=\"{market['url']}\">{market['url']}</a>"
+        f"💡 Ставить: <b>{m['our_bet']}</b>\n"
+        f"  Толпа: <b>{m['crowd_prob']:.0f}%</b>  ·  {edge_label}: <b>{edge_str}</b>"
     )
 
 
-async def get_daily_poly_signals(snaps: dict[str, dict]) -> list[str]:
-    """Get Polymarket daily signals for all coins."""
-    signals = []
-    for coin, snap in snaps.items():
-        market = await find_daily_market(coin)
-        if not market:
-            logger.info(f"[{coin}] No Polymarket daily market found")
-            continue
-        text = build_poly_signal(coin, market, snap)
-        if text:
-            signals.append(text)
-            logger.info(f"[{coin}] Polymarket signal: {market['question'][:60]}")
-        await asyncio.sleep(0.5)
-    return signals
+async def get_crypto_predictions(snaps: dict, top_n: int = 5) -> list[str]:
+    """Fetch crypto markets and return formatted signals for top matches."""
+    markets = await fetch_crypto_markets(limit=100)
+    if not markets:
+        logger.warning("Polymarket: no crypto markets returned")
+        return []
+
+    analyzed = []
+    for m in markets:
+        result = _analyze_market(m, snaps)
+        if result:
+            analyzed.append(result)
+
+    # Sort by edge (our confidence vs crowd) descending
+    analyzed.sort(key=lambda x: x["edge"], reverse=True)
+
+    # Return top N, deduplicate by coin (best per coin)
+    seen_coins: set[str] = set()
+    texts = []
+    for a in analyzed:
+        if a["coin"] not in seen_coins:
+            seen_coins.add(a["coin"])
+            texts.append(_format_market_signal(a))
+        if len(texts) >= top_n:
+            break
+
+    return texts
