@@ -7,7 +7,7 @@ from app.services.user_service import get_or_create_user, get_user, activate_sub
 from app.services.signal_service import (
     generate_signal, get_stats, get_recent_signals,
     get_deposit_history, get_current_balance, recompute_stats,
-    get_signal_by_id, get_latest_signals_all_coins,
+    get_signal_by_id, get_latest_signals_all_coins, _cache,
 )
 from app.services.notifier import format_signal, format_full_analysis, format_market_overview, broadcast_signal
 from app.keyboards.inline import (
@@ -68,21 +68,38 @@ async def cb_signal(call: CallbackQuery):
     coin = call.data.split("_")[1]
     await call.answer(f"⚙️ Анализирую {coin}...")
     await call.message.edit_text(
-        f"⏳ <b>Анализирую {coin}/USDT...</b>\n\n"
-        f"  1. Загружаю данные Binance (1H · 4H · 1D)...\n"
-        f"  2. Считаю индикаторы...\n"
-        f"  3. Запускаю AI-анализ (Groq LLaMA 70B)...\n\n"
-        f"<i>~10–20 секунд</i>",
+        f"⏳ <b>Анализирую {coin}/USDT...</b>\n<i>~10–20 секунд</i>",
         parse_mode="HTML",
     )
     try:
-        sig = await generate_signal(coin)
+        sig = await generate_signal(coin, use_cache=True)
     except Exception as e:
         logger.error(f"Signal error: {e}")
         await call.message.edit_text("❌ Ошибка генерации. Попробуй позже.", reply_markup=back_kb())
         return
     if not sig:
         await call.message.edit_text("⚠️ Не удалось получить данные. Попробуй позже.", reply_markup=back_kb())
+        return
+    await call.message.edit_text(format_signal(sig), reply_markup=signal_kb(coin, sig.id), parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("refresh_"))
+async def cb_refresh(call: CallbackQuery):
+    coin = call.data.split("_")[1]
+    _cache.pop(coin, None)
+    await call.answer(f"🔄 Обновляю {coin}...")
+    await call.message.edit_text(
+        f"⏳ <b>Получаю свежий анализ {coin}/USDT...</b>\n<i>~15–25 секунд</i>",
+        parse_mode="HTML",
+    )
+    try:
+        sig = await generate_signal(coin, use_cache=False)
+    except Exception as e:
+        logger.error(f"Refresh error: {e}")
+        await call.message.edit_text("❌ Ошибка. Попробуй через минуту.", reply_markup=back_kb())
+        return
+    if not sig:
+        await call.message.edit_text("⚠️ AI временно недоступен. Попробуй через минуту.", reply_markup=back_kb())
         return
     await call.message.edit_text(format_signal(sig), reply_markup=signal_kb(coin, sig.id), parse_mode="HTML")
 

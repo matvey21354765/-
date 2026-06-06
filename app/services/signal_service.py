@@ -1,9 +1,10 @@
 from __future__ import annotations
+import asyncio
 import logging
+import time
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 from sqlalchemy import select, and_, desc
-from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.database import Signal, DepositSnapshot, StrategyStats, AsyncSessionLocal
 from app.services.binance import get_full_snapshot, fetch_ticker, SYMBOL_MAP
 from app.services.analyzer import analyze_coin
@@ -11,8 +12,21 @@ from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
+# In-memory cache: coin -> (signal, timestamp)
+_cache: dict[str, tuple[Signal, float]] = {}
+CACHE_TTL = 300  # 5 minutes
 
-async def generate_signal(coin: str) -> Optional[Signal]:
+
+async def generate_signal(coin: str, use_cache: bool = True) -> Optional[Signal]:
+    if use_cache and coin in _cache:
+        sig, ts = _cache[coin]
+        if time.time() - ts < CACHE_TTL:
+            logger.info(f"[{coin}] Cache hit")
+            return sig
+    return await _generate_signal_fresh(coin)
+
+
+async def _generate_signal_fresh(coin: str) -> Optional[Signal]:
     logger.info(f"[{coin}] Fetching snapshot...")
     try:
         snap = await get_full_snapshot(coin)
@@ -66,6 +80,7 @@ async def generate_signal(coin: str) -> Optional[Signal]:
         await db.commit()
         await db.refresh(sig)
         logger.info(f"[{coin}] Saved #{sig.id} {sig.direction} conf={sig.confidence:.0f}% rating={sig.signal_rating}")
+        _cache[coin] = (sig, time.time())
         return sig
 
 

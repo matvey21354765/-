@@ -19,7 +19,7 @@ def signal_kb(coin: str, sig_id: int = None) -> InlineKeyboardMarkup:
     if sig_id:
         rows.append([Btn(text="📝 Полный анализ", callback_data=f"full_{sig_id}")])
     rows.append([
-        Btn(text="🔄 Обновить", callback_data=f"sig_{coin}"),
+        Btn(text="🔄 Свежий анализ", callback_data=f"refresh_{coin}"),
         Btn(text="📋 История", callback_data=f"hist_{coin}_0"),
     ])
     rows.append([Btn(text="« Меню", callback_data="main_menu")])
