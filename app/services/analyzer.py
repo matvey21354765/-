@@ -155,6 +155,13 @@ def _validate(data: dict, snap: dict) -> dict:
         data["reasons"] = [str(data.get("reasons", "—"))]
     conf = float(data.get("confidence", 55))
     data["confidence"] = max(40.0, min(85.0, conf))
+    # Ensure string fields are actually strings, not lists
+    for field in ("full_analysis", "bull_scenario", "bear_scenario", "key_trigger"):
+        v = data.get(field)
+        if isinstance(v, list):
+            data[field] = " ".join(str(x) for x in v)
+        elif v is not None:
+            data[field] = str(v)
     return data
 
 
