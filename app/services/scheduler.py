@@ -21,7 +21,13 @@ def setup_scheduler(scheduler: AsyncIOScheduler, bot: Bot):
                       id="poly_morning", replace_existing=True)
     scheduler.add_job(_run_polymarket, "cron", hour=18, minute=0, args=[bot],
                       id="poly_evening", replace_existing=True)
-    logger.info(f"Scheduler ready: signals/{settings.SIGNAL_INTERVAL_MINUTES}min, Polymarket 09:00+18:00 UTC")
+    # News: every 4 hours
+    scheduler.add_job(_run_news, "cron", hour="6,10,14,18,22", minute=0, args=[bot],
+                      id="news", replace_existing=True)
+    # Daily crypto term: 08:00 UTC
+    scheduler.add_job(_run_daily_term, "cron", hour=8, minute=0, args=[bot],
+                      id="daily_term", replace_existing=True)
+    logger.info("Scheduler ready: signals, Polymarket, news (5x/day), daily term 08:00 UTC")
 
 
 async def _run_signals(bot: Bot):
@@ -76,3 +82,22 @@ async def _run_polymarket(bot: Bot):
             await asyncio.sleep(1)
     except Exception as e:
         logger.error(f"Polymarket job error: {e}")
+
+
+async def _run_news(bot: Bot):
+    logger.info("📰 Posting news to channel...")
+    try:
+        from app.services.news_service import post_news_to_channel
+        count = await post_news_to_channel(bot)
+        logger.info(f"News job done: {count} items posted")
+    except Exception as e:
+        logger.error(f"News job error: {e}")
+
+
+async def _run_daily_term(bot: Bot):
+    logger.info("📖 Posting daily crypto term...")
+    try:
+        from app.services.news_service import post_term_to_channel
+        await post_term_to_channel(bot)
+    except Exception as e:
+        logger.error(f"Daily term job error: {e}")
