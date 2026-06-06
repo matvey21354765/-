@@ -395,14 +395,23 @@ async def cmd_promocodes(msg: Message):
 async def cmd_polymarket(msg: Message):
     if msg.from_user.id not in settings.ADMIN_IDS:
         return
-    await msg.answer("⏳ Ищу лучшие ставки на Polymarket...")
-    from app.services.polymarket import get_high_confidence_markets, format_polymarket_alert
-    markets = await get_high_confidence_markets(min_conf=70.0)
-    if not markets:
-        await msg.answer("😔 Нет рынков с уверенностью ≥70% прямо сейчас")
+    await msg.answer("⏳ Ищу дневные ставки на Polymarket...")
+    from app.services.binance import get_full_snapshot
+    from app.services.polymarket import get_daily_poly_signals
+    import asyncio
+    snaps = {}
+    for coin in settings.COINS:
+        try:
+            snaps[coin] = await get_full_snapshot(coin)
+        except Exception:
+            pass
+    texts = await get_daily_poly_signals(snaps)
+    if not texts:
+        await msg.answer("😔 Дневные рынки не найдены. Попробуй позже.")
         return
-    text = format_polymarket_alert(markets)
-    await msg.answer(text, parse_mode="HTML", disable_web_page_preview=False)
+    for text in texts:
+        await msg.answer(text, parse_mode="HTML", disable_web_page_preview=False)
+        await asyncio.sleep(0.3)
 
 
 @router.message(Command("reload_promos"))
