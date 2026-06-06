@@ -5,7 +5,6 @@ from typing import Optional
 import aiohttp
 import numpy as np
 import pandas as pd
-from config.settings import settings
 
 logger = logging.getLogger(__name__)
 SYMBOL_MAP = {"BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT"}
