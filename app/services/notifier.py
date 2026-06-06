@@ -8,7 +8,7 @@ from app.services.user_service import get_users_with_notifications
 
 logger = logging.getLogger(__name__)
 
-POLYMARKET_URL = "https://polymarket.com/markets/crypto"
+POLYMARKET_URL = "https://polymarket.com/markets/crypto?via=max-chron0n"
 
 _STARS = {
     10: "⭐⭐⭐⭐⭐", 9: "⭐⭐⭐⭐⭐",
