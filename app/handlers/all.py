@@ -2,7 +2,7 @@ from aiogram import Router, F
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message, CallbackQuery, PreCheckoutQuery, LabeledPrice
+from aiogram.types import Message, CallbackQuery
 import logging
 
 from app.services.user_service import (
@@ -17,7 +17,7 @@ from app.services.signal_service import (
 from app.services.notifier import format_signal, format_full_analysis, format_market_overview, broadcast_signal
 from app.keyboards.inline import (
     main_menu, signal_kb, full_analysis_kb, stats_kb, history_kb,
-    subscription_kb, back_kb, overview_kb, pay_kb,
+    subscription_kb, back_kb, overview_kb,
 )
 from config.settings import settings
 
@@ -28,10 +28,6 @@ PAGE_SIZE = 8
 
 class PromoState(StatesGroup):
     waiting_code = State()
-
-# Stars prices per month count
-STARS_PRICES = {1: 500, 3: 1200, 6: 2100}
-STARS_LABELS = {1: "1 месяц", 3: "3 месяца", 6: "6 месяцев"}
 
 
 # ── /start ────────────────────────────────────────────────────────────────────
@@ -275,16 +271,17 @@ async def cb_subscription(call: CallbackQuery):
         f"💳 <b>Подписка DAO Signals</b>\n\n"
         f"Статус: {status}\n\n"
         f"<b>Тарифы:</b>\n"
-        f"  ⭐ 1 месяц   — <b>500 Stars</b>\n"
-        f"  ⭐ 3 месяца  — <b>1 200 Stars</b>  (−20%)\n"
-        f"  ⭐ 6 месяцев — <b>2 100 Stars</b>  (−30%)\n\n"
+        f"  • 1 месяц   — <b>$29</b>\n"
+        f"  • 3 месяца  — <b>$69</b>  (−21%)\n"
+        f"  • 6 месяцев — <b>$119</b>  (−32%)\n\n"
+        f"<b>Как оплатить:</b>\n"
+        f"  1. Напиши @n0likkkk или @n3m1r\n"
+        f"  2. Получи промокод\n"
+        f"  3. Введи его кнопкой ниже 👇\n\n"
         f"<b>Включено:</b>\n"
-        f"  • Сигналы LONG/SHORT по BTC, ETH, SOL\n"
-        f"  • Push-уведомления при новом сигнале\n"
-        f"  • Полный анализ и история\n\n"
-        f"<b>💬 Оплата напрямую (крипта / перевод):</b>\n"
-        f"  Написать: @n0likkkk или @n3m1r\n\n"
-        f"<b>🎁 Есть промокод?</b> Нажми кнопку ниже 👇"
+        f"  • Сигналы LONG/SHORT каждый час\n"
+        f"  • BTC, ETH, SOL\n"
+        f"  • Уведомления и полный анализ"
     )
     await call.message.edit_text(text, reply_markup=subscription_kb(), parse_mode="HTML")
     await call.answer()
@@ -316,43 +313,6 @@ async def msg_promo_code(msg: Message, state: FSMContext):
     )
 
 
-@router.callback_query(F.data.startswith("buy_stars_"))
-async def cb_buy_stars(call: CallbackQuery):
-    months = int(call.data.split("_")[2])
-    stars = STARS_PRICES.get(months, 500)
-    label = STARS_LABELS.get(months, "1 месяц")
-    await call.message.answer_invoice(
-        title=f"DAO Signals — {label}",
-        description=f"Подписка на {label}: AI-сигналы LONG/SHORT для BTC, ETH, SOL",
-        payload=f"sub_{months}",
-        currency="XTR",
-        prices=[LabeledPrice(label=f"Подписка {label}", amount=stars)],
-        reply_markup=pay_kb(months),
-    )
-    await call.answer()
-
-
-@router.pre_checkout_query()
-async def pre_checkout(query: PreCheckoutQuery):
-    await query.answer(ok=True)
-
-
-@router.message(F.successful_payment)
-async def successful_payment(msg: Message):
-    payload = msg.successful_payment.invoice_payload
-    months = int(payload.split("_")[1]) if payload.startswith("sub_") else 1
-    ok = await activate_subscription(msg.from_user.id, months)
-    if ok:
-        user = await get_user(msg.from_user.id)
-        notif = user.notifications_enabled if user and hasattr(user, 'notifications_enabled') else False
-        await msg.answer(
-            f"✅ <b>Оплата прошла успешно!</b>\n\n"
-            f"Подписка активирована на <b>{months} мес.</b>\n"
-            f"Сигналы LONG/SHORT приходят автоматически.\n\n"
-            f"Нажми 🔔 <b>Уведомления</b> в меню чтобы получать их.",
-            reply_markup=main_menu(notif),
-            parse_mode="HTML",
-        )
 
 
 # ── Admin ─────────────────────────────────────────────────────────────────────

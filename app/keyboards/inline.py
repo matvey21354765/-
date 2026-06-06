@@ -1,4 +1,4 @@
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton as Btn, LabeledPrice
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton as Btn
 
 
 def main_menu(notifications: bool = False) -> InlineKeyboardMarkup:
@@ -76,19 +76,12 @@ def overview_kb() -> InlineKeyboardMarkup:
 
 def subscription_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [Btn(text="⭐ 1 месяц — 500 Stars", callback_data="buy_stars_1")],
-        [Btn(text="⭐ 3 месяца — 1200 Stars  (−20%)", callback_data="buy_stars_3")],
-        [Btn(text="⭐ 6 месяцев — 2100 Stars  (−30%)", callback_data="buy_stars_6")],
         [Btn(text="🎁 Ввести промокод", callback_data="enter_promo")],
+        [Btn(text="💬 Написать @n0likkkk", url="https://t.me/n0likkkk")],
+        [Btn(text="💬 Написать @n3m1r", url="https://t.me/n3m1r")],
         [Btn(text="« Меню", callback_data="main_menu")],
     ])
 
-
-def pay_kb(months: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [Btn(text="⭐ Оплатить Telegram Stars", pay=True)],
-        [Btn(text="✖ Отмена", callback_data="subscription")],
-    ])
 
 
 def back_kb() -> InlineKeyboardMarkup:
