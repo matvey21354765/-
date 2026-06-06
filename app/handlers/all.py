@@ -1,0 +1,362 @@
+from aiogram import Router, F
+from aiogram.filters import CommandStart, Command
+from aiogram.types import Message, CallbackQuery
+import logging
+
+from app.services.user_service import get_or_create_user, get_user, activate_subscription, get_user_count
+from app.services.signal_service import (
+    generate_signal, get_stats, get_recent_signals,
+    get_deposit_history, get_current_balance, recompute_stats,
+    get_signal_by_id, get_latest_signals_all_coins,
+)
+from app.services.notifier import format_signal, format_full_analysis, format_market_overview, broadcast_signal
+from app.keyboards.inline import (
+    main_menu, signal_kb, full_analysis_kb, stats_kb, history_kb,
+    subscription_kb, back_kb, overview_kb,
+)
+from config.settings import settings
+
+logger = logging.getLogger(__name__)
+router = Router()
+PAGE_SIZE = 8
+
+
+# ── /start ────────────────────────────────────────────────────────────────────
+
+@router.message(CommandStart())
+async def cmd_start(msg: Message):
+    user, is_new = await get_or_create_user(
+        msg.from_user.id, msg.from_user.username, msg.from_user.first_name)
+
+    if is_new:
+        ends = user.trial_ends_at.strftime("%d.%m.%Y %H:%M") if user.trial_ends_at else "—"
+        text = (
+            f"👋 <b>Добро пожаловать в DAO Signals!</b>\n\n"
+            f"🎁 Бесплатный доступ на <b>{settings.TRIAL_DAYS} дня</b>\n"
+            f"Пробный период до: <b>{ends} UTC</b>\n\n"
+            f"<b>Анализирую BTC, ETH, SOL по:</b>\n"
+            f"• RSI · MACD · EMA 20/50/200 · Bollinger · Stochastic · ADX · ATR\n"
+            f"• Open Interest · Funding Rate · Long/Short Ratio\n"
+            f"• Уровни поддержки и сопротивления\n"
+            f"• Fear & Greed · паттерны свечей\n"
+            f"• AI-анализ (Groq LLaMA 70B)\n\n"
+            f"Выбери монету 👇"
+        )
+    else:
+        days = user.trial_days_left()
+        status = (
+            "✅ Подписка активна" if user.is_subscribed
+            else f"⏳ Пробный период: {days}д" if days > 0
+            else "❌ Доступ истёк"
+        )
+        text = f"👋 С возвращением, <b>{user.first_name or 'трейдер'}</b>!\n{status}"
+
+    await msg.answer(text, reply_markup=main_menu(), parse_mode="HTML")
+
+
+@router.callback_query(F.data == "main_menu")
+async def cb_main(call: CallbackQuery):
+    await call.message.edit_text("📡 <b>DAO Signals</b> — выберите действие:",
+                                  reply_markup=main_menu(), parse_mode="HTML")
+    await call.answer()
+
+
+# ── Signals ───────────────────────────────────────────────────────────────────
+
+@router.callback_query(F.data.startswith("sig_"))
+async def cb_signal(call: CallbackQuery):
+    coin = call.data.split("_")[1]
+    await call.answer(f"⚙️ Анализирую {coin}...")
+    await call.message.edit_text(
+        f"⏳ <b>Анализирую {coin}/USDT...</b>\n\n"
+        f"  1. Загружаю данные Binance (1H · 4H · 1D)...\n"
+        f"  2. Считаю индикаторы...\n"
+        f"  3. Запускаю AI-анализ (Groq LLaMA 70B)...\n\n"
+        f"<i>~10–20 секунд</i>",
+        parse_mode="HTML",
+    )
+    try:
+        sig = await generate_signal(coin)
+    except Exception as e:
+        logger.error(f"Signal error: {e}")
+        await call.message.edit_text("❌ Ошибка генерации. Попробуй позже.", reply_markup=back_kb())
+        return
+    if not sig:
+        await call.message.edit_text("⚠️ Не удалось получить данные. Попробуй позже.", reply_markup=back_kb())
+        return
+    await call.message.edit_text(format_signal(sig), reply_markup=signal_kb(coin, sig.id), parse_mode="HTML")
+
+
+# ── Full Analysis ─────────────────────────────────────────────────────────────
+
+@router.callback_query(F.data.startswith("full_"))
+async def cb_full_analysis(call: CallbackQuery):
+    try:
+        sig_id = int(call.data.split("_")[1])
+    except (IndexError, ValueError):
+        await call.answer("❌ Ошибка", show_alert=True)
+        return
+    await call.answer("📝 Загружаю полный анализ...")
+    sig = await get_signal_by_id(sig_id)
+    if not sig:
+        await call.message.edit_text("⚠️ Сигнал не найден.", reply_markup=back_kb())
+        return
+    text = format_full_analysis(sig)
+    # Telegram limit: 4096 chars. Split if needed.
+    if len(text) > 4096:
+        await call.message.edit_text(text[:4090] + "…", reply_markup=full_analysis_kb(sig.coin, sig.id), parse_mode="HTML")
+    else:
+        await call.message.edit_text(text, reply_markup=full_analysis_kb(sig.coin, sig.id), parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("back_sig_"))
+async def cb_back_to_signal(call: CallbackQuery):
+    try:
+        sig_id = int(call.data.split("_")[2])
+    except (IndexError, ValueError):
+        await call.answer("❌ Ошибка", show_alert=True)
+        return
+    sig = await get_signal_by_id(sig_id)
+    if not sig:
+        await call.message.edit_text("⚠️ Сигнал не найден.", reply_markup=back_kb())
+        return
+    await call.message.edit_text(format_signal(sig), reply_markup=signal_kb(sig.coin, sig.id), parse_mode="HTML")
+    await call.answer()
+
+
+# ── Market Overview ────────────────────────────────────────────────────────────
+
+@router.callback_query(F.data == "overview")
+async def cb_overview(call: CallbackQuery):
+    await call.answer("🌐 Загружаю обзор рынка...")
+    await call.message.edit_text(
+        "⏳ <b>Загружаю последние данные BTC · ETH · SOL...</b>",
+        parse_mode="HTML",
+    )
+    try:
+        signals = await get_latest_signals_all_coins()
+    except Exception as e:
+        logger.error(f"Overview error: {e}")
+        await call.message.edit_text("❌ Ошибка загрузки. Попробуй позже.", reply_markup=back_kb())
+        return
+    if not any(signals):
+        await call.message.edit_text(
+            "⚠️ Нет данных. Запроси сигнал по любой монете, чтобы появились данные.",
+            reply_markup=overview_kb(),
+            parse_mode="HTML",
+        )
+        return
+    text = format_market_overview([s for s in signals if s])
+    await call.message.edit_text(text, reply_markup=overview_kb(), parse_mode="HTML")
+
+
+# ── Stats ─────────────────────────────────────────────────────────────────────
+
+@router.callback_query(F.data == "stats_menu")
+async def cb_stats_menu(call: CallbackQuery):
+    await call.message.edit_text("📊 <b>Статистика</b> — выбери период:",
+                                  reply_markup=stats_kb(), parse_mode="HTML")
+    await call.answer()
+
+
+@router.callback_query(F.data.in_({"stats_7d", "stats_30d", "stats_90d", "stats_all"}))
+async def cb_stats(call: CallbackQuery):
+    period = call.data.replace("stats_", "")
+    labels = {"7d": "7 дней", "30d": "30 дней", "90d": "90 дней", "all": "Всё время"}
+    s = await get_stats(period)
+
+    if not s or s.total_signals == 0:
+        text = f"📊 <b>Статистика · {labels[period]}</b>\n\nНет завершённых сделок."
+    else:
+        bar = "█" * int(s.win_rate / 10) + "░" * (10 - int(s.win_rate / 10))
+        text = (
+            f"📊 <b>Статистика · {labels[period]}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"Сделок:        <b>{s.total_signals}</b>  ✅{s.wins} / ❌{s.losses}\n"
+            f"Win Rate:      <b>{s.win_rate:.1f}%</b>  {bar}\n"
+            f"Avg R/R:       <b>1:{s.avg_rr:.2f}</b>\n"
+            f"Profit Factor: <b>{s.profit_factor:.2f}</b>\n"
+            f"Мат. ожидание: <b>{'+' if s.expectancy >= 0 else ''}{s.expectancy:.2f}%</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"Общий PnL:     <b>{'+' if s.total_pnl_pct >= 0 else ''}{s.total_pnl_pct:.2f}%</b>\n"
+            f"Ср. выигрыш:   <b>+{s.avg_win_pct:.2f}%</b>\n"
+            f"Ср. убыток:    <b>-{s.avg_loss_pct:.2f}%</b>\n"
+            f"Макс. просадка:<b>-{s.max_drawdown:.2f}%</b>\n"
+            f"Лучшая монета: <b>{s.best_coin or '—'}</b>\n"
+        )
+    await call.message.edit_text(text, reply_markup=stats_kb(), parse_mode="HTML")
+    await call.answer()
+
+
+# ── Deposit ───────────────────────────────────────────────────────────────────
+
+@router.callback_query(F.data == "deposit")
+async def cb_deposit(call: CallbackQuery):
+    history = await get_deposit_history(30)
+    current = await get_current_balance()
+    start = settings.VIRTUAL_DEPOSIT
+    total_pnl = (current / start - 1) * 100
+
+    if not history:
+        text = (
+            f"📈 <b>Виртуальный депозит</b>\n\n"
+            f"Старт:   <b>${start:,.2f}</b>\n"
+            f"Текущий: <b>${current:,.2f}</b>\n\n"
+            f"Сделок пока не было."
+        )
+    else:
+        values = [s.balance for s in history]
+        mn, mx = min(values), max(values)
+        chars = "▁▂▃▄▅▆▇█"
+        spark = "".join(chars[int((v - mn) / (mx - mn) * 7)] if mx > mn else "─" for v in values)
+        rows = []
+        for s in history[-10:]:
+            sign = "+" if s.pnl_pct >= 0 else ""
+            rows.append(f"<code>{s.recorded_at.strftime('%d.%m')}  ${s.balance:>10,.2f}  ({sign}{s.pnl_pct:.2f}%)</code>")
+        text = (
+            f"📈 <b>Виртуальный депозит</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"Старт:    <b>${start:,.2f}</b>\n"
+            f"Текущий:  <b>${current:,.2f}</b>\n"
+            f"Доходность: <b>{'+' if total_pnl >= 0 else ''}{total_pnl:.2f}%</b>\n\n"
+            f"<code>{spark}</code>\n\n"
+            f"<b>Последние сделки:</b>\n" + "\n".join(rows)
+        )
+    await call.message.edit_text(text, reply_markup=back_kb(), parse_mode="HTML")
+    await call.answer()
+
+
+# ── History ───────────────────────────────────────────────────────────────────
+
+@router.callback_query(F.data.startswith("hist_"))
+async def cb_history(call: CallbackQuery):
+    parts = call.data.split("_")
+    coin_filter = parts[1]
+    page = int(parts[2]) if len(parts) > 2 else 0
+    coin = None if coin_filter == "ALL" else coin_filter
+
+    all_sigs = await get_recent_signals(coin=coin, limit=PAGE_SIZE * 10)
+    total = len(all_sigs)
+    page_sigs = all_sigs[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]
+    has_next = (page + 1) * PAGE_SIZE < total
+
+    if not page_sigs:
+        text = "📋 <b>История</b>\n\nСигналов нет."
+    else:
+        st = {"WIN": "✅", "LOSS": "❌", "ACTIVE": "⏳", "EXPIRED": "⏸"}
+        dr = {"LONG": "▲", "SHORT": "▼", "NO TRADE": "◆"}
+        lines = []
+        for s in page_sigs:
+            pnl = f"{'+' if (s.outcome_pnl_pct or 0) >= 0 else ''}{s.outcome_pnl_pct:.2f}%" if s.outcome_pnl_pct else "—"
+            lines.append(
+                f"{st.get(s.status, '?')} <b>{s.coin}</b>{dr.get(s.direction, '')} "
+                f"⭐{s.signal_rating} <code>${s.entry_price:,.2f}</code> → <b>{pnl}</b> "
+                f"<i>{s.created_at.strftime('%d.%m %H:%M')}</i>"
+            )
+        header = f"📋 <b>История{' · ' + coin_filter if coin else ''}</b>  ({total})\n━━━━━━━━━━━━━━━━━━━━\n"
+        text = header + "\n".join(lines)
+
+    await call.message.edit_text(text, reply_markup=history_kb(coin_filter, page, has_next), parse_mode="HTML")
+    await call.answer()
+
+
+# ── Subscription ──────────────────────────────────────────────────────────────
+
+@router.callback_query(F.data == "subscription")
+async def cb_subscription(call: CallbackQuery):
+    user = await get_user(call.from_user.id)
+    if user and user.is_subscribed and user.subscription_ends_at:
+        status = f"✅ Активна до <b>{user.subscription_ends_at.strftime('%d.%m.%Y')}</b>"
+    elif user and user.trial_active():
+        status = f"⏳ Пробный период: <b>{user.trial_days_left()} дн.</b>"
+    else:
+        status = "❌ Нет доступа"
+    text = (
+        f"💳 <b>Подписка DAO Signals</b>\n\n"
+        f"Статус: {status}\n\n"
+        f"<b>Тарифы:</b>\n"
+        f"  1 месяц   — <b>$29</b>\n"
+        f"  3 месяца  — <b>$69</b>  (−21%)\n"
+        f"  6 месяцев — <b>$119</b>  (−32%)\n\n"
+        f"<b>Включено:</b>\n"
+        f"  • Сигналы BTC, ETH, SOL каждый час\n"
+        f"  • AI-анализ на Groq LLaMA 70B\n"
+        f"  • Рейтинг сигнала 1–10\n"
+        f"  • Статистика и история\n"
+        f"  • График виртуального депозита\n"
+    )
+    await call.message.edit_text(text, reply_markup=subscription_kb(), parse_mode="HTML")
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("buy_"))
+async def cb_buy(call: CallbackQuery):
+    months = int(call.data.split("_")[1])
+    prices = {1: 29, 3: 69, 6: 119}
+    ok = await activate_subscription(call.from_user.id, months)
+    if ok:
+        await call.message.edit_text(
+            f"✅ <b>Подписка активирована!</b>\n\n"
+            f"Срок: <b>{months} мес.</b>  ·  ${prices.get(months, 29)}\n\n"
+            f"Сигналы приходят автоматически каждый час.",
+            reply_markup=main_menu(), parse_mode="HTML")
+        await call.answer("✅ Подписка активирована!")
+    else:
+        await call.answer("❌ Ошибка. Напиши в поддержку.", show_alert=True)
+
+
+# ── Admin ─────────────────────────────────────────────────────────────────────
+
+@router.message(Command("admin"))
+async def cmd_admin(msg: Message):
+    if msg.from_user.id not in settings.ADMIN_IDS:
+        return
+    counts = await get_user_count()
+    s30 = await get_stats("30d")
+    await msg.answer(
+        f"🔧 <b>Admin Panel</b>\n\n"
+        f"Всего: {counts['total']} | Триал: {counts['trial']} | Подписка: {counts['subscribed']}\n\n"
+        f"30д: сделок={s30.total_signals if s30 else 0} winrate={s30.win_rate if s30 else 0:.1f}%\n\n"
+        f"/force BTC|ETH|SOL\n/give_sub ID MONTHS\n/recompute",
+        parse_mode="HTML")
+
+
+@router.message(Command("force"))
+async def cmd_force(msg: Message):
+    if msg.from_user.id not in settings.ADMIN_IDS:
+        return
+    parts = msg.text.split()
+    coin = parts[1].upper() if len(parts) > 1 else "BTC"
+    if coin not in ["BTC", "ETH", "SOL"]:
+        await msg.answer("BTC, ETH или SOL")
+        return
+    await msg.answer(f"⏳ Генерирую {coin}...")
+    sig = await generate_signal(coin)
+    if sig:
+        sent, _ = await broadcast_signal(msg.bot, sig)
+        await msg.answer(f"✅ #{sig.id} разослан {sent} пользователям")
+    else:
+        await msg.answer("❌ Ошибка")
+
+
+@router.message(Command("give_sub"))
+async def cmd_give_sub(msg: Message):
+    if msg.from_user.id not in settings.ADMIN_IDS:
+        return
+    parts = msg.text.split()
+    if len(parts) < 3:
+        await msg.answer("/give_sub USER_ID MONTHS")
+        return
+    try:
+        ok = await activate_subscription(int(parts[1]), int(parts[2]))
+        await msg.answer(f"{'✅' if ok else '❌'} Подписка {parts[2]}мес для {parts[1]}")
+    except ValueError:
+        await msg.answer("❌ Неверные параметры")
+
+
+@router.message(Command("recompute"))
+async def cmd_recompute(msg: Message):
+    if msg.from_user.id not in settings.ADMIN_IDS:
+        return
+    await recompute_stats()
+    await msg.answer("✅ Статистика пересчитана")
