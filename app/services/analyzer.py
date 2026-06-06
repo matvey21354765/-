@@ -207,7 +207,9 @@ async def _call_groq(prompt: str) -> Optional[str]:
         return None
     key = getattr(settings, "GROQ_API_KEY", "")
     if not _key_valid(key):
+        logger.warning(f"Groq key invalid or missing: '{key[:10]}...'")
         return None
+    logger.info(f"Groq: sending request with model={GROQ_MODEL}, key={key[:10]}...")
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
     payload = {"model": GROQ_MODEL,
                "messages": [{"role": "user", "content": prompt}],
@@ -215,17 +217,20 @@ async def _call_groq(prompt: str) -> Optional[str]:
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as s:
             async with s.post(GROQ_URL, headers=headers, json=payload) as r:
+                body = await r.text()
                 if r.status == 429:
                     _groq_blocked_until = time.time() + 60
-                    logger.warning("Groq 429 — blocked for 60s")
+                    logger.warning(f"Groq 429 — blocked for 60s. Body: {body[:200]}")
                     return None
                 if r.status != 200:
-                    logger.warning(f"Groq error: {r.status}")
+                    logger.error(f"Groq HTTP {r.status}: {body[:300]}")
                     return None
-                result = await r.json()
-        return result["choices"][0]["message"]["content"]
+                result = await r.json(content_type=None)
+        content = result["choices"][0]["message"]["content"]
+        logger.info(f"Groq OK, response length={len(content)}")
+        return content
     except Exception as e:
-        logger.warning(f"Groq exception: {e}")
+        logger.error(f"Groq exception: {type(e).__name__}: {e}")
         return None
 
 
