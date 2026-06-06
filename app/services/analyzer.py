@@ -124,9 +124,16 @@ def _validate(data: dict, snap: dict) -> dict:
             data[field] = " ".join(str(x) for x in v)
         elif v is not None:
             data[field] = str(v)
-    if not data.get("trend_strength"):
-        data["trend_strength"] = "NEUTRAL"
-    if not data.get("timeframe"):
+    valid_trends = {"STRONG BULL", "WEAK BULL", "NEUTRAL", "WEAK BEAR", "STRONG BEAR"}
+    if data.get("trend_strength") not in valid_trends:
+        rsi = snap["i1h"]["rsi"]
+        if rsi >= 65: data["trend_strength"] = "STRONG BULL"
+        elif rsi >= 55: data["trend_strength"] = "WEAK BULL"
+        elif rsi <= 35: data["trend_strength"] = "STRONG BEAR"
+        elif rsi <= 45: data["trend_strength"] = "WEAK BEAR"
+        else: data["trend_strength"] = "NEUTRAL"
+    valid_tf = {"4-12 часов", "1-3 дня", "3-7 дней", "4-12ч", "1-3д", "3-7д"}
+    if data.get("timeframe") not in valid_tf:
         data["timeframe"] = "4-12 часов"
     return data
 
