@@ -34,8 +34,8 @@ async def _generate_signal_fresh(coin: str) -> Optional[Signal]:
         logger.error(f"[{coin}] Snapshot failed: {e}")
         return None
 
-    logger.info(f"[{coin}] Running Groq analysis...")
-    result = await analyze_coin(snap)
+    logger.info(f"[{coin}] Running analysis...")
+    result = analyze_coin(snap)
     if not result:
         return None
 
