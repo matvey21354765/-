@@ -8,6 +8,7 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 SYMBOL_MAP = {"BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT"}
+_BYBIT_SYMBOL_MAP = {"BTCUSDT": "BTCUSDT", "ETHUSDT": "ETHUSDT", "SOLUSDT": "SOLUSDT"}
 _TIMEOUT = aiohttp.ClientTimeout(total=20)
 
 _SPOT_URLS = [
@@ -17,6 +18,7 @@ _SPOT_URLS = [
     "https://api3.binance.com",
 ]
 _FUTURES_URL = "https://fapi.binance.com"
+_BYBIT_URL = "https://api.bybit.com"
 
 
 async def _get(url: str, params: dict = None) -> dict | list:
@@ -37,19 +39,63 @@ async def _get_spot(path: str, params: dict = None) -> dict | list:
     raise last_err
 
 
-async def fetch_klines(symbol: str, interval: str, limit: int = 200) -> pd.DataFrame:
-    raw = await _get_spot("/api/v3/klines",
-                          {"symbol": symbol, "interval": interval, "limit": limit})
-    cols = ["open_time", "open", "high", "low", "close", "volume",
-            "close_time", "quote_vol", "trades", "taker_buy_base", "taker_buy_quote", "ignore"]
-    df = pd.DataFrame(raw, columns=cols)
-    for c in ("open", "high", "low", "close", "volume", "quote_vol", "taker_buy_base", "taker_buy_quote"):
+# ── Bybit fallback ────────────────────────────────────────────────────────────
+
+async def _bybit_klines(symbol: str, interval: str, limit: int) -> pd.DataFrame:
+    """Fetch klines from Bybit v5 (linear/spot)."""
+    interval_map = {"1h": "60", "4h": "240", "1d": "D"}
+    bybit_interval = interval_map.get(interval, interval)
+    url = f"{_BYBIT_URL}/v5/market/kline"
+    params = {"category": "linear", "symbol": symbol, "interval": bybit_interval, "limit": limit}
+    d = await _get(url, params)
+    rows = d["result"]["list"]
+    # Bybit returns [startTime, open, high, low, close, volume, turnover] newest first
+    rows = list(reversed(rows))
+    cols = ["open_time", "open", "high", "low", "close", "volume", "quote_vol"]
+    df = pd.DataFrame(rows, columns=cols)
+    for c in ("open", "high", "low", "close", "volume", "quote_vol"):
         df[c] = df[c].astype(float)
+    df["taker_buy_base"] = df["volume"] * 0.5
+    df["taker_buy_quote"] = df["quote_vol"] * 0.5
     return df
 
 
+async def _bybit_ticker(symbol: str) -> dict:
+    url = f"{_BYBIT_URL}/v5/market/tickers"
+    d = await _get(url, {"category": "linear", "symbol": symbol})
+    t = d["result"]["list"][0]
+    return {
+        "lastPrice": t["lastPrice"],
+        "priceChangePercent": str(round(
+            (float(t["lastPrice"]) / float(t["prevPrice24h"]) - 1) * 100, 2
+        ) if t.get("prevPrice24h") and float(t["prevPrice24h"]) > 0 else 0),
+        "quoteVolume": t.get("turnover24h", "0"),
+        "highPrice": t.get("highPrice24h", t["lastPrice"]),
+        "lowPrice": t.get("lowPrice24h", t["lastPrice"]),
+    }
+
+
+async def fetch_klines(symbol: str, interval: str, limit: int = 200) -> pd.DataFrame:
+    try:
+        raw = await _get_spot("/api/v3/klines",
+                              {"symbol": symbol, "interval": interval, "limit": limit})
+        cols = ["open_time", "open", "high", "low", "close", "volume",
+                "close_time", "quote_vol", "trades", "taker_buy_base", "taker_buy_quote", "ignore"]
+        df = pd.DataFrame(raw, columns=cols)
+        for c in ("open", "high", "low", "close", "volume", "quote_vol", "taker_buy_base", "taker_buy_quote"):
+            df[c] = df[c].astype(float)
+        return df
+    except Exception as e:
+        logger.warning(f"Binance klines failed ({e}), trying Bybit...")
+        return await _bybit_klines(symbol, interval, limit)
+
+
 async def fetch_ticker(symbol: str) -> dict:
-    return await _get_spot("/api/v3/ticker/24hr", {"symbol": symbol})
+    try:
+        return await _get_spot("/api/v3/ticker/24hr", {"symbol": symbol})
+    except Exception as e:
+        logger.warning(f"Binance ticker failed ({e}), trying Bybit...")
+        return await _bybit_ticker(symbol)
 
 
 async def fetch_funding_rate(symbol: str) -> float:
@@ -57,7 +103,11 @@ async def fetch_funding_rate(symbol: str) -> float:
         d = await _get(f"{_FUTURES_URL}/fapi/v1/premiumIndex", {"symbol": symbol})
         return float(d.get("lastFundingRate", 0))
     except Exception:
-        return 0.0
+        try:
+            d = await _get(f"{_BYBIT_URL}/v5/market/tickers", {"category": "linear", "symbol": symbol})
+            return float(d["result"]["list"][0].get("fundingRate", 0))
+        except Exception:
+            return 0.0
 
 
 async def fetch_open_interest(symbol: str) -> float:
@@ -65,7 +115,12 @@ async def fetch_open_interest(symbol: str) -> float:
         d = await _get(f"{_FUTURES_URL}/fapi/v1/openInterest", {"symbol": symbol})
         return float(d.get("openInterest", 0))
     except Exception:
-        return 0.0
+        try:
+            d = await _get(f"{_BYBIT_URL}/v5/market/open-interest",
+                           {"category": "linear", "symbol": symbol, "intervalTime": "1h", "limit": 1})
+            return float(d["result"]["list"][0].get("openInterest", 0))
+        except Exception:
+            return 0.0
 
 
 async def fetch_long_short_ratio(symbol: str) -> float:
