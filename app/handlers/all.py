@@ -391,6 +391,21 @@ async def cmd_promocodes(msg: Message):
         await msg.answer(text[i:i+4000], parse_mode="HTML")
 
 
+@router.message(Command("reload_promos"))
+async def cmd_reload_promos(msg: Message):
+    if msg.from_user.id not in settings.ADMIN_IDS:
+        return
+    from app.models.database import PromoCode, AsyncSessionLocal
+    from app.services.user_service import save_promo_codes
+    from sqlalchemy import delete
+    await msg.answer("⏳ Перезагружаю промокоды...")
+    async with AsyncSessionLocal() as db:
+        await db.execute(delete(PromoCode).where(PromoCode.is_used == False))
+        await db.commit()
+    total = await save_promo_codes()
+    await msg.answer(f"✅ Загружено {total} промокодов (100x1м + 100x3м + 100x6м)")
+
+
 @router.message(Command("recompute"))
 async def cmd_recompute(msg: Message):
     if msg.from_user.id not in settings.ADMIN_IDS:

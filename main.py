@@ -25,13 +25,20 @@ async def main():
     await init_db()
     logger.info("✅ Database ready")
 
-    # Generate promo codes on first launch
+    # Seed promo codes — check by known first code
+    from app.seeds.promo_list import PROMO_CODES
+    first_code = PROMO_CODES[1][0]
     async with AsyncSessionLocal() as db:
-        res = await db.execute(select(func.count()).select_from(PromoCode))
-        count = res.scalar()
-    if count == 0:
+        from sqlalchemy import delete
+        res = await db.execute(select(PromoCode).where(PromoCode.code == first_code))
+        exists = res.scalar_one_or_none()
+    if not exists:
+        # Clear wrong codes and reload correct ones
+        async with AsyncSessionLocal() as db:
+            await db.execute(delete(PromoCode).where(PromoCode.is_used == False))
+            await db.commit()
         total = await save_promo_codes()
-        logger.info(f"✅ Seeded {total} promo codes (100x1m + 100x3m + 100x6m)")
+        logger.info(f"✅ Seeded {total} promo codes")
 
     bot = Bot(token=settings.BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
