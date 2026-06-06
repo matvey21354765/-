@@ -8,8 +8,8 @@ import aiohttp
 logger = logging.getLogger(__name__)
 
 GAMMA_URL = "https://gamma-api.polymarket.com"
+POLY_REF = "?via=max-chron0n"
 
-# Map coin keywords in market question → our coin symbol
 _COIN_MAP = {
     "bitcoin": "BTC", "btc": "BTC",
     "ethereum": "ETH", "eth": "ETH",
@@ -34,7 +34,6 @@ async def _fetch(url: str, params: dict = None) -> list | dict | None:
 
 
 def _parse_prices(market: dict) -> tuple[float, float]:
-    """Return (yes_prob, no_prob) as 0-100 floats."""
     prices = market.get("outcomePrices") or []
     if isinstance(prices, str):
         import json as _j
@@ -62,8 +61,6 @@ def _detect_coin(text: str) -> Optional[str]:
 
 
 async def fetch_crypto_markets(limit: int = 50) -> list[dict]:
-    """Fetch active crypto markets from Polymarket predictions/crypto page."""
-    # Try tag_slug=crypto first
     data = await _fetch(f"{GAMMA_URL}/markets", {
         "active": "true", "closed": "false",
         "tag_slug": "crypto", "limit": limit,
@@ -72,7 +69,6 @@ async def fetch_crypto_markets(limit: int = 50) -> list[dict]:
     if data:
         markets = data if isinstance(data, list) else data.get("markets", [])
 
-    # Also try events endpoint
     if not markets:
         data = await _fetch(f"{GAMMA_URL}/events", {
             "active": "true", "closed": "false",
@@ -88,7 +84,6 @@ async def fetch_crypto_markets(limit: int = 50) -> list[dict]:
 
 
 def _analyze_market(market: dict, snaps: dict) -> Optional[dict]:
-    """Match market to a coin and return analysis."""
     from app.services.analyzer import analyze_coin
 
     question = market.get("question") or market.get("title") or ""
@@ -107,10 +102,8 @@ def _analyze_market(market: dict, snaps: dict) -> Optional[dict]:
     reasons = result.get("reasons", [])[:2]
     price = snap["price"]
     slug = market.get("slug", "")
-    url = f"https://polymarket.com/event/{slug}"
+    url = f"https://polymarket.com/event/{slug}{POLY_REF}"
 
-    # Determine our answer to the market question
-    # Detect if it's a price UP/DOWN question
     q_low = question.lower()
     is_bullish_q = any(w in q_low for w in ["up", "higher", "above", "rise", "pump", "bull", "gain"])
     is_bearish_q = any(w in q_low for w in ["down", "lower", "below", "fall", "drop", "bear", "loss"])
@@ -124,23 +117,21 @@ def _analyze_market(market: dict, snaps: dict) -> Optional[dict]:
         our_prob = yes_prob if direction == "SHORT" else no_prob
         crowd_prob = yes_prob
     else:
-        # Generic question - just show direction
         our_bet = "ВВЕРХ 📈" if direction == "LONG" else "ВНИЗ 📉"
         our_prob = confidence
         crowd_prob = yes_prob
 
-    # Edge = difference between our confidence and crowd probability
     crowd_on_our_side = crowd_prob if our_bet.startswith("ДА") or our_bet.startswith("ВВЕРХ") else (100 - crowd_prob)
     edge = round(confidence - crowd_on_our_side, 1)
 
     trend_map = {
         "STRONG BULL": "🐂🐂 сильный рост",
         "WEAK BULL": "🐂 слабый рост",
-        "NEUTRAL": "⇔️ нейтрально",
+        "NEUTRAL": "↔️ нейтрально",
         "WEAK BEAR": "🐻 слабое падение",
         "STRONG BEAR": "🐻🐻 сильное падение",
     }
-    trend = trend_map.get(result.get("trend_strength", ""), "⇔️")
+    trend = trend_map.get(result.get("trend_strength", ""), "↔️")
     reasons_text = "\n".join(f"  • {r}" for r in reasons)
 
     return {
@@ -174,7 +165,6 @@ def _format_market_signal(m: dict) -> str:
 
 
 async def get_crypto_predictions(snaps: dict, top_n: int = 5) -> list[str]:
-    """Fetch crypto markets and return formatted signals for top matches."""
     markets = await fetch_crypto_markets(limit=100)
     if not markets:
         logger.warning("Polymarket: no crypto markets returned")
@@ -186,10 +176,8 @@ async def get_crypto_predictions(snaps: dict, top_n: int = 5) -> list[str]:
         if result:
             analyzed.append(result)
 
-    # Sort by edge (our confidence vs crowd) descending
     analyzed.sort(key=lambda x: x["edge"], reverse=True)
 
-    # Return top N, deduplicate by coin (best per coin)
     seen_coins: set[str] = set()
     texts = []
     for a in analyzed:
