@@ -121,7 +121,7 @@ Fear & Greed: {snap['fear_greed']}/100 {'ЖАДНОСТЬ' if snap['fear_greed']
   "bull_scenario": "что нужно для роста",
   "bear_scenario": "что сломает структуру",
   "key_trigger": "ключевой уровень или событие",
-  "full_analysis": "3 абзаца простым языком: куда движется рынок и почему, что говорят объёмы и настроения, что делать трейдеру. Без технических аббревиатур."
+  "full_analysis": "2 абзаца простым языком (максимум 200 слов): куда движется рынок и почему, что делать трейдеру. Без технических аббревиатур."
 }}"""
 
 
@@ -213,7 +213,7 @@ async def _call_groq(prompt: str) -> Optional[str]:
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
     payload = {"model": GROQ_MODEL,
                "messages": [{"role": "user", "content": prompt}],
-               "max_tokens": 2048, "temperature": 0.3}
+               "max_tokens": 4096, "temperature": 0.3}
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as s:
             async with s.post(GROQ_URL, headers=headers, json=payload) as r:
