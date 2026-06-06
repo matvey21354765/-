@@ -36,7 +36,7 @@ def _sub_kb() -> InlineKeyboardMarkup:
 async def _check_channel(bot, channel: str, user_id: int) -> bool:
     try:
         member = await asyncio.wait_for(
-            bot.get_chat_member(channel, user_id), timeout=5.0
+            bot.get_chat_member(channel, user_id), timeout=3.0
         )
         return member.status not in ("left", "kicked", "banned")
     except Exception:
@@ -55,6 +55,7 @@ async def _live_check(bot, user_id: int) -> bool:
 # Events that trigger a live Telegram API check
 _LIVE_CHECK_CMDS = {"/start"}
 _LIVE_CHECK_CBS = {"check_sub"}
+_CACHE_TTL_SHORT = 10  # seconds — used after check_sub to force recheck soon
 
 
 class AccessMiddleware(BaseMiddleware):
@@ -74,7 +75,9 @@ class AccessMiddleware(BaseMiddleware):
             uid = event.from_user.id
             cb = event.data or ""
             is_free = cb in _FREE_CBS
-            needs_live_check = cb in _LIVE_CHECK_CBS
+            needs_live_check = False  # never live-check on callbacks — too slow
+            if cb == "check_sub":
+                _sub_cache.pop(uid, None)  # drop cache so /start will recheck
             bot = event.bot
         else:
             return await handler(event, data)

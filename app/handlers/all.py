@@ -55,13 +55,17 @@ async def cmd_start(msg: Message, state: FSMContext):
 
 @router.callback_query(F.data == "check_sub")
 async def cb_check_sub(call: CallbackQuery):
-    # If we reach here, middleware already confirmed subscription (force=True check passed)
-    user = await get_user(call.from_user.id)
-    notif = getattr(user, "notifications_enabled", False) if user else False
-    await call.message.edit_text(
-        "📡 <b>PredictBot</b> — выберите действие:",
-        reply_markup=main_menu(notif), parse_mode="HTML"
-    )
+    from app.middlewares.access import _live_check, _sub_kb
+    ok = await _live_check(call.bot, call.from_user.id)
+    if ok:
+        user = await get_user(call.from_user.id)
+        notif = getattr(user, "notifications_enabled", False) if user else False
+        await call.message.edit_text(
+            "📡 <b>PredictBot</b> — выберите действие:",
+            reply_markup=main_menu(notif), parse_mode="HTML"
+        )
+    else:
+        await call.answer("❌ Ты ещё не подписан на все каналы", show_alert=True)
     await call.answer()
 
 
