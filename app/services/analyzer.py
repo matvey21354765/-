@@ -32,86 +32,86 @@ def analyze_coin(snap: dict) -> Optional[dict]:
 
     # ── RSI ──────────────────────────────────────────────────────────────────
     if rsi1 < 30:
-        bull += 3; reasons_bull.append(f"RSI(1H)={rsi1:.1f} — зона перепроданности, разворот вверх вероятен")
+        bull += 3; reasons_bull.append(f"монета сильно перепродана (RSI {rsi1:.0f}) — продавцы устали, вероятен отскок")
     elif rsi1 < 45:
-        bull += 1; reasons_bull.append(f"RSI(1H)={rsi1:.1f} — слабость продавцов")
+        bull += 1; reasons_bull.append(f"продавцы ослабевают (RSI {rsi1:.0f})")
     elif rsi1 > 70:
-        bear += 3; reasons_bear.append(f"RSI(1H)={rsi1:.1f} — перекупленность, коррекция вниз вероятна")
+        bear += 3; reasons_bear.append(f"монета перегрета (RSI {rsi1:.0f}) — покупатели выдыхаются, вероятна коррекция")
     elif rsi1 > 55:
-        bear += 1; reasons_bear.append(f"RSI(1H)={rsi1:.1f} — давление покупателей ослабевает")
+        bear += 1; reasons_bear.append(f"покупатели теряют силу (RSI {rsi1:.0f})")
 
     if rsi4 < 40:
-        bull += 2; reasons_bull.append(f"RSI(4H)={rsi4:.1f} — среднесрочная перепроданность")
+        bull += 2; reasons_bull.append(f"среднесрочно монета перепродана (RSI 4H {rsi4:.0f})")
     elif rsi4 > 60:
-        bear += 2; reasons_bear.append(f"RSI(4H)={rsi4:.1f} — среднесрочная перекупленность")
+        bear += 2; reasons_bear.append(f"среднесрочно монета перекуплена (RSI 4H {rsi4:.0f})")
 
     if rsi1d < 40:
-        bull += 1; reasons_bull.append(f"RSI(1D)={rsi1d:.1f} — дневной тренд перепродан")
+        bull += 1; reasons_bull.append(f"на дневном графике монета перепродана (RSI 1D {rsi1d:.0f})")
     elif rsi1d > 60:
-        bear += 1; reasons_bear.append(f"RSI(1D)={rsi1d:.1f} — дневной тренд перекуплен")
+        bear += 1; reasons_bear.append(f"на дневном графике монета перекуплена (RSI 1D {rsi1d:.0f})")
 
     # ── MACD ─────────────────────────────────────────────────────────────────
     if macd1["bullish_cross"]:
-        bull += 3; reasons_bull.append(f"MACD(1H) бычье пересечение — сигнал к росту")
+        bull += 3; reasons_bull.append("импульс развернулся вверх — покупатели берут контроль")
     elif macd1["bearish_cross"]:
-        bear += 3; reasons_bear.append(f"MACD(1H) медвежье пересечение — сигнал к падению")
+        bear += 3; reasons_bear.append("импульс развернулся вниз — продавцы берут контроль")
     elif macd1["histogram"] > 0:
         bull += 1
     elif macd1["histogram"] < 0:
         bear += 1
 
     if macd4["histogram"] > 0:
-        bull += 2; reasons_bull.append(f"MACD(4H) в плюсе — среднесрочный импульс вверх")
+        bull += 2; reasons_bull.append("среднесрочный импульс направлен вверх")
     elif macd4["histogram"] < 0:
-        bear += 2; reasons_bear.append(f"MACD(4H) в минусе — среднесрочный импульс вниз")
+        bear += 2; reasons_bear.append("среднесрочный импульс направлен вниз")
 
     # ── EMA ──────────────────────────────────────────────────────────────────
     if p > i1["ema_50"]:
-        bull += 2; reasons_bull.append(f"Цена ${p:,.0f} выше EMA50=${i1['ema_50']:,.0f} — бычья структура")
+        bull += 2; reasons_bull.append(f"цена держится выше ключевой средней ${i1['ema_50']:,.0f} — тренд бычий")
     else:
-        bear += 2; reasons_bear.append(f"Цена ${p:,.0f} ниже EMA50=${i1['ema_50']:,.0f} — медвежья структура")
+        bear += 2; reasons_bear.append(f"цена упала ниже ключевой средней ${i1['ema_50']:,.0f} — тренд медвежий")
 
     if p > i1["ema_200"]:
-        bull += 1; reasons_bull.append(f"Цена выше EMA200=${i1['ema_200']:,.0f} — долгосрочный бычий тренд")
+        bull += 1; reasons_bull.append(f"выше долгосрочной средней ${i1['ema_200']:,.0f} — глобально растём")
     else:
-        bear += 1; reasons_bear.append(f"Цена ниже EMA200=${i1['ema_200']:,.0f} — долгосрочный медвежий тренд")
+        bear += 1; reasons_bear.append(f"ниже долгосрочной средней ${i1['ema_200']:,.0f} — глобально падаем")
 
     # ── Stochastic ───────────────────────────────────────────────────────────
     if stoch["oversold"]:
-        bull += 2; reasons_bull.append(f"Stochastic K={stoch['k']:.0f} — перепроданность, отскок возможен")
+        bull += 2; reasons_bull.append(f"осциллятор в зоне перепроданности ({stoch['k']:.0f}) — отскок вероятен")
     elif stoch["overbought"]:
-        bear += 2; reasons_bear.append(f"Stochastic K={stoch['k']:.0f} — перекупленность, откат возможен")
+        bear += 2; reasons_bear.append(f"осциллятор в зоне перекупленности ({stoch['k']:.0f}) — откат вероятен")
 
     # ── ADX + Directional ────────────────────────────────────────────────────
     if adx1["strong_trend"]:
         if adx1["plus_di"] > adx1["minus_di"]:
-            bull += 2; reasons_bull.append(f"ADX={adx1['adx']:.0f} сильный тренд вверх (+DI={adx1['plus_di']:.0f} > -DI={adx1['minus_di']:.0f})")
+            bull += 2; reasons_bull.append(f"сила тренда высокая (ADX {adx1['adx']:.0f}) — покупатели доминируют")
         else:
-            bear += 2; reasons_bear.append(f"ADX={adx1['adx']:.0f} сильный тренд вниз (-DI={adx1['minus_di']:.0f} > +DI={adx1['plus_di']:.0f})")
+            bear += 2; reasons_bear.append(f"сила тренда высокая (ADX {adx1['adx']:.0f}) — продавцы доминируют")
 
     # ── Bollinger Bands ───────────────────────────────────────────────────────
     if bb["position_pct"] < 20:
-        bull += 1; reasons_bull.append(f"Цена у нижней границы Bollinger ({bb['position_pct']:.0f}%) — возможен отскок")
+        bull += 1; reasons_bull.append("цена у нижней границы диапазона — отскок возможен")
     elif bb["position_pct"] > 80:
-        bear += 1; reasons_bear.append(f"Цена у верхней границы Bollinger ({bb['position_pct']:.0f}%) — возможна коррекция")
+        bear += 1; reasons_bear.append("цена у верхней границы диапазона — коррекция возможна")
 
     # ── Volume ───────────────────────────────────────────────────────────────
     if vol["buy_ratio_pct"] > 60 and vol["ratio"] > 1.2:
-        bull += 2; reasons_bull.append(f"Объём покупок {vol['buy_ratio_pct']:.0f}% при объёме {vol['ratio']:.1f}x нормы — давление покупателей")
+        bull += 2; reasons_bull.append(f"покупателей больше ({vol['buy_ratio_pct']:.0f}% объёма) — рост интереса к покупке")
     elif vol["buy_ratio_pct"] < 40 and vol["ratio"] > 1.2:
-        bear += 2; reasons_bear.append(f"Объём продаж {100 - vol['buy_ratio_pct']:.0f}% при объёме {vol['ratio']:.1f}x нормы — давление продавцов")
+        bear += 2; reasons_bear.append(f"продавцов больше ({100 - vol['buy_ratio_pct']:.0f}% объёма) — рост давления на продажу")
 
     # ── Funding Rate ─────────────────────────────────────────────────────────
     if funding < -0.01:
-        bull += 1; reasons_bull.append(f"Funding Rate {funding:+.4f}% отрицательный — шорты перегреты, вероятен шорт-сквиз")
+        bull += 1; reasons_bull.append("шортистов слишком много — возможен резкий рост (шорт-сквиз)")
     elif funding > 0.05:
-        bear += 1; reasons_bear.append(f"Funding Rate {funding:+.4f}% высокий — лонги перегреты")
+        bear += 1; reasons_bear.append("лонгистов слишком много — рынок перекуплен, возможна ликвидация")
 
     # ── Fear & Greed ─────────────────────────────────────────────────────────
     if fg <= 20:
-        bull += 2; reasons_bull.append(f"Fear & Greed={fg}/100 — экстремальный страх, исторически хороший момент для покупки")
+        bull += 2; reasons_bull.append(f"все боятся ({fg}/100) — исторически лучшее время для покупки")
     elif fg >= 80:
-        bear += 2; reasons_bear.append(f"Fear & Greed={fg}/100 — экстремальная жадность, рынок перегрет")
+        bear += 2; reasons_bear.append(f"все жадничают ({fg}/100) — рынок перегрет, риск обвала")
 
     # ── Direction & Confidence ───────────────────────────────────────────────
     total = bull + bear
@@ -169,14 +169,22 @@ def analyze_coin(snap: dict) -> Optional[dict]:
                   "NEUTRAL": "нейтральный", "WEAK BEAR": "слабый медвежий",
                   "STRONG BEAR": "сильный медвежий"}.get(trend, "нейтральный")
 
+    rsi_comment = (
+        "монета сильно перепродана" if rsi1 < 35 else
+        "монета перегрета" if rsi1 > 65 else "индикаторы нейтральны"
+    )
+    fg_comment = (
+        "все боятся — возможно дно" if fg <= 25 else
+        "все жадничают — рынок перегрет" if fg >= 75 else
+        f"настроения нейтральные"
+    )
     full = (
-        f"Текущий тренд по {snap['coin']} — {trend_word}. "
-        f"Из {total} сигналов индикаторов {dominant} указывают на {dir_word}. "
-        f"Цена {'выше' if p > i1['ema_50'] else 'ниже'} ключевой скользящей EMA50, "
-        f"RSI(1H)={rsi1:.0f} {'— зона перепроданности' if rsi1 < 35 else '— зона перекупленности' if rsi1 > 65 else '— нейтральная зона'}. "
-        f"Fear & Greed: {fg}/100. "
-        f"Рекомендация: {'открывать лонг' if direction == 'LONG' else 'открывать шорт'} с целью "
-        f"${tp1:,.0f}, стоп-лосс ${sl:,.0f}."
+        f"{dominant} из {total} индикаторов указывают на {dir_word}. "
+        f"Цена {'держится выше' if p > i1['ema_50'] else 'упала ниже'} ключевой средней "
+        f"${i1['ema_50']:,.0f} — тренд {'бычий' if p > i1['ema_50'] else 'медвежий'}. "
+        f"{rsi_comment.capitalize()}. {fg_comment.capitalize()} ({fg}/100). "
+        f"Рекомендация: {'открыть лонг' if direction == 'LONG' else 'открыть шорт'} "
+        f"с целью ${tp1:,.0f} и стопом ${sl:,.0f}."
     )
 
     bull_scenario = (
