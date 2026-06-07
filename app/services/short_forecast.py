@@ -148,19 +148,109 @@ def _score(df1m: pd.DataFrame, df5m: pd.DataFrame) -> dict:
 
 
 async def get_short_forecast(coin: str) -> dict:
-    df1m, df5m = await asyncio.gather(
-        _kraken_df(coin, 1, 60),
-        _kraken_df(coin, 5, 60),
-    )
-    result = _score(df1m, df5m)
-    result["coin"] = coin
-    return result
+    # Try Kraken first (real 1m/5m candles)
+    try:
+        df1m, df5m = await asyncio.gather(
+            _kraken_df(coin, 1, 60),
+            _kraken_df(coin, 5, 60),
+        )
+        result = _score(df1m, df5m)
+        result["coin"] = coin
+        result["source"] = "kraken"
+        return result
+    except Exception as e:
+        logger.warning(f"Kraken failed for {coin}: {e} — falling back to DB+CoinGecko")
+
+    # Fallback: use last saved signal from DB + CoinGecko price
+    return await _forecast_from_db(coin)
+
+
+async def _forecast_from_db(coin: str) -> dict:
+    """Fallback forecast using saved signal indicators + CoinGecko current price."""
+    import aiohttp
+
+    # Get current price from CoinGecko (always works)
+    cg_ids = {"BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana"}
+    cg_id = cg_ids.get(coin, "bitcoin")
+    price, change = 0.0, 0.0
+    try:
+        url = f"https://api.coingecko.com/api/v3/simple/price?ids={cg_id}&vs_currencies=usd&include_24hr_change=true"
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as s:
+            async with s.get(url) as r:
+                d = await r.json()
+        price  = float(d[cg_id]["usd"])
+        change = float(d[cg_id].get("usd_24h_change", 0))
+    except Exception as e:
+        logger.warning(f"CoinGecko failed: {e}")
+
+    # Get latest signal from DB for indicator data
+    try:
+        from app.services.signal_service import get_recent_signals
+        sigs = await get_recent_signals(coin=coin, limit=1)
+    except Exception:
+        sigs = []
+
+    score, signals_list = 0.0, []
+
+    if sigs:
+        sig = sigs[0]
+        rsi = sig.rsi_1h or 50.0
+
+        if rsi >= 70:
+            score -= 22; signals_list.append(f"RSI {rsi:.0f} — перекуплен ⚠️")
+        elif rsi <= 30:
+            score += 22; signals_list.append(f"RSI {rsi:.0f} — перепродан 💡")
+        elif rsi >= 58:
+            score += 12; signals_list.append(f"RSI {rsi:.0f} — зона покупателей 🐂")
+        elif rsi <= 42:
+            score -= 12; signals_list.append(f"RSI {rsi:.0f} — зона продавцов 🐻")
+
+        if sig.direction == "LONG":
+            score += 18; signals_list.append(f"Последний сигнал: ЛОНГ {sig.confidence:.0f}% 📈")
+        elif sig.direction == "SHORT":
+            score -= 18; signals_list.append(f"Последний сигнал: ШОРТ {sig.confidence:.0f}% 📉")
+
+        fund = (sig.funding_rate or 0) * 100
+        if fund > 0.05:
+            score -= 8; signals_list.append(f"Фандинг +{fund:.3f}% — лонги перегреты")
+        elif fund < -0.01:
+            score += 8; signals_list.append(f"Фандинг {fund:.3f}% — шорты перегреты")
+
+        fg = sig.fear_greed or 50
+        if fg >= 75:   score -= 8
+        elif fg <= 25: score += 8
+
+        if not price and sig.entry_price:
+            price = sig.entry_price
+
+        # 24h change as extra signal
+        if change > 3:   score += 10; signals_list.append(f"Рост +{change:.1f}% за 24ч 📈")
+        elif change < -3: score -= 10; signals_list.append(f"Падение {change:.1f}% за 24ч 📉")
+    else:
+        # No signals at all — use price change only
+        if change > 2:   score += 15; signals_list.append(f"Рост +{change:.1f}% за 24ч 📈")
+        elif change < -2: score -= 15; signals_list.append(f"Падение {change:.1f}% за 24ч 📉")
+        else:             signals_list.append("Нажми BTC/ETH/SOL в меню для точного прогноза")
+
+    score = max(-100.0, min(100.0, score))
+    conf  = min(int(abs(score) * 0.45 + 45), 88)
+    direction = "UP" if score > 8 else "DOWN" if score < -8 else "FLAT"
+
+    return {
+        "coin": coin, "price": price, "change_24h": change,
+        "score": score, "direction": direction, "confidence": conf,
+        "rsi1": sigs[0].rsi_1h if sigs else 50.0,
+        "rsi5": 50.0, "signals": signals_list[:3],
+        "source": "db",
+    }
 
 
 def format_forecast(f: dict) -> str:
     coin, direction, conf = f["coin"], f["direction"], f["confidence"]
-    price, sigs = f["price"], f["signals"]
-    now = datetime.now(timezone.utc).strftime("%H:%M UTC")
+    price  = f.get("price", 0.0)
+    sigs   = f.get("signals", [])
+    source = f.get("source", "")
+    now    = datetime.now(timezone.utc).strftime("%H:%M UTC")
 
     if direction == "UP":
         dir_emoji, dir_text = "🟢", "РОСТ ↑"
@@ -176,6 +266,8 @@ def format_forecast(f: dict) -> str:
     price_str = f"${price:,.2f}" if price >= 1000 else f"${price:.4f}" if price >= 1 else f"${price:.6f}"
     sigs_text = "\n".join(f"  • {s}" for s in sigs) if sigs else "  • Нейтральные условия"
 
+    src_note = "" if source == "kraken" else "\n<i>📡 Данные: технический анализ</i>"
+
     return (
         f"{dir_emoji} <b>{coin}/USDT — {dir_text}</b>\n"
         f"⏱ Горизонт: <b>5–10 минут</b>  ·  {now}\n"
@@ -187,4 +279,5 @@ def format_forecast(f: dict) -> str:
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"{poly_action}\n"
         f"🔗 <a href=\"{POLY_REF}\">Ставить на Polymarket</a>"
+        f"{src_note}"
     )
