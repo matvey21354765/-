@@ -71,6 +71,13 @@ async def get_users_with_notifications() -> list[User]:
         return res.scalars().all()
 
 
+async def get_users_with_btc_alerts() -> list[User]:
+    async with AsyncSessionLocal() as db:
+        res = await db.execute(
+            select(User).where(User.btc_alerts_enabled == True, User.is_active == True))
+        return res.scalars().all()
+
+
 async def get_all_active_users() -> list[User]:
     async with AsyncSessionLocal() as db:
         res = await db.execute(select(User).where(User.is_active == True))

@@ -6,6 +6,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from config.settings import settings
 from app.models.database import init_db, PromoCode, AsyncSessionLocal
 from app.handlers.all import router
+from app.handlers.polymarket_pro import router as poly_router
 from app.middlewares.access import AccessMiddleware
 from app.services.scheduler import setup_scheduler
 from app.services.user_service import save_promo_codes
@@ -46,6 +47,7 @@ async def main():
     dp.message.middleware(AccessMiddleware())
     dp.callback_query.middleware(AccessMiddleware())
     dp.include_router(router)
+    dp.include_router(poly_router)
 
     scheduler = AsyncIOScheduler(timezone="UTC")
     setup_scheduler(scheduler, bot)

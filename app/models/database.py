@@ -30,6 +30,7 @@ class User(Base):
     registered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     virtual_deposit: Mapped[float] = mapped_column(Float, default=10000.0)
     notifications_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    btc_alerts_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
 
     def has_access(self) -> bool:
         now = datetime.now(timezone.utc)
@@ -151,6 +152,9 @@ async def init_db():
         await conn.run_sync(Base.metadata.create_all)
         await conn.execute(text(
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS notifications_enabled BOOLEAN DEFAULT FALSE"
+        ))
+        await conn.execute(text(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS btc_alerts_enabled BOOLEAN DEFAULT FALSE"
         ))
         for col, typ in [
             ("leverage_conservative", "INTEGER"),

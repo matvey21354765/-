@@ -25,7 +25,9 @@ def setup_scheduler(scheduler: AsyncIOScheduler, bot: Bot):
                       id="news", replace_existing=True)
     scheduler.add_job(_run_daily_term, "cron", hour=8, minute=0, args=[bot],
                       id="daily_term", replace_existing=True)
-    logger.info(f"Scheduler ready: signals/{settings.SIGNAL_INTERVAL_MINUTES}min, Polymarket, News, Terms")
+    scheduler.add_job(_run_btc_alerts, "interval", minutes=5, args=[bot],
+                      id="btc_alerts", replace_existing=True, misfire_grace_time=60)
+    logger.info(f"Scheduler ready: signals/{settings.SIGNAL_INTERVAL_MINUTES}min, BTC alerts 5min, Polymarket, News, Terms")
 
 
 async def _run_signals(bot: Bot):
@@ -57,6 +59,41 @@ async def _run_daily_term(bot: Bot):
         await post_term_to_channel(bot)
     except Exception as e:
         logger.error(f"Term job error: {e}")
+
+
+async def _run_btc_alerts(bot: Bot):
+    try:
+        from app.services.btc_alerts import fetch_btc_data, check_alerts
+        from app.services.user_service import get_users_with_btc_alerts
+        from app.services.notifier import POLYMARKET_URL
+        df5, df15 = await fetch_btc_data()
+        alerts = check_alerts(df5, df15)
+        if not alerts:
+            return
+        users = await get_users_with_btc_alerts()
+        if not users:
+            return
+        for alert in alerts:
+            text = (
+                f"⚡ <b>{alert['title']}</b>\n\n"
+                f"{alert['text']}\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"🔗 <a href=\"{POLYMARKET_URL}\">Ставка на Polymarket</a>"
+            )
+            for user in users:
+                if not user.has_access():
+                    continue
+                try:
+                    await bot.send_message(user.telegram_id, text,
+                                           parse_mode="HTML", disable_web_page_preview=True)
+                except TelegramForbiddenError:
+                    pass
+                except Exception as e:
+                    logger.warning(f"Alert send error {user.telegram_id}: {e}")
+            await asyncio.sleep(0.5)
+        logger.info(f"BTC alerts sent: {[a['type'] for a in alerts]}")
+    except Exception as e:
+        logger.error(f"BTC alerts job error: {e}")
 
 
 async def _run_polymarket(bot: Bot):
