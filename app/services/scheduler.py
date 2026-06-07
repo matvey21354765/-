@@ -81,8 +81,6 @@ async def _run_btc_alerts(bot: Bot):
                 f"🔗 <a href=\"{POLYMARKET_URL}\">Ставка на Polymarket</a>"
             )
             for user in users:
-                if not user.has_access():
-                    continue
                 try:
                     await bot.send_message(user.telegram_id, text,
                                            parse_mode="HTML", disable_web_page_preview=True)

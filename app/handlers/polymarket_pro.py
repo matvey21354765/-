@@ -107,20 +107,7 @@ def _premium_kb() -> InlineKeyboardMarkup:
 @router.callback_query(F.data == "poly_pro")
 async def cb_poly_pro(call: CallbackQuery):
     user = await get_user(call.from_user.id)
-    if not user or not user.has_access():
-        await call.message.edit_text(
-            "🔒 <b>Polymarket Pro</b> — только для подписчиков\n\n"
-            "Включено в подписку:\n"
-            "  🎯 Полный онбординг в Polymarket\n"
-            "  ⚡ 4 вида алертов по BTC 5м/15м\n"
-            "  📈 RSI экстремум, MACD кросс, BB пробой, объём\n\n"
-            "Оформи подписку чтобы получить доступ 👇",
-            reply_markup=_premium_kb(), parse_mode="HTML"
-        )
-        await call.answer()
-        return
-
-    alerts_on = getattr(user, "btc_alerts_enabled", False)
+    alerts_on = getattr(user, "btc_alerts_enabled", False) if user else False
     await call.message.edit_text(
         "🎯 <b>Polymarket Pro</b>\n\n"
         "⚡ <b>4 алерта по BTC 5м/15м:</b>\n"
@@ -137,11 +124,6 @@ async def cb_poly_pro(call: CallbackQuery):
 
 @router.callback_query(F.data.startswith("poly_step_"))
 async def cb_poly_step(call: CallbackQuery):
-    user = await get_user(call.from_user.id)
-    if not user or not user.has_access():
-        await call.answer("🔒 Только для подписчиков", show_alert=True)
-        return
-
     try:
         step = int(call.data.split("_")[2])
     except (IndexError, ValueError):
@@ -167,9 +149,6 @@ async def cb_toggle_btc_alerts(call: CallbackQuery):
         user = res.scalar_one_or_none()
         if not user:
             await call.answer("Ошибка", show_alert=True)
-            return
-        if not user.has_access():
-            await call.answer("🔒 Только для подписчиков", show_alert=True)
             return
         current = getattr(user, "btc_alerts_enabled", False)
         user.btc_alerts_enabled = not current
