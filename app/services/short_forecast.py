@@ -16,15 +16,19 @@ async def get_short_forecast(coin: str) -> dict:
     signals = await get_recent_signals(coin=coin, limit=1)
 
     if not signals:
-        # No signal yet — fetch just the ticker (single fast request)
-        symbol = SYMBOL_MAP.get(coin, coin + "USDT")
-        ticker = await fetch_ticker(symbol)
-        price = float(ticker["lastPrice"])
-        change = float(ticker["priceChangePercent"])
+        # No signal yet — try to get ticker price
+        try:
+            symbol = SYMBOL_MAP.get(coin, coin + "USDT")
+            ticker = await fetch_ticker(symbol)
+            price = float(ticker["lastPrice"])
+            change = float(ticker["priceChangePercent"])
+        except Exception:
+            price = 0.0
+            change = 0.0
         return {
             "coin": coin, "price": price, "change_24h": change,
             "score": 0.0, "direction": "FLAT", "confidence": 50,
-            "rsi": 50.0, "signals": ["Нет данных — сначала запроси сигнал по монете"],
+            "rsi": 50.0, "signals": ["Сначала запроси сигнал по монете (кнопки BTC/ETH/SOL)"],
             "no_signal": True,
         }
 
