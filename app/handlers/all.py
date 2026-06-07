@@ -455,3 +455,30 @@ async def cmd_recompute(msg: Message):
         return
     await recompute_stats()
     await msg.answer("✅ Статистика пересчитана")
+
+
+@router.message(Command("test_data"))
+async def cmd_test_data(msg: Message):
+    if msg.from_user.id not in settings.ADMIN_IDS:
+        return
+    await msg.answer("⏳ Тестирую источники данных...")
+    import aiohttp
+    from app.services.short_forecast import _bybit_klines, _kraken_klines
+    from app.services.binance import _okx_klines, _TIMEOUT
+
+    lines = []
+    for name, coro in [
+        ("OKX 1m",    _okx_klines("BTCUSDT", "1m", 5)),
+        ("OKX 5m",    _okx_klines("BTCUSDT", "5m", 5)),
+        ("Bybit 1m",  _bybit_klines("BTCUSDT", "1m", 5)),
+        ("Bybit 5m",  _bybit_klines("BTCUSDT", "5m", 5)),
+        ("Kraken 1m", _kraken_klines("BTCUSDT", "1m", 5)),
+        ("Kraken 5m", _kraken_klines("BTCUSDT", "5m", 5)),
+    ]:
+        try:
+            data = await coro
+            lines.append(f"✅ {name}: {len(data)} свечей, last close={data[-1][4] if data else '?'}")
+        except Exception as e:
+            lines.append(f"❌ {name}: {type(e).__name__}: {e}")
+
+    await msg.answer("\n".join(lines))
