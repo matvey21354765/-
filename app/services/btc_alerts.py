@@ -13,11 +13,11 @@ _ALERT_COOLDOWN = 900  # 15 min cooldown per alert type
 
 
 async def fetch_btc_data() -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Fetch BTC 5m and 15m candles, OKX with Bybit fallback."""
-    from app.services.short_forecast import _fetch_df
+    """Use 1h snapshot data re-structured as df for alert checks."""
+    from app.services.binance import fetch_klines
     df5, df15 = await asyncio.gather(
-        _fetch_df("BTCUSDT", "5m", 60),
-        _fetch_df("BTCUSDT", "15m", 60),
+        fetch_klines("BTCUSDT", "1h", 60),
+        fetch_klines("BTCUSDT", "1h", 60),
     )
     return df5, df15
 

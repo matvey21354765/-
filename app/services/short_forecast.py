@@ -1,8 +1,6 @@
 from __future__ import annotations
 import asyncio
 import logging
-import numpy as np
-import pandas as pd
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
@@ -11,263 +9,119 @@ COIN_SYMBOL = {"BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT"}
 POLY_REF = "https://polymarket.com/markets/crypto?via=max-chron0n"
 
 
-_BYBIT_INTERVAL = {"1m": "1", "5m": "5", "15m": "15", "1h": "60", "4h": "240"}
-_KRAKEN_PAIR = {"BTCUSDT": "XBTUSD", "ETHUSDT": "ETHUSD", "SOLUSDT": "SOLUSD"}
-_KRAKEN_INTERVAL = {"1m": 1, "5m": 5, "15m": 15, "1h": 60, "4h": 240}
+async def get_short_forecast(coin: str) -> dict:
+    """Use existing working snapshot data to generate a short-term forecast."""
+    from app.services.binance import get_full_snapshot
 
+    snap = await get_full_snapshot(coin)
 
-async def _bybit_klines(symbol: str, interval: str, limit: int) -> list:
-    import aiohttp
-    from app.services.binance import _TIMEOUT
-    bybit_int = _BYBIT_INTERVAL.get(interval, "1")
-    url = "https://api.bybit.com/v5/market/kline"
-    params = {"symbol": symbol, "interval": bybit_int, "limit": str(limit), "category": "spot"}
-    async with aiohttp.ClientSession(timeout=_TIMEOUT) as s:
-        async with s.get(url, params=params) as r:
-            r.raise_for_status()
-            d = await r.json()
-    if str(d.get("retCode", -1)) != "0":
-        raise RuntimeError(f"Bybit error: {d.get('retMsg', d)}")
-    candles = d.get("result", {}).get("list", [])
-    if not candles:
-        raise RuntimeError(f"Bybit empty data for {symbol} {interval}")
-    candles = list(reversed(candles))
-    result = []
-    for c in candles:
-        try:
-            ts = int(c[0])
-            o, h, l, cl, vol = str(c[1]), str(c[2]), str(c[3]), str(c[4]), str(c[5])
-            result.append([ts, o, h, l, cl, vol, ts, vol, 0, vol, vol, "0"])
-        except Exception:
-            continue
-    return result
-
-
-async def _kraken_klines(symbol: str, interval: str, limit: int) -> list:
-    import aiohttp, time
-    from app.services.binance import _TIMEOUT
-    pair = _KRAKEN_PAIR.get(symbol, "XBTUSD")
-    kr_interval = _KRAKEN_INTERVAL.get(interval, 1)
-    # Kraken needs 'since' to limit rows (returns max 720)
-    since = int(time.time()) - kr_interval * 60 * (limit + 5)
-    url = "https://api.kraken.com/0/public/OHLC"
-    params = {"pair": pair, "interval": kr_interval, "since": since}
-    async with aiohttp.ClientSession(timeout=_TIMEOUT) as s:
-        async with s.get(url, params=params) as r:
-            r.raise_for_status()
-            d = await r.json()
-    if d.get("error"):
-        raise RuntimeError(f"Kraken error: {d['error']}")
-    result_data = d.get("result", {})
-    # Key is the pair name (may differ slightly)
-    candles = next((v for k, v in result_data.items() if k != "last"), [])
-    if not candles:
-        raise RuntimeError(f"Kraken empty data for {pair} {interval}")
-    # Kraken format: [time, open, high, low, close, vwap, volume, count]
-    # Already oldest-first
-    result = []
-    for c in candles[-limit:]:
-        try:
-            ts = int(c[0]) * 1000  # convert to ms
-            o, h, l, cl, vol = str(c[1]), str(c[2]), str(c[3]), str(c[4]), str(c[6])
-            result.append([ts, o, h, l, cl, vol, ts, vol, 0, vol, vol, "0"])
-        except Exception:
-            continue
-    return result
-
-
-async def _fetch_df(symbol: str, interval: str, limit: int = 60) -> pd.DataFrame:
-    cols = ["open_time", "open", "high", "low", "close", "volume",
-            "close_time", "quote_vol", "trades", "taker_buy_base", "taker_buy_quote", "ignore"]
-
-    raw = None
-    sources = [
-        ("OKX",    lambda: __import__("app.services.binance", fromlist=["_okx_klines"])._okx_klines(symbol, interval, limit)),
-        ("Bybit",  lambda: _bybit_klines(symbol, interval, limit)),
-        ("Kraken", lambda: _kraken_klines(symbol, interval, limit)),
-    ]
-    for source, fn in sources:
-        try:
-            raw = await fn()
-            if raw and len(raw) >= 20:
-                logger.info(f"{source} OK: {symbol} {interval} {len(raw)} candles")
-                break
-        except Exception as e:
-            logger.warning(f"{source} failed {symbol} {interval}: {type(e).__name__}: {e}")
-
-    if not raw:
-        raise RuntimeError(f"All data sources failed for {symbol} {interval}")
-
-    df = pd.DataFrame(raw, columns=cols)
-    for c in ("open", "high", "low", "close", "volume"):
-        df[c] = df[c].astype(float)
-    return df
-
-
-def _rsi(closes: pd.Series, p: int = 14) -> float:
-    d = closes.diff()
-    g = d.clip(lower=0).rolling(p).mean()
-    l = (-d.clip(upper=0)).rolling(p).mean()
-    v = (100 - 100 / (1 + g / l.replace(0, np.nan))).iloc[-1]
-    return round(float(v) if not np.isnan(v) else 50.0, 1)
-
-
-def _ema(closes: pd.Series, p: int) -> float:
-    return float(closes.ewm(span=p, adjust=False).mean().iloc[-1])
-
-
-def _macd_hist(closes: pd.Series) -> float:
-    e12 = closes.ewm(span=12, adjust=False).mean()
-    e26 = closes.ewm(span=26, adjust=False).mean()
-    macd = e12 - e26
-    sig = macd.ewm(span=9, adjust=False).mean()
-    return float((macd - sig).iloc[-1])
-
-
-def _bb_position(closes: pd.Series, p: int = 20) -> float:
-    """0=lower band, 100=upper band"""
-    sma = closes.rolling(p).mean()
-    std = closes.rolling(p).std()
-    upper = sma + 2 * std
-    lower = sma - 2 * std
-    rng = float(upper.iloc[-1] - lower.iloc[-1])
-    if rng == 0:
-        return 50.0
-    return round(float((closes.iloc[-1] - lower.iloc[-1]) / rng * 100), 1)
-
-
-def _momentum(closes: pd.Series, p: int = 5) -> float:
-    """% change over last p candles"""
-    return round(float((closes.iloc[-1] - closes.iloc[-p]) / closes.iloc[-p] * 100), 3)
-
-
-def _vol_ratio(df: pd.DataFrame, p: int = 20) -> float:
-    avg = df["volume"].rolling(p).mean().iloc[-1]
-    return round(float(df["volume"].iloc[-1] / avg), 2) if avg > 0 else 1.0
-
-
-def _score(df1m: pd.DataFrame, df5m: pd.DataFrame) -> dict:
-    """Score -100..+100. Positive = bullish."""
-    c1 = df1m["close"]
-    c5 = df5m["close"]
-    price = float(c1.iloc[-1])
+    price = snap["price"]
+    i1h = snap["i1h"]
+    i4h = snap["i4h"]
+    funding = snap["funding_rate"]
+    fg = snap["fear_greed"]
+    ls = snap["long_short_ratio"]
+    vol = snap["volume"]
+    change_24h = snap["change_24h"]
 
     score = 0.0
     signals = []
 
-    # 1m RSI
-    rsi1 = _rsi(c1, 9)
-    if rsi1 > 65:
-        score += 15
-        signals.append(f"RSI(1м)={rsi1} — перекуплен, давление вниз")
-        score -= 30
-    elif rsi1 < 35:
-        score -= 15
-        signals.append(f"RSI(1м)={rsi1} — перепродан, отскок вверх")
-        score += 30
-    elif rsi1 > 55:
-        score += 10
-    elif rsi1 < 45:
-        score -= 10
-
-    # 5m RSI
-    rsi5 = _rsi(c5, 14)
-    if rsi5 > 70:
+    # RSI 1h
+    rsi = i1h["rsi"]
+    if rsi >= 70:
         score -= 20
-        signals.append(f"RSI(5м)={rsi5} — зона продажи")
-    elif rsi5 < 30:
+        signals.append(f"RSI {rsi} — перекуплен, давление вниз ⚠️")
+    elif rsi <= 30:
         score += 20
-        signals.append(f"RSI(5м)={rsi5} — зона покупки")
-    elif rsi5 > 55:
+        signals.append(f"RSI {rsi} — перепродан, отскок вверх 💡")
+    elif rsi >= 60:
+        score += 12
+        signals.append(f"RSI {rsi} — зона покупателей 🐂")
+    elif rsi <= 40:
+        score -= 12
+        signals.append(f"RSI {rsi} — зона продавцов 🐻")
+
+    # MACD 1h
+    macd = i1h["macd"]
+    if macd["bullish_cross"]:
+        score += 18
+        signals.append("MACD кросс вверх на 1ч — бычий импульс 📈")
+    elif macd["bearish_cross"]:
+        score -= 18
+        signals.append("MACD кросс вниз на 1ч — медвежий импульс 📉")
+    elif macd["bullish"]:
         score += 8
-    elif rsi5 < 45:
+    else:
         score -= 8
 
-    # EMA trend 1m
-    ema9 = _ema(c1, 9)
-    ema21 = _ema(c1, 21)
-    if price > ema9 > ema21:
-        score += 15
-        signals.append("Цена > EMA9 > EMA21 — бычий тренд на 1м")
-    elif price < ema9 < ema21:
-        score -= 15
-        signals.append("Цена < EMA9 < EMA21 — медвежий тренд на 1м")
+    # EMA trend 1h
+    ema20 = i1h["ema_20"]
+    ema50 = i1h["ema_50"]
+    if price > ema20 > ema50:
+        score += 14
+        signals.append(f"Цена выше EMA20/EMA50 — восходящий тренд ↗")
+    elif price < ema20 < ema50:
+        score -= 14
+        signals.append(f"Цена ниже EMA20/EMA50 — нисходящий тренд ↘")
 
-    # MACD 5m
-    macd5 = _macd_hist(c5)
-    prev_macd5 = _macd_hist(c5.iloc[:-1])
-    if macd5 > 0 and macd5 > prev_macd5:
-        score += 12
-        signals.append("MACD(5м) растёт — импульс вверх")
-    elif macd5 < 0 and macd5 < prev_macd5:
-        score -= 12
-        signals.append("MACD(5м) падает — импульс вниз")
-
-    # BB position 5m
-    bbp = _bb_position(c5)
-    if bbp > 85:
+    # Bollinger 1h
+    bb = i1h["bollinger"]
+    bbp = bb["position_pct"]
+    if bbp > 90:
         score -= 10
-        signals.append(f"BB(5м) {bbp:.0f}% — у верхней полосы, коррекция вероятна")
-    elif bbp < 15:
+        signals.append(f"У верхней BB — возможен откат вниз")
+    elif bbp < 10:
         score += 10
-        signals.append(f"BB(5м) {bbp:.0f}% — у нижней полосы, отскок вероятен")
+        signals.append(f"У нижней BB — возможен отскок вверх")
 
-    # Momentum 1m (last 3 candles)
-    mom1 = _momentum(c1, 3)
-    if mom1 > 0.05:
-        score += 10
-        signals.append(f"Моментум +{mom1:.2f}% за 3 свечи")
-    elif mom1 < -0.05:
-        score -= 10
-        signals.append(f"Моментум {mom1:.2f}% за 3 свечи")
+    # Funding rate
+    fund_pct = funding * 100
+    if fund_pct > 0.05:
+        score -= 8
+        signals.append(f"Фандинг +{fund_pct:.3f}% — лонги перегреты")
+    elif fund_pct < -0.01:
+        score += 8
+        signals.append(f"Фандинг {fund_pct:.3f}% — шорты перегреты")
 
-    # Volume confirmation
-    vr = _vol_ratio(df1m)
-    if vr > 1.5:
-        # volume confirms direction
+    # Long/Short ratio
+    if ls > 1.3:
+        score += 6
+    elif ls < 0.8:
+        score -= 6
+
+    # Volume
+    if vol["high_volume"]:
         if score > 0:
             score += 8
-            signals.append(f"Объём {vr:.1f}x — подтверждает рост")
+            signals.append(f"Объём {vol['ratio']}x — подтверждает рост 🔥")
         else:
             score -= 8
-            signals.append(f"Объём {vr:.1f}x — подтверждает падение")
+            signals.append(f"Объём {vol['ratio']}x — подтверждает падение 🔥")
 
-    # Last candle body direction
-    last_bull = float(df1m["close"].iloc[-1]) > float(df1m["open"].iloc[-1])
-    prev_bull = float(df1m["close"].iloc[-2]) > float(df1m["open"].iloc[-2])
-    if last_bull and prev_bull:
-        score += 8
-    elif not last_bull and not prev_bull:
-        score -= 8
+    # 4h trend confirmation
+    macd4h = i4h["macd"]
+    if macd4h["bullish"]:
+        score += 6
+    else:
+        score -= 6
 
-    score = max(-100, min(100, score))
-    confidence = round(abs(score) * 0.6 + 40)  # 40–100%
-    direction = "UP" if score > 5 else "DOWN" if score < -5 else "FLAT"
+    score = max(-100.0, min(100.0, score))
+    confidence = int(abs(score) * 0.5 + 45)
+    confidence = min(confidence, 95)
+
+    direction = "UP" if score > 8 else "DOWN" if score < -8 else "FLAT"
 
     return {
+        "coin": coin,
         "price": price,
         "score": score,
         "direction": direction,
         "confidence": confidence,
-        "rsi1": rsi1,
-        "rsi5": rsi5,
-        "bbp": bbp,
-        "mom1": mom1,
-        "vol_ratio": vr,
+        "rsi": rsi,
+        "change_24h": change_24h,
         "signals": signals[:3],
     }
-
-
-async def get_short_forecast(coin: str) -> dict:
-    symbol = COIN_SYMBOL.get(coin, coin + "USDT")
-    df1m, df5m = await asyncio.gather(
-        _fetch_df(symbol, "1m", 60),
-        _fetch_df(symbol, "5m", 60),
-    )
-    result = _score(df1m, df5m)
-    result["coin"] = coin
-    result["symbol"] = symbol
-    return result
 
 
 def format_forecast(f: dict) -> str:
@@ -275,31 +129,23 @@ def format_forecast(f: dict) -> str:
     price = f["price"]
     direction = f["direction"]
     conf = f["confidence"]
-    score = f["score"]
     signals = f["signals"]
-    now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+    change = f["change_24h"]
+    now = datetime.now(timezone.utc).strftime("%H:%M UTC")
 
     if direction == "UP":
-        dir_emoji = "🟢"
-        dir_text = "РОСТ ↑"
-        poly_action = "YES (вырастет)"
-        poly_emoji = "🟢"
+        dir_emoji, dir_text = "🟢", "РОСТ ↑"
+        poly_action = "✅ YES — цена вырастет"
     elif direction == "DOWN":
-        dir_emoji = "🔴"
-        dir_text = "ПАДЕНИЕ ↓"
-        poly_action = "NO (не вырастет)"
-        poly_emoji = "🔴"
+        dir_emoji, dir_text = "🔴", "ПАДЕНИЕ ↓"
+        poly_action = "❌ NO — цена не вырастет"
     else:
-        dir_emoji = "⚪"
-        dir_text = "БОКОВИК ↔"
-        poly_action = "воздержись от ставки"
-        poly_emoji = "⚪"
+        dir_emoji, dir_text = "⚪", "БОКОВИК ↔"
+        poly_action = "⏸ Воздержись от ставки"
 
-    # Confidence bar
     filled = max(0, min(10, round(conf / 10)))
     bar = "█" * filled + "░" * (10 - filled)
 
-    # Price format
     if price >= 1000:
         price_str = f"${price:,.2f}"
     elif price >= 1:
@@ -307,19 +153,19 @@ def format_forecast(f: dict) -> str:
     else:
         price_str = f"${price:.6f}"
 
+    ch_sign = "+" if change >= 0 else ""
     signals_text = "\n".join(f"  • {s}" for s in signals) if signals else "  • Нейтральные условия"
 
     return (
         f"{dir_emoji} <b>{coin}/USDT — {dir_text}</b>\n"
-        f"⏱ Горизонт: <b>5–10 минут</b>  ·  {now}\n"
+        f"⏱ Горизонт: <b>5–30 минут</b>  ·  {now}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"💵 Цена сейчас: <b>{price_str}</b>\n"
+        f"💵 Цена: <b>{price_str}</b>  <i>({ch_sign}{change:.2f}% за 24ч)</i>\n"
         f"📊 Уверенность: <b>{conf}%</b>  <code>{bar}</code>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"<b>Что говорит анализ:</b>\n"
-        f"{signals_text}\n"
+        f"<b>Сигналы:</b>\n{signals_text}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"{poly_emoji} <b>Ставка на Polymarket:</b> {poly_action}\n"
-        f"🔗 <a href=\"{POLY_REF}\">Открыть рынок</a>\n"
-        f"<i>⚠️ Прогноз на 5–10м. Не является финансовым советом.</i>"
+        f"{poly_action}\n"
+        f"🔗 <a href=\"{POLY_REF}\">Ставить на Polymarket</a>\n"
+        f"<i>⚠️ Не является финансовым советом</i>"
     )
