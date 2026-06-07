@@ -12,6 +12,8 @@ POLY_REF = "https://polymarket.com/markets/crypto?via=max-chron0n"
 
 
 _BYBIT_INTERVAL = {"1m": "1", "5m": "5", "15m": "15", "1h": "60", "4h": "240"}
+_KRAKEN_PAIR = {"BTCUSDT": "XBTUSD", "ETHUSDT": "ETHUSD", "SOLUSDT": "SOLUSD"}
+_KRAKEN_INTERVAL = {"1m": 1, "5m": 5, "15m": 15, "1h": 60, "4h": 240}
 
 
 async def _bybit_klines(symbol: str, interval: str, limit: int) -> list:
@@ -29,7 +31,6 @@ async def _bybit_klines(symbol: str, interval: str, limit: int) -> list:
     candles = d.get("result", {}).get("list", [])
     if not candles:
         raise RuntimeError(f"Bybit empty data for {symbol} {interval}")
-    # Bybit returns newest first: [startTime, open, high, low, close, volume, turnover]
     candles = list(reversed(candles))
     result = []
     for c in candles:
@@ -42,22 +43,57 @@ async def _bybit_klines(symbol: str, interval: str, limit: int) -> list:
     return result
 
 
+async def _kraken_klines(symbol: str, interval: str, limit: int) -> list:
+    import aiohttp, time
+    from app.services.binance import _TIMEOUT
+    pair = _KRAKEN_PAIR.get(symbol, "XBTUSD")
+    kr_interval = _KRAKEN_INTERVAL.get(interval, 1)
+    # Kraken needs 'since' to limit rows (returns max 720)
+    since = int(time.time()) - kr_interval * 60 * (limit + 5)
+    url = "https://api.kraken.com/0/public/OHLC"
+    params = {"pair": pair, "interval": kr_interval, "since": since}
+    async with aiohttp.ClientSession(timeout=_TIMEOUT) as s:
+        async with s.get(url, params=params) as r:
+            r.raise_for_status()
+            d = await r.json()
+    if d.get("error"):
+        raise RuntimeError(f"Kraken error: {d['error']}")
+    result_data = d.get("result", {})
+    # Key is the pair name (may differ slightly)
+    candles = next((v for k, v in result_data.items() if k != "last"), [])
+    if not candles:
+        raise RuntimeError(f"Kraken empty data for {pair} {interval}")
+    # Kraken format: [time, open, high, low, close, vwap, volume, count]
+    # Already oldest-first
+    result = []
+    for c in candles[-limit:]:
+        try:
+            ts = int(c[0]) * 1000  # convert to ms
+            o, h, l, cl, vol = str(c[1]), str(c[2]), str(c[3]), str(c[4]), str(c[6])
+            result.append([ts, o, h, l, cl, vol, ts, vol, 0, vol, vol, "0"])
+        except Exception:
+            continue
+    return result
+
+
 async def _fetch_df(symbol: str, interval: str, limit: int = 60) -> pd.DataFrame:
     cols = ["open_time", "open", "high", "low", "close", "volume",
             "close_time", "quote_vol", "trades", "taker_buy_base", "taker_buy_quote", "ignore"]
 
     raw = None
-    for source, fn in [
-        ("OKX",   lambda: __import__("app.services.binance", fromlist=["_okx_klines"])._okx_klines(symbol, interval, limit)),
-        ("Bybit", lambda: _bybit_klines(symbol, interval, limit)),
-    ]:
+    sources = [
+        ("OKX",    lambda: __import__("app.services.binance", fromlist=["_okx_klines"])._okx_klines(symbol, interval, limit)),
+        ("Bybit",  lambda: _bybit_klines(symbol, interval, limit)),
+        ("Kraken", lambda: _kraken_klines(symbol, interval, limit)),
+    ]
+    for source, fn in sources:
         try:
             raw = await fn()
-            if raw:
-                logger.debug(f"{source} OK: {symbol} {interval} {len(raw)} candles")
+            if raw and len(raw) >= 20:
+                logger.info(f"{source} OK: {symbol} {interval} {len(raw)} candles")
                 break
         except Exception as e:
-            logger.warning(f"{source} failed for {symbol} {interval}: {type(e).__name__}: {e}")
+            logger.warning(f"{source} failed {symbol} {interval}: {type(e).__name__}: {e}")
 
     if not raw:
         raise RuntimeError(f"All data sources failed for {symbol} {interval}")
