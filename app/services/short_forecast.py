@@ -11,11 +11,57 @@ COIN_SYMBOL = {"BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT"}
 POLY_REF = "https://polymarket.com/markets/crypto?via=max-chron0n"
 
 
+_BYBIT_INTERVAL = {"1m": "1", "5m": "5", "15m": "15", "1h": "60", "4h": "240"}
+
+
+async def _bybit_klines(symbol: str, interval: str, limit: int) -> list:
+    import aiohttp
+    from app.services.binance import _TIMEOUT
+    bybit_int = _BYBIT_INTERVAL.get(interval, "1")
+    url = "https://api.bybit.com/v5/market/kline"
+    params = {"symbol": symbol, "interval": bybit_int, "limit": str(limit), "category": "spot"}
+    async with aiohttp.ClientSession(timeout=_TIMEOUT) as s:
+        async with s.get(url, params=params) as r:
+            r.raise_for_status()
+            d = await r.json()
+    if str(d.get("retCode", -1)) != "0":
+        raise RuntimeError(f"Bybit error: {d.get('retMsg', d)}")
+    candles = d.get("result", {}).get("list", [])
+    if not candles:
+        raise RuntimeError(f"Bybit empty data for {symbol} {interval}")
+    # Bybit returns newest first: [startTime, open, high, low, close, volume, turnover]
+    candles = list(reversed(candles))
+    result = []
+    for c in candles:
+        try:
+            ts = int(c[0])
+            o, h, l, cl, vol = str(c[1]), str(c[2]), str(c[3]), str(c[4]), str(c[5])
+            result.append([ts, o, h, l, cl, vol, ts, vol, 0, vol, vol, "0"])
+        except Exception:
+            continue
+    return result
+
+
 async def _fetch_df(symbol: str, interval: str, limit: int = 60) -> pd.DataFrame:
-    from app.services.binance import _okx_klines
-    raw = await _okx_klines(symbol, interval, limit)
     cols = ["open_time", "open", "high", "low", "close", "volume",
             "close_time", "quote_vol", "trades", "taker_buy_base", "taker_buy_quote", "ignore"]
+
+    raw = None
+    for source, fn in [
+        ("OKX",   lambda: __import__("app.services.binance", fromlist=["_okx_klines"])._okx_klines(symbol, interval, limit)),
+        ("Bybit", lambda: _bybit_klines(symbol, interval, limit)),
+    ]:
+        try:
+            raw = await fn()
+            if raw:
+                logger.debug(f"{source} OK: {symbol} {interval} {len(raw)} candles")
+                break
+        except Exception as e:
+            logger.warning(f"{source} failed for {symbol} {interval}: {type(e).__name__}: {e}")
+
+    if not raw:
+        raise RuntimeError(f"All data sources failed for {symbol} {interval}")
+
     df = pd.DataFrame(raw, columns=cols)
     for c in ("open", "high", "low", "close", "volume"):
         df[c] = df[c].astype(float)

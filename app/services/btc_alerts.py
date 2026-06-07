@@ -13,17 +13,12 @@ _ALERT_COOLDOWN = 900  # 15 min cooldown per alert type
 
 
 async def fetch_btc_data() -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Fetch BTC 5m and 15m candles via OKX (Railway-compatible)."""
-    import aiohttp
-    from app.services.binance import _okx_klines
-    raw5 = await _okx_klines("BTCUSDT", "5m", 60)
-    raw15 = await _okx_klines("BTCUSDT", "15m", 60)
-    cols = ["open_time", "open", "high", "low", "close", "volume",
-            "close_time", "quote_vol", "trades", "taker_buy_base", "taker_buy_quote", "ignore"]
-    df5 = pd.DataFrame(raw5, columns=cols).astype(
-        {"open": float, "high": float, "low": float, "close": float, "volume": float})
-    df15 = pd.DataFrame(raw15, columns=cols).astype(
-        {"open": float, "high": float, "low": float, "close": float, "volume": float})
+    """Fetch BTC 5m and 15m candles, OKX with Bybit fallback."""
+    from app.services.short_forecast import _fetch_df
+    df5, df15 = await asyncio.gather(
+        _fetch_df("BTCUSDT", "5m", 60),
+        _fetch_df("BTCUSDT", "15m", 60),
+    )
     return df5, df15
 
 
