@@ -2,105 +2,107 @@ from aiogram import Router, F
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton as Btn
 from app.services.user_service import get_user
 from app.keyboards.inline import back_kb, main_menu
+import logging
 
 router = Router()
+logger = logging.getLogger(__name__)
 
-POLY_REF = "https://polymarket.com/markets/crypto?via=max-chron0n"
-POLY_REGISTER = "https://polymarket.com/?via=max-chron0n"
+POLY_REF     = "https://polymarket.com/markets/crypto?via=max-chron0n"
+POLY_REG     = "https://polymarket.com/?via=max-chron0n"
+POLY_BTC     = "https://polymarket.com/markets/crypto/bitcoin?via=max-chron0n"
+POLY_ETH     = "https://polymarket.com/markets/crypto/ethereum?via=max-chron0n"
+POLY_SOL     = "https://polymarket.com/markets/crypto/solana?via=max-chron0n"
 
-_ONBOARDING = [
-    # step 0
+_GUIDE = [
+    # 0 — что это
     (
-        "🎯 <b>Polymarket — что это?</b>\n\n"
-        "Polymarket — крупнейший рынок предсказаний в мире.\n"
-        "Ты ставишь реальные деньги (USDC) на исходы событий:\n\n"
-        "  • 💵 <b>BTC выше $100k до конца месяца?</b>\n"
-        "  • 📈 <b>ETH вырастет на 20% за неделю?</b>\n"
-        "  • ⚡ <b>SOL установит новый ATH в 2025?</b>\n\n"
-        "Если ты угадал — получаешь выплату.\n"
-        "Если нет — теряешь ставку.\n\n"
-        "Работает на блокчейне Polygon — всё прозрачно."
+        "🎯 <b>Polymarket — рынок предсказаний</b>\n\n"
+        "Ты ставишь USDC на исход события:\n"
+        "  <b>YES</b> — цена вырастет / событие произойдёт\n"
+        "  <b>NO</b>  — цена не вырастет / не произойдёт\n\n"
+        "Примеры рынков:\n"
+        "  • BTC выше $70 000 до конца июня?\n"
+        "  • ETH выше $4 000 в июле?\n"
+        "  • SOL установит новый ATH в 2025?\n\n"
+        "Если угадал → получаешь $1 за каждую долю\n"
+        "Если нет → теряешь вложенное\n\n"
+        "<i>Работает на блокчейне Polygon. Всё прозрачно.</i>"
     ),
-    # step 1
+    # 1 — регистрация
     (
-        "📝 <b>Шаг 1 — Регистрация</b>\n\n"
-        "1. Перейди по ссылке:\n"
-        f"👉 <a href=\"{POLY_REGISTER}\">Зарегистрироваться на Polymarket</a>\n\n"
+        "📝 <b>Как зарегистрироваться</b>\n\n"
+        f"1. Перейди: <a href=\"{POLY_REG}\">polymarket.com</a>\n"
         "2. Нажми <b>Sign Up</b>\n"
-        "3. Введи email или подключи кошелёк\n"
-        "4. Подтверди email\n\n"
-        "✅ Аккаунт создан — переходи к следующему шагу"
-    ),
-    # step 2
-    (
-        "💰 <b>Шаг 2 — Пополнение счёта</b>\n\n"
-        "Polymarket работает только с <b>USDC</b> на сети <b>Polygon</b>.\n\n"
-        "<b>Способы пополнения:</b>\n"
+        "3. Войди через Google или email\n"
+        "4. Подтверди возраст (18+)\n\n"
+        "✅ Всё — аккаунт готов за 30 секунд\n\n"
+        "<b>Пополнение счёта:</b>\n"
         "  • Банковская карта (Stripe) — прямо на сайте\n"
-        "  • Крипто-перевод USDC на Polygon\n"
-        "  • Через MetaMask/Coinbase Wallet\n\n"
-        "<b>Минимальная ставка:</b> $1 USDC\n"
-        "<b>Рекомендуем начать с:</b> $10–50 USDC\n\n"
-        "⚠️ Не вкладывай больше, чем готов потерять"
+        "  • USDC на сети Polygon\n"
+        "  • Минимум: $1\n\n"
+        "<i>Рекомендуем начать с $10–50 USDC</i>"
     ),
-    # step 3
+    # 2 — как ставить
     (
-        "🎯 <b>Шаг 3 — Как сделать ставку</b>\n\n"
+        "💡 <b>Как делать ставки</b>\n\n"
         "1. Зайди в раздел <b>Crypto</b>\n"
-        "2. Найди рынок по BTC/ETH/SOL\n"
-        "3. Выбери <b>YES</b> (вырастет) или <b>NO</b> (нет)\n"
-        "4. Введи сумму ставки\n"
-        "5. Нажми <b>Buy</b> и подтверди транзакцию\n\n"
-        "<b>Пример:</b>\n"
-        "  BTC выше $105,000 в июне?\n"
-        "  YES @ <b>42%</b> → ставишь $10 → получаешь $23.8 если да\n\n"
-        f"👉 <a href=\"{POLY_REF}\">Открыть крипто-рынки</a>"
+        "2. Найди рынок (например, BTC &gt; $100k)\n"
+        "3. Посмотри текущую цену YES/NO\n"
+        "   Пример: YES @ <b>35%</b> = за $3.50 получишь $10 при победе\n"
+        "4. Нажми <b>Buy</b> → введи сумму → подтверди\n\n"
+        "<b>Стратегия с нашими сигналами:</b>\n"
+        "  🟢 Сигнал LONG → ставь YES на рост\n"
+        "  🔴 Сигнал SHORT → ставь NO\n"
+        "  ⚡ Прогноз 5–10м → для краткосрочных рынков\n\n"
+        "<i>Никогда не ставь больше 5–10% депозита на одну ставку</i>"
     ),
-    # step 4
+    # 3 — текущие рынки
     (
-        "🤖 <b>Шаг 4 — Как использовать сигналы PredictBot</b>\n\n"
-        "Алгоритм работы:\n\n"
-        "  1️⃣ Получи сигнал LONG/SHORT в боте\n"
-        "  2️⃣ Проверь уверенность сигнала (<b>>70%</b> = надёжный)\n"
-        "  3️⃣ Найди соответствующий рынок на Polymarket\n"
-        "  4️⃣ Поставь на YES если LONG, NO если SHORT\n\n"
-        "<b>💡 Совет:</b> Следи за алертами BTC 5м/15м —\n"
-        "они приходят за несколько минут до движения цены.\n\n"
-        "✅ <b>Онбординг завершён! Удачных ставок 🎯</b>"
+        "📊 <b>Текущие крипто-рынки Polymarket</b>\n\n"
+        "Нажми на монету чтобы увидеть\n"
+        "актуальные рынки и рекомендации 👇"
     ),
 ]
 
 
-def _onboarding_kb(step: int) -> InlineKeyboardMarkup:
-    total = len(_ONBOARDING)
+def _guide_kb(step: int) -> InlineKeyboardMarkup:
+    total = len(_GUIDE)
     nav = []
     if step > 0:
-        nav.append(Btn(text="← Назад", callback_data=f"poly_step_{step - 1}"))
+        nav.append(Btn(text="← Назад", callback_data=f"pg_step_{step - 1}"))
     if step < total - 1:
-        nav.append(Btn(text="Далее →", callback_data=f"poly_step_{step + 1}"))
+        nav.append(Btn(text="Далее →", callback_data=f"pg_step_{step + 1}"))
     rows = []
     if nav:
         rows.append(nav)
     if step == total - 1:
-        rows.append([Btn(text="🎯 Открыть Polymarket", url=POLY_REF)])
+        rows.append([
+            Btn(text="₿ BTC рынки", callback_data="pg_markets_BTC"),
+            Btn(text="Ξ ETH рынки", callback_data="pg_markets_ETH"),
+        ])
+        rows.append([Btn(text="◎ SOL рынки", callback_data="pg_markets_SOL")])
     rows.append([Btn(text="« Меню", callback_data="main_menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _alerts_kb(alerts_on: bool) -> InlineKeyboardMarkup:
-    toggle_text = "🔔 Алерты: ВКЛ" if alerts_on else "🔕 Алерты: ВЫКЛ"
+def _main_kb(alerts_on: bool) -> InlineKeyboardMarkup:
+    toggle = "🔔 Алерты: ВКЛ" if alerts_on else "🔕 Алерты: ВЫКЛ"
     return InlineKeyboardMarkup(inline_keyboard=[
-        [Btn(text=toggle_text, callback_data="toggle_btc_alerts")],
-        [Btn(text="📚 Онбординг Polymarket", callback_data="poly_step_0")],
+        [Btn(text="📚 Гайд по Polymarket", callback_data="pg_step_0")],
+        [Btn(text="₿ BTC ставки",  callback_data="pg_markets_BTC"),
+         Btn(text="Ξ ETH ставки",  callback_data="pg_markets_ETH")],
+        [Btn(text="◎ SOL ставки",  callback_data="pg_markets_SOL")],
+        [Btn(text=toggle, callback_data="toggle_btc_alerts")],
         [Btn(text="🎯 Открыть Polymarket", url=POLY_REF)],
         [Btn(text="« Меню", callback_data="main_menu")],
     ])
 
 
-def _premium_kb() -> InlineKeyboardMarkup:
+def _markets_kb(coin: str) -> InlineKeyboardMarkup:
+    urls = {"BTC": POLY_BTC, "ETH": POLY_ETH, "SOL": POLY_SOL}
     return InlineKeyboardMarkup(inline_keyboard=[
-        [Btn(text="💳 Оформить подписку", callback_data="subscription")],
-        [Btn(text="« Меню", callback_data="main_menu")],
+        [Btn(text=f"🎯 Открыть {coin} рынки", url=urls.get(coin, POLY_REF))],
+        [Btn(text="« Назад", callback_data="poly_pro")],
     ])
 
 
@@ -110,34 +112,76 @@ async def cb_poly_pro(call: CallbackQuery):
     alerts_on = getattr(user, "btc_alerts_enabled", False) if user else False
     await call.message.edit_text(
         "🎯 <b>Polymarket Pro</b>\n\n"
-        "⚡ <b>4 алерта по BTC 5м/15м:</b>\n"
-        "  • RSI экстремум (>75 / <25) на 15м\n"
-        "  • MACD кроссовер на 15м\n"
-        "  • Пробой Bollinger Bands на 5м\n"
-        "  • Спайк объёма 2x+ на 5м\n\n"
-        "Алерты приходят раньше, чем большинство трейдеров замечают движение.\n\n"
-        "📚 Не знаешь как использовать Polymarket? Пройди онбординг ниже 👇",
-        reply_markup=_alerts_kb(alerts_on), parse_mode="HTML"
+        "Здесь ты найдёшь:\n"
+        "  📚 Полный гайд как зарабатывать на Polymarket\n"
+        "  💰 Актуальные ставки по BTC / ETH / SOL\n"
+        "  ⚡ Алерты когда рынок даёт точку входа\n\n"
+        "Используй прогнозы бота чтобы знать куда ставить 👇",
+        reply_markup=_main_kb(alerts_on), parse_mode="HTML"
     )
     await call.answer()
 
 
-@router.callback_query(F.data.startswith("poly_step_"))
-async def cb_poly_step(call: CallbackQuery):
+@router.callback_query(F.data.startswith("pg_step_"))
+async def cb_guide_step(call: CallbackQuery):
     try:
         step = int(call.data.split("_")[2])
     except (IndexError, ValueError):
         step = 0
-
-    step = max(0, min(step, len(_ONBOARDING) - 1))
-    total = len(_ONBOARDING)
-    header = f"📚 <b>Онбординг Polymarket</b>  [{step + 1}/{total}]\n\n"
+    step = max(0, min(step, len(_GUIDE) - 1))
+    header = f"📚 <b>Гайд Polymarket</b>  [{step + 1}/{len(_GUIDE)}]\n\n"
     await call.message.edit_text(
-        header + _ONBOARDING[step],
-        reply_markup=_onboarding_kb(step), parse_mode="HTML",
-        disable_web_page_preview=True
+        header + _GUIDE[step],
+        reply_markup=_guide_kb(step),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
     )
     await call.answer()
+
+
+@router.callback_query(F.data.startswith("pg_markets_"))
+async def cb_markets(call: CallbackQuery):
+    coin = call.data.split("_")[2]
+    await call.answer(f"⏳ Загружаю {coin} рынки...")
+
+    try:
+        from app.services.short_forecast import get_short_forecast, format_forecast, KRAKEN_PAIR
+        forecast = await get_short_forecast(coin)
+        f = forecast
+        direction = f["direction"]
+        conf = f["confidence"]
+        price = f["price"]
+        price_str = f"${price:,.2f}" if price >= 1000 else f"${price:.4f}"
+
+        if direction == "UP":
+            rec = f"✅ <b>Рекомендация: YES</b> — ожидается рост\nИщи рынки вида «{coin} выше X$»"
+        elif direction == "DOWN":
+            rec = f"❌ <b>Рекомендация: NO</b> — ожидается падение\nИщи рынки вида «{coin} выше X$» → ставь NO"
+        else:
+            rec = f"⏸ <b>Рекомендация: подожди</b> — нет чёткого сигнала"
+
+        text = (
+            f"💰 <b>{coin}/USDT — ставки Polymarket</b>\n\n"
+            f"📍 Цена сейчас: <b>{price_str}</b>\n"
+            f"📊 Прогноз 5–10м: <b>{'Рост ↑' if direction == 'UP' else 'Падение ↓' if direction == 'DOWN' else 'Боковик ↔'}</b>  ({conf}%)\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"{rec}\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"<b>Как найти нужный рынок:</b>\n"
+            f"  1. Нажми кнопку ниже → откроется Polymarket\n"
+            f"  2. Найди рынок с ценой близкой к текущей\n"
+            f"  3. Ставь YES или NO по рекомендации выше\n"
+        )
+    except Exception as e:
+        logger.error(f"pg_markets {coin}: {e}")
+        urls = {"BTC": POLY_BTC, "ETH": POLY_ETH, "SOL": POLY_SOL}
+        text = (
+            f"💰 <b>{coin} — рынки Polymarket</b>\n\n"
+            f"Нажми кнопку ниже чтобы открыть актуальные рынки по {coin} 👇"
+        )
+
+    await call.message.edit_text(text, reply_markup=_markets_kb(coin),
+                                  parse_mode="HTML", disable_web_page_preview=True)
 
 
 @router.callback_query(F.data == "toggle_btc_alerts")
@@ -150,13 +194,10 @@ async def cb_toggle_btc_alerts(call: CallbackQuery):
         if not user:
             await call.answer("Ошибка", show_alert=True)
             return
-        current = getattr(user, "btc_alerts_enabled", False)
-        user.btc_alerts_enabled = not current
+        user.btc_alerts_enabled = not getattr(user, "btc_alerts_enabled", False)
         await db.commit()
-        await db.refresh(user)
         new_state = user.btc_alerts_enabled
 
     icon = "🔔" if new_state else "🔕"
-    state_text = "включены" if new_state else "выключены"
-    await call.answer(f"{icon} BTC алерты {state_text}", show_alert=True)
-    await call.message.edit_reply_markup(reply_markup=_alerts_kb(new_state))
+    await call.answer(f"{icon} Алерты {'включены' if new_state else 'выключены'}", show_alert=True)
+    await call.message.edit_reply_markup(reply_markup=_main_kb(new_state))
