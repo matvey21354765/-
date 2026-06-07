@@ -60,17 +60,25 @@ async def _okx_klines(symbol: str, interval: str, limit: int) -> list:
     bar = _OKX_INTERVAL.get(interval, "1H")
     url = "https://www.okx.com/api/v5/market/candles"
     async with aiohttp.ClientSession(timeout=_TIMEOUT) as s:
-        async with s.get(url, params={"instId": inst, "bar": bar, "limit": limit}) as r:
+        async with s.get(url, params={"instId": inst, "bar": bar, "limit": str(limit)}) as r:
             r.raise_for_status()
             d = await r.json()
-    # OKX returns newest first; reverse to oldest-first like Binance
+    if d.get("code") != "0":
+        raise RuntimeError(f"OKX error: {d.get('msg', d)}")
     candles = d.get("data", [])
-    candles.reverse()
-    # Convert to Binance kline format: [open_time,open,high,low,close,volume,...]
+    if not candles:
+        raise RuntimeError(f"OKX returned empty data for {inst} {bar}")
+    # OKX returns newest first; reverse to oldest-first like Binance
+    candles = list(reversed(candles))
     result = []
     for c in candles:
-        ts, o, h, l, cl, vol = c[0], c[1], c[2], c[3], c[4], c[5]
-        result.append([int(ts), o, h, l, cl, vol, int(ts), vol, 0, vol, vol, "0"])
+        try:
+            ts = int(c[0])
+            o, h, l, cl, vol = str(c[1]), str(c[2]), str(c[3]), str(c[4]), str(c[5])
+            result.append([ts, o, h, l, cl, vol, ts, vol, 0, vol, vol, "0"])
+        except (IndexError, ValueError) as e:
+            logger.warning(f"OKX candle parse error: {e} — {c}")
+            continue
     return result
 
 

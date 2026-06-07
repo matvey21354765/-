@@ -93,6 +93,10 @@ async def cb_forecast(call: CallbackQuery):
         await call.message.edit_text(text, reply_markup=_forecast_kb(coin),
                                       parse_mode="HTML", disable_web_page_preview=True)
     except Exception as e:
-        logger.error(f"Forecast {coin} error: {e}")
-        await call.message.edit_text("❌ Ошибка загрузки данных. Попробуй через минуту.",
-                                      reply_markup=_forecast_kb(coin), parse_mode="HTML")
+        logger.error(f"Forecast {coin} error: {type(e).__name__}: {e}")
+        await call.message.edit_text(
+            f"❌ <b>Не удалось получить данные {coin}</b>\n\n"
+            f"Источник данных временно недоступен.\n"
+            f"Попробуй через 30 секунд 👇",
+            reply_markup=_forecast_kb(coin), parse_mode="HTML"
+        )
