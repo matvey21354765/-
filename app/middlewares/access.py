@@ -13,7 +13,7 @@ _FREE_CBS = {
     "subscription", "enter_promo", "main_menu", "open_menu",
     "buy_stars_1", "buy_stars_3", "buy_stars_6",
     "buy_1", "buy_3", "buy_6",
-    "check_sub", "poly_pro", "toggle_btc_alerts",
+    "check_sub", "poly_pro", "toggle_btc_alerts", "forecast_menu",
 }
 _MSG = "⏰ <b>Пробный период закончился</b>\n\nОформите подписку или введите промокод:"
 

@@ -24,7 +24,7 @@ _binance_blocked: bool = False
 # OKX fallback mappings
 _OKX_MAP = {"BTCUSDT": "BTC-USDT", "ETHUSDT": "ETH-USDT", "SOLUSDT": "SOL-USDT"}
 _OKX_SWAP_MAP = {"BTCUSDT": "BTC-USDT-SWAP", "ETHUSDT": "ETH-USDT-SWAP", "SOLUSDT": "SOL-USDT-SWAP"}
-_OKX_INTERVAL = {"5m": "5m", "15m": "15m", "1h": "1H", "4h": "4H", "1d": "1D"}
+_OKX_INTERVAL = {"1m": "1m", "3m": "3m", "5m": "5m", "15m": "15m", "1h": "1H", "4h": "4H", "1d": "1D"}
 
 
 async def _get(url: str, params: dict = None) -> dict | list:

@@ -12,6 +12,7 @@ def start_kb() -> InlineKeyboardMarkup:
 def main_menu(notifications: bool = False) -> InlineKeyboardMarkup:
     notif_text = "🔔 Уведомления: ВКЛ" if notifications else "🔕 Уведомления: ВЫКЛ"
     return InlineKeyboardMarkup(inline_keyboard=[
+        [Btn(text="⚡ Прогноз 5–10м", callback_data="forecast_menu")],
         [Btn(text="🌐 Обзор рынка", callback_data="overview")],
         [Btn(text="₿ BTC", callback_data="sig_BTC"),
          Btn(text="Ξ ETH", callback_data="sig_ETH"),
