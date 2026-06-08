@@ -372,13 +372,12 @@ def _pil_to_np(img) -> "np.ndarray":
 
 
 def _build_clip(img, audio_path: Optional[str], duration: float):
-    from moviepy.editor import ImageClip, AudioFileClip
-    clip = ImageClip(_pil_to_np(img)).set_duration(duration)
+    from moviepy import ImageClip, AudioFileClip
+    clip = ImageClip(_pil_to_np(img), duration=duration)
     if audio_path and os.path.exists(audio_path):
         try:
-            a = AudioFileClip(audio_path)
-            a = a.subclip(0, min(duration, a.duration))
-            clip = clip.set_audio(a)
+            a = AudioFileClip(audio_path).with_duration(min(duration, AudioFileClip(audio_path).duration))
+            clip = clip.with_audio(a)
         except Exception as e:
             logger.warning(f"Audio attach failed: {e}")
     return clip
@@ -386,7 +385,7 @@ def _build_clip(img, audio_path: Optional[str], duration: float):
 
 def _export(clips: list, tmp_audio: list) -> Optional[str]:
     try:
-        from moviepy.editor import concatenate_videoclips
+        from moviepy import concatenate_videoclips
         final = concatenate_videoclips(clips, method="compose")
         fd, path = tempfile.mkstemp(suffix=".mp4")
         os.close(fd)
@@ -454,7 +453,7 @@ async def generate_news_video(news_items: list[dict]) -> Optional[str]:
 
 def _sync_news_video(news_items: list[dict]) -> Optional[str]:
     try:
-        from moviepy.editor import ImageClip
+        from moviepy import ImageClip
     except ImportError as e:
         logger.error(f"moviepy not installed: {e}")
         return None
@@ -507,7 +506,7 @@ async def generate_signal_video(signal) -> Optional[str]:
 
 def _sync_signal_video(data: dict) -> Optional[str]:
     try:
-        from moviepy.editor import ImageClip
+        from moviepy import ImageClip
     except ImportError as e:
         logger.error(f"moviepy not installed: {e}")
         return None
@@ -533,7 +532,7 @@ async def generate_term_video(title: str, body: str) -> Optional[str]:
 
 def _sync_term_video(title: str, body: str) -> Optional[str]:
     try:
-        from moviepy.editor import ImageClip
+        from moviepy import ImageClip
     except ImportError as e:
         logger.error(f"moviepy not installed: {e}")
         return None
