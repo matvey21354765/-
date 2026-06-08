@@ -12,6 +12,7 @@ def _kb(days: int) -> InlineKeyboardMarkup:
         Btn(text="📅 7д"  + (" ✓" if days == 7 else ""),   callback_data="lb_7"),
         Btn(text="📅 30д" + (" ✓" if days == 30 else ""),  callback_data="lb_30"),
     ]]
+    rows.append([Btn(text="🔄 Обновить", callback_data=f"lb_{days}")])
     rows.append([Btn(text="« Меню", callback_data="main_menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

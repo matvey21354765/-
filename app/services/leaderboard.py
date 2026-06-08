@@ -7,12 +7,26 @@ logger = logging.getLogger(__name__)
 
 
 async def log_forecast(coin: str, direction: str, price: float) -> int | None:
-    """Save a new forecast to forecast_log. Returns record id."""
+    """Save a new forecast to forecast_log, deduplicating within 15 minutes."""
     if direction == "FLAT":
         return None
     try:
         from app.models.database import AsyncSessionLocal, ForecastLog
+        dedup_window = datetime.now(timezone.utc) - timedelta(minutes=15)
         async with AsyncSessionLocal() as db:
+            # Don't log if same coin+direction already logged in last 15 min
+            existing = await db.execute(
+                select(ForecastLog).where(
+                    and_(
+                        ForecastLog.coin == coin,
+                        ForecastLog.direction == direction,
+                        ForecastLog.created_at >= dedup_window,
+                        ForecastLog.correct.is_(None),
+                    )
+                ).limit(1)
+            )
+            if existing.scalar_one_or_none():
+                return None
             row = ForecastLog(coin=coin, direction=direction, price_entry=price)
             db.add(row)
             await db.commit()

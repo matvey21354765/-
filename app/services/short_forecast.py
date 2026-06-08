@@ -143,6 +143,21 @@ def _score(df1m: pd.DataFrame, df5m: pd.DataFrame, df15m: pd.DataFrame) -> dict:
     c1, c5, c15 = df1m["close"], df5m["close"], df15m["close"]
     price = float(c1.iloc[-1])
 
+    # ── RANGING MARKET FILTER: if 5m ATR is too small relative to price → FLAT ─
+    atr5 = _atr(df5m, 14)
+    atr_pct = atr5 / price * 100
+    # Below 0.08% ATR on 5m = dead market, no clean moves
+    if atr_pct < 0.08:
+        rsi1 = _rsi(c1, 9)
+        rsi5 = _rsi(c5, 14)
+        atr1 = _atr(df1m)
+        levels = _sl_tp(price, atr1, "FLAT")
+        return {
+            "price": price, "score": 0.0, "direction": "FLAT",
+            "confidence": 38, "rsi1": rsi1, "rsi5": rsi5,
+            "signals": [f"ATR(5м) {atr_pct:.3f}% — рынок во флэте, нет движения"],
+        }
+
     # ── 15m TREND (master filter) ───────────────────────────────────────────
     ema21_15 = _ema(c15, 21)
     ema50_15 = _ema(c15, 50)
@@ -204,14 +219,10 @@ def _score(df1m: pd.DataFrame, df5m: pd.DataFrame, df15m: pd.DataFrame) -> dict:
     else:
         votes += [0]
 
-    # RSI 5m — only extremes — weight 1
-    if rsi5 <= 30:
+    # RSI 5m — only genuine extremes count, neutral zone = 0
+    if rsi5 <= 32:
         votes += [1]
-    elif rsi5 >= 70:
-        votes += [-1]
-    elif 48 <= rsi5 <= 58:
-        votes += [1]   # mild bullish momentum zone
-    elif 42 <= rsi5 < 48:
+    elif rsi5 >= 68:
         votes += [-1]
     else:
         votes += [0]
