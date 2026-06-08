@@ -208,31 +208,28 @@ def _score(df1m: pd.DataFrame, df5m: pd.DataFrame, df15m: pd.DataFrame) -> dict:
     elif bulls5 <= 1:
         bear_signals.append("5 свечей 1м: медвежий импульс")
 
-    # ── DECISION: require confluence of 3+ signals ─────────────────────────
+    # ── DECISION: winning side needs 2+ net advantage AND at least 3 signals ─
     nb, ns = len(bull_signals), len(bear_signals)
     net = nb - ns
 
-    # Require minimum 3 confirming signals AND majority
-    # Also: if trend opposes direction, require stronger confluence (5+)
-    if net >= 3:
+    if net >= 2 and nb >= 3:
         direction = "UP"
-        # If against 15m trend, need stronger confirmation
         if trend_down and nb < 5:
             direction = "FLAT"
-    elif net <= -3:
+    elif net <= -2 and ns >= 3:
         direction = "DOWN"
         if trend_up and ns < 5:
             direction = "FLAT"
     else:
         direction = "FLAT"
 
-    # Confidence based on signal count and trend alignment
-    raw_conf = min(nb, ns) == 0 and max(nb, ns) or max(nb, ns) - min(nb, ns)
+    # Confidence: scales with net advantage and trend alignment
+    net_abs = abs(net)
+    trend_bonus = 12 if (direction == "UP" and trend_up) or (direction == "DOWN" and trend_down) else 0
     if direction == "FLAT":
-        conf = 0
+        conf = max(35, 40 - net_abs * 3)  # show partial confidence even for FLAT
     else:
-        bonus = 10 if (direction == "UP" and trend_up) or (direction == "DOWN" and trend_down) else 0
-        conf = min(50 + raw_conf * 6 + bonus, 94)
+        conf = min(48 + net_abs * 8 + trend_bonus, 94)
 
     # Score for legacy compatibility
     score = float(net * 12)
@@ -244,8 +241,12 @@ def _score(df1m: pd.DataFrame, df5m: pd.DataFrame, df15m: pd.DataFrame) -> dict:
     elif direction == "DOWN":
         top_sigs = bear_signals[:3]
     else:
-        # Show why it's FLAT
-        top_sigs = [f"Сигналов ЛОНГ: {nb}, ШОРТ: {ns} — нет перевеса"]
+        if nb > ns:
+            top_sigs = bull_signals[:2] + [f"Шорт-сигналов: {ns} — недостаточно перевеса"]
+        elif ns > nb:
+            top_sigs = bear_signals[:2] + [f"Лонг-сигналов: {nb} — недостаточно перевеса"]
+        else:
+            top_sigs = ["Рынок в равновесии — ждём движения"]
 
     atr = _atr(df1m)
     levels = _sl_tp(price, atr, direction)
