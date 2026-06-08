@@ -2,6 +2,7 @@ aiogram==3.7.0
 aiohttp==3.9.5
 sqlalchemy==2.0.31
 asyncpg==0.29.0
+aiosqlite>=0.20.0
 apscheduler==3.10.4
 pandas==2.2.2
 numpy==1.26.4

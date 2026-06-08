@@ -6,7 +6,8 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from config.settings import settings
 
-engine = create_async_engine(settings.DATABASE_URL, pool_pre_ping=True, echo=False)
+_db_kwargs = {} if settings.DATABASE_URL.startswith("sqlite") else {"pool_pre_ping": True}
+engine = create_async_engine(settings.DATABASE_URL, echo=False, **_db_kwargs)
 AsyncSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
@@ -146,21 +147,29 @@ class PromoCode(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+async def _safe_add_column(conn, table: str, col: str, typ: str):
+    """Add column if it doesn't exist — works for both PostgreSQL and SQLite."""
+    is_sqlite = "sqlite" in str(engine.url)
+    if is_sqlite:
+        try:
+            await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {typ}"))
+        except Exception:
+            pass  # column already exists
+    else:
+        await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {typ}"))
+
+
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        await conn.execute(text(
-            "ALTER TABLE users ADD COLUMN IF NOT EXISTS notifications_enabled BOOLEAN DEFAULT FALSE"
-        ))
+        await _safe_add_column(conn, "users", "notifications_enabled", "BOOLEAN DEFAULT FALSE")
         for col, typ in [
             ("leverage_conservative", "INTEGER"),
             ("leverage_aggressive", "INTEGER"),
             ("liq_price_conservative", "DOUBLE PRECISION"),
             ("liq_price_aggressive", "DOUBLE PRECISION"),
         ]:
-            await conn.execute(text(
-                f"ALTER TABLE signals ADD COLUMN IF NOT EXISTS {col} {typ}"
-            ))
+            await _safe_add_column(conn, "signals", col, typ)
 
 
 async def get_db():

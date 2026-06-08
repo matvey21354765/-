@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str = ""
     OPENROUTER_API_KEY: str = ""
 
-    DATABASE_URL: str = "postgresql+asyncpg://postgres:2004@localhost:5432/dao_signals"
+    DATABASE_URL: str = "sqlite+aiosqlite:///bot.db"
 
     @field_validator("DATABASE_URL", mode="before")
     @classmethod
