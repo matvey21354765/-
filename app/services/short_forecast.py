@@ -111,72 +111,141 @@ def _sl_tp(price: float, atr: float, direction: str) -> dict:
     }
 
 
-def _score(df1m: pd.DataFrame, df5m: pd.DataFrame) -> dict:
-    c1, c5 = df1m["close"], df5m["close"]
+def _score(df1m: pd.DataFrame, df5m: pd.DataFrame, df15m: pd.DataFrame) -> dict:
+    """
+    Multi-timeframe confluence scoring.
+    Strategy: trade WITH the 15m trend, confirmed by 5m momentum, timed on 1m.
+    Only signal UP/DOWN when at least 3 independent signals agree.
+    """
+    c1, c5, c15 = df1m["close"], df5m["close"], df15m["close"]
     price = float(c1.iloc[-1])
-    score = 0.0
-    signals = []
+    bull_signals, bear_signals = [], []
 
-    # RSI 1m
-    rsi1 = _rsi(c1, 9)
-    if rsi1 >= 72:
-        score -= 22; signals.append(f"RSI(1м) {rsi1} — перекуплен ⚠️")
-    elif rsi1 <= 28:
-        score += 22; signals.append(f"RSI(1м) {rsi1} — перепродан 💡")
-    elif rsi1 >= 58:
-        score += 10
-    elif rsi1 <= 42:
-        score -= 10
+    # ── 15m TREND FILTER (highest weight — don't fight the trend) ──────────
+    ema21_15 = _ema(c15, 21)
+    ema50_15 = _ema(c15, 50)
+    rsi15    = _rsi(c15, 14)
+    trend_up   = ema21_15 > ema50_15 and price > ema21_15
+    trend_down = ema21_15 < ema50_15 and price < ema21_15
 
-    # RSI 5m
-    rsi5 = _rsi(c5, 14)
-    if rsi5 >= 70:
-        score -= 15; signals.append(f"RSI(5м) {rsi5} — зона продажи 🔴")
-    elif rsi5 <= 30:
-        score += 15; signals.append(f"RSI(5м) {rsi5} — зона покупки 🟢")
+    if trend_up:
+        bull_signals.append("Тренд 15м: бычий ↗")
+    elif trend_down:
+        bear_signals.append("Тренд 15м: медвежий ↘")
 
-    # EMA тренд 1m
-    ema9  = _ema(c1, 9)
-    ema21 = _ema(c1, 21)
-    if price > ema9 > ema21:
-        score += 14; signals.append("EMA9 > EMA21 — восходящий тренд ↗")
-    elif price < ema9 < ema21:
-        score -= 14; signals.append("EMA9 < EMA21 — нисходящий тренд ↘")
-
-    # MACD 5m
+    # ── 5m MOMENTUM ────────────────────────────────────────────────────────
+    rsi5  = _rsi(c5, 14)
+    ema9_5  = _ema(c5, 9)
+    ema21_5 = _ema(c5, 21)
     m5 = _macd(c5)
+    bbp5 = _bb_pos(c5)
+
+    # EMA alignment 5m
+    if float(c5.iloc[-1]) > ema9_5 > ema21_5:
+        bull_signals.append("EMA 5м: бычье выравнивание")
+    elif float(c5.iloc[-1]) < ema9_5 < ema21_5:
+        bear_signals.append("EMA 5м: медвежье выравнивание")
+
+    # RSI 5m — only strong zones count
+    if rsi5 <= 35:
+        bull_signals.append(f"RSI(5м) {rsi5} — перепродан 💡")
+    elif rsi5 >= 65:
+        bear_signals.append(f"RSI(5м) {rsi5} — перекуплен ⚠️")
+    elif 45 <= rsi5 <= 60:
+        bull_signals.append(f"RSI(5м) {rsi5} — бычья зона")
+    elif 40 <= rsi5 < 45:
+        bear_signals.append(f"RSI(5м) {rsi5} — медвежья зона")
+
+    # MACD 5m crossover — strongest signal
     if m5["cross_up"]:
-        score += 18; signals.append("MACD(5м) кросс вверх 📈")
+        bull_signals.append("MACD(5м) кросс вверх 📈")
+        bull_signals.append("MACD(5м) импульс вверх")  # counts double on cross
     elif m5["cross_down"]:
-        score -= 18; signals.append("MACD(5м) кросс вниз 📉")
+        bear_signals.append("MACD(5м) кросс вниз 📉")
+        bear_signals.append("MACD(5м) импульс вниз")
     elif m5["rising"]:
-        score += 7
+        bull_signals.append("MACD(5м) растёт")
     else:
-        score -= 7
+        bear_signals.append("MACD(5м) падает")
 
-    # Bollinger 5m
-    bbp = _bb_pos(c5)
-    if bbp > 88:
-        score -= 10; signals.append(f"BB(5м) у верхней полосы — откат вероятен")
-    elif bbp < 12:
-        score += 10; signals.append(f"BB(5м) у нижней полосы — отскок вероятен")
+    # Bollinger squeeze / breakout 5m
+    if bbp5 < 10:
+        bull_signals.append("BB(5м) у нижней полосы — отскок")
+    elif bbp5 > 90:
+        bear_signals.append("BB(5м) у верхней полосы — откат")
 
-    # Объём 1m
+    # ── 1m TIMING ──────────────────────────────────────────────────────────
+    rsi1 = _rsi(c1, 9)
+    ema9_1  = _ema(c1, 9)
+    ema21_1 = _ema(c1, 21)
     vr = _vol_ratio(df1m)
-    if vr >= 1.8:
-        if score > 0: score += 8; signals.append(f"Объём {vr}x — подтверждает рост 🔥")
-        else:         score -= 8; signals.append(f"Объём {vr}x — подтверждает падение 🔥")
 
-    # Последние 3 свечи
-    last3 = df1m["close"].iloc[-3:].values
-    open3 = df1m["open"].iloc[-3:].values
-    bulls = sum(1 for c, o in zip(last3, open3) if c > o)
-    if bulls == 3:   score += 8
-    elif bulls == 0: score -= 8
+    # EMA alignment 1m
+    if price > ema9_1 > ema21_1:
+        bull_signals.append("EMA 1м: цена выше EMA9 > EMA21")
+    elif price < ema9_1 < ema21_1:
+        bear_signals.append("EMA 1м: цена ниже EMA9 < EMA21")
 
+    # RSI 1m extremes only
+    if rsi1 <= 25:
+        bull_signals.append(f"RSI(1м) {rsi1} — сильная перепроданность")
+    elif rsi1 >= 75:
+        bear_signals.append(f"RSI(1м) {rsi1} — сильная перекупленность")
+
+    # Volume confirmation — only adds if matches direction
+    if vr >= 2.0:
+        if len(bull_signals) > len(bear_signals):
+            bull_signals.append(f"Объём {vr}x — подтверждает рост 🔥")
+        elif len(bear_signals) > len(bull_signals):
+            bear_signals.append(f"Объём {vr}x — подтверждает падение 🔥")
+
+    # Candle momentum 1m (last 5 candles)
+    last5_c = df1m["close"].iloc[-5:].values
+    last5_o = df1m["open"].iloc[-5:].values
+    bulls5 = sum(1 for c, o in zip(last5_c, last5_o) if c > o)
+    if bulls5 >= 4:
+        bull_signals.append("5 свечей 1м: бычий импульс")
+    elif bulls5 <= 1:
+        bear_signals.append("5 свечей 1м: медвежий импульс")
+
+    # ── DECISION: require confluence of 3+ signals ─────────────────────────
+    nb, ns = len(bull_signals), len(bear_signals)
+    net = nb - ns
+
+    # Require minimum 3 confirming signals AND majority
+    # Also: if trend opposes direction, require stronger confluence (5+)
+    if net >= 3:
+        direction = "UP"
+        # If against 15m trend, need stronger confirmation
+        if trend_down and nb < 5:
+            direction = "FLAT"
+    elif net <= -3:
+        direction = "DOWN"
+        if trend_up and ns < 5:
+            direction = "FLAT"
+    else:
+        direction = "FLAT"
+
+    # Confidence based on signal count and trend alignment
+    raw_conf = min(nb, ns) == 0 and max(nb, ns) or max(nb, ns) - min(nb, ns)
+    if direction == "FLAT":
+        conf = 0
+    else:
+        bonus = 10 if (direction == "UP" and trend_up) or (direction == "DOWN" and trend_down) else 0
+        conf = min(50 + raw_conf * 6 + bonus, 94)
+
+    # Score for legacy compatibility
+    score = float(net * 12)
     score = max(-100.0, min(100.0, score))
-    conf  = min(int(abs(score) * 0.55 + 42), 94)
-    direction = "UP" if score > 8 else "DOWN" if score < -8 else "FLAT"
+
+    # Pick top 3 signals for display
+    if direction == "UP":
+        top_sigs = bull_signals[:3]
+    elif direction == "DOWN":
+        top_sigs = bear_signals[:3]
+    else:
+        # Show why it's FLAT
+        top_sigs = [f"Сигналов ЛОНГ: {nb}, ШОРТ: {ns} — нет перевеса"]
 
     atr = _atr(df1m)
     levels = _sl_tp(price, atr, direction)
@@ -184,18 +253,19 @@ def _score(df1m: pd.DataFrame, df5m: pd.DataFrame) -> dict:
     return {
         "price": price, "score": score, "direction": direction,
         "confidence": conf, "rsi1": rsi1, "rsi5": rsi5,
-        "signals": signals[:3], **levels,
+        "signals": top_sigs, **levels,
     }
 
 
 async def get_short_forecast(coin: str) -> dict:
     # Try Kraken first (real 1m/5m candles)
     try:
-        df1m, df5m = await asyncio.gather(
+        df1m, df5m, df15m = await asyncio.gather(
             _kraken_df(coin, 1, 60),
             _kraken_df(coin, 5, 60),
+            _kraken_df(coin, 15, 60),
         )
-        result = _score(df1m, df5m)
+        result = _score(df1m, df5m, df15m)
         result["coin"] = coin
         result["source"] = "kraken"
         try:
