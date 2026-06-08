@@ -18,7 +18,7 @@ async def _kraken_df(coin: str, interval_min: int, limit: int = 60) -> pd.DataFr
     pair = KRAKEN_PAIR.get(coin, "XBTUSD")
     since = int(time.time()) - interval_min * 60 * (limit + 5)
     url = "https://api.kraken.com/0/public/OHLC"
-    timeout = aiohttp.ClientTimeout(total=8)
+    timeout = aiohttp.ClientTimeout(total=5)
     async with aiohttp.ClientSession(timeout=timeout) as s:
         async with s.get(url, params={"pair": pair, "interval": interval_min, "since": since}) as r:
             r.raise_for_status()
@@ -243,6 +243,27 @@ def _score(df1m: pd.DataFrame, df5m: pd.DataFrame, df15m: pd.DataFrame) -> dict:
     else:
         votes += [0]
 
+    # 5m Price ROC (rate-of-change over last 3 candles) — weight 1
+    # Most direct measure of short-term momentum
+    if len(c5) >= 4:
+        roc5 = (float(c5.iloc[-1]) - float(c5.iloc[-4])) / float(c5.iloc[-4]) * 100
+        if roc5 > 0.15:
+            votes += [1]
+        elif roc5 < -0.15:
+            votes += [-1]
+        else:
+            votes += [0]
+
+    # 1m Price ROC over last 5 candles — weight 1
+    if len(c1) >= 6:
+        roc1 = (float(c1.iloc[-1]) - float(c1.iloc[-6])) / float(c1.iloc[-6]) * 100
+        if roc1 > 0.05:
+            votes += [1]
+        elif roc1 < -0.05:
+            votes += [-1]
+        else:
+            votes += [0]
+
     # Volume spike confirmation — weight 1 (direction-aware)
     if vr >= 1.8:
         bull_vote = sum(1 for v in votes if v > 0)
@@ -294,25 +315,28 @@ def _score(df1m: pd.DataFrame, df5m: pd.DataFrame, df15m: pd.DataFrame) -> dict:
         conf = min(base, 94)
 
     # ── SIGNALS TEXT ────────────────────────────────────────────────────────
+    roc5_val = (float(c5.iloc[-1]) - float(c5.iloc[-4])) / float(c5.iloc[-4]) * 100 if len(c5) >= 4 else 0
     sigs = []
     if direction == "UP":
-        if trend_up:         sigs.append("Тренд 15м: бычий ↗")
-        if m5["cross_up"]:   sigs.append("MACD(5м) кросс вверх 📈")
-        elif m5["rising"]:   sigs.append("MACD(5м) растёт")
-        if rsi5 <= 35:       sigs.append(f"RSI(5м) {rsi5} — перепродан 💡")
-        if vr >= 1.8:        sigs.append(f"Объём {vr}x — рост подтверждён 🔥")
-        if not sigs:         sigs.append("Бычий импульс по всем таймфреймам")
+        if trend_up:                sigs.append("Тренд 15м: бычий ↗")
+        if m5["cross_up"]:          sigs.append("MACD(5м) кросс вверх 📈")
+        elif m5["rising"]:          sigs.append("MACD(5м) растёт")
+        if roc5_val > 0.15:         sigs.append(f"Импульс 5м: +{roc5_val:.2f}% за 3 свечи 🚀")
+        if rsi5 <= 35:              sigs.append(f"RSI(5м) {rsi5} — перепродан 💡")
+        if vr >= 1.8:               sigs.append(f"Объём {vr}x — рост подтверждён 🔥")
+        if not sigs:                sigs.append("Бычий импульс по всем таймфреймам")
     elif direction == "DOWN":
-        if trend_down:        sigs.append("Тренд 15м: медвежий ↘")
-        if m5["cross_down"]:  sigs.append("MACD(5м) кросс вниз 📉")
-        elif m5["falling"]:   sigs.append("MACD(5м) падает")
-        if rsi5 >= 65:        sigs.append(f"RSI(5м) {rsi5} — перекуплен ⚠️")
-        if vr >= 1.8:         sigs.append(f"Объём {vr}x — падение подтверждено 🔥")
-        if not sigs:          sigs.append("Медвежий импульс по всем таймфреймам")
+        if trend_down:              sigs.append("Тренд 15м: медвежий ↘")
+        if m5["cross_down"]:        sigs.append("MACD(5м) кросс вниз 📉")
+        elif m5["falling"]:         sigs.append("MACD(5м) падает")
+        if roc5_val < -0.15:        sigs.append(f"Импульс 5м: {roc5_val:.2f}% за 3 свечи 📉")
+        if rsi5 >= 65:              sigs.append(f"RSI(5м) {rsi5} — перекуплен ⚠️")
+        if vr >= 1.8:               sigs.append(f"Объём {vr}x — падение подтверждено 🔥")
+        if not sigs:                sigs.append("Медвежий импульс по всем таймфреймам")
     else:
-        if trend_neutral:    sigs.append("15м тренд неопределён — боковик")
-        elif abs(total) < 2: sigs.append("Сигналы противоречат друг другу")
-        else:                sigs.append("Ждём подтверждения от MACD")
+        if trend_neutral:           sigs.append("15м тренд неопределён — боковик")
+        elif abs(roc5_val) < 0.05:  sigs.append(f"Импульс слабый ({roc5_val:+.3f}%) — ждём движения")
+        else:                       sigs.append("Сигналы противоречат друг другу")
 
     score = float(total * 10)
     score = max(-100.0, min(100.0, score))
@@ -330,8 +354,8 @@ async def get_short_forecast(coin: str) -> dict:
     # Try Kraken first (real 1m/5m candles)
     try:
         df1m, df5m, df15m = await asyncio.gather(
-            _kraken_df(coin, 1, 60),
-            _kraken_df(coin, 5, 60),
+            _kraken_df(coin, 1, 30),
+            _kraken_df(coin, 5, 40),
             _kraken_df(coin, 15, 60),
         )
         result = _score(df1m, df5m, df15m)
