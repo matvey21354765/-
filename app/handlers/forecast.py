@@ -53,7 +53,6 @@ async def cb_forecast(call: CallbackQuery):
             parse_mode="HTML"
         )
         import asyncio
-        from app.services.short_forecast import get_short_forecast, format_forecast
         try:
             results = await asyncio.gather(
                 get_short_forecast("BTC"),
