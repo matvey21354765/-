@@ -27,15 +27,18 @@ def setup_scheduler(scheduler: AsyncIOScheduler, bot: Bot):
     # Daily crypto term: 08:00 UTC
     scheduler.add_job(_run_daily_term, "cron", hour=8, minute=0, args=[bot],
                       id="daily_term", replace_existing=True)
-    # TikTok: news video 3x per day (09:00, 15:00, 21:00 UTC)
+    # TikTok: news video 3x per day
     scheduler.add_job(_run_tiktok_news, "cron", hour="9,15,21", minute=30,
                       id="tiktok_news", replace_existing=True)
-    # TikTok: signal video after each signal batch (offset by 10 min)
+    # TikTok: term video daily at 08:15 UTC (15 min after Telegram term post)
+    scheduler.add_job(_run_tiktok_term, "cron", hour=8, minute=15,
+                      id="tiktok_term", replace_existing=True)
+    # TikTok: signal video every signal cycle
     scheduler.add_job(_run_tiktok_signals, "interval",
                       minutes=settings.SIGNAL_INTERVAL_MINUTES,
                       start_date="2024-01-01 00:10:00",
                       id="tiktok_signals", replace_existing=True, misfire_grace_time=300)
-    logger.info("Scheduler ready: signals, Polymarket, news (5x/day), daily term 08:00 UTC, TikTok (news 3x/day + signals)")
+    logger.info("Scheduler ready: signals, Polymarket, news, daily term, TikTok (news 3x + term daily + signals)")
 
 
 async def _run_signals(bot: Bot):
@@ -115,12 +118,12 @@ async def _run_tiktok_news():
     logger.info("🎬 TikTok news video job started...")
     try:
         from app.services.news_service import fetch_news
-        from app.services.tiktok_service import post_news_video_to_tiktok
+        from app.services.tiktok_service import post_news_video
         items = await fetch_news()
         if not items:
             logger.info("No news for TikTok video")
             return
-        ok = await post_news_video_to_tiktok(items)
+        ok = await post_news_video(items)
         logger.info(f"TikTok news video: {'uploaded' if ok else 'skipped/failed'}")
     except Exception as e:
         logger.error(f"TikTok news job error: {e}")
@@ -130,15 +133,27 @@ async def _run_tiktok_signals():
     logger.info("🎬 TikTok signal video job started...")
     try:
         from app.services.signal_service import generate_signal
-        from app.services.tiktok_service import post_signal_video_to_tiktok
+        from app.services.tiktok_service import post_signal_video
         for coin in settings.COINS:
             try:
                 sig = await generate_signal(coin, use_cache=True)
                 if sig and sig.direction != "NO TRADE":
-                    ok = await post_signal_video_to_tiktok(sig)
+                    ok = await post_signal_video(sig)
                     logger.info(f"[{coin}] TikTok signal video: {'uploaded' if ok else 'skipped/failed'}")
                 await asyncio.sleep(5)
             except Exception as e:
                 logger.error(f"[{coin}] TikTok signal error: {e}")
     except Exception as e:
         logger.error(f"TikTok signal job error: {e}")
+
+
+async def _run_tiktok_term():
+    logger.info("🎬 TikTok daily term video job started...")
+    try:
+        from app.services.news_service import get_daily_term
+        from app.services.tiktok_service import post_term_video
+        title, body = get_daily_term()
+        ok = await post_term_video(title, body)
+        logger.info(f"TikTok term video: {'uploaded' if ok else 'skipped/failed'}")
+    except Exception as e:
+        logger.error(f"TikTok term job error: {e}")

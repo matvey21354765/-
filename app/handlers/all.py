@@ -3,6 +3,7 @@ from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, CallbackQuery
+from datetime import datetime, timezone
 import logging
 
 from app.services.user_service import (
@@ -303,7 +304,12 @@ async def cmd_admin(msg: Message):
         f"30д: сделок={s30.total_signals if s30 else 0} winrate={s30.win_rate if s30 else 0:.1f}%\n\n"
         f"/force BTC|ETH|SOL — принудительный сигнал\n"
         f"/give_sub ID MONTHS — выдать подписку\n"
-        f"/recompute — пересчитать статистику",
+        f"/recompute — пересчитать статистику\n\n"
+        f"🎬 TikTok:\n"
+        f"/tiktok_setup — авторизовать TikTok аккаунт\n"
+        f"/tiktok_status — статус токена\n"
+        f"/tiktok_test_news — тест загрузки новостей\n"
+        f"/tiktok_test_signal — тест загрузки сигнала",
         parse_mode="HTML")
 
 
@@ -408,3 +414,150 @@ async def cmd_recompute(msg: Message):
         return
     await recompute_stats()
     await msg.answer("✅ Статистика пересчитана")
+
+
+# ── TikTok admin commands ──────────────────────────────────────────────────────
+
+class TikTokAuthState(StatesGroup):
+    waiting_code = State()
+
+
+@router.message(Command("tiktok_setup"))
+async def cmd_tiktok_setup(msg: Message, state: FSMContext):
+    """Step 1: send TikTok OAuth URL to admin."""
+    if msg.from_user.id not in settings.ADMIN_IDS:
+        return
+    if not settings.TIKTOK_CLIENT_KEY:
+        await msg.answer(
+            "❌ <b>TIKTOK_CLIENT_KEY</b> не задан в .env\n\n"
+            "Добавь в переменные окружения:\n"
+            "<code>TIKTOK_CLIENT_KEY=...</code>\n"
+            "<code>TIKTOK_CLIENT_SECRET=...</code>\n"
+            "<code>TIKTOK_ENABLED=true</code>",
+            parse_mode="HTML")
+        return
+
+    from app.services.tiktok_auth import build_auth_url
+    redirect_uri = "https://localhost/callback"
+    url = build_auth_url(settings.TIKTOK_CLIENT_KEY, redirect_uri)
+    await msg.answer(
+        "🔐 <b>Авторизация TikTok</b>\n\n"
+        "1. Перейди по ссылке ниже и разреши доступ:\n"
+        f"<code>{url}</code>\n\n"
+        "2. После редиректа скопируй <b>весь URL</b> из браузера\n"
+        "   (он начинается с <code>https://localhost/callback?code=...</code>)\n\n"
+        "3. Пришли его сюда ответным сообщением 👇",
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+    await state.set_state(TikTokAuthState.waiting_code)
+    await state.update_data(redirect_uri=redirect_uri)
+
+
+@router.message(TikTokAuthState.waiting_code)
+async def cmd_tiktok_code(msg: Message, state: FSMContext):
+    """Step 2: receive redirect URL and exchange for tokens."""
+    if msg.from_user.id not in settings.ADMIN_IDS:
+        return
+    import urllib.parse
+    text = msg.text or ""
+    # Accept either full URL or just the code value
+    if "code=" in text:
+        parsed = urllib.parse.urlparse(text)
+        code = urllib.parse.parse_qs(parsed.query).get("code", [text])[0]
+    else:
+        code = text.strip()
+
+    data = await state.get_data()
+    redirect_uri = data.get("redirect_uri", "https://localhost/callback")
+    await state.clear()
+
+    from app.services.tiktok_auth import exchange_code
+    await msg.answer("⏳ Обмениваю код на токен...")
+    ok = await exchange_code(
+        settings.TIKTOK_CLIENT_KEY,
+        settings.TIKTOK_CLIENT_SECRET,
+        code,
+        redirect_uri,
+    )
+    if ok:
+        await msg.answer(
+            "✅ <b>TikTok авторизован!</b>\n\n"
+            "Токены сохранены. Видео будут заливаться автоматически по расписанию.\n\n"
+            "Расписание:\n"
+            "• Новости — 09:30, 15:30, 21:30 UTC\n"
+            "• Термин дня — 08:15 UTC\n"
+            "• Сигналы — каждый час\n\n"
+            "Команда /tiktok_status — проверить статус",
+            parse_mode="HTML")
+    else:
+        await msg.answer(
+            "❌ Ошибка авторизации. Проверь CLIENT_KEY/SECRET и попробуй /tiktok_setup снова.")
+
+
+@router.message(Command("tiktok_status"))
+async def cmd_tiktok_status(msg: Message):
+    """Show TikTok token status and test upload flag."""
+    if msg.from_user.id not in settings.ADMIN_IDS:
+        return
+    from app.services.tiktok_auth import is_token_valid, get_open_id, _load
+    import time
+    data = _load()
+    has_token = bool(data.get("access_token"))
+    valid = is_token_valid()
+    exp = data.get("expires_at", 0)
+    exp_str = datetime.fromtimestamp(exp, tz=timezone.utc).strftime("%d.%m.%Y %H:%M UTC") if exp else "—"
+    open_id = get_open_id() or "—"
+
+    lines = [
+        "📊 <b>TikTok статус</b>\n",
+        f"Включён (TIKTOK_ENABLED): {'✅' if settings.TIKTOK_ENABLED else '❌'}",
+        f"Токен сохранён: {'✅' if has_token else '❌'}",
+        f"Токен действителен: {'✅' if valid else '❌ (требует обновления)'}",
+        f"Истекает: {exp_str}",
+        f"Open ID: <code>{open_id}</code>",
+        "",
+        "Команды:",
+        "/tiktok_setup — авторизовать аккаунт",
+        "/tiktok_test_news — тестовая загрузка новостей",
+        "/tiktok_test_signal — тестовая загрузка сигнала",
+    ]
+    await msg.answer("\n".join(lines), parse_mode="HTML")
+
+
+@router.message(Command("tiktok_test_news"))
+async def cmd_tiktok_test_news(msg: Message):
+    """Admin: generate and upload a test news video right now."""
+    if msg.from_user.id not in settings.ADMIN_IDS:
+        return
+    await msg.answer("⏳ Генерирую и заливаю тестовое видео с новостями...")
+    try:
+        from app.services.news_service import fetch_news
+        from app.services.tiktok_service import post_news_video
+        items = await fetch_news()
+        if not items:
+            await msg.answer("❌ Нет новостей для видео")
+            return
+        ok = await post_news_video(items)
+        await msg.answer("✅ Видео загружено!" if ok else "❌ Загрузка не удалась — проверь логи")
+    except Exception as e:
+        await msg.answer(f"❌ Ошибка: {e}")
+
+
+@router.message(Command("tiktok_test_signal"))
+async def cmd_tiktok_test_signal(msg: Message):
+    """Admin: generate and upload a signal video for BTC right now."""
+    if msg.from_user.id not in settings.ADMIN_IDS:
+        return
+    await msg.answer("⏳ Генерирую и заливаю тестовое видео с сигналом BTC...")
+    try:
+        from app.services.signal_service import generate_signal
+        from app.services.tiktok_service import post_signal_video
+        sig = await generate_signal("BTC", use_cache=False)
+        if not sig:
+            await msg.answer("❌ Не удалось сгенерировать сигнал")
+            return
+        ok = await post_signal_video(sig)
+        await msg.answer("✅ Видео загружено!" if ok else "❌ Загрузка не удалась — проверь логи")
+    except Exception as e:
+        await msg.answer(f"❌ Ошибка: {e}")

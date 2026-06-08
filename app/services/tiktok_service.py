@@ -1,4 +1,4 @@
-"""TikTok Content Posting API v2 integration."""
+"""TikTok Content Posting API v2 — full upload pipeline with auto token refresh."""
 from __future__ import annotations
 
 import asyncio
@@ -14,25 +14,32 @@ from config.settings import settings
 logger = logging.getLogger(__name__)
 
 _BASE = "https://open.tiktokapis.com/v2"
-_CHUNK_SIZE = 10 * 1024 * 1024  # 10 MB per chunk
+_CHUNK = 10 * 1024 * 1024   # 10 MB
 _TIMEOUT = aiohttp.ClientTimeout(total=120)
 
 
-# ── helpers ────────────────────────────────────────────────────────────────────
+# ── token-aware header builder ────────────────────────────────────────────────
 
-def _auth_headers() -> dict:
+async def _headers() -> Optional[dict]:
+    """Return auth headers, refreshing the token if needed. None = not configured."""
+    if not settings.TIKTOK_ENABLED:
+        return None
+    from app.services.tiktok_auth import refresh_token_if_needed, get_access_token
+    ok = await refresh_token_if_needed(settings.TIKTOK_CLIENT_KEY, settings.TIKTOK_CLIENT_SECRET)
+    if not ok:
+        logger.warning("TikTok token unavailable")
+        return None
+    token = get_access_token()
     return {
-        "Authorization": f"Bearer {settings.TIKTOK_ACCESS_TOKEN}",
+        "Authorization": f"Bearer {token}",
         "Content-Type": "application/json; charset=UTF-8",
     }
 
 
-async def _init_upload(file_size: int, title: str) -> Optional[dict]:
-    """
-    Call /post/publish/video/init/ and return the response body or None.
-    Docs: https://developers.tiktok.com/doc/content-posting-api-reference-direct-post
-    """
-    chunk_count = math.ceil(file_size / _CHUNK_SIZE)
+# ── upload helpers ─────────────────────────────────────────────────────────────
+
+async def _init_upload(file_size: int, title: str, hdrs: dict) -> Optional[dict]:
+    chunks = math.ceil(file_size / _CHUNK)
     payload = {
         "post_info": {
             "title": title[:150],
@@ -45,171 +52,161 @@ async def _init_upload(file_size: int, title: str) -> Optional[dict]:
         "source_info": {
             "source": "FILE_UPLOAD",
             "video_size": file_size,
-            "chunk_size": _CHUNK_SIZE,
-            "total_chunk_count": chunk_count,
+            "chunk_size": _CHUNK,
+            "total_chunk_count": chunks,
         },
     }
     try:
-        async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
-            async with session.post(
-                f"{_BASE}/post/publish/video/init/",
-                headers=_auth_headers(),
-                json=payload,
-            ) as resp:
-                data = await resp.json()
-                if resp.status != 200 or data.get("error", {}).get("code") != "ok":
-                    logger.error(f"TikTok init error {resp.status}: {data}")
-                    return None
-                return data.get("data", {})
+        async with aiohttp.ClientSession(timeout=_TIMEOUT) as s:
+            async with s.post(f"{_BASE}/post/publish/video/init/",
+                              headers=hdrs, json=payload) as r:
+                data = await r.json()
+        if r.status != 200 or data.get("error", {}).get("code") != "ok":
+            logger.error(f"TikTok init error {r.status}: {data}")
+            return None
+        return data.get("data", {})
     except Exception as e:
         logger.error(f"TikTok init request failed: {e}")
         return None
 
 
-async def _upload_chunks(upload_url: str, video_path: str, file_size: int) -> bool:
-    """Upload video in chunks via PUT requests."""
-    chunk_count = math.ceil(file_size / _CHUNK_SIZE)
+async def _upload_chunks(upload_url: str, path: str, file_size: int) -> bool:
+    chunks = math.ceil(file_size / _CHUNK)
     try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=300)) as session:
-            with open(video_path, "rb") as f:
-                for idx in range(chunk_count):
-                    chunk = f.read(_CHUNK_SIZE)
-                    start = idx * _CHUNK_SIZE
+        async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=300)) as s:
+            with open(path, "rb") as f:
+                for idx in range(chunks):
+                    chunk = f.read(_CHUNK)
+                    start = idx * _CHUNK
                     end = start + len(chunk) - 1
-                    headers = {
+                    hdrs = {
                         "Content-Range": f"bytes {start}-{end}/{file_size}",
                         "Content-Type": "video/mp4",
                         "Content-Length": str(len(chunk)),
                     }
-                    async with session.put(upload_url, data=chunk, headers=headers) as resp:
-                        if resp.status not in (200, 201, 206):
-                            body = await resp.text()
-                            logger.error(f"Chunk {idx} upload failed {resp.status}: {body}")
+                    async with s.put(upload_url, data=chunk, headers=hdrs) as r:
+                        if r.status not in (200, 201, 206):
+                            logger.error(f"Chunk {idx} failed {r.status}: {await r.text()}")
                             return False
-                        logger.debug(f"Chunk {idx+1}/{chunk_count} uploaded")
+                        logger.debug(f"Chunk {idx+1}/{chunks} OK")
         return True
     except Exception as e:
         logger.error(f"TikTok chunk upload error: {e}")
         return False
 
 
-async def _check_status(publish_id: str) -> str:
-    """Poll publish status. Returns 'PUBLISH_COMPLETE', 'FAILED', or 'PROCESSING'."""
-    try:
-        async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
-            async with session.post(
-                f"{_BASE}/post/publish/status/fetch/",
-                headers=_auth_headers(),
-                json={"publish_id": publish_id},
-            ) as resp:
-                data = await resp.json()
-                status = data.get("data", {}).get("status", "UNKNOWN")
-                return status
-    except Exception as e:
-        logger.error(f"TikTok status check failed: {e}")
-        return "UNKNOWN"
-
-
-# ── public API ─────────────────────────────────────────────────────────────────
-
-async def upload_video_to_tiktok(video_path: str, title: str) -> bool:
-    """
-    Full upload flow: init → chunk upload → poll status.
-    Returns True on success.
-    """
-    if not settings.TIKTOK_ENABLED:
-        logger.info("TikTok upload skipped (TIKTOK_ENABLED=false)")
-        return False
-    if not settings.TIKTOK_ACCESS_TOKEN:
-        logger.warning("TIKTOK_ACCESS_TOKEN not set")
-        return False
-
-    file_size = os.path.getsize(video_path)
-    logger.info(f"TikTok upload: {video_path} ({file_size/1024/1024:.1f} MB)")
-
-    init_data = await _init_upload(file_size, title)
-    if not init_data:
-        return False
-
-    publish_id = init_data.get("publish_id")
-    upload_url = init_data.get("upload_url")
-    if not publish_id or not upload_url:
-        logger.error(f"Missing publish_id/upload_url in TikTok response: {init_data}")
-        return False
-
-    ok = await _upload_chunks(upload_url, video_path, file_size)
-    if not ok:
-        return False
-
-    # Poll for completion (max 3 minutes)
-    for attempt in range(18):
+async def _poll_status(publish_id: str, hdrs: dict, max_wait: int = 180) -> bool:
+    for _ in range(max_wait // 10):
         await asyncio.sleep(10)
-        status = await _check_status(publish_id)
-        logger.info(f"TikTok publish status [{attempt+1}]: {status}")
-        if status == "PUBLISH_COMPLETE":
-            logger.info(f"TikTok video published! publish_id={publish_id}")
-            return True
-        if status in ("FAILED", "SPAM_RISK_TOO_MANY_POSTS", "SPAM_RISK_USER_BANNED_FROM_POSTING"):
-            logger.error(f"TikTok publish failed with status: {status}")
-            return False
-
-    logger.warning(f"TikTok publish timed out for publish_id={publish_id}")
+        try:
+            async with aiohttp.ClientSession(timeout=_TIMEOUT) as s:
+                async with s.post(
+                        f"{_BASE}/post/publish/status/fetch/",
+                        headers=hdrs,
+                        json={"publish_id": publish_id}) as r:
+                    data = await r.json()
+            status = data.get("data", {}).get("status", "UNKNOWN")
+            logger.info(f"TikTok publish status: {status}")
+            if status == "PUBLISH_COMPLETE":
+                return True
+            if "FAIL" in status or "SPAM" in status or "BANNED" in status:
+                logger.error(f"TikTok publish failed: {status}")
+                return False
+        except Exception as e:
+            logger.warning(f"TikTok status poll error: {e}")
+    logger.warning(f"TikTok publish timed out: {publish_id}")
     return False
 
 
-async def post_news_video_to_tiktok(news_items: list[dict]) -> bool:
-    """Generate a news video and upload it to TikTok."""
-    from app.services.video_service import generate_news_video
+# ── main upload entry point ───────────────────────────────────────────────────
+
+async def upload_video(video_path: str, title: str) -> bool:
+    hdrs = await _headers()
+    if not hdrs:
+        return False
+
+    file_size = os.path.getsize(video_path)
+    logger.info(f"TikTok upload start: {os.path.basename(video_path)} ({file_size/1024/1024:.1f} MB)")
+
+    init = await _init_upload(file_size, title, hdrs)
+    if not init:
+        return False
+
+    publish_id = init.get("publish_id")
+    upload_url = init.get("upload_url")
+    if not publish_id or not upload_url:
+        logger.error(f"Bad TikTok init response: {init}")
+        return False
+
+    if not await _upload_chunks(upload_url, video_path, file_size):
+        return False
+
+    success = await _poll_status(publish_id, hdrs)
+    if success:
+        logger.info(f"✅ TikTok video published (publish_id={publish_id})")
+    return success
+
+
+# ── high-level helpers ────────────────────────────────────────────────────────
+
+def _news_title(items: list[dict]) -> str:
+    first = items[0].get("title", "Крипто-новости")[:80] if items else "Крипто-новости"
+    return f"📰 {first} | #crypto #bitcoin #btc #крипта #новости"
+
+
+def _signal_title(signal) -> str:
+    coin = getattr(signal, "coin", None) or signal.get("coin", "BTC")
+    direction = getattr(signal, "direction", None) or signal.get("direction", "LONG")
+    price = getattr(signal, "entry_price", None) or signal.get("entry_price", 0)
+    emoji = "🟢" if direction == "LONG" else "🔴"
+    return (
+        f"{emoji} {coin}/USDT {direction} сигнал | вход ${price:,.0f} "
+        f"#crypto #futures #{coin.lower()} #трейдинг #фьючерсы"
+    )
+
+
+def _term_title(title: str) -> str:
+    short = title.replace("📖 Термин дня: ", "")
+    return f"📖 {short} — что это такое? #крипта #обучение #трейдинг #криптовалюта"
+
+
+async def post_news_video(news_items: list[dict]) -> bool:
     if not news_items:
         return False
-    video_path = await generate_news_video(news_items)
-    if not video_path:
-        logger.warning("News video generation failed, skipping TikTok upload")
+    from app.services.video_service import generate_news_video
+    path = await generate_news_video(news_items)
+    if not path:
+        logger.warning("News video generation failed")
         return False
-    title = _build_news_title(news_items)
     try:
-        return await upload_video_to_tiktok(video_path, title)
+        return await upload_video(path, _news_title(news_items))
     finally:
-        try:
-            os.remove(video_path)
-        except Exception:
-            pass
+        try: os.remove(path)
+        except Exception: pass
 
 
-async def post_signal_video_to_tiktok(signal) -> bool:
-    """Generate a signal video and upload it to TikTok."""
+async def post_signal_video(signal) -> bool:
     from app.services.video_service import generate_signal_video
-    signal_data = {
-        "coin": signal.coin,
-        "direction": signal.direction,
-        "entry_price": signal.entry_price or 0,
-        "stop_loss": signal.stop_loss or 0,
-        "take_profit_1": signal.take_profit_1 or 0,
-        "confidence": signal.confidence or 0,
-        "risk_reward": signal.risk_reward or 0,
-        "reasons": (signal.reasons or "").split("\n")[:6],
-    }
-    video_path = await generate_signal_video(signal_data)
-    if not video_path:
-        logger.warning("Signal video generation failed, skipping TikTok upload")
+    path = await generate_signal_video(signal)
+    if not path:
+        logger.warning("Signal video generation failed")
         return False
-    direction_emoji = "🟢" if signal.direction == "LONG" else "🔴"
-    title = (
-        f"{direction_emoji} {signal.coin} {signal.direction} фьючерс сигнал "
-        f"| вход ${signal.entry_price:,.0f} | крипта #crypto #futures #{signal.coin.lower()}"
-    )
     try:
-        return await upload_video_to_tiktok(video_path, title)
+        return await upload_video(path, _signal_title(signal))
     finally:
-        try:
-            os.remove(video_path)
-        except Exception:
-            pass
+        try: os.remove(path)
+        except Exception: pass
 
 
-def _build_news_title(items: list[dict]) -> str:
-    first = items[0].get("title", "Крипто новости")[:80] if items else "Крипто новости"
-    return (
-        f"📰 {first} | криптоновости сегодня "
-        f"#crypto #bitcoin #btc #новости #крипта"
-    )
+async def post_term_video(title: str, body: str) -> bool:
+    from app.services.video_service import generate_term_video
+    path = await generate_term_video(title, body)
+    if not path:
+        logger.warning("Term video generation failed")
+        return False
+    try:
+        return await upload_video(path, _term_title(title))
+    finally:
+        try: os.remove(path)
+        except Exception: pass
