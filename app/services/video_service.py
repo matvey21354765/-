@@ -327,17 +327,113 @@ def _make_term_slide(title: str, body: str) -> "Image":
 
 # ── TTS helpers ────────────────────────────────────────────────────────────────
 
-def _tts(text: str) -> Optional[str]:
+# Piper voice model path — downloaded once on first use
+_PIPER_MODEL = os.environ.get("PIPER_MODEL", "/tmp/piper_voices/ru.onnx")
+_PIPER_CONFIG = os.environ.get("PIPER_CONFIG", "/tmp/piper_voices/ru.onnx.json")
+_PIPER_VOICE_URL = "https://huggingface.co/rhasspy/piper-voices/resolve/main/ru/ru_RU/ruslan/medium"
+_piper_voice = None  # lazy singleton
+
+
+def _get_piper_voice():
+    """Load Piper voice, downloading model if needed (first call only)."""
+    global _piper_voice
+    if _piper_voice is not None:
+        return _piper_voice
     try:
+        from piper.voice import PiperVoice
+        import urllib.request
+
+        os.makedirs(os.path.dirname(_PIPER_MODEL), exist_ok=True)
+        if not os.path.exists(_PIPER_MODEL):
+            logger.info("Downloading Piper Russian voice model (~61 MB)...")
+            urllib.request.urlretrieve(f"{_PIPER_VOICE_URL}/ru_RU-ruslan-medium.onnx", _PIPER_MODEL)
+        if not os.path.exists(_PIPER_CONFIG):
+            urllib.request.urlretrieve(f"{_PIPER_VOICE_URL}/ru_RU-ruslan-medium.onnx.json", _PIPER_CONFIG)
+
+        _piper_voice = PiperVoice.load(_PIPER_MODEL, config_path=_PIPER_CONFIG)
+        logger.info("Piper TTS voice loaded")
+        return _piper_voice
+    except Exception as e:
+        logger.warning(f"Piper TTS unavailable: {e}")
+        return None
+
+
+def _tts_piper(text: str) -> Optional[str]:
+    """Neural TTS via Piper (offline, natural Russian voice)."""
+    try:
+        import io, wave
+        voice = _get_piper_voice()
+        if not voice:
+            return None
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as wf:
+            voice.synthesize_wav(text[:600], wf)
+        fd, path = tempfile.mkstemp(suffix=".wav")
+        os.close(fd)
+        with open(path, "wb") as f:
+            f.write(buf.getvalue())
+        return path
+    except Exception as e:
+        logger.warning(f"Piper TTS failed: {e}")
+        return None
+
+
+def _tts_edge(text: str) -> Optional[str]:
+    """Neural TTS via edge-tts (Microsoft, requires internet)."""
+    try:
+        import asyncio, edge_tts
+        fd, path = tempfile.mkstemp(suffix=".mp3")
+        os.close(fd)
+
+        async def _run():
+            comm = edge_tts.Communicate(text[:600], voice="ru-RU-SvetlanaNeural",
+                                        rate="+10%", pitch="+0Hz")
+            await comm.save(path)
+
+        asyncio.run(_run())
+        return path if os.path.getsize(path) > 1000 else None
+    except Exception as e:
+        logger.warning(f"edge-tts failed: {e}")
+        return None
+
+
+def _tts_gtts_fallback(text: str) -> Optional[str]:
+    """Fallback: gTTS (robotic but always available)."""
+    try:
+        import requests, urllib3
+        urllib3.disable_warnings()
+        import gtts.tts as gtts_mod
+        orig_session = gtts_mod.requests
+
+        class _NoSSL(type(requests)):
+            pass
+
+        import types
+        fake = types.SimpleNamespace(**{k: getattr(requests, k) for k in dir(requests)})
+
+        class _S(requests.Session):
+            def request(self, *a, **kw):
+                kw["verify"] = False
+                return super().request(*a, **kw)
+
+        fake.Session = _S
+        gtts_mod.requests = fake
+
         from gtts import gTTS
         tts = gTTS(text=text[:500], lang="ru", slow=False)
         fd, path = tempfile.mkstemp(suffix=".mp3")
         os.close(fd)
         tts.save(path)
+        gtts_mod.requests = orig_session
         return path
     except Exception as e:
-        logger.warning(f"TTS failed: {e}")
+        logger.warning(f"gTTS fallback failed: {e}")
         return None
+
+
+def _tts(text: str) -> Optional[str]:
+    """Try Piper → edge-tts → gTTS in order of quality."""
+    return _tts_piper(text) or _tts_edge(text) or _tts_gtts_fallback(text)
 
 
 def _tts_signal_slide1(s: dict) -> str:
