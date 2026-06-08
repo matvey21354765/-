@@ -111,150 +111,207 @@ def _sl_tp(price: float, atr: float, direction: str) -> dict:
     }
 
 
+def _macd_strength(closes: pd.Series) -> dict:
+    """Returns MACD with histogram magnitude for filtering weak signals."""
+    e12 = closes.ewm(span=12, adjust=False).mean()
+    e26 = closes.ewm(span=26, adjust=False).mean()
+    macd = e12 - e26
+    sig  = macd.ewm(span=9, adjust=False).mean()
+    hist = macd - sig
+    h_now  = float(hist.iloc[-1])
+    h_prev = float(hist.iloc[-2])
+    h_prev2 = float(hist.iloc[-3])
+    # Magnitude relative to price for coin-agnostic comparison
+    price = float(closes.iloc[-1])
+    magnitude = abs(h_now) / price * 10000  # basis points
+    return {
+        "cross_up":   h_now > 0 > h_prev,
+        "cross_down": h_now < 0 < h_prev,
+        "rising":     h_now > h_prev > h_prev2,
+        "falling":    h_now < h_prev < h_prev2,
+        "bullish":    h_now > 0,
+        "magnitude":  magnitude,
+    }
+
+
 def _score(df1m: pd.DataFrame, df5m: pd.DataFrame, df15m: pd.DataFrame) -> dict:
     """
-    Multi-timeframe confluence scoring.
-    Strategy: trade WITH the 15m trend, confirmed by 5m momentum, timed on 1m.
-    Only signal UP/DOWN when at least 3 independent signals agree.
+    Quality-over-quantity scoring: fewer signals, much higher accuracy.
+    Only fires UP/DOWN when MACD + trend + at least one confirming indicator agree.
+    FLAT = safer than a wrong signal.
     """
     c1, c5, c15 = df1m["close"], df5m["close"], df15m["close"]
     price = float(c1.iloc[-1])
-    bull_signals, bear_signals = [], []
 
-    # ── 15m TREND FILTER (highest weight — don't fight the trend) ──────────
+    # ── 15m TREND (master filter) ───────────────────────────────────────────
     ema21_15 = _ema(c15, 21)
     ema50_15 = _ema(c15, 50)
     rsi15    = _rsi(c15, 14)
-    trend_up   = ema21_15 > ema50_15 and price > ema21_15
-    trend_down = ema21_15 < ema50_15 and price < ema21_15
+    # Strict trend: EMA aligned AND price on correct side AND RSI not opposing
+    trend_up   = (ema21_15 > ema50_15) and (price > ema21_15) and (rsi15 < 72)
+    trend_down = (ema21_15 < ema50_15) and (price < ema21_15) and (rsi15 > 28)
+    trend_neutral = not trend_up and not trend_down
 
-    if trend_up:
-        bull_signals.append("Тренд 15м: бычий ↗")
-    elif trend_down:
-        bear_signals.append("Тренд 15м: медвежий ↘")
-
-    # ── 5m MOMENTUM ────────────────────────────────────────────────────────
-    rsi5  = _rsi(c5, 14)
+    # ── 5m MACD — primary signal (must fire for any trade) ──────────────────
+    m5 = _macd_strength(c5)
+    rsi5 = _rsi(c5, 14)
     ema9_5  = _ema(c5, 9)
     ema21_5 = _ema(c5, 21)
-    m5 = _macd(c5)
-    bbp5 = _bb_pos(c5)
+    bbp5    = _bb_pos(c5)
 
-    # EMA alignment 5m
-    if float(c5.iloc[-1]) > ema9_5 > ema21_5:
-        bull_signals.append("EMA 5м: бычье выравнивание")
-    elif float(c5.iloc[-1]) < ema9_5 < ema21_5:
-        bear_signals.append("EMA 5м: медвежье выравнивание")
+    # ── 1m confirmation ─────────────────────────────────────────────────────
+    rsi1   = _rsi(c1, 9)
+    ema9_1 = _ema(c1, 9)
+    m1     = _macd_strength(c1)
+    vr     = _vol_ratio(df1m)
 
-    # RSI 5m — only strong zones count
-    if rsi5 <= 35:
-        bull_signals.append(f"RSI(5м) {rsi5} — перепродан 💡")
-    elif rsi5 >= 65:
-        bear_signals.append(f"RSI(5м) {rsi5} — перекуплен ⚠️")
-    elif 45 <= rsi5 <= 60:
-        bull_signals.append(f"RSI(5м) {rsi5} — бычья зона")
-    elif 40 <= rsi5 < 45:
-        bear_signals.append(f"RSI(5м) {rsi5} — медвежья зона")
+    # Last 5 candles direction
+    c5v = df1m["close"].iloc[-5:].values
+    o5v = df1m["open"].iloc[-5:].values
+    bulls5 = sum(1 for c, o in zip(c5v, o5v) if c > o)
+    candle_bull = bulls5 >= 3
+    candle_bear = bulls5 <= 2
 
-    # MACD 5m crossover — strongest signal
+    # ── SCORING: use integer vote system ────────────────────────────────────
+    # Each factor votes +1 bull / -1 bear / 0 neutral
+    votes = []
+
+    # 5m MACD — weight 2 (most reliable)
     if m5["cross_up"]:
-        bull_signals.append("MACD(5м) кросс вверх 📈")
-        bull_signals.append("MACD(5м) импульс вверх")  # counts double on cross
+        votes += [1, 1]   # crossover = 2 votes
     elif m5["cross_down"]:
-        bear_signals.append("MACD(5м) кросс вниз 📉")
-        bear_signals.append("MACD(5м) импульс вниз")
-    elif m5["rising"]:
-        bull_signals.append("MACD(5м) растёт")
+        votes += [-1, -1]
+    elif m5["rising"] and m5["bullish"] and m5["magnitude"] > 0.3:
+        votes += [1]
+    elif m5["falling"] and not m5["bullish"] and m5["magnitude"] > 0.3:
+        votes += [-1]
     else:
-        bear_signals.append("MACD(5м) падает")
+        votes += [0]
 
-    # Bollinger squeeze / breakout 5m
-    if bbp5 < 10:
-        bull_signals.append("BB(5м) у нижней полосы — отскок")
-    elif bbp5 > 90:
-        bear_signals.append("BB(5м) у верхней полосы — откат")
+    # 15m trend — weight 2
+    if trend_up:
+        votes += [1, 1]
+    elif trend_down:
+        votes += [-1, -1]
+    else:
+        votes += [0]
 
-    # ── 1m TIMING ──────────────────────────────────────────────────────────
-    rsi1 = _rsi(c1, 9)
-    ema9_1  = _ema(c1, 9)
-    ema21_1 = _ema(c1, 21)
-    vr = _vol_ratio(df1m)
+    # 5m EMA alignment — weight 1
+    if float(c5.iloc[-1]) > ema9_5 > ema21_5:
+        votes += [1]
+    elif float(c5.iloc[-1]) < ema9_5 < ema21_5:
+        votes += [-1]
+    else:
+        votes += [0]
 
-    # EMA alignment 1m
-    if price > ema9_1 > ema21_1:
-        bull_signals.append("EMA 1м: цена выше EMA9 > EMA21")
-    elif price < ema9_1 < ema21_1:
-        bear_signals.append("EMA 1м: цена ниже EMA9 < EMA21")
+    # RSI 5m — only extremes — weight 1
+    if rsi5 <= 30:
+        votes += [1]
+    elif rsi5 >= 70:
+        votes += [-1]
+    elif 48 <= rsi5 <= 58:
+        votes += [1]   # mild bullish momentum zone
+    elif 42 <= rsi5 < 48:
+        votes += [-1]
+    else:
+        votes += [0]
 
-    # RSI 1m extremes only
-    if rsi1 <= 25:
-        bull_signals.append(f"RSI(1м) {rsi1} — сильная перепроданность")
-    elif rsi1 >= 75:
-        bear_signals.append(f"RSI(1м) {rsi1} — сильная перекупленность")
+    # 1m MACD direction — weight 1
+    if m1["bullish"] and m1["rising"]:
+        votes += [1]
+    elif not m1["bullish"] and m1["falling"]:
+        votes += [-1]
+    else:
+        votes += [0]
 
-    # Volume confirmation — only adds if matches direction
-    if vr >= 2.0:
-        if len(bull_signals) > len(bear_signals):
-            bull_signals.append(f"Объём {vr}x — подтверждает рост 🔥")
-        elif len(bear_signals) > len(bull_signals):
-            bear_signals.append(f"Объём {vr}x — подтверждает падение 🔥")
+    # Candle momentum 1m — weight 1
+    if candle_bull:
+        votes += [1]
+    elif candle_bear:
+        votes += [-1]
+    else:
+        votes += [0]
 
-    # Candle momentum 1m (last 5 candles)
-    last5_c = df1m["close"].iloc[-5:].values
-    last5_o = df1m["open"].iloc[-5:].values
-    bulls5 = sum(1 for c, o in zip(last5_c, last5_o) if c > o)
-    if bulls5 >= 4:
-        bull_signals.append("5 свечей 1м: бычий импульс")
-    elif bulls5 <= 1:
-        bear_signals.append("5 свечей 1м: медвежий импульс")
+    # Volume spike confirmation — weight 1 (direction-aware)
+    if vr >= 1.8:
+        bull_vote = sum(1 for v in votes if v > 0)
+        bear_vote = sum(1 for v in votes if v < 0)
+        if bull_vote > bear_vote:
+            votes += [1]
+        elif bear_vote > bull_vote:
+            votes += [-1]
 
-    # ── DECISION: winning side needs 2+ net advantage AND at least 3 signals ─
-    nb, ns = len(bull_signals), len(bear_signals)
-    net = nb - ns
+    # ── DECISION ────────────────────────────────────────────────────────────
+    total = sum(votes)
+    max_votes = len(votes)
+    bull_pct = sum(1 for v in votes if v > 0) / max_votes
+    bear_pct = sum(1 for v in votes if v < 0) / max_votes
 
-    if net >= 2 and nb >= 3:
-        direction = "UP"
-        if trend_down and nb < 5:
+    # Require strong majority (>60%) AND net score
+    # Also block if RSI in extreme opposite zone
+    if total >= 3 and bull_pct >= 0.55:
+        if rsi5 >= 75 or rsi1 >= 80:  # already overbought — too risky
             direction = "FLAT"
-    elif net <= -2 and ns >= 3:
-        direction = "DOWN"
-        if trend_up and ns < 5:
+        elif trend_down and total < 5:  # against 15m trend — need very strong signal
             direction = "FLAT"
+        else:
+            direction = "UP"
+    elif total <= -3 and bear_pct >= 0.55:
+        if rsi5 <= 25 or rsi1 <= 20:  # already oversold — too risky
+            direction = "FLAT"
+        elif trend_up and total > -5:
+            direction = "FLAT"
+        else:
+            direction = "DOWN"
     else:
         direction = "FLAT"
 
-    # Confidence: scales with net advantage and trend alignment
-    net_abs = abs(net)
-    trend_bonus = 12 if (direction == "UP" and trend_up) or (direction == "DOWN" and trend_down) else 0
+    # ── CONFIDENCE ──────────────────────────────────────────────────────────
+    abs_total = abs(total)
+    trend_aligned = (direction == "UP" and trend_up) or (direction == "DOWN" and trend_down)
+    macd_cross = m5["cross_up"] or m5["cross_down"]
+    vol_conf = vr >= 1.5
+
     if direction == "FLAT":
-        conf = max(35, 40 - net_abs * 3)  # show partial confidence even for FLAT
+        conf = 40
     else:
-        conf = min(48 + net_abs * 8 + trend_bonus, 94)
+        base = 52
+        base += abs_total * 5       # more votes = more confident
+        base += 10 if trend_aligned else 0
+        base += 8  if macd_cross    else 0
+        base += 5  if vol_conf      else 0
+        conf = min(base, 94)
 
-    # Score for legacy compatibility
-    score = float(net * 12)
-    score = max(-100.0, min(100.0, score))
-
-    # Pick top 3 signals for display
+    # ── SIGNALS TEXT ────────────────────────────────────────────────────────
+    sigs = []
     if direction == "UP":
-        top_sigs = bull_signals[:3]
+        if trend_up:         sigs.append("Тренд 15м: бычий ↗")
+        if m5["cross_up"]:   sigs.append("MACD(5м) кросс вверх 📈")
+        elif m5["rising"]:   sigs.append("MACD(5м) растёт")
+        if rsi5 <= 35:       sigs.append(f"RSI(5м) {rsi5} — перепродан 💡")
+        if vr >= 1.8:        sigs.append(f"Объём {vr}x — рост подтверждён 🔥")
+        if not sigs:         sigs.append("Бычий импульс по всем таймфреймам")
     elif direction == "DOWN":
-        top_sigs = bear_signals[:3]
+        if trend_down:        sigs.append("Тренд 15м: медвежий ↘")
+        if m5["cross_down"]:  sigs.append("MACD(5м) кросс вниз 📉")
+        elif m5["falling"]:   sigs.append("MACD(5м) падает")
+        if rsi5 >= 65:        sigs.append(f"RSI(5м) {rsi5} — перекуплен ⚠️")
+        if vr >= 1.8:         sigs.append(f"Объём {vr}x — падение подтверждено 🔥")
+        if not sigs:          sigs.append("Медвежий импульс по всем таймфреймам")
     else:
-        if nb > ns:
-            top_sigs = bull_signals[:2] + [f"Шорт-сигналов: {ns} — недостаточно перевеса"]
-        elif ns > nb:
-            top_sigs = bear_signals[:2] + [f"Лонг-сигналов: {nb} — недостаточно перевеса"]
-        else:
-            top_sigs = ["Рынок в равновесии — ждём движения"]
+        if trend_neutral:    sigs.append("15м тренд неопределён — боковик")
+        elif abs(total) < 2: sigs.append("Сигналы противоречат друг другу")
+        else:                sigs.append("Ждём подтверждения от MACD")
 
+    score = float(total * 10)
+    score = max(-100.0, min(100.0, score))
     atr = _atr(df1m)
     levels = _sl_tp(price, atr, direction)
 
     return {
         "price": price, "score": score, "direction": direction,
         "confidence": conf, "rsi1": rsi1, "rsi5": rsi5,
-        "signals": top_sigs, **levels,
+        "signals": sigs[:3], **levels,
     }
 
 
