@@ -264,7 +264,8 @@ def format_forecast(f: dict) -> str:
 
     bar = "█" * max(0, min(10, round(conf / 10))) + "░" * (10 - max(0, min(10, round(conf / 10))))
     price_str = f"${price:,.2f}" if price >= 1000 else f"${price:.4f}" if price >= 1 else f"${price:.6f}"
-    sigs_text = "\n".join(f"  • {s}" for s in sigs) if sigs else "  • Нейтральные условия"
+    import html as _html
+    sigs_text = "\n".join(f"  • {_html.escape(s)}" for s in sigs) if sigs else "  • Нейтральные условия"
 
     src_note = "" if source == "kraken" else "\n<i>📡 Данные: технический анализ</i>"
 
