@@ -182,8 +182,6 @@ async def upload_video(video_path: str, title: str) -> bool:
     return await browser_upload(video_path, title)
 
 
-async def _upload_via_api(video_path: str, title: str) -> bool:
-
 
 # ── high-level helpers ────────────────────────────────────────────────────────
 

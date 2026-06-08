@@ -11,9 +11,9 @@ logger = logging.getLogger(__name__)
 NEWS_CHANNEL = "@Predict00000"
 
 _RSS_FEEDS = [
-    ("Cointelegraph", "https://cointelegraph.com/rss"),
-    ("CoinDesk",      "https://www.coindesk.com/arc/outboundfeeds/rss/"),
-    ("Decrypt",       "https://decrypt.co/feed"),
+    ("Forklog",       "https://forklog.com/feed/"),
+    ("CryptoNews RU", "https://ru.cryptonews.com/news/feed/"),
+    ("Cointelegraph RU", "https://ru.cointelegraph.com/rss"),
 ]
 
 _TIMEOUT = aiohttp.ClientTimeout(total=15)
