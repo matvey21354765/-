@@ -20,7 +20,7 @@ def main_menu(notifications: bool = False) -> InlineKeyboardMarkup:
         [Btn(text="📊 Статистика", callback_data="stats_menu"),
          Btn(text="📋 История", callback_data="hist_ALL_0")],
         [Btn(text="🎯 Polymarket Pro", callback_data="poly_pro"),
-         Btn(text="🌐 Polymarket", url=POLY_URL)],
+         Btn(text="🏆 Точность", callback_data="leaderboard")],
         [Btn(text="💳 Подписка", callback_data="subscription"),
          Btn(text=notif_text, callback_data="toggle_notifications")],
     ])

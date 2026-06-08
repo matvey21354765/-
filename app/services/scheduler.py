@@ -27,6 +27,8 @@ def setup_scheduler(scheduler: AsyncIOScheduler, bot: Bot):
                       id="daily_term", replace_existing=True)
     scheduler.add_job(_run_btc_alerts, "interval", minutes=5, args=[bot],
                       id="btc_alerts", replace_existing=True, misfire_grace_time=60)
+    scheduler.add_job(_run_resolve_forecasts, "interval", minutes=5,
+                      id="resolve_forecasts", replace_existing=True, misfire_grace_time=60)
     logger.info(f"Scheduler ready: signals/{settings.SIGNAL_INTERVAL_MINUTES}min, BTC alerts 5min, Polymarket, News, Terms")
 
 
@@ -92,6 +94,14 @@ async def _run_btc_alerts(bot: Bot):
         logger.info(f"BTC alerts sent: {[a['type'] for a in alerts]}")
     except Exception as e:
         logger.error(f"BTC alerts job error: {e}")
+
+
+async def _run_resolve_forecasts():
+    try:
+        from app.services.leaderboard import resolve_forecasts
+        await resolve_forecasts()
+    except Exception as e:
+        logger.error(f"resolve_forecasts job error: {e}")
 
 
 async def _run_polymarket(bot: Bot):

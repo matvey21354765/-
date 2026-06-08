@@ -135,6 +135,19 @@ class StrategyStats(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class ForecastLog(Base):
+    __tablename__ = "forecast_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    coin: Mapped[str] = mapped_column(String(10), nullable=False)
+    direction: Mapped[str] = mapped_column(String(8), nullable=False)
+    price_entry: Mapped[float] = mapped_column(Float, nullable=False)
+    price_exit: Mapped[Optional[float]] = mapped_column(Float)
+    correct: Mapped[Optional[bool]] = mapped_column(Boolean)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+
 class PromoCode(Base):
     __tablename__ = "promo_codes"
 
@@ -150,6 +163,18 @@ class PromoCode(Base):
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS forecast_log (
+                id SERIAL PRIMARY KEY,
+                coin VARCHAR(10) NOT NULL,
+                direction VARCHAR(8) NOT NULL,
+                price_entry DOUBLE PRECISION NOT NULL,
+                price_exit DOUBLE PRECISION,
+                correct BOOLEAN,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                resolved_at TIMESTAMPTZ
+            )
+        """))
         await conn.execute(text(
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS notifications_enabled BOOLEAN DEFAULT FALSE"
         ))

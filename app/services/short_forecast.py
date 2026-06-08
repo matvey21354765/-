@@ -73,6 +73,44 @@ def _vol_ratio(df: pd.DataFrame) -> float:
     return round(float(df["volume"].iloc[-1] / avg), 2) if avg > 0 else 1.0
 
 
+def _atr(df: pd.DataFrame, p: int = 14) -> float:
+    h, l, c = df["high"], df["low"], df["close"]
+    prev_c = c.shift(1)
+    tr = pd.concat([h - l, (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
+    return float(tr.rolling(p).mean().iloc[-1])
+
+
+def _sl_tp(price: float, atr: float, direction: str) -> dict:
+    """Calculate SL/TP levels and recommended leverage based on ATR."""
+    sl_mult, tp1_mult, tp2_mult = 1.5, 1.5, 3.0
+    sl_dist = atr * sl_mult
+    sl_pct = sl_dist / price * 100
+
+    if direction == "UP":
+        sl  = price - sl_dist
+        tp1 = price + atr * tp1_mult
+        tp2 = price + atr * tp2_mult
+    elif direction == "DOWN":
+        sl  = price + sl_dist
+        tp1 = price - atr * tp1_mult
+        tp2 = price - atr * tp2_mult
+    else:
+        return {}
+
+    # Leverage: lower when volatile
+    if sl_pct > 1.0:
+        lev = "3–5x"
+    elif sl_pct > 0.5:
+        lev = "5–10x"
+    else:
+        lev = "10–20x"
+
+    return {
+        "sl": round(sl, 2), "tp1": round(tp1, 2), "tp2": round(tp2, 2),
+        "sl_pct": round(sl_pct, 2), "leverage": lev,
+    }
+
+
 def _score(df1m: pd.DataFrame, df5m: pd.DataFrame) -> dict:
     c1, c5 = df1m["close"], df5m["close"]
     price = float(c1.iloc[-1])
@@ -140,10 +178,13 @@ def _score(df1m: pd.DataFrame, df5m: pd.DataFrame) -> dict:
     conf  = min(int(abs(score) * 0.55 + 42), 94)
     direction = "UP" if score > 8 else "DOWN" if score < -8 else "FLAT"
 
+    atr = _atr(df1m)
+    levels = _sl_tp(price, atr, direction)
+
     return {
         "price": price, "score": score, "direction": direction,
         "confidence": conf, "rsi1": rsi1, "rsi5": rsi5,
-        "signals": signals[:3],
+        "signals": signals[:3], **levels,
     }
 
 
@@ -157,6 +198,11 @@ async def get_short_forecast(coin: str) -> dict:
         result = _score(df1m, df5m)
         result["coin"] = coin
         result["source"] = "kraken"
+        try:
+            from app.services.leaderboard import log_forecast
+            await log_forecast(coin, result["direction"], result["price"])
+        except Exception:
+            pass
         return result
     except Exception as e:
         logger.warning(f"Kraken failed for {coin}: {e} — falling back to DB+CoinGecko")
@@ -253,28 +299,48 @@ def format_forecast(f: dict) -> str:
     now    = datetime.now(timezone.utc).strftime("%H:%M UTC")
 
     if direction == "UP":
-        dir_emoji, dir_text = "🟢", "РОСТ ↑"
-        poly_action = "✅ Ставить YES — цена вырастет"
+        dir_emoji, dir_text = "🟢", "ЛОНГ ↑"
+        poly_action = "✅ Polymarket: ставить YES"
     elif direction == "DOWN":
-        dir_emoji, dir_text = "🔴", "ПАДЕНИЕ ↓"
-        poly_action = "❌ Ставить NO — цена не вырастет"
+        dir_emoji, dir_text = "🔴", "ШОРТ ↓"
+        poly_action = "❌ Polymarket: ставить NO"
     else:
         dir_emoji, dir_text = "⚪", "БОКОВИК ↔"
-        poly_action = "⏸ Пропусти — нет чёткого движения"
+        poly_action = "⏸ Polymarket: пропусти"
+
+    def _p(v: float) -> str:
+        return f"${v:,.2f}" if v >= 1000 else f"${v:.4f}" if v >= 1 else f"${v:.6f}"
 
     bar = "█" * max(0, min(10, round(conf / 10))) + "░" * (10 - max(0, min(10, round(conf / 10))))
-    price_str = f"${price:,.2f}" if price >= 1000 else f"${price:.4f}" if price >= 1 else f"${price:.6f}"
     import html as _html
     sigs_text = "\n".join(f"  • {_html.escape(s)}" for s in sigs) if sigs else "  • Нейтральные условия"
-
     src_note = "" if source == "kraken" else "\n<i>📡 Данные: технический анализ</i>"
+
+    sl  = f.get("sl")
+    tp1 = f.get("tp1")
+    tp2 = f.get("tp2")
+    lev = f.get("leverage", "")
+    slp = f.get("sl_pct", 0)
+
+    if sl and tp1 and tp2 and direction != "FLAT":
+        tp1_pct = abs(tp1 - price) / price * 100
+        levels_block = (
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"📍 Вход: <b>{_p(price)}</b>\n"
+            f"🛑 SL: <b>{_p(sl)}</b>  <i>(-{slp:.2f}%)</i>\n"
+            f"🎯 TP1: <b>{_p(tp1)}</b>  <i>(+{tp1_pct:.2f}%)</i>\n"
+            f"🎯 TP2: <b>{_p(tp2)}</b>  <i>(1:2)</i>\n"
+            f"⚡ Плечо: <b>{lev}</b>\n"
+        )
+    else:
+        levels_block = f"━━━━━━━━━━━━━━━━━━━━\n💵 Цена: <b>{_p(price)}</b>\n"
 
     return (
         f"{dir_emoji} <b>{coin}/USDT — {dir_text}</b>\n"
         f"⏱ Горизонт: <b>5–10 минут</b>  ·  {now}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"💵 Цена: <b>{price_str}</b>\n"
         f"📊 Уверенность: <b>{conf}%</b>  <code>{bar}</code>\n"
+        f"{levels_block}"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"<b>Сигналы:</b>\n{sigs_text}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
