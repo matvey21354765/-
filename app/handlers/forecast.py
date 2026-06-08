@@ -92,9 +92,10 @@ async def cb_forecast(call: CallbackQuery):
         await call.message.edit_text(text, reply_markup=_forecast_kb(coin),
                                       parse_mode="HTML", disable_web_page_preview=True)
     except Exception as e:
+        import html
         logger.error(f"Forecast {coin} error: {type(e).__name__}: {e}")
         await call.message.edit_text(
             f"❌ <b>Ошибка {coin}</b>\n\n"
-            f"<code>{type(e).__name__}: {str(e)[:300]}</code>",
+            f"<code>{html.escape(f'{type(e).__name__}: {str(e)[:300]}')}</code>",
             reply_markup=_forecast_kb(coin), parse_mode="HTML"
         )
