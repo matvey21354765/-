@@ -33,7 +33,7 @@ async def _kraken_df(coin: str, interval_min: int, limit: int = 60) -> pd.DataFr
     return df
 
 
-def _rsi(closes: pd.Series, p: int = 9) -> float:
+def _rsi(closes: pd.Series, p: int = 14) -> float:
     d = closes.diff()
     g = d.clip(lower=0).rolling(p).mean()
     l = (-d.clip(upper=0)).rolling(p).mean()
@@ -58,78 +58,74 @@ def _atr(df: pd.DataFrame, p: int = 14) -> float:
 
 
 def _sl_tp(price: float, atr: float, direction: str) -> dict:
-    sl_mult, tp1_mult, tp2_mult = 1.5, 1.5, 3.0
-    sl_dist = atr * sl_mult
+    sl_dist = atr * 1.5
     sl_pct = sl_dist / price * 100
-
     if direction == "UP":
         sl  = price - sl_dist
-        tp1 = price + atr * tp1_mult
-        tp2 = price + atr * tp2_mult
+        tp1 = price + atr * 1.5
+        tp2 = price + atr * 3.0
     elif direction == "DOWN":
         sl  = price + sl_dist
-        tp1 = price - atr * tp1_mult
-        tp2 = price - atr * tp2_mult
+        tp1 = price - atr * 1.5
+        tp2 = price - atr * 3.0
     else:
         return {}
-
     lev = "3–5x" if sl_pct > 1.0 else "5–10x" if sl_pct > 0.5 else "10–20x"
     return {"sl": round(sl, 2), "tp1": round(tp1, 2), "tp2": round(tp2, 2),
             "sl_pct": round(sl_pct, 2), "leverage": lev}
 
 
-def _macd_strength(closes: pd.Series) -> dict:
+def _macd(closes: pd.Series) -> dict:
     e12 = closes.ewm(span=12, adjust=False).mean()
     e26 = closes.ewm(span=26, adjust=False).mean()
     macd = e12 - e26
     sig  = macd.ewm(span=9, adjust=False).mean()
     hist = macd - sig
-    h_now   = float(hist.iloc[-1])
-    h_prev  = float(hist.iloc[-2])
-    h_prev2 = float(hist.iloc[-3])
+    h0, h1, h2 = float(hist.iloc[-1]), float(hist.iloc[-2]), float(hist.iloc[-3])
     price = float(closes.iloc[-1])
-    magnitude = abs(h_now) / price * 10000
+    mag = abs(h0) / price * 10000
     return {
-        "cross_up":   h_now > 0 > h_prev,
-        "cross_down": h_now < 0 < h_prev,
-        "rising":     h_now > h_prev > h_prev2,
-        "falling":    h_now < h_prev < h_prev2,
-        "bullish":    h_now > 0,
-        "magnitude":  magnitude,
+        "cross_up":   h0 > 0 > h1,
+        "cross_down": h0 < 0 < h1,
+        "rising":     h0 > h1 > h2,
+        "falling":    h0 < h1 < h2,
+        "bullish":    h0 > 0,
+        "magnitude":  mag,
     }
 
 
 def _score(df1m: pd.DataFrame, df5m: pd.DataFrame, df15m: pd.DataFrame) -> dict:
     c1, c5, c15 = df1m["close"], df5m["close"], df15m["close"]
     price = float(c1.iloc[-1])
-    rsi1  = _rsi(c1, 9)
     rsi5  = _rsi(c5, 14)
+    rsi15 = _rsi(c15, 14)
     vr    = _vol_ratio(df5m)
 
     # ── FLAT: dead market ───────────────────────────────────────────────────
-    atr5 = _atr(df5m, 14)
+    atr5    = _atr(df5m, 14)
     atr_pct = atr5 / price * 100
     if atr_pct < 0.07:
         return {"price": price, "score": 0.0, "direction": "FLAT", "confidence": 38,
-                "rsi1": rsi1, "rsi5": rsi5,
-                "signals": [f"Флэт — ATR {atr_pct:.3f}%, нет движения"]}
+                "rsi1": rsi5, "rsi5": rsi5,
+                "signals": [f"Флэт — ATR {atr_pct:.3f}%, рынок без движения"]}
 
-    # ── INDICATORS ──────────────────────────────────────────────────────────
-    m5  = _macd_strength(c5)
-    m15 = _macd_strength(c15)
+    m5  = _macd(c5)
+    m15 = _macd(c15)
 
+    # 15m trend
     ema21_15 = _ema(c15, 21)
-    trend_bull = price > ema21_15 * 1.0003
-    trend_bear = price < ema21_15 * 0.9997
+    ema9_15  = _ema(c15, 9)
+    trend_bull = price > ema21_15 * 1.0003 and ema9_15 > ema21_15
+    trend_bear = price < ema21_15 * 0.9997 and ema9_15 < ema21_15
 
-    # 5m candle majority: last 6 candles
-    c5v6 = df5m["close"].iloc[-6:].values
-    o5v6 = df5m["open"].iloc[-6:].values
-    bulls_5m = sum(1 for c, o in zip(c5v6, o5v6) if c > o)
-    majority_bull_5m = bulls_5m >= 4
-    majority_bear_5m = bulls_5m <= 2
+    # 5m candle majority (last 6)
+    c5v = df5m["close"].iloc[-6:].values
+    o5v = df5m["open"].iloc[-6:].values
+    bulls = sum(1 for c, o in zip(c5v, o5v) if c > o)
+    majority_bull = bulls >= 4
+    majority_bear = bulls <= 2
 
-    # 1m: last 3 candles momentum
+    # 1m momentum (last 3)
     c1v = df1m["close"].iloc[-4:].values
     o1v = df1m["open"].iloc[-4:].values
     last3_bull = all(c1v[i] > o1v[i] for i in range(1, 4))
@@ -139,97 +135,88 @@ def _score(df1m: pd.DataFrame, df5m: pd.DataFrame, df15m: pd.DataFrame) -> dict:
 
     roc5 = (float(c5.iloc[-1]) - float(c5.iloc[-4])) / float(c5.iloc[-4]) * 100 if len(c5) >= 4 else 0
 
-    # ── GATE: require MACD crossover OR RSI extreme ─────────────────────────
-    has_cross_up   = m5["cross_up"]   or m15["cross_up"]
-    has_cross_down = m5["cross_down"] or m15["cross_down"]
-    rsi_oversold   = rsi5 <= 28
-    rsi_overbought = rsi5 >= 72
-    has_anchor_bull = has_cross_up   or rsi_oversold
-    has_anchor_bear = has_cross_down or rsi_overbought
+    # ── STRICT GATE ─────────────────────────────────────────────────────────
+    # Require: 5m MACD cross OR (15m MACD cross AND 5m MACD aligned)
+    # AND 15m trend must agree with direction
+    cross_up_strong   = m5["cross_up"] or (m15["cross_up"]   and m5["bullish"])
+    cross_down_strong = m5["cross_down"] or (m15["cross_down"] and not m5["bullish"])
 
-    if not has_anchor_bull and not has_anchor_bear:
+    rsi_oversold  = rsi5 <= 25
+    rsi_overbought = rsi5 >= 75
+
+    anchor_bull = (cross_up_strong   or rsi_oversold)  and trend_bull
+    anchor_bear = (cross_down_strong or rsi_overbought) and trend_bear
+
+    if not anchor_bull and not anchor_bear:
         return {"price": price, "score": 0.0, "direction": "FLAT", "confidence": 40,
-                "rsi1": rsi1, "rsi5": rsi5,
-                "signals": ["Нет MACD кросса / RSI экстремума — ждём сигнал"]}
+                "rsi1": rsi5, "rsi5": rsi5,
+                "signals": ["Нет подтверждённого сигнала — ждём"]}
 
     # ── VOTES (max ±9) ──────────────────────────────────────────────────────
-    # MACD 5m: weight 0–3
     if m5["cross_up"]:                                              macd_vote = 3
-    elif m5["bullish"] and m5["rising"] and m5["magnitude"] > 0.1: macd_vote = 1
+    elif m5["bullish"] and m5["rising"] and m5["magnitude"] > 0.1: macd_vote = 2
+    elif m5["bullish"]:                                             macd_vote = 1
     elif m5["cross_down"]:                                          macd_vote = -3
-    elif not m5["bullish"] and m5["falling"] and m5["magnitude"] > 0.1: macd_vote = -1
+    elif not m5["bullish"] and m5["falling"] and m5["magnitude"] > 0.1: macd_vote = -2
+    elif not m5["bullish"]:                                         macd_vote = -1
     else:                                                           macd_vote = 0
 
-    # 15m trend: weight 0–2
-    trend_vote = 2 if trend_bull else -2 if trend_bear else 0
+    trend_vote   = 2 if trend_bull else -2 if trend_bear else 0
+    candle_vote  = 2 if majority_bull else -2 if majority_bear else 0
+    mom_vote     = 1 if (accel_up or last3_bull) else -1 if (accel_down or last3_bear) else 0
+    roc_vote     = 1 if roc5 > 0.15 else -1 if roc5 < -0.15 else 0
 
-    # 5m candle majority: weight 0–2
-    candle5_vote = 2 if majority_bull_5m else -2 if majority_bear_5m else 0
+    total = macd_vote + trend_vote + candle_vote + mom_vote + roc_vote  # max ±9
 
-    # 1m momentum: weight 0–1
-    mom_vote = 1 if (accel_up or last3_bull) else -1 if (accel_down or last3_bear) else 0
-
-    # ROC 5m: weight 0–1
-    roc_vote = 1 if roc5 > 0.15 else -1 if roc5 < -0.15 else 0
-
-    total = macd_vote + trend_vote + candle5_vote + mom_vote + roc_vote  # max ±9
-
-    # ── DECISION: require total ≥ 5 ─────────────────────────────────────────
-    if total >= 5 and has_anchor_bull:
-        if rsi5 >= 78 or (trend_bear and total < 7):
-            direction = "FLAT"
-        else:
-            direction = "UP"
-    elif total <= -5 and has_anchor_bear:
-        if rsi5 <= 22 or (trend_bull and total > -7):
-            direction = "FLAT"
-        else:
-            direction = "DOWN"
+    # ── DECISION: strict confluence ─────────────────────────────────────────
+    # Block UP if RSI overbought; block DOWN if RSI oversold
+    # Require total >= 6 (was 5) for even higher quality
+    if total >= 6 and anchor_bull and rsi5 < 70:
+        direction = "UP"
+    elif total <= -6 and anchor_bear and rsi5 > 30:
+        direction = "DOWN"
     else:
         direction = "FLAT"
 
     # ── CONFIDENCE ──────────────────────────────────────────────────────────
-    trend_aligned = (direction == "UP" and trend_bull) or (direction == "DOWN" and trend_bear)
     if direction == "FLAT":
         conf = 40
     else:
-        base  = 55 + abs(total) * 4
-        base += 10 if trend_aligned else 0
-        base += 8  if (m5["cross_up"] or m5["cross_down"]) else 0
-        base += 5  if vr >= 1.3 else 0
-        conf  = min(base, 94)
+        base  = 58 + abs(total) * 4
+        base += 8 if (m5["cross_up"] or m5["cross_down"]) else 0
+        base += 5 if vr >= 1.2 else 0
+        base += 5 if (rsi15 < 40 and direction == "UP") or (rsi15 > 60 and direction == "DOWN") else 0
+        conf  = min(base, 93)
 
     # ── SIGNALS TEXT ────────────────────────────────────────────────────────
     sigs = []
     if direction == "UP":
-        if m5["cross_up"]:       sigs.append("MACD(5м) кросс вверх 📈")
-        elif m15["cross_up"]:    sigs.append("MACD(15м) кросс вверх 📈")
-        if trend_bull:           sigs.append("Цена выше EMA21(15м) — тренд вверх ↗")
-        if majority_bull_5m:     sigs.append(f"{bulls_5m}/6 свечей 5м зелёные 🟢")
-        if accel_up:             sigs.append("3 ускоряющихся 1м свечи 🚀")
-        if roc5 > 0.15:          sigs.append(f"ROC 5м: +{roc5:.2f}%")
-        if rsi_oversold:         sigs.append(f"RSI(5м) {rsi5} — перепродан 💡")
-        if not sigs:             sigs.append("Бычья конфлюэнция 1м/5м/15м")
+        if m5["cross_up"]:      sigs.append("MACD(5м) кросс вверх 📈")
+        elif m15["cross_up"]:   sigs.append("MACD(15м) кросс вверх + 5м бычий 📈")
+        if trend_bull:          sigs.append("Тренд вверх: EMA9 > EMA21 (15м) ↗")
+        if majority_bull:       sigs.append(f"{bulls}/6 свечей 5м зелёные 🟢")
+        if accel_up:            sigs.append("3 ускоряющихся 1м свечи 🚀")
+        elif last3_bull:        sigs.append("3 бычьих 1м свечи подряд 🟢")
+        if roc5 > 0.15:         sigs.append(f"ROC 5м: +{roc5:.2f}%")
+        if rsi_oversold:        sigs.append(f"RSI(5м) {rsi5} — перепродан 💡")
     elif direction == "DOWN":
-        if m5["cross_down"]:     sigs.append("MACD(5м) кросс вниз 📉")
-        elif m15["cross_down"]:  sigs.append("MACD(15м) кросс вниз 📉")
-        if trend_bear:           sigs.append("Цена ниже EMA21(15м) — тренд вниз ↘")
-        if majority_bear_5m:     sigs.append(f"{6-bulls_5m}/6 свечей 5м красные 🔴")
-        if accel_down:           sigs.append("3 ускоряющихся 1м свечи вниз 📉")
-        if roc5 < -0.15:         sigs.append(f"ROC 5м: {roc5:.2f}%")
-        if rsi_overbought:       sigs.append(f"RSI(5м) {rsi5} — перекуплен ⚠️")
-        if not sigs:             sigs.append("Медвежья конфлюэнция 1м/5м/15м")
+        if m5["cross_down"]:    sigs.append("MACD(5м) кросс вниз 📉")
+        elif m15["cross_down"]: sigs.append("MACD(15м) кросс вниз + 5м медвежий 📉")
+        if trend_bear:          sigs.append("Тренд вниз: EMA9 < EMA21 (15м) ↘")
+        if majority_bear:       sigs.append(f"{6-bulls}/6 свечей 5м красные 🔴")
+        if accel_down:          sigs.append("3 ускоряющихся 1м свечи вниз 📉")
+        elif last3_bear:        sigs.append("3 медвежьих 1м свечи подряд 🔴")
+        if roc5 < -0.15:        sigs.append(f"ROC 5м: {roc5:.2f}%")
+        if rsi_overbought:      sigs.append(f"RSI(5м) {rsi5} — перекуплен ⚠️")
     else:
-        sigs.append(f"Скор {total:+d} из ±9 — ниже порога (нужно ±5)")
+        sigs.append(f"Скор {total:+d}/±9 — нет чёткого сигнала")
 
-    score = float(total * 10)
-    score = max(-100.0, min(100.0, score))
-    atr1  = _atr(df1m)
+    atr1   = _atr(df1m)
     levels = _sl_tp(price, atr1, direction)
 
     return {
-        "price": price, "score": score, "direction": direction,
-        "confidence": conf, "rsi1": rsi1, "rsi5": rsi5,
+        "price": price, "score": float(total * 10), "direction": direction,
+        "confidence": conf, "rsi1": rsi5, "rsi5": rsi5,
         "signals": sigs[:3], **levels,
     }
 
@@ -257,9 +244,7 @@ async def get_short_forecast(coin: str) -> dict:
 
 
 async def _forecast_from_db(coin: str) -> dict:
-    """Fallback forecast using saved signal indicators + CoinGecko current price."""
     import aiohttp
-
     cg_ids = {"BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana"}
     cg_id = cg_ids.get(coin, "bitcoin")
     price, change = 0.0, 0.0
@@ -280,38 +265,32 @@ async def _forecast_from_db(coin: str) -> dict:
         sigs = []
 
     score, signals_list = 0.0, []
-
     if sigs:
         sig = sigs[0]
         rsi = sig.rsi_1h or 50.0
         if rsi >= 70:   score -= 22; signals_list.append(f"RSI {rsi:.0f} — перекуплен ⚠️")
         elif rsi <= 30: score += 22; signals_list.append(f"RSI {rsi:.0f} — перепродан 💡")
-
         if sig.direction == "LONG":
             score += 18; signals_list.append(f"Последний сигнал: ЛОНГ {sig.confidence:.0f}% 📈")
         elif sig.direction == "SHORT":
             score -= 18; signals_list.append(f"Последний сигнал: ШОРТ {sig.confidence:.0f}% 📉")
-
         if not price and sig.entry_price:
             price = sig.entry_price
-
         if change > 3:    score += 10; signals_list.append(f"Рост +{change:.1f}% за 24ч 📈")
         elif change < -3: score -= 10; signals_list.append(f"Падение {change:.1f}% за 24ч 📉")
     else:
         if change > 2:    score += 15; signals_list.append(f"Рост +{change:.1f}% за 24ч 📈")
         elif change < -2: score -= 15; signals_list.append(f"Падение {change:.1f}% за 24ч 📉")
-        else:             signals_list.append("Нажми BTC/ETH/SOL в меню для точного прогноза")
+        else:             signals_list.append("Нет данных — используй BTC/ETH/SOL для точного прогноза")
 
     score = max(-100.0, min(100.0, score))
     conf  = min(int(abs(score) * 0.45 + 45), 88)
     direction = "UP" if score > 8 else "DOWN" if score < -8 else "FLAT"
-
     return {
         "coin": coin, "price": price, "change_24h": change,
         "score": score, "direction": direction, "confidence": conf,
         "rsi1": sigs[0].rsi_1h if sigs else 50.0,
-        "rsi5": 50.0, "signals": signals_list[:3],
-        "source": "db",
+        "rsi5": 50.0, "signals": signals_list[:3], "source": "db",
     }
 
 
