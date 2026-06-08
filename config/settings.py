@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     TIKTOK_CLIENT_SECRET: str = ""
     TIKTOK_ACCESS_TOKEN: str = ""
     TIKTOK_ENABLED: bool = False
+    # False = inbox/draft (Sandbox, video.upload scope)
+    # True  = direct public post (Production, video.publish scope)
+    TIKTOK_DIRECT_POST: bool = False
 
     @field_validator("BINANCE_SPOT_URL", mode="before")
     @classmethod

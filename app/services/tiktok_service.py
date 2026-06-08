@@ -38,28 +38,42 @@ async def _headers() -> Optional[dict]:
 
 # ── upload helpers ─────────────────────────────────────────────────────────────
 
-async def _init_upload(file_size: int, title: str, hdrs: dict) -> Optional[dict]:
-    chunks = math.ceil(file_size / _CHUNK)
-    payload = {
-        "post_info": {
-            "title": title[:150],
-            "privacy_level": "PUBLIC_TO_EVERYONE",
-            "disable_duet": False,
-            "disable_comment": False,
-            "disable_stitch": False,
-            "video_cover_timestamp_ms": 1000,
-        },
-        "source_info": {
-            "source": "FILE_UPLOAD",
-            "video_size": file_size,
-            "chunk_size": _CHUNK,
-            "total_chunk_count": chunks,
-        },
-    }
+async def _init_upload(file_size: int, title: str, hdrs: dict,
+                       direct_post: bool = False) -> Optional[dict]:
+    if direct_post:
+        # Production: public direct post (requires video.publish scope)
+        payload = {
+            "post_info": {
+                "title": title[:150],
+                "privacy_level": "PUBLIC_TO_EVERYONE",
+                "disable_duet": False,
+                "disable_comment": False,
+                "disable_stitch": False,
+                "video_cover_timestamp_ms": 1000,
+            },
+            "source_info": {
+                "source": "FILE_UPLOAD",
+                "video_size": file_size,
+                "chunk_size": _CHUNK,
+                "total_chunk_count": math.ceil(file_size / _CHUNK),
+            },
+        }
+        endpoint = f"{_BASE}/post/publish/video/init/"
+    else:
+        # Sandbox / draft inbox (requires only video.upload scope)
+        payload = {
+            "source_info": {
+                "source": "FILE_UPLOAD",
+                "video_size": file_size,
+                "chunk_size": file_size,
+                "total_chunk_count": 1,
+            },
+        }
+        endpoint = f"{_BASE}/post/publish/inbox/video/init/"
+
     try:
         async with aiohttp.ClientSession(timeout=_TIMEOUT) as s:
-            async with s.post(f"{_BASE}/post/publish/video/init/",
-                              headers=hdrs, json=payload) as r:
+            async with s.post(endpoint, headers=hdrs, json=payload) as r:
                 data = await r.json()
         if r.status != 200 or data.get("error", {}).get("code") != "ok":
             logger.error(f"TikTok init error {r.status}: {data}")
@@ -70,15 +84,17 @@ async def _init_upload(file_size: int, title: str, hdrs: dict) -> Optional[dict]
         return None
 
 
-async def _upload_chunks(upload_url: str, path: str, file_size: int) -> bool:
-    chunks = math.ceil(file_size / _CHUNK)
+async def _upload_chunks(upload_url: str, path: str, file_size: int,
+                         single: bool = False) -> bool:
+    chunk_size = file_size if single else _CHUNK
+    chunks = 1 if single else math.ceil(file_size / _CHUNK)
     try:
         async with aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=300)) as s:
             with open(path, "rb") as f:
                 for idx in range(chunks):
-                    chunk = f.read(_CHUNK)
-                    start = idx * _CHUNK
+                    chunk = f.read(chunk_size)
+                    start = idx * chunk_size
                     end = start + len(chunk) - 1
                     hdrs = {
                         "Content-Range": f"bytes {start}-{end}/{file_size}",
@@ -108,7 +124,7 @@ async def _poll_status(publish_id: str, hdrs: dict, max_wait: int = 180) -> bool
                     data = await r.json()
             status = data.get("data", {}).get("status", "UNKNOWN")
             logger.info(f"TikTok publish status: {status}")
-            if status == "PUBLISH_COMPLETE":
+            if status in ("PUBLISH_COMPLETE", "SEND_TO_USER_INBOX"):
                 return True
             if "FAIL" in status or "SPAM" in status or "BANNED" in status:
                 logger.error(f"TikTok publish failed: {status}")
@@ -127,9 +143,10 @@ async def upload_video(video_path: str, title: str) -> bool:
         return False
 
     file_size = os.path.getsize(video_path)
-    logger.info(f"TikTok upload start: {os.path.basename(video_path)} ({file_size/1024/1024:.1f} MB)")
+    direct = settings.TIKTOK_DIRECT_POST
+    logger.info(f"TikTok upload: {os.path.basename(video_path)} ({file_size/1024/1024:.1f} MB) direct={direct}")
 
-    init = await _init_upload(file_size, title, hdrs)
+    init = await _init_upload(file_size, title, hdrs, direct_post=direct)
     if not init:
         return False
 
@@ -139,7 +156,12 @@ async def upload_video(video_path: str, title: str) -> bool:
         logger.error(f"Bad TikTok init response: {init}")
         return False
 
-    if not await _upload_chunks(upload_url, video_path, file_size):
+    # Inbox upload: single chunk = full file
+    if not direct:
+        ok = await _upload_chunks(upload_url, video_path, file_size, single=True)
+    else:
+        ok = await _upload_chunks(upload_url, video_path, file_size)
+    if not ok:
         return False
 
     success = await _poll_status(publish_id, hdrs)
