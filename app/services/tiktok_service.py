@@ -137,14 +137,14 @@ async def _poll_status(publish_id: str, hdrs: dict, max_wait: int = 180) -> bool
 
 # ── main upload entry point ───────────────────────────────────────────────────
 
-async def upload_video(video_path: str, title: str) -> bool:
+async def _upload_via_api(video_path: str, title: str) -> bool:
     hdrs = await _headers()
     if not hdrs:
         return False
 
     file_size = os.path.getsize(video_path)
     direct = settings.TIKTOK_DIRECT_POST
-    logger.info(f"TikTok upload: {os.path.basename(video_path)} ({file_size/1024/1024:.1f} MB) direct={direct}")
+    logger.info(f"TikTok API upload: {os.path.basename(video_path)} ({file_size/1024/1024:.1f} MB) direct={direct}")
 
     init = await _init_upload(file_size, title, hdrs, direct_post=direct)
     if not init:
@@ -166,8 +166,23 @@ async def upload_video(video_path: str, title: str) -> bool:
 
     success = await _poll_status(publish_id, hdrs)
     if success:
-        logger.info(f"✅ TikTok video published (publish_id={publish_id})")
+        logger.info(f"✅ TikTok video published via API (publish_id={publish_id})")
     return success
+
+
+async def upload_video(video_path: str, title: str) -> bool:
+    """Try official API first, fall back to browser upload."""
+    # 1. Try official TikTok API
+    ok = await _upload_via_api(video_path, title)
+    if ok:
+        return True
+    # 2. Fall back to browser automation (sessionid cookie)
+    logger.info("API upload failed/skipped, trying browser upload...")
+    from app.services.tiktok_browser import browser_upload
+    return await browser_upload(video_path, title)
+
+
+async def _upload_via_api(video_path: str, title: str) -> bool:
 
 
 # ── high-level helpers ────────────────────────────────────────────────────────

@@ -15,3 +15,5 @@ imageio>=2.34.1
 imageio-ffmpeg>=0.4.9
 piper-tts>=1.2.0
 edge-tts>=6.1.0
+tiktok-uploader>=1.2.0
+playwright>=1.40.0
