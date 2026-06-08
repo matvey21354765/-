@@ -42,11 +42,7 @@ async def cmd_start(msg: Message, state: FSMContext):
     ends = user.trial_ends_at.strftime("%d.%m.%Y") if user.trial_ends_at else "—"
     text = (
         f"👋 Привет, <b>{name}</b>!\n\n"
-        f"🤖 <b>PredictBot</b> — AI-сигналы LONG/SHORT для BTC, ETH, SOL\n\n"
-        f"✅ Техана лиз: RSI, MACD, EMA, Bollinger, ADX\n"
-        f"✅ Фандинг, OI, Fear & Greed\n"
-        f"✅ Уровни поддержки/сопротивления\n"
-        f"✅ Рекомендации по плечу\n\n"
+        f"🤖 <b>PredictBot</b> — сигналы LONG/SHORT для BTC, ETH, SOL\n\n"
         f"🎁 <b>Бесплатный доступ</b> до {ends}\n\n"
         f"Нажми кнопку ниже ↓"
     )
