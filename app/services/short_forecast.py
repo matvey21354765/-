@@ -42,17 +42,31 @@ def _rsi(closes: pd.Series, p: int = 14) -> float:
 
 
 def _stoch_rsi(closes: pd.Series, p: int = 14, smooth: int = 3) -> float:
-    """Stochastic RSI — more sensitive than plain RSI for short timeframes."""
-    rsi_vals = pd.Series([
-        _rsi(closes.iloc[max(0, i - p * 2): i + 1], p)
-        for i in range(len(closes))
-    ])
+    d = closes.diff()
+    g = d.clip(lower=0).ewm(alpha=1/p, adjust=False).mean()
+    l = (-d.clip(upper=0)).ewm(alpha=1/p, adjust=False).mean()
+    rsi_vals = 100 - 100 / (1 + g / l.replace(0, np.nan))
     rsi_min = rsi_vals.rolling(p).min()
     rsi_max = rsi_vals.rolling(p).max()
     rng = (rsi_max - rsi_min).replace(0, np.nan)
     stoch = ((rsi_vals - rsi_min) / rng * 100).rolling(smooth).mean()
     val = float(stoch.iloc[-1])
     return round(val if not np.isnan(val) else 50.0, 1)
+
+
+def _adx(df: pd.DataFrame, p: int = 14) -> float:
+    """Average Directional Index — measures trend strength (>25 = trending)."""
+    h, l, c = df["high"], df["low"], df["close"]
+    prev_h, prev_l, prev_c = h.shift(1), l.shift(1), c.shift(1)
+    tr = pd.concat([h - l, (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
+    dm_plus  = ((h - prev_h).clip(lower=0)).where((h - prev_h) > (prev_l - l), 0)
+    dm_minus = ((prev_l - l).clip(lower=0)).where((prev_l - l) > (h - prev_h), 0)
+    atr_s  = tr.ewm(alpha=1/p, adjust=False).mean()
+    dip    = dm_plus.ewm(alpha=1/p, adjust=False).mean() / atr_s.replace(0, np.nan) * 100
+    dim    = dm_minus.ewm(alpha=1/p, adjust=False).mean() / atr_s.replace(0, np.nan) * 100
+    dx     = ((dip - dim).abs() / (dip + dim).replace(0, np.nan) * 100)
+    adx    = dx.ewm(alpha=1/p, adjust=False).mean().iloc[-1]
+    return round(float(adx) if not np.isnan(adx) else 15.0, 1)
 
 
 def _ema(closes: pd.Series, p: int) -> float:
@@ -130,13 +144,18 @@ def _score(df1m: pd.DataFrame, df5m: pd.DataFrame, df15m: pd.DataFrame) -> dict:
     vr     = _vol_ratio(df5m)
     bb5    = _bb(c5, 20)
 
-    # ── FLAT: dead market ───────────────────────────────────────────────────
+    # ── FLAT: dead/sideways market ──────────────────────────────────────────
     atr5    = _atr(df5m, 14)
     atr_pct = atr5 / price * 100
+    adx5    = _adx(df5m, 14)
     if atr_pct < 0.06:
         return {"price": price, "score": 0.0, "direction": "FLAT", "confidence": 38,
                 "rsi1": rsi5, "rsi5": rsi5,
                 "signals": [f"Флэт — ATR {atr_pct:.3f}%, рынок без движения"]}
+    if adx5 < 18:
+        return {"price": price, "score": 0.0, "direction": "FLAT", "confidence": 38,
+                "rsi1": rsi5, "rsi5": rsi5,
+                "signals": [f"Боковик — ADX {adx5:.0f}, нет тренда (нужно >18)"]}
 
     # ── MACD (standard + fast) ──────────────────────────────────────────────
     m5_std  = _macd(c5,  12, 26, 9)   # standard
@@ -147,8 +166,8 @@ def _score(df1m: pd.DataFrame, df5m: pd.DataFrame, df15m: pd.DataFrame) -> dict:
     ema21_15 = _ema(c15, 21)
     ema9_15  = _ema(c15, 9)
     ema21_5  = _ema(c5,  21)
-    trend_bull = price > ema21_15 * 1.0002 and ema9_15 >= ema21_15
-    trend_bear = price < ema21_15 * 0.9998 and ema9_15 <= ema21_15
+    trend_bull = price > ema21_15 * 1.0003 and ema9_15 > ema21_15 * 1.0001
+    trend_bear = price < ema21_15 * 0.9997 and ema9_15 < ema21_15 * 0.9999
 
     # ── 5m candle majority (last 6) ─────────────────────────────────────────
     c5v = df5m["close"].iloc[-6:].values
