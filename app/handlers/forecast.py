@@ -34,7 +34,7 @@ def _forecast_kb(coin: str) -> InlineKeyboardMarkup:
 @router.callback_query(F.data == "forecast_menu")
 async def cb_forecast_menu(call: CallbackQuery):
     await call.message.edit_text(
-        "⚡ <b>Прогноз 5–10 минут</b>\n\n"
+        "⚡ <b>Прогноз 3–5 минут</b>\n\n"
         "Выбери монету — получи прогноз куда пойдёт цена\n"
         "и что ставить на Polymarket прямо сейчас 👇",
         reply_markup=_forecast_menu_kb(), parse_mode="HTML"
