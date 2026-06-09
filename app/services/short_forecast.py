@@ -144,42 +144,49 @@ def _score(df1m: pd.DataFrame, df5m: pd.DataFrame, df15m: pd.DataFrame) -> dict:
     vr     = _vol_ratio(df5m)
     bb5    = _bb(c5, 20)
 
-    # ── FLAT: dead/sideways market ──────────────────────────────────────────
+    # ── FLAT: мёртвый/боковой рынок ────────────────────────────────────────
     atr5    = _atr(df5m, 14)
     atr_pct = atr5 / price * 100
     adx5    = _adx(df5m, 14)
     if atr_pct < 0.05:
         return {"price": price, "score": 0.0, "direction": "FLAT", "confidence": 38,
                 "rsi1": rsi5, "rsi5": rsi5,
-                "signals": [f"Флэт — ATR {atr_pct:.3f}%, рынок без движения"]}
-    if adx5 < 15:
+                "signals": [f"Флэт — ATR {atr_pct:.3f}%, нет движения"]}
+    if adx5 < 20:
         return {"price": price, "score": 0.0, "direction": "FLAT", "confidence": 38,
                 "rsi1": rsi5, "rsi5": rsi5,
-                "signals": [f"Боковик — ADX {adx5:.0f}, ждём тренд"]}
+                "signals": [f"Боковик — ADX {adx5:.0f}, ждём тренд (нужно >20)"]}
 
     # ── MACD ────────────────────────────────────────────────────────────────
     m5_std  = _macd(c5,  12, 26, 9)
     m5_fast = _macd(c5,  6,  13, 5)
     m15     = _macd(c15, 12, 26, 9)
 
-    # ── TREND: 5m primary, 15m bias ─────────────────────────────────────────
+    # ── ТРЕНД: оба таймфрейма должны совпадать ──────────────────────────────
     ema9_5   = _ema(c5,  9);  ema21_5  = _ema(c5,  21)
     ema9_15  = _ema(c15, 9);  ema21_15 = _ema(c15, 21)
-    # 5m trend — primary (fast reaction)
-    trend5_bull = ema9_5 > ema21_5 * 1.0001 and price > ema21_5
-    trend5_bear = ema9_5 < ema21_5 * 0.9999 and price < ema21_5
-    # 15m trend — higher timeframe bias
-    trend15_bull = ema9_15 >= ema21_15 and price > ema21_15 * 0.9997
-    trend15_bear = ema9_15 <= ema21_15 and price < ema21_15 * 1.0003
+    trend5_bull  = ema9_5  > ema21_5  * 1.0001 and price > ema21_5
+    trend5_bear  = ema9_5  < ema21_5  * 0.9999 and price < ema21_5
+    trend15_bull = ema9_15 > ema21_15 * 1.0001 and price > ema21_15 * 0.9995
+    trend15_bear = ema9_15 < ema21_15 * 0.9999 and price < ema21_15 * 1.0005
 
-    # ── 5m candle majority (last 6) ─────────────────────────────────────────
+    # Оба тренда должны совпадать — это фундаментальное условие
+    both_bull = trend5_bull and trend15_bull
+    both_bear = trend5_bear and trend15_bear
+
+    if not both_bull and not both_bear:
+        return {"price": price, "score": 0.0, "direction": "FLAT", "confidence": 40,
+                "rsi1": rsi5, "rsi5": rsi5,
+                "signals": ["5м и 15м тренды не совпадают — ждём"]}
+
+    # ── 5m свечи (последние 6) ───────────────────────────────────────────────
     c5v = df5m["close"].iloc[-6:].values
     o5v = df5m["open"].iloc[-6:].values
     bulls = sum(1 for c, o in zip(c5v, o5v) if c > o)
     majority_bull = bulls >= 4
     majority_bear = bulls <= 2
 
-    # ── 1m momentum (last 3) ────────────────────────────────────────────────
+    # ── 1m импульс ──────────────────────────────────────────────────────────
     c1v = df1m["close"].iloc[-4:].values
     o1v = df1m["open"].iloc[-4:].values
     last3_bull = all(c1v[i] > o1v[i] for i in range(1, 4))
@@ -192,79 +199,68 @@ def _score(df1m: pd.DataFrame, df5m: pd.DataFrame, df15m: pd.DataFrame) -> dict:
     srsi_oversold   = srsi5 <= 20
     srsi_overbought = srsi5 >= 80
 
-    # ── GATE: 5m trend must agree + need MACD or stochRSI trigger ───────────
-    cross_up   = m5_std["cross_up"]   or m5_fast["cross_up"]   or (m15["cross_up"] and m5_std["bullish"])
-    cross_down = m5_std["cross_down"] or m5_fast["cross_down"] or (m15["cross_down"] and not m5_std["bullish"])
+    # ── ТРИГГЕР: нужен MACD кросс или StochRSI экстремум ────────────────────
+    cross_up   = m5_std["cross_up"]   or m5_fast["cross_up"]   or m15["cross_up"]
+    cross_down = m5_std["cross_down"] or m5_fast["cross_down"] or m15["cross_down"]
 
-    anchor_bull = trend5_bull and (cross_up or srsi_oversold or (m5_std["bullish"] and majority_bull))
-    anchor_bear = trend5_bear and (cross_down or srsi_overbought or (not m5_std["bullish"] and majority_bear))
+    has_trigger_bull = cross_up   or srsi_oversold
+    has_trigger_bear = cross_down or srsi_overbought
 
-    if not anchor_bull and not anchor_bear:
+    if both_bull and not has_trigger_bull:
         return {"price": price, "score": 0.0, "direction": "FLAT", "confidence": 40,
                 "rsi1": rsi5, "rsi5": rsi5,
-                "signals": ["Нет совпадения тренд + импульс"]}
+                "signals": ["Тренд вверх, ждём MACD кросс или перепроданность"]}
+    if both_bear and not has_trigger_bear:
+        return {"price": price, "score": 0.0, "direction": "FLAT", "confidence": 40,
+                "rsi1": rsi5, "rsi5": rsi5,
+                "signals": ["Тренд вниз, ждём MACD кросс или перекупленность"]}
 
-    # ── VOTES (max ±12) ──────────────────────────────────────────────────────
-    # MACD 5m standard: ±3
-    if m5_std["cross_up"]:                                                macd_vote = 3
-    elif m5_std["bullish"] and m5_std["rising"] and m5_std["magnitude"] > 0.06: macd_vote = 2
-    elif m5_std["bullish"]:                                               macd_vote = 1
-    elif m5_std["cross_down"]:                                            macd_vote = -3
-    elif not m5_std["bullish"] and m5_std["falling"] and m5_std["magnitude"] > 0.06: macd_vote = -2
-    else:                                                                 macd_vote = -1 if not m5_std["bullish"] else 0
+    # ── ГОЛОСА (max ±12) ─────────────────────────────────────────────────────
+    if m5_std["cross_up"]:                                                  macd_vote = 3
+    elif m5_std["bullish"] and m5_std["rising"] and m5_std["magnitude"] > 0.05: macd_vote = 2
+    elif m5_std["bullish"]:                                                 macd_vote = 1
+    elif m5_std["cross_down"]:                                              macd_vote = -3
+    elif not m5_std["bullish"] and m5_std["falling"] and m5_std["magnitude"] > 0.05: macd_vote = -2
+    else:                                                                   macd_vote = -1 if not m5_std["bullish"] else 0
 
-    # Fast MACD: ±2
-    if m5_fast["cross_up"]   or (m5_fast["bullish"] and m5_fast["rising"]):    fast_vote = 2
+    if m5_fast["cross_up"]   or (m5_fast["bullish"] and m5_fast["rising"]):      fast_vote = 2
     elif m5_fast["cross_down"] or (not m5_fast["bullish"] and m5_fast["falling"]): fast_vote = -2
-    else:                                                                        fast_vote = 0
+    else:                                                                          fast_vote = 0
 
-    # 5m trend (primary): ±2
-    trend_vote = 2 if trend5_bull else -2 if trend5_bear else 0
-
-    # 15m bias (secondary): ±1
-    bias_vote = 1 if trend15_bull else -1 if trend15_bear else 0
-
-    # 5m candles: ±2
+    trend_vote  = 2 if both_bull  else -2  # оба тренда совпадают = ±2
     candle_vote = 2 if majority_bull else -2 if majority_bear else 0
+    stoch_vote  = 1 if srsi_oversold else -1 if srsi_overbought else 0
+    mom_vote    = 1 if (accel_up or last3_bull) else -1 if (accel_down or last3_bear) else 0
+    bb_vote     = 1 if bb5["near_lower"] else -1 if bb5["near_upper"] else 0
 
-    # StochRSI: ±1
-    stoch_vote = 1 if srsi_oversold else -1 if srsi_overbought else 0
+    total = macd_vote + fast_vote + trend_vote + candle_vote + stoch_vote + mom_vote + bb_vote
 
-    # 1m momentum: ±1
-    mom_vote = 1 if (accel_up or last3_bull) else -1 if (accel_down or last3_bear) else 0
-
-    # BB: ±1
-    bb_vote = 1 if bb5["near_lower"] else -1 if bb5["near_upper"] else 0
-
-    total = macd_vote + fast_vote + trend_vote + bias_vote + candle_vote + stoch_vote + mom_vote + bb_vote  # max ±12
-
-    # ── DECISION: 4/12 with anchor + RSI guard ──────────────────────────────
-    if total >= 4 and anchor_bull and rsi5 < 73:
+    # ── РЕШЕНИЕ: порог 6/12, строгие RSI границы ────────────────────────────
+    if total >= 6 and both_bull and rsi5 < 70 and not majority_bear:
         direction = "UP"
-    elif total <= -4 and anchor_bear and rsi5 > 27:
+    elif total <= -6 and both_bear and rsi5 > 30 and not majority_bull:
         direction = "DOWN"
     else:
         direction = "FLAT"
 
-    # ── CONFIDENCE ──────────────────────────────────────────────────────────
+    # ── УВЕРЕННОСТЬ ─────────────────────────────────────────────────────────
     if direction == "FLAT":
         conf = 40
     else:
-        base  = 56 + abs(total) * 3
+        base  = 60 + abs(total) * 3
         base += 8 if (m5_std["cross_up"] or m5_std["cross_down"]) else 0
         base += 4 if (m5_fast["cross_up"] or m5_fast["cross_down"]) else 0
-        base += 4 if (trend15_bull and direction == "UP") or (trend15_bear and direction == "DOWN") else 0
         base += 4 if vr >= 1.2 else 0
-        conf  = min(base, 93)
+        base += 3 if adx5 >= 25 else 0
+        conf  = min(base, 95)
 
-    # ── SIGNALS TEXT ─────────────────────────────────────────────────────────
+    # ── ТЕКСТ СИГНАЛОВ ───────────────────────────────────────────────────────
     sigs = []
     if direction == "UP":
         if m5_std["cross_up"]:    sigs.append("MACD(5м) кросс вверх 📈")
         elif m5_fast["cross_up"]: sigs.append("Fast MACD кросс вверх ⚡")
         elif m15["cross_up"]:     sigs.append("MACD(15м) кросс вверх 📈")
-        if trend5_bull:           sigs.append("5м тренд вверх: EMA9 > EMA21 ↗")
-        if trend15_bull:          sigs.append("15м тренд подтверждает ↗")
+        sigs.append("5м + 15м тренд вверх совпадают ✅")
         if majority_bull:         sigs.append(f"{bulls}/6 свечей 5м зелёные 🟢")
         if accel_up:              sigs.append("1м ускорение вверх 🚀")
         elif last3_bull:          sigs.append("3 бычьих 1м свечи 🟢")
@@ -275,8 +271,7 @@ def _score(df1m: pd.DataFrame, df5m: pd.DataFrame, df15m: pd.DataFrame) -> dict:
         if m5_std["cross_down"]:    sigs.append("MACD(5м) кросс вниз 📉")
         elif m5_fast["cross_down"]: sigs.append("Fast MACD кросс вниз ⚡")
         elif m15["cross_down"]:     sigs.append("MACD(15м) кросс вниз 📉")
-        if trend5_bear:             sigs.append("5м тренд вниз: EMA9 < EMA21 ↘")
-        if trend15_bear:            sigs.append("15м тренд подтверждает ↘")
+        sigs.append("5м + 15м тренд вниз совпадают ✅")
         if majority_bear:           sigs.append(f"{6-bulls}/6 свечей 5м красные 🔴")
         if accel_down:              sigs.append("1м ускорение вниз 📉")
         elif last3_bear:            sigs.append("3 медвежьих 1м свечи 🔴")
