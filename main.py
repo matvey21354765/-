@@ -28,16 +28,6 @@ async def main():
     await init_db()
     logger.info("✅ Database ready")
 
-    try:
-        from app.models.database import ForecastLog, Signal
-        from sqlalchemy import delete
-        async with AsyncSessionLocal() as db:
-            await db.execute(delete(ForecastLog))
-            await db.execute(delete(Signal).where(Signal.status.in_(["WIN", "LOSS", "EXPIRED"])))
-            await db.commit()
-        logger.info("✅ Stats reset done")
-    except Exception as e:
-        logger.warning(f"Stats reset error: {e}")
 
 
 
