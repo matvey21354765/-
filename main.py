@@ -28,16 +28,6 @@ async def main():
     await init_db()
     logger.info("✅ Database ready")
 
-    # One-time stats reset
-    try:
-        from app.models.database import ForecastLog
-        from sqlalchemy import delete
-        async with AsyncSessionLocal() as db:
-            await db.execute(delete(ForecastLog))
-            await db.commit()
-        logger.info("✅ forecast_log cleared")
-    except Exception as e:
-        logger.warning(f"Stats reset error: {e}")
 
 
     # Seed promo codes — check by known first code
