@@ -41,6 +41,20 @@ def _rsi(closes: pd.Series, p: int = 14) -> float:
     return round(float(v) if not np.isnan(v) else 50.0, 1)
 
 
+def _stoch_rsi(closes: pd.Series, p: int = 14, smooth: int = 3) -> float:
+    """Stochastic RSI — more sensitive than plain RSI for short timeframes."""
+    rsi_vals = pd.Series([
+        _rsi(closes.iloc[max(0, i - p * 2): i + 1], p)
+        for i in range(len(closes))
+    ])
+    rsi_min = rsi_vals.rolling(p).min()
+    rsi_max = rsi_vals.rolling(p).max()
+    rng = (rsi_max - rsi_min).replace(0, np.nan)
+    stoch = ((rsi_vals - rsi_min) / rng * 100).rolling(smooth).mean()
+    val = float(stoch.iloc[-1])
+    return round(val if not np.isnan(val) else 50.0, 1)
+
+
 def _ema(closes: pd.Series, p: int) -> float:
     return float(closes.ewm(span=p, adjust=False).mean().iloc[-1])
 
@@ -57,9 +71,22 @@ def _atr(df: pd.DataFrame, p: int = 14) -> float:
     return float(tr.rolling(p).mean().iloc[-1])
 
 
+def _bb(closes: pd.Series, p: int = 20) -> dict:
+    """Bollinger Bands — price position relative to bands."""
+    mid  = closes.rolling(p).mean()
+    std  = closes.rolling(p).std()
+    upper = mid + 2 * std
+    lower = mid - 2 * std
+    price = float(closes.iloc[-1])
+    u, l, m = float(upper.iloc[-1]), float(lower.iloc[-1]), float(mid.iloc[-1])
+    width = (u - l) / m * 100  # band width %
+    pct_b = (price - l) / (u - l) if (u - l) > 0 else 0.5  # 0=lower band, 1=upper band
+    return {"pct_b": pct_b, "width": width, "near_lower": pct_b < 0.2, "near_upper": pct_b > 0.8}
+
+
 def _sl_tp(price: float, atr: float, direction: str) -> dict:
     sl_dist = atr * 1.5
-    sl_pct = sl_dist / price * 100
+    sl_pct  = sl_dist / price * 100
     if direction == "UP":
         sl  = price - sl_dist
         tp1 = price + atr * 1.5
@@ -75,15 +102,15 @@ def _sl_tp(price: float, atr: float, direction: str) -> dict:
             "sl_pct": round(sl_pct, 2), "leverage": lev}
 
 
-def _macd(closes: pd.Series) -> dict:
-    e12 = closes.ewm(span=12, adjust=False).mean()
-    e26 = closes.ewm(span=26, adjust=False).mean()
-    macd = e12 - e26
-    sig  = macd.ewm(span=9, adjust=False).mean()
-    hist = macd - sig
+def _macd(closes: pd.Series, fast: int = 12, slow: int = 26, sig: int = 9) -> dict:
+    e_fast = closes.ewm(span=fast, adjust=False).mean()
+    e_slow = closes.ewm(span=slow, adjust=False).mean()
+    macd   = e_fast - e_slow
+    signal = macd.ewm(span=sig, adjust=False).mean()
+    hist   = macd - signal
     h0, h1, h2 = float(hist.iloc[-1]), float(hist.iloc[-2]), float(hist.iloc[-3])
-    price = float(closes.iloc[-1])
-    mag = abs(h0) / price * 10000
+    price  = float(closes.iloc[-1])
+    mag    = abs(h0) / price * 10000
     return {
         "cross_up":   h0 > 0 > h1,
         "cross_down": h0 < 0 < h1,
@@ -96,36 +123,41 @@ def _macd(closes: pd.Series) -> dict:
 
 def _score(df1m: pd.DataFrame, df5m: pd.DataFrame, df15m: pd.DataFrame) -> dict:
     c1, c5, c15 = df1m["close"], df5m["close"], df15m["close"]
-    price = float(c1.iloc[-1])
-    rsi5  = _rsi(c5, 14)
-    rsi15 = _rsi(c15, 14)
-    vr    = _vol_ratio(df5m)
+    price  = float(c1.iloc[-1])
+    rsi5   = _rsi(c5, 14)
+    rsi15  = _rsi(c15, 14)
+    srsi5  = _stoch_rsi(c5, 14, 3)
+    vr     = _vol_ratio(df5m)
+    bb5    = _bb(c5, 20)
 
     # ── FLAT: dead market ───────────────────────────────────────────────────
     atr5    = _atr(df5m, 14)
     atr_pct = atr5 / price * 100
-    if atr_pct < 0.07:
+    if atr_pct < 0.06:
         return {"price": price, "score": 0.0, "direction": "FLAT", "confidence": 38,
                 "rsi1": rsi5, "rsi5": rsi5,
                 "signals": [f"Флэт — ATR {atr_pct:.3f}%, рынок без движения"]}
 
-    m5  = _macd(c5)
-    m15 = _macd(c15)
+    # ── MACD (standard + fast) ──────────────────────────────────────────────
+    m5_std  = _macd(c5,  12, 26, 9)   # standard
+    m5_fast = _macd(c5,  6,  13, 5)   # fast scalping MACD
+    m15     = _macd(c15, 12, 26, 9)
 
-    # 15m trend
+    # ── 15m TREND ───────────────────────────────────────────────────────────
     ema21_15 = _ema(c15, 21)
     ema9_15  = _ema(c15, 9)
-    trend_bull = price > ema21_15 * 1.0003 and ema9_15 > ema21_15
-    trend_bear = price < ema21_15 * 0.9997 and ema9_15 < ema21_15
+    ema21_5  = _ema(c5,  21)
+    trend_bull = price > ema21_15 * 1.0002 and ema9_15 >= ema21_15
+    trend_bear = price < ema21_15 * 0.9998 and ema9_15 <= ema21_15
 
-    # 5m candle majority (last 6)
+    # ── 5m candle majority (last 6) ─────────────────────────────────────────
     c5v = df5m["close"].iloc[-6:].values
     o5v = df5m["open"].iloc[-6:].values
     bulls = sum(1 for c, o in zip(c5v, o5v) if c > o)
     majority_bull = bulls >= 4
     majority_bear = bulls <= 2
 
-    # 1m momentum (last 3)
+    # ── 1m momentum (last 3) ────────────────────────────────────────────────
     c1v = df1m["close"].iloc[-4:].values
     o1v = df1m["open"].iloc[-4:].values
     last3_bull = all(c1v[i] > o1v[i] for i in range(1, 4))
@@ -135,45 +167,58 @@ def _score(df1m: pd.DataFrame, df5m: pd.DataFrame, df15m: pd.DataFrame) -> dict:
 
     roc5 = (float(c5.iloc[-1]) - float(c5.iloc[-4])) / float(c5.iloc[-4]) * 100 if len(c5) >= 4 else 0
 
-    # ── STRICT GATE ─────────────────────────────────────────────────────────
-    # Require: 5m MACD cross OR (15m MACD cross AND 5m MACD aligned)
-    # AND 15m trend must agree with direction
-    cross_up_strong   = m5["cross_up"] or (m15["cross_up"]   and m5["bullish"])
-    cross_down_strong = m5["cross_down"] or (m15["cross_down"] and not m5["bullish"])
+    # ── GATE ─────────────────────────────────────────────────────────────────
+    # Standard or fast MACD cross, or stochRSI extreme — AND 15m trend aligned
+    cross_up   = m5_std["cross_up"]   or m5_fast["cross_up"]   or (m15["cross_up"]   and m5_std["bullish"])
+    cross_down = m5_std["cross_down"] or m5_fast["cross_down"] or (m15["cross_down"] and not m5_std["bullish"])
 
-    rsi_oversold  = rsi5 <= 25
-    rsi_overbought = rsi5 >= 75
+    srsi_oversold   = srsi5 <= 20
+    srsi_overbought = srsi5 >= 80
 
-    anchor_bull = (cross_up_strong   or rsi_oversold)  and trend_bull
-    anchor_bear = (cross_down_strong or rsi_overbought) and trend_bear
+    anchor_bull = (cross_up   or srsi_oversold)  and trend_bull
+    anchor_bear = (cross_down or srsi_overbought) and trend_bear
 
     if not anchor_bull and not anchor_bear:
         return {"price": price, "score": 0.0, "direction": "FLAT", "confidence": 40,
                 "rsi1": rsi5, "rsi5": rsi5,
-                "signals": ["Нет подтверждённого сигнала — ждём"]}
+                "signals": ["Нет подтверждения — тренд или MACD не совпадают"]}
 
-    # ── VOTES (max ±9) ──────────────────────────────────────────────────────
-    if m5["cross_up"]:                                              macd_vote = 3
-    elif m5["bullish"] and m5["rising"] and m5["magnitude"] > 0.1: macd_vote = 2
-    elif m5["bullish"]:                                             macd_vote = 1
-    elif m5["cross_down"]:                                          macd_vote = -3
-    elif not m5["bullish"] and m5["falling"] and m5["magnitude"] > 0.1: macd_vote = -2
-    elif not m5["bullish"]:                                         macd_vote = -1
-    else:                                                           macd_vote = 0
+    # ── VOTES (max ±11) ──────────────────────────────────────────────────────
+    # Standard MACD 5m: ±3
+    if m5_std["cross_up"]:                                               macd_vote = 3
+    elif m5_std["bullish"] and m5_std["rising"] and m5_std["magnitude"] > 0.08: macd_vote = 2
+    elif m5_std["bullish"]:                                              macd_vote = 1
+    elif m5_std["cross_down"]:                                           macd_vote = -3
+    elif not m5_std["bullish"] and m5_std["falling"] and m5_std["magnitude"] > 0.08: macd_vote = -2
+    elif not m5_std["bullish"]:                                          macd_vote = -1
+    else:                                                                macd_vote = 0
 
-    trend_vote   = 2 if trend_bull else -2 if trend_bear else 0
-    candle_vote  = 2 if majority_bull else -2 if majority_bear else 0
-    mom_vote     = 1 if (accel_up or last3_bull) else -1 if (accel_down or last3_bear) else 0
-    roc_vote     = 1 if roc5 > 0.15 else -1 if roc5 < -0.15 else 0
+    # Fast MACD confirmation: ±2
+    if m5_fast["cross_up"]   or (m5_fast["bullish"]     and m5_fast["rising"]):   fast_vote = 2
+    elif m5_fast["cross_down"] or (not m5_fast["bullish"] and m5_fast["falling"]): fast_vote = -2
+    else:                                                                           fast_vote = 0
 
-    total = macd_vote + trend_vote + candle_vote + mom_vote + roc_vote  # max ±9
+    # 15m trend: ±2
+    trend_vote = 2 if trend_bull else -2 if trend_bear else 0
 
-    # ── DECISION: strict confluence ─────────────────────────────────────────
-    # Block UP if RSI overbought; block DOWN if RSI oversold
-    # Require total >= 6 (was 5) for even higher quality
-    if total >= 6 and anchor_bull and rsi5 < 70:
+    # 5m candles: ±2
+    candle_vote = 2 if majority_bull else -2 if majority_bear else 0
+
+    # StochRSI: ±1
+    stoch_vote = 1 if srsi_oversold else -1 if srsi_overbought else 0
+
+    # 1m momentum: ±1
+    mom_vote = 1 if (accel_up or last3_bull) else -1 if (accel_down or last3_bear) else 0
+
+    # BB position: ±1 (near lower band = buy, near upper = sell)
+    bb_vote = 1 if bb5["near_lower"] else -1 if bb5["near_upper"] else 0
+
+    total = macd_vote + fast_vote + trend_vote + candle_vote + stoch_vote + mom_vote + bb_vote  # max ±12
+
+    # ── DECISION: require 5/12 with anchor ──────────────────────────────────
+    if total >= 5 and anchor_bull and rsi5 < 72:
         direction = "UP"
-    elif total <= -6 and anchor_bear and rsi5 > 30:
+    elif total <= -5 and anchor_bear and rsi5 > 28:
         direction = "DOWN"
     else:
         direction = "FLAT"
@@ -182,40 +227,45 @@ def _score(df1m: pd.DataFrame, df5m: pd.DataFrame, df15m: pd.DataFrame) -> dict:
     if direction == "FLAT":
         conf = 40
     else:
-        base  = 58 + abs(total) * 4
-        base += 8 if (m5["cross_up"] or m5["cross_down"]) else 0
+        base  = 55 + abs(total) * 3
+        base += 8 if (m5_std["cross_up"] or m5_std["cross_down"]) else 0
+        base += 4 if (m5_fast["cross_up"] or m5_fast["cross_down"]) else 0
         base += 5 if vr >= 1.2 else 0
-        base += 5 if (rsi15 < 40 and direction == "UP") or (rsi15 > 60 and direction == "DOWN") else 0
+        base += 4 if (rsi15 < 40 and direction == "UP") or (rsi15 > 60 and direction == "DOWN") else 0
         conf  = min(base, 93)
 
-    # ── SIGNALS TEXT ────────────────────────────────────────────────────────
+    # ── SIGNALS TEXT ─────────────────────────────────────────────────────────
     sigs = []
     if direction == "UP":
-        if m5["cross_up"]:      sigs.append("MACD(5м) кросс вверх 📈")
-        elif m15["cross_up"]:   sigs.append("MACD(15м) кросс вверх + 5м бычий 📈")
-        if trend_bull:          sigs.append("Тренд вверх: EMA9 > EMA21 (15м) ↗")
-        if majority_bull:       sigs.append(f"{bulls}/6 свечей 5м зелёные 🟢")
-        if accel_up:            sigs.append("3 ускоряющихся 1м свечи 🚀")
-        elif last3_bull:        sigs.append("3 бычьих 1м свечи подряд 🟢")
-        if roc5 > 0.15:         sigs.append(f"ROC 5м: +{roc5:.2f}%")
-        if rsi_oversold:        sigs.append(f"RSI(5м) {rsi5} — перепродан 💡")
+        if m5_std["cross_up"]:   sigs.append("MACD(5м) кросс вверх 📈")
+        elif m5_fast["cross_up"]:sigs.append("Fast MACD(5м) кросс вверх ⚡")
+        elif m15["cross_up"]:    sigs.append("MACD(15м) кросс вверх + 5м бычий 📈")
+        if trend_bull:           sigs.append("Тренд вверх: EMA9 > EMA21 (15м) ↗")
+        if majority_bull:        sigs.append(f"{bulls}/6 свечей 5м зелёные 🟢")
+        if accel_up:             sigs.append("1м ускорение вверх 🚀")
+        elif last3_bull:         sigs.append("3 бычьих 1м свечи подряд 🟢")
+        if srsi_oversold:        sigs.append(f"StochRSI {srsi5:.0f} — перепродан 💡")
+        if bb5["near_lower"]:    sigs.append("Цена у нижней BB — отскок 📊")
+        if roc5 > 0.15:          sigs.append(f"ROC 5м: +{roc5:.2f}%")
     elif direction == "DOWN":
-        if m5["cross_down"]:    sigs.append("MACD(5м) кросс вниз 📉")
-        elif m15["cross_down"]: sigs.append("MACD(15м) кросс вниз + 5м медвежий 📉")
-        if trend_bear:          sigs.append("Тренд вниз: EMA9 < EMA21 (15м) ↘")
-        if majority_bear:       sigs.append(f"{6-bulls}/6 свечей 5м красные 🔴")
-        if accel_down:          sigs.append("3 ускоряющихся 1м свечи вниз 📉")
-        elif last3_bear:        sigs.append("3 медвежьих 1м свечи подряд 🔴")
-        if roc5 < -0.15:        sigs.append(f"ROC 5м: {roc5:.2f}%")
-        if rsi_overbought:      sigs.append(f"RSI(5м) {rsi5} — перекуплен ⚠️")
+        if m5_std["cross_down"]:   sigs.append("MACD(5м) кросс вниз 📉")
+        elif m5_fast["cross_down"]:sigs.append("Fast MACD(5м) кросс вниз ⚡")
+        elif m15["cross_down"]:    sigs.append("MACD(15м) кросс вниз + 5м медвежий 📉")
+        if trend_bear:             sigs.append("Тренд вниз: EMA9 < EMA21 (15м) ↘")
+        if majority_bear:          sigs.append(f"{6-bulls}/6 свечей 5м красные 🔴")
+        if accel_down:             sigs.append("1м ускорение вниз 📉")
+        elif last3_bear:           sigs.append("3 медвежьих 1м свечи подряд 🔴")
+        if srsi_overbought:        sigs.append(f"StochRSI {srsi5:.0f} — перекуплен ⚠️")
+        if bb5["near_upper"]:      sigs.append("Цена у верхней BB — разворот 📊")
+        if roc5 < -0.15:           sigs.append(f"ROC 5м: {roc5:.2f}%")
     else:
-        sigs.append(f"Скор {total:+d}/±9 — нет чёткого сигнала")
+        sigs.append(f"Скор {total:+d}/±12 — нет чёткого сигнала")
 
     atr1   = _atr(df1m)
     levels = _sl_tp(price, atr1, direction)
 
     return {
-        "price": price, "score": float(total * 10), "direction": direction,
+        "price": price, "score": float(total * 8), "direction": direction,
         "confidence": conf, "rsi1": rsi5, "rsi5": rsi5,
         "signals": sigs[:3], **levels,
     }
@@ -246,7 +296,7 @@ async def get_short_forecast(coin: str) -> dict:
 async def _forecast_from_db(coin: str) -> dict:
     import aiohttp
     cg_ids = {"BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana"}
-    cg_id = cg_ids.get(coin, "bitcoin")
+    cg_id  = cg_ids.get(coin, "bitcoin")
     price, change = 0.0, 0.0
     try:
         url = f"https://api.coingecko.com/api/v3/simple/price?ids={cg_id}&vs_currencies=usd&include_24hr_change=true"
@@ -283,8 +333,8 @@ async def _forecast_from_db(coin: str) -> dict:
         elif change < -2: score -= 15; signals_list.append(f"Падение {change:.1f}% за 24ч 📉")
         else:             signals_list.append("Нет данных — используй BTC/ETH/SOL для точного прогноза")
 
-    score = max(-100.0, min(100.0, score))
-    conf  = min(int(abs(score) * 0.45 + 45), 88)
+    score     = max(-100.0, min(100.0, score))
+    conf      = min(int(abs(score) * 0.45 + 45), 88)
     direction = "UP" if score > 8 else "DOWN" if score < -8 else "FLAT"
     return {
         "coin": coin, "price": price, "change_24h": change,
@@ -317,7 +367,7 @@ def format_forecast(f: dict) -> str:
 
     bar = "█" * max(0, min(10, round(conf / 10))) + "░" * (10 - max(0, min(10, round(conf / 10))))
     sigs_text = "\n".join(f"  • {_html.escape(s)}" for s in sigs) if sigs else "  • Нейтральные условия"
-    src_note = "" if source == "kraken" else "\n<i>📡 Данные: технический анализ</i>"
+    src_note  = "" if source == "kraken" else "\n<i>📡 Данные: технический анализ</i>"
 
     sl  = f.get("sl"); tp1 = f.get("tp1"); tp2 = f.get("tp2")
     lev = f.get("leverage", ""); slp = f.get("sl_pct", 0)
