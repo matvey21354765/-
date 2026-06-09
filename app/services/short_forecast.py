@@ -407,7 +407,7 @@ def format_forecast(f: dict) -> str:
 
     return (
         f"{dir_emoji} <b>{coin}/USDT — {dir_text}</b>\n"
-        f"⏱ Горизонт: <b>5–10 минут</b>  ·  {now}\n"
+        f"⏱ Горизонт: <b>3–5 минут</b>  ·  {now}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📊 Уверенность: <b>{conf}%</b>  <code>{bar}</code>\n"
         f"{levels_block}"

@@ -38,11 +38,11 @@ async def log_forecast(coin: str, direction: str, price: float) -> int | None:
 
 
 async def resolve_forecasts():
-    """Called by scheduler every 5 min. Resolve forecasts older than 10 min."""
+    """Called by scheduler every 5 min. Resolve forecasts older than 5 min."""
     try:
         from app.models.database import AsyncSessionLocal, ForecastLog
         from app.services.short_forecast import _kraken_df
-        cutoff = datetime.now(timezone.utc) - timedelta(minutes=10)
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
         async with AsyncSessionLocal() as db:
             res = await db.execute(
                 select(ForecastLog).where(
@@ -185,5 +185,5 @@ def format_leaderboard(stats: dict) -> str:
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"<b>По монетам:</b>\n{coins_text}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"<i>⚡ — прогноз 5-10м  📊 — основной сигнал</i>"
+        f"<i>⚡ — быстрый прогноз 3-5м  📊 — основной сигнал</i>"
     )
