@@ -152,10 +152,10 @@ def _score(df1m: pd.DataFrame, df5m: pd.DataFrame, df15m: pd.DataFrame) -> dict:
         return {"price": price, "score": 0.0, "direction": "FLAT", "confidence": 38,
                 "rsi1": rsi5, "rsi5": rsi5,
                 "signals": [f"Флэт — ATR {atr_pct:.3f}%, нет движения"]}
-    if adx5 < 20:
+    if adx5 < 17:
         return {"price": price, "score": 0.0, "direction": "FLAT", "confidence": 38,
                 "rsi1": rsi5, "rsi5": rsi5,
-                "signals": [f"Боковик — ADX {adx5:.0f}, ждём тренд (нужно >20)"]}
+                "signals": [f"Боковик — ADX {adx5:.0f}, ждём тренд"]}
 
     # ── MACD ────────────────────────────────────────────────────────────────
     m5_std  = _macd(c5,  12, 26, 9)
@@ -236,9 +236,9 @@ def _score(df1m: pd.DataFrame, df5m: pd.DataFrame, df15m: pd.DataFrame) -> dict:
     total = macd_vote + fast_vote + trend_vote + candle_vote + stoch_vote + mom_vote + bb_vote
 
     # ── РЕШЕНИЕ: порог 6/12, строгие RSI границы ────────────────────────────
-    if total >= 6 and both_bull and rsi5 < 70 and not majority_bear:
+    if total >= 5 and both_bull and rsi5 < 70 and not majority_bear:
         direction = "UP"
-    elif total <= -6 and both_bear and rsi5 > 30 and not majority_bull:
+    elif total <= -5 and both_bear and rsi5 > 30 and not majority_bull:
         direction = "DOWN"
     else:
         direction = "FLAT"

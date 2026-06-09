@@ -81,16 +81,15 @@ async def resolve_forecasts():
 
 
 async def get_stats(days: int = 7) -> dict:
-    """Return accuracy stats for last N days — combines short forecasts + regular signals."""
+    """Return accuracy stats for last N days — short forecasts only."""
     try:
-        from app.models.database import AsyncSessionLocal, ForecastLog, Signal
+        from app.models.database import AsyncSessionLocal, ForecastLog
         from sqlalchemy import case
         since = datetime.now(timezone.utc) - timedelta(days=days)
 
         coins: dict[str, dict] = {}
 
         async with AsyncSessionLocal() as db:
-            # ── Short forecasts (5-10 min) ───────────────────────────────────
             res = await db.execute(
                 select(
                     ForecastLog.coin,
@@ -102,31 +101,8 @@ async def get_stats(days: int = 7) -> dict:
                 ).group_by(ForecastLog.coin)
             )
             for r in res.all():
-                coins.setdefault(r.coin, {"total": 0, "wins": 0, "short_total": 0, "short_wins": 0,
-                                          "sig_total": 0, "sig_wins": 0})
-                coins[r.coin]["total"]       += r.total
-                coins[r.coin]["wins"]        += r.wins
-                coins[r.coin]["short_total"] += r.total
-                coins[r.coin]["short_wins"]  += r.wins
-
-            # ── Regular signals (WIN/LOSS) ────────────────────────────────────
-            res2 = await db.execute(
-                select(
-                    Signal.coin,
-                    func.count().label("total"),
-                    func.sum(case((Signal.status == "WIN", 1), else_=0)).label("wins"),
-                ).where(
-                    and_(Signal.status.in_(["WIN", "LOSS"]),
-                         Signal.created_at >= since)
-                ).group_by(Signal.coin)
-            )
-            for r in res2.all():
-                coins.setdefault(r.coin, {"total": 0, "wins": 0, "short_total": 0, "short_wins": 0,
-                                          "sig_total": 0, "sig_wins": 0})
-                coins[r.coin]["total"]     += r.total
-                coins[r.coin]["wins"]      += r.wins
-                coins[r.coin]["sig_total"] += r.total
-                coins[r.coin]["sig_wins"]  += r.wins
+                coins[r.coin] = {"total": r.total, "wins": r.wins,
+                                 "short_total": r.total, "short_wins": r.wins}
 
         for coin in coins:
             d = coins[coin]
@@ -164,15 +140,7 @@ def format_leaderboard(stats: dict) -> str:
     )
     for i, (coin, d) in enumerate(sorted_coins):
         m = medal[i] if i < 3 else "  "
-        parts = []
-        if d.get("short_total", 0) > 0:
-            sa = round(d["short_wins"] / d["short_total"] * 100) if d["short_total"] else 0
-            parts.append(f"⚡{sa}% ({d['short_wins']}/{d['short_total']})")
-        if d.get("sig_total", 0) > 0:
-            sg = round(d["sig_wins"] / d["sig_total"] * 100) if d["sig_total"] else 0
-            parts.append(f"📊{sg}% ({d['sig_wins']}/{d['sig_total']})")
-        detail = "  ".join(parts) if parts else f"{d['wins']}/{d['total']}"
-        coin_lines.append(f"{m} <b>{coin}</b>: <b>{d['acc']}%</b>  <i>{detail}</i>")
+        coin_lines.append(f"{m} <b>{coin}</b>: <b>{d['acc']}%</b>  <i>({d['wins']}/{d['total']})</i>")
 
     coins_text = "\n".join(coin_lines) if coin_lines else "  Нет данных"
 
@@ -181,9 +149,9 @@ def format_leaderboard(stats: dict) -> str:
         f"📅 За последние {days} дней\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📊 Общая точность: <b>{acc}%</b>  <code>{bar}</code>\n"
-        f"✅ Верных: <b>{wins}</b> из <b>{total}</b>\n"
+        f"✅ Верных: <b>{wins}</b> из <b>{total}</b> прогнозов\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"<b>По монетам:</b>\n{coins_text}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"<i>⚡ — быстрый прогноз 3-5м  📊 — основной сигнал</i>"
+        f"<i>Результат считается через 5 минут после прогноза</i>"
     )
