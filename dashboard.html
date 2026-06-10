@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AutoBroker — Екатеринбург</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f1117; color: #e2e8f0; min-height: 100vh; }
+
+  /* Header */
+  .header { background: #1a1d2e; border-bottom: 1px solid #2d3148; padding: 14px 20px; display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 100; }
+  .logo { display: flex; align-items: center; gap: 10px; }
+  .logo-icon { font-size: 24px; }
+  .logo-text h1 { font-size: 18px; font-weight: 700; color: #fff; }
+  .logo-text p { font-size: 12px; color: #64748b; }
+  .header-right { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #94a3b8; }
+  .badge-count { background: #3b82f6; color: #fff; border-radius: 12px; padding: 2px 10px; font-size: 12px; font-weight: 600; }
+  .refresh-btn { background: #2d3148; border: 1px solid #3d4268; color: #94a3b8; border-radius: 8px; padding: 6px 12px; cursor: pointer; font-size: 13px; transition: all .2s; }
+  .refresh-btn:hover { background: #3b82f6; color: #fff; border-color: #3b82f6; }
+
+  /* Tabs */
+  .tabs { background: #1a1d2e; border-bottom: 1px solid #2d3148; padding: 0 20px; display: flex; gap: 4px; }
+  .tab { padding: 12px 16px; font-size: 13px; cursor: pointer; color: #64748b; border-bottom: 2px solid transparent; transition: all .2s; white-space: nowrap; display: flex; align-items: center; gap: 6px; }
+  .tab:hover { color: #94a3b8; }
+  .tab.active { color: #3b82f6; border-bottom-color: #3b82f6; }
+  .tab-badge { background: #2d3148; border-radius: 10px; padding: 1px 7px; font-size: 11px; }
+  .tab.active .tab-badge { background: #1e3a5f; color: #60a5fa; }
+
+  /* Filters */
+  .filters { padding: 14px 20px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; background: #0f1117; border-bottom: 1px solid #1e2030; }
+  .filter-btn { padding: 6px 14px; border-radius: 20px; font-size: 13px; cursor: pointer; border: 1.5px solid #2d3148; background: transparent; color: #94a3b8; transition: all .2s; }
+  .filter-btn:hover { border-color: #3b82f6; color: #60a5fa; }
+  .filter-btn.active { background: #3b82f6; border-color: #3b82f6; color: #fff; font-weight: 600; }
+  .filter-btn.hot { border-color: #f97316; color: #f97316; }
+  .filter-btn.hot.active { background: #f97316; color: #fff; }
+  .filter-btn.good { border-color: #22c55e; color: #22c55e; }
+  .filter-btn.good.active { background: #22c55e; color: #fff; }
+  .filter-count { margin-left: auto; font-size: 13px; color: #64748b; }
+
+  /* Sort / Search */
+  .toolbar { padding: 12px 20px; display: flex; gap: 10px; align-items: center; border-bottom: 1px solid #1e2030; }
+  .search-box { flex: 1; background: #1a1d2e; border: 1px solid #2d3148; border-radius: 8px; padding: 8px 12px; color: #e2e8f0; font-size: 13px; outline: none; transition: border .2s; }
+  .search-box:focus { border-color: #3b82f6; }
+  .search-box::placeholder { color: #475569; }
+  .sort-select { background: #1a1d2e; border: 1px solid #2d3148; border-radius: 8px; padding: 8px 10px; color: #94a3b8; font-size: 13px; cursor: pointer; outline: none; }
+
+  /* Cards */
+  .listings { padding: 16px 20px; display: grid; gap: 12px; }
+  .card { background: #1a1d2e; border: 1px solid #2d3148; border-radius: 12px; padding: 16px; display: flex; gap: 14px; transition: border-color .2s; cursor: pointer; }
+  .card:hover { border-color: #3b82f6; }
+  .card.hot-card { border-left: 3px solid #f97316; }
+
+  .card-num { color: #475569; font-size: 12px; min-width: 28px; padding-top: 2px; }
+  .card-body { flex: 1; min-width: 0; }
+  .card-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+  .card-title { font-size: 15px; font-weight: 600; color: #e2e8f0; line-height: 1.3; }
+  .card-price { font-size: 16px; font-weight: 700; color: #22c55e; white-space: nowrap; }
+
+  .card-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+  .tag { padding: 3px 8px; border-radius: 6px; font-size: 11px; font-weight: 600; }
+  .tag-avito { background: #1a3a5c; color: #60a5fa; }
+  .tag-drom { background: #2d1f4e; color: #a78bfa; }
+  .tag-autoru { background: #3a1c1c; color: #f87171; }
+  .tag-private { background: #14312b; color: #34d399; }
+  .tag-dealer { background: #2d2414; color: #fbbf24; }
+  .tag-hot { background: #3a1f0a; color: #fb923c; }
+
+  .card-info { font-size: 12px; color: #64748b; display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+  .score-bar { display: flex; align-items: center; gap: 6px; }
+  .score-dots { display: flex; gap: 3px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #2d3148; }
+  .dot.filled { background: #3b82f6; }
+  .dot.hot-dot { background: #f97316; }
+
+  .card-actions { display: flex; gap: 8px; }
+  .btn { padding: 7px 14px; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; border: none; transition: all .2s; text-decoration: none; display: inline-flex; align-items: center; gap: 5px; }
+  .btn-primary { background: #3b82f6; color: #fff; }
+  .btn-primary:hover { background: #2563eb; }
+  .btn-secondary { background: #2d3148; color: #94a3b8; }
+  .btn-secondary:hover { background: #374168; color: #e2e8f0; }
+  .btn-msg { background: #059669; color: #fff; }
+  .btn-msg:hover { background: #047857; }
+
+  /* Empty */
+  .empty { text-align: center; padding: 80px 20px; color: #475569; }
+  .empty-icon { font-size: 60px; margin-bottom: 16px; }
+  .empty h3 { font-size: 18px; margin-bottom: 8px; color: #64748b; }
+
+  /* Loading */
+  .loading { text-align: center; padding: 60px; color: #64748b; }
+  .spinner { width: 36px; height: 36px; border: 3px solid #2d3148; border-top-color: #3b82f6; border-radius: 50%; animation: spin .7s linear infinite; margin: 0 auto 12px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Toast */
+  .toast { position: fixed; bottom: 20px; right: 20px; background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 12px 18px; font-size: 13px; color: #e2e8f0; box-shadow: 0 8px 24px rgba(0,0,0,.4); z-index: 999; transition: opacity .3s; }
+
+  /* Stats bar */
+  .stats { padding: 10px 20px; background: #0d1020; border-bottom: 1px solid #1e2030; display: flex; gap: 20px; font-size: 12px; color: #475569; flex-wrap: wrap; }
+  .stat { display: flex; gap: 5px; }
+  .stat-val { color: #94a3b8; font-weight: 600; }
+
+  @media (max-width: 600px) {
+    .card { flex-direction: column; }
+    .card-header { flex-direction: column; }
+    .tabs { overflow-x: auto; }
+  }
+</style>
+</head>
+<body>
+
+<header class="header">
+  <div class="logo">
+    <span class="logo-icon">🚗</span>
+    <div class="logo-text">
+      <h1>AutoBroker — Екатеринбург</h1>
+      <p>Автопоиск горячих лидов</p>
+    </div>
+  </div>
+  <div class="header-right">
+    <span id="last-updated">—</span>
+    <button class="refresh-btn" onclick="loadData()">↻ Обновить</button>
+  </div>
+</header>
+
+<nav class="tabs">
+  <div class="tab active" onclick="switchTab('listings', this)">📋 Объявления <span class="tab-badge" id="tab-all-count">0</span></div>
+  <div class="tab" onclick="switchTab('messages', this)">💬 Сообщения <span class="tab-badge">0</span></div>
+  <div class="tab" onclick="switchTab('manual', this)">➕ Вручную</div>
+  <div class="tab" onclick="switchTab('deals', this)">💰 Сделки <span class="tab-badge">0</span></div>
+</nav>
+
+<div id="tab-listings">
+  <div class="stats" id="stats-bar"></div>
+  <div class="filters">
+    <button class="filter-btn active" onclick="setFilter('all', this)">Все</button>
+    <button class="filter-btn good" onclick="setFilter('good', this)">⭐ Хорошие 5+</button>
+    <button class="filter-btn hot" onclick="setFilter('hot', this)">🔥 Горячие 8+</button>
+    <button class="filter-btn" onclick="setFilter('private', this)">👤 Частники</button>
+    <button class="filter-btn" id="clear-btn" onclick="clearAll()" style="margin-left:auto;border-color:#ef4444;color:#ef4444;">🗑 Очистить всё</button>
+    <span class="filter-count" id="filter-count">0 шт.</span>
+  </div>
+  <div class="toolbar">
+    <input type="text" class="search-box" placeholder="🔍 Поиск по названию, цене..." id="search-input" oninput="renderCards()">
+    <select class="sort-select" id="sort-select" onchange="renderCards()">
+      <option value="score">По рейтингу</option>
+      <option value="date">По дате</option>
+      <option value="price_asc">Цена ↑</option>
+      <option value="price_desc">Цена ↓</option>
+    </select>
+  </div>
+  <div class="listings" id="listings-container">
+    <div class="loading"><div class="spinner"></div>Загрузка данных...</div>
+  </div>
+</div>
+
+<div id="tab-messages" style="display:none">
+  <div class="empty"><div class="empty-icon">💬</div><h3>Нет сообщений</h3><p>Нажмите «Написать» на объявлении</p></div>
+</div>
+<div id="tab-manual" style="display:none">
+  <div style="padding:20px;max-width:500px">
+    <h3 style="color:#e2e8f0;margin-bottom:16px">Добавить вручную</h3>
+    <input type="text" class="search-box" placeholder="Ссылка на объявление" id="manual-url" style="display:block;width:100%;margin-bottom:10px">
+    <input type="text" class="search-box" placeholder="Название" id="manual-title" style="display:block;width:100%;margin-bottom:10px">
+    <input type="text" class="search-box" placeholder="Цена" id="manual-price" style="display:block;width:100%;margin-bottom:10px">
+    <button class="btn btn-primary" onclick="addManual()">Добавить</button>
+  </div>
+</div>
+<div id="tab-deals" style="display:none">
+  <div class="empty"><div class="empty-icon">💰</div><h3>Нет сделок</h3><p>Сохраняйте интересные объявления</p></div>
+</div>
+
+<script>
+let allData = [];
+let dismissed = JSON.parse(localStorage.getItem('dismissed') || '[]');
+let saved = JSON.parse(localStorage.getItem('saved') || '[]');
+let currentFilter = 'all';
+
+const DEALER_KEYWORDS = ['ооо','ип ','автосалон','официальный','дилер','автоцентр','trade-in','трейд-ин','автохолдинг','автодом','автомир','рольф','major','колёса даром','exist','lada','dealer'];
+
+function isDealer(item) {
+  if (item._is_dealer !== undefined) return item._is_dealer;
+  const t = (item.title + ' ' + (item.description || '')).toLowerCase();
+  return DEALER_KEYWORDS.some(k => t.includes(k));
+}
+
+function formatPrice(p) {
+  if (!p) return '—';
+  const n = parseInt(String(p).replace(/\D/g, ''));
+  if (!n) return p;
+  return n.toLocaleString('ru-RU') + ' ₽';
+}
+
+function scoreColor(s) {
+  if (s >= 8) return '#f97316';
+  if (s >= 5) return '#22c55e';
+  return '#3b82f6';
+}
+
+function getContactUrl(item) {
+  if (item.url && item.url.includes('avito.ru')) {
+    return item.url; // Avito has built-in messaging
+  }
+  if (item.url && item.url.includes('drom.ru')) {
+    return item.url;
+  }
+  return item.url || '#';
+}
+
+function getMsgText(item) {
+  return encodeURIComponent(`Здравствуйте! Интересует ваш автомобиль "${item.title}". Ещё актуально?`);
+}
+
+function renderCards() {
+  const container = document.getElementById('listings-container');
+  const search = document.getElementById('search-input').value.toLowerCase();
+  const sort = document.getElementById('sort-select').value;
+
+  let data = allData.filter(d => !dismissed.includes(d.url || d.title));
+
+  // Filter
+  if (currentFilter === 'hot') data = data.filter(d => (d._hot_score || 0) >= 8);
+  else if (currentFilter === 'good') data = data.filter(d => (d._hot_score || 0) >= 5);
+  else if (currentFilter === 'private') data = data.filter(d => !isDealer(d));
+
+  // Search
+  if (search) {
+    data = data.filter(d =>
+      (d.title || '').toLowerCase().includes(search) ||
+      (d.price || '').toLowerCase().includes(search)
+    );
+  }
+
+  // Sort
+  if (sort === 'score') data.sort((a, b) => (b._hot_score || 0) - (a._hot_score || 0));
+  else if (sort === 'date') data.sort((a, b) => (b._days_on_site || 0) - (a._days_on_site || 0));
+  else if (sort === 'price_asc') data.sort((a, b) => parseInt(String(a.price).replace(/\D/g,'') || 0) - parseInt(String(b.price).replace(/\D/g,'') || 0));
+  else if (sort === 'price_desc') data.sort((a, b) => parseInt(String(b.price).replace(/\D/g,'') || 0) - parseInt(String(a.price).replace(/\D/g,'') || 0));
+
+  document.getElementById('filter-count').textContent = data.length + ' шт.';
+
+  if (!data.length) {
+    container.innerHTML = '<div class="empty"><div class="empty-icon">📭</div><h3>Нет объявлений</h3><p>Попробуй другой фильтр или запусти автопоиск</p></div>';
+    return;
+  }
+
+  const isSaved = (item) => saved.includes(item.url || item.title);
+
+  container.innerHTML = data.map((item, i) => {
+    const score = item._hot_score || 0;
+    const isHot = score >= 8;
+    const dealer = isDealer(item);
+    const contactUrl = getContactUrl(item);
+    const hasUrl = item.url && item.url !== '#' && item.url !== '';
+    const photos = item._photos || item._photo_cnt || 0;
+    const days = item._days_on_site || 0;
+
+    // Score dots (max 10)
+    const dots = Array.from({length: 10}, (_, j) =>
+      `<div class="dot ${j < score ? (isHot ? 'hot-dot' : 'filled') : ''}"></div>`
+    ).join('');
+
+    return `
+    <div class="card ${isHot ? 'hot-card' : ''}" id="card-${i}">
+      <div class="card-num">${i+1}</div>
+      <div class="card-body">
+        <div class="card-header">
+          <div class="card-title">${item.title || '—'}</div>
+          <div class="card-price">${formatPrice(item.price)}</div>
+        </div>
+        <div class="card-meta">
+          <span class="tag tag-${item.source || 'avito'}">${item.source === 'avito' ? 'Авито' : item.source === 'drom' ? 'Дром' : 'Авто.ру'}</span>
+          ${dealer
+            ? '<span class="tag tag-dealer">🏢 Дилер</span>'
+            : '<span class="tag tag-private">👤 Частник</span>'
+          }
+          ${isHot ? '<span class="tag tag-hot">🔥 Горячее</span>' : ''}
+        </div>
+        <div class="card-info">
+          <span>📷 ${photos} фото</span>
+          ${days > 0 ? `<span>📅 ${days} дн. на сайте</span>` : `<span>📅 Сегодня</span>`}
+          <div class="score-bar">
+            <span style="color:#64748b">Рейтинг:</span>
+            <span style="color:${scoreColor(score)};font-weight:700">${score.toFixed(1)}</span>
+            <div class="score-dots">${dots}</div>
+          </div>
+        </div>
+        <div class="card-actions">
+          ${hasUrl ? `
+            <a class="btn btn-msg" href="${contactUrl}" target="_blank">💬 Написать</a>
+            <a class="btn btn-secondary" href="${contactUrl}" target="_blank">🔗 Открыть</a>
+          ` : '<span style="color:#475569;font-size:12px">Ссылка недоступна</span>'}
+          <button class="btn btn-secondary" onclick="saveItem(${i})" style="${isSaved(item) ? 'color:#fbbf24' : ''}">
+            ${isSaved(item) ? '★ В сделки' : '☆ Сохранить'}
+          </button>
+          <button class="btn" style="background:#2d3148;color:#ef4444" onclick="dismissItem('${(item.url || item.title).replace(/'/g,'\\'')}', ${i})">✕</button>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function setFilter(f, btn) {
+  currentFilter = f;
+  document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  renderCards();
+}
+
+function dismissItem(key, i) {
+  dismissed.push(key);
+  localStorage.setItem('dismissed', JSON.stringify(dismissed));
+  const el = document.getElementById('card-' + i);
+  if (el) { el.style.opacity = '0'; el.style.transition = 'opacity .3s'; setTimeout(() => renderCards(), 300); }
+}
+
+function saveItem(i) {
+  const data = allData.filter(d => !dismissed.includes(d.url || d.title));
+  const item = data[i];
+  if (!item) return;
+  const key = item.url || item.title;
+  if (!saved.includes(key)) {
+    saved.push(key);
+    localStorage.setItem('saved', JSON.stringify(saved));
+    showToast('★ Сохранено в сделки');
+    renderCards();
+  }
+}
+
+function clearAll() {
+  if (!confirm('Очистить все объявления из текущего фильтра?')) return;
+  let data = allData.filter(d => !dismissed.includes(d.url || d.title));
+  if (currentFilter === 'hot') data = data.filter(d => (d._hot_score || 0) >= 8);
+  else if (currentFilter === 'good') data = data.filter(d => (d._hot_score || 0) >= 5);
+  else if (currentFilter === 'private') data = data.filter(d => !isDealer(d));
+  data.forEach(d => dismissed.push(d.url || d.title));
+  localStorage.setItem('dismissed', JSON.stringify(dismissed));
+  renderCards();
+}
+
+function switchTab(name, el) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  el.classList.add('active');
+  ['listings','messages','manual','deals'].forEach(t => {
+    const el2 = document.getElementById('tab-' + t);
+    if (el2) el2.style.display = t === name ? '' : 'none';
+  });
+}
+
+function addManual() {
+  const url = document.getElementById('manual-url').value.trim();
+  const title = document.getElementById('manual-title').value.trim();
+  const price = document.getElementById('manual-price').value.trim();
+  if (!title) return;
+  allData.unshift({ source: 'manual', title, price, url, _hot_score: 5, _photos: 0, _days_on_site: 0, description: '' });
+  document.getElementById('manual-url').value = '';
+  document.getElementById('manual-title').value = '';
+  document.getElementById('manual-price').value = '';
+  switchTab('listings', document.querySelector('.tab'));
+  renderCards();
+  showToast('✅ Добавлено вручную');
+}
+
+function showToast(msg) {
+  const t = document.createElement('div');
+  t.className = 'toast';
+  t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 300); }, 2500);
+}
+
+async function loadData() {
+  const container = document.getElementById('listings-container');
+  container.innerHTML = '<div class="loading"><div class="spinner"></div>Загрузка данных...</div>';
+  try {
+    const r = await fetch('listings.json?_=' + Date.now());
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    allData = await r.json();
+
+    // Stats
+    const total = allData.length;
+    const hotCount = allData.filter(d => (d._hot_score||0) >= 8).length;
+    const goodCount = allData.filter(d => (d._hot_score||0) >= 5).length;
+    const privateCount = allData.filter(d => !isDealer(d)).length;
+    const avito = allData.filter(d => d.source === 'avito').length;
+    const drom = allData.filter(d => d.source === 'drom').length;
+
+    document.getElementById('tab-all-count').textContent = total;
+    document.getElementById('stats-bar').innerHTML = `
+      <div class="stat"><span>Всего:</span><span class="stat-val">${total}</span></div>
+      <div class="stat"><span>🔥 Горячих:</span><span class="stat-val" style="color:#f97316">${hotCount}</span></div>
+      <div class="stat"><span>⭐ Хороших:</span><span class="stat-val" style="color:#22c55e">${goodCount}</span></div>
+      <div class="stat"><span>👤 Частников:</span><span class="stat-val" style="color:#34d399">${privateCount}</span></div>
+      <div class="stat"><span>Авито:</span><span class="stat-val">${avito}</span></div>
+      <div class="stat"><span>Дром:</span><span class="stat-val">${drom}</span></div>
+    `;
+    document.getElementById('last-updated').textContent = 'Обновлено: ' + new Date().toLocaleTimeString('ru-RU');
+    renderCards();
+  } catch(e) {
+    container.innerHTML = `
+      <div class="empty">
+        <div class="empty-icon">📭</div>
+        <h3>Нет данных</h3>
+        <p>Запусти <code style="color:#60a5fa">python broker.py</code> чтобы собрать объявления</p>
+        <p style="margin-top:8px;color:#ef4444;font-size:12px">${e.message}</p>
+      </div>`;
+  }
+}
+
+loadData();
+// Авто-обновление каждые 5 минут
+setInterval(loadData, 5 * 60 * 1000);
+</script>
+</body>
+</html>

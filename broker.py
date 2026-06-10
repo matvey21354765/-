@@ -874,7 +874,7 @@ class CORSHandler(http.server.SimpleHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/":
-            self.path = "/index.html"
+            self.path = "/dashboard.html"
         super().do_GET()
 
     def log_message(self, fmt, *args):
