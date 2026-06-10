@@ -145,40 +145,58 @@ def _score(df1m: pd.DataFrame, df5m: pd.DataFrame, df15m: pd.DataFrame) -> dict:
     vr     = _vol_ratio(df5m)
     bb5    = _bb(c5, 20)
 
-    # ── FLAT: мёртвый/боковой рынок ────────────────────────────────────────
+    # ── Базовые индикаторы (нужны и для FLAT сводки) ───────────────────────
     atr5    = _atr(df5m, 14)
     atr_pct = atr5 / price * 100
     adx5    = _adx(df5m, 14)
-    if atr_pct < 0.05:
-        return {"price": price, "score": 0.0, "direction": "FLAT", "confidence": 38,
-                "rsi1": rsi5, "rsi5": rsi5,
-                "signals": [f"Флэт — ATR {atr_pct:.3f}%, нет движения"]}
-    if adx5 < 17:
-        return {"price": price, "score": 0.0, "direction": "FLAT", "confidence": 38,
-                "rsi1": rsi5, "rsi5": rsi5,
-                "signals": [f"Боковик — ADX {adx5:.0f}, ждём тренд"]}
-
-    # ── MACD ────────────────────────────────────────────────────────────────
     m5_std  = _macd(c5,  12, 26, 9)
     m5_fast = _macd(c5,  6,  13, 5)
     m15     = _macd(c15, 12, 26, 9)
-
-    # ── ТРЕНД: оба таймфрейма должны совпадать ──────────────────────────────
     ema9_5   = _ema(c5,  9);  ema21_5  = _ema(c5,  21)
     ema9_15  = _ema(c15, 9);  ema21_15 = _ema(c15, 21)
     trend5_bull  = ema9_5  > ema21_5  * 1.0001 and price > ema21_5
     trend5_bear  = ema9_5  < ema21_5  * 0.9999 and price < ema21_5
     trend15_bull = ema9_15 > ema21_15 * 1.0001 and price > ema21_15 * 0.9995
     trend15_bear = ema9_15 < ema21_15 * 0.9999 and price < ema21_15 * 1.0005
-
-    # Оба тренда должны совпадать — это фундаментальное условие
     both_bull = trend5_bull and trend15_bull
     both_bear = trend5_bear and trend15_bear
 
+    roc5 = (float(c5.iloc[-1]) - float(c5.iloc[-4])) / float(c5.iloc[-4]) * 100 if len(c5) >= 4 else 0
+
+    def _base_tv():
+        ind = [
+            ("RSI",      "buy" if rsi5 < 40 else "sell" if rsi5 > 60 else "neutral"),
+            ("StochRSI", "buy" if srsi5 < 20 else "sell" if srsi5 > 80 else "neutral"),
+            ("MACD",     "buy" if m5_std["bullish"] else "sell"),
+            ("FastMACD", "buy" if m5_fast["bullish"] else "sell"),
+            ("ADX",      "buy" if adx5 > 25 and both_bull else "sell" if adx5 > 25 and both_bear else "neutral"),
+            ("Mom",      "buy" if roc5 > 0 else "sell"),
+            ("BB",       "buy" if bb5["near_lower"] else "sell" if bb5["near_upper"] else "neutral"),
+            ("EMA9(5m)", "buy" if trend5_bull else "sell" if trend5_bear else "neutral"),
+            ("EMA21(5m)","buy" if price > ema21_5 else "sell"),
+            ("EMA9(15m)","buy" if trend15_bull else "sell" if trend15_bear else "neutral"),
+            ("EMA21(15m)","buy" if price > ema21_15 else "sell"),
+            ("MACD15m",  "buy" if m15["bullish"] else "sell"),
+        ]
+        b = sum(1 for _, v in ind if v == "buy")
+        s = sum(1 for _, v in ind if v == "sell")
+        n = sum(1 for _, v in ind if v == "neutral")
+        vrd = "Покупать" if b > s * 1.5 else "Продавать" if s > b * 1.5 else "Нейтрально"
+        return b, s, n, vrd
+
+    def _flat(sig):
+        b, s, n, vrd = _base_tv()
+        return {"price": price, "score": 0.0, "direction": "FLAT", "confidence": 38,
+                "rsi1": rsi5, "rsi5": rsi5, "signals": [sig],
+                "tv_buy": b, "tv_sell": s, "tv_neutral": n, "tv_verdict": vrd}
+
+    # ── FLAT: мёртвый/боковой рынок ────────────────────────────────────────
+    if atr_pct < 0.05:
+        return _flat(f"Флэт — ATR {atr_pct:.3f}%, нет движения")
+    if adx5 < 17:
+        return _flat(f"Боковик — ADX {adx5:.0f}, ждём тренд")
     if not both_bull and not both_bear:
-        return {"price": price, "score": 0.0, "direction": "FLAT", "confidence": 40,
-                "rsi1": rsi5, "rsi5": rsi5,
-                "signals": ["5м и 15м тренды не совпадают — ждём"]}
+        return _flat("5м и 15м тренды не совпадают — ждём")
 
     # ── 5m свечи (последние 6) ───────────────────────────────────────────────
     c5v = df5m["close"].iloc[-6:].values
@@ -195,8 +213,6 @@ def _score(df1m: pd.DataFrame, df5m: pd.DataFrame, df15m: pd.DataFrame) -> dict:
     accel_up   = last3_bull and c1v[3] > c1v[2] > c1v[1]
     accel_down = last3_bear and c1v[3] < c1v[2] < c1v[1]
 
-    roc5 = (float(c5.iloc[-1]) - float(c5.iloc[-4])) / float(c5.iloc[-4]) * 100 if len(c5) >= 4 else 0
-
     srsi_oversold   = srsi5 <= 20
     srsi_overbought = srsi5 >= 80
 
@@ -208,13 +224,9 @@ def _score(df1m: pd.DataFrame, df5m: pd.DataFrame, df15m: pd.DataFrame) -> dict:
     has_trigger_bear = cross_down or srsi_overbought
 
     if both_bull and not has_trigger_bull:
-        return {"price": price, "score": 0.0, "direction": "FLAT", "confidence": 40,
-                "rsi1": rsi5, "rsi5": rsi5,
-                "signals": ["Тренд вверх, ждём MACD кросс или перепроданность"]}
+        return _flat("Тренд вверх, ждём MACD кросс или перепроданность")
     if both_bear and not has_trigger_bear:
-        return {"price": price, "score": 0.0, "direction": "FLAT", "confidence": 40,
-                "rsi1": rsi5, "rsi5": rsi5,
-                "signals": ["Тренд вниз, ждём MACD кросс или перекупленность"]}
+        return _flat("Тренд вниз, ждём MACD кросс или перекупленность")
 
     # ── ГОЛОСА (max ±12) ─────────────────────────────────────────────────────
     if m5_std["cross_up"]:                                                  macd_vote = 3
