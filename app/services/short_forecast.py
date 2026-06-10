@@ -283,10 +283,38 @@ def _score(df1m: pd.DataFrame, df5m: pd.DataFrame, df15m: pd.DataFrame) -> dict:
     atr1   = _atr(df1m)
     levels = _sl_tp(price, atr1, direction)
 
+    # ── TV-style summary ─────────────────────────────────────────────────────
+    # Count each indicator as buy/neutral/sell
+    indicators = [
+        # Oscillators
+        ("RSI(14)",        "buy" if rsi5 < 40 else "sell" if rsi5 > 60 else "neutral"),
+        ("StochRSI",       "buy" if srsi5 < 20 else "sell" if srsi5 > 80 else "neutral"),
+        ("MACD",           "buy" if m5_std["bullish"] else "sell"),
+        ("Fast MACD",      "buy" if m5_fast["bullish"] else "sell"),
+        ("ADX",            "buy" if adx5 > 25 and both_bull else "sell" if adx5 > 25 and both_bear else "neutral"),
+        ("Momentum",       "buy" if roc5 > 0 else "sell"),
+        ("BB",             "buy" if bb5["near_lower"] else "sell" if bb5["near_upper"] else "neutral"),
+        # MAs
+        ("EMA9(5m)",       "buy" if trend5_bull else "sell" if trend5_bear else "neutral"),
+        ("EMA21(5m)",      "buy" if price > ema21_5 else "sell"),
+        ("EMA9(15m)",      "buy" if trend15_bull else "sell" if trend15_bear else "neutral"),
+        ("EMA21(15m)",     "buy" if price > ema21_15 else "sell"),
+        ("MACD(15m)",      "buy" if m15["bullish"] else "sell"),
+    ]
+    tv_buy     = sum(1 for _, v in indicators if v == "buy")
+    tv_sell    = sum(1 for _, v in indicators if v == "sell")
+    tv_neutral = sum(1 for _, v in indicators if v == "neutral")
+
+    if tv_buy > tv_sell * 1.5:     tv_verdict = "Покупать"
+    elif tv_sell > tv_buy * 1.5:   tv_verdict = "Продавать"
+    else:                           tv_verdict = "Нейтрально"
+
     return {
         "price": price, "score": float(total * 8), "direction": direction,
         "confidence": conf, "rsi1": rsi5, "rsi5": rsi5,
         "signals": sigs[:3], **levels,
+        "tv_buy": tv_buy, "tv_sell": tv_sell, "tv_neutral": tv_neutral,
+        "tv_verdict": tv_verdict,
     }
 
 
@@ -391,6 +419,17 @@ def format_forecast(f: dict) -> str:
     sl  = f.get("sl"); tp1 = f.get("tp1"); tp2 = f.get("tp2")
     lev = f.get("leverage", ""); slp = f.get("sl_pct", 0)
 
+    tv_buy     = f.get("tv_buy", 0)
+    tv_sell    = f.get("tv_sell", 0)
+    tv_neutral = f.get("tv_neutral", 0)
+    tv_verdict = f.get("tv_verdict", "")
+    tv_block = (
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"📈 <b>Сводка ({tv_buy+tv_sell+tv_neutral} инд.)</b>\n"
+        f"  🟢 Покупать: <b>{tv_buy}</b>  ⚪ Нейтр: <b>{tv_neutral}</b>  🔴 Продавать: <b>{tv_sell}</b>\n"
+        f"  Итог: <b>{tv_verdict}</b>\n"
+    ) if tv_verdict else ""
+
     if sl and tp1 and tp2 and direction != "FLAT":
         tp1_pct = abs(tp1 - price) / price * 100
         levels_block = (
@@ -410,6 +449,7 @@ def format_forecast(f: dict) -> str:
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📊 Уверенность: <b>{conf}%</b>  <code>{bar}</code>\n"
         f"{levels_block}"
+        f"{tv_block}"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"<b>Сигналы:</b>\n{sigs_text}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
