@@ -32,15 +32,13 @@ _WC_MATCHES = [
 def _wc_text() -> str:
     lines = []
     for home, away, pick, reason in _WC_MATCHES:
-        lines.append(
-            f'<a href="{POLY_WC}">{home} vs {away}</a> → <b>{pick}</b> <i>({reason})</i>'
-        )
+        lines.append(f"{home} vs {away} → <b>{pick}</b> <i>({reason})</i>")
     return (
         "⚽ <b>ЧМ 2026 — ставки Polymarket</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         + "\n".join(lines) +
         "\n━━━━━━━━━━━━━━━━━━━━\n"
-        "<i>Нажми на матч → сразу попадёшь на Polymarket</i>"
+        "<i>Нажми кнопку ниже чтобы ставить на ЧМ 2026</i>"
     )
 
 
