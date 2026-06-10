@@ -814,7 +814,47 @@ def save(listings: list[dict]) -> None:
     Path(OUTPUT_FILE).write_text(
         json.dumps(listings, ensure_ascii=False, indent=2), encoding="utf-8"
     )
+    # Генерируем HTML со ссылками
+    rows = []
+    for i, item in enumerate(listings, 1):
+        url = item.get("url", "#")
+        title = item.get("title", "—")
+        price = item.get("price", "")
+        source = item.get("source", "")
+        rows.append(
+            f'<tr><td>{i}</td>'
+            f'<td><a href="{url}" target="_blank">{title}</a></td>'
+            f'<td>{price}</td>'
+            f'<td>{source}</td>'
+            f'<td><a href="{url}" target="_blank">{url}</a></td></tr>'
+        )
+    html = f"""<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Авто Екатеринбург — {len(listings)} объявлений</title>
+<style>
+  body {{ font-family: sans-serif; padding: 20px; }}
+  table {{ border-collapse: collapse; width: 100%; }}
+  th, td {{ border: 1px solid #ccc; padding: 6px 10px; text-align: left; font-size: 13px; }}
+  th {{ background: #f0f0f0; }}
+  a {{ color: #0066cc; }}
+  tr:nth-child(even) {{ background: #fafafa; }}
+</style>
+</head>
+<body>
+<h2>Авто Екатеринбург — {len(listings)} объявлений</h2>
+<table>
+<thead><tr><th>#</th><th>Название</th><th>Цена</th><th>Источник</th><th>Ссылка</th></tr></thead>
+<tbody>
+{''.join(rows)}
+</tbody>
+</table>
+</body>
+</html>"""
+    Path("index.html").write_text(html, encoding="utf-8")
     print(f"Сохранено → {OUTPUT_FILE}  ({len(listings)} объявлений)")
+    print(f"Сохранено → index.html  (ссылки на все объявления)")
 
 
 # ---------------------------------------------------------------------------
@@ -833,8 +873,8 @@ class CORSHandler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        if self.path in ("/", "/listings.json"):
-            self.path = "/listings.json"
+        if self.path == "/":
+            self.path = "/index.html"
         super().do_GET()
 
     def log_message(self, fmt, *args):
@@ -843,7 +883,7 @@ class CORSHandler(http.server.SimpleHTTPRequestHandler):
 
 def start_server() -> None:
     server = http.server.HTTPServer(("0.0.0.0", PORT), CORSHandler)
-    print(f"Веб-сервер: http://localhost:{PORT}/listings.json")
+    print(f"Веб-сервер: http://localhost:{PORT}/  (ссылки на объявления)")
     server.serve_forever()
 
 
