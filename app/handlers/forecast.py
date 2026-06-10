@@ -1,6 +1,6 @@
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton as Btn
-from app.services.short_forecast import get_short_forecast, format_forecast
+from app.services.short_forecast import get_short_forecast, format_forecast, format_forecast_free
 import logging
 
 router = Router()
@@ -31,12 +31,33 @@ def _forecast_kb(coin: str) -> InlineKeyboardMarkup:
     ])
 
 
+def _forecast_kb_free(coin: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [Btn(text="🔓 Открыть полный сигнал", callback_data="subscription")],
+        [Btn(text="🔄 Обновить", callback_data=f"fcast_{coin}"),
+         Btn(text="🎯 Polymarket", url=POLY_REF)],
+        [Btn(text="₿ BTC", callback_data="fcast_BTC"),
+         Btn(text="Ξ ETH", callback_data="fcast_ETH"),
+         Btn(text="◎ SOL", callback_data="fcast_SOL")],
+        [Btn(text="« Меню", callback_data="main_menu")],
+    ])
+
+
+async def _get_user(call: CallbackQuery):
+    try:
+        from app.services.user_service import get_or_create_user
+        return await get_or_create_user(call.from_user.id, call.from_user.username,
+                                        call.from_user.full_name)
+    except Exception:
+        return None
+
+
 @router.callback_query(F.data == "forecast_menu")
 async def cb_forecast_menu(call: CallbackQuery):
     await call.message.edit_text(
         "⚡ <b>Прогноз 3–5 минут</b>\n\n"
-        "Выбери монету — получи прогноз куда пойдёт цена\n"
-        "и что ставить на Polymarket прямо сейчас 👇",
+        "Выбери монету — получи анализ индикаторов прямо сейчас 👇\n"
+        "<i>Полный сигнал с входом и SL/TP — по подписке</i>",
         reply_markup=_forecast_menu_kb(), parse_mode="HTML"
     )
     await call.answer()
@@ -53,21 +74,25 @@ async def cb_forecast(call: CallbackQuery):
             parse_mode="HTML"
         )
         import asyncio
+        user = await _get_user(call)
+        has_access = user and user.has_access()
         try:
             results = await asyncio.gather(
                 get_short_forecast("BTC"),
                 get_short_forecast("ETH"),
                 get_short_forecast("SOL"),
             )
-            parts = [format_forecast(r) for r in results]
+            fmt = format_forecast if has_access else format_forecast_free
+            parts = [fmt(r) for r in results]
             text = "\n\n━━━━━━━━━━━━━━━━━━━━\n\n".join(parts)
             if len(text) > 4096:
                 text = text[:4090] + "…"
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [Btn(text="🔄 Обновить все", callback_data="fcast_all"),
-                 Btn(text="🎯 Polymarket", url=POLY_REF)],
-                [Btn(text="« Меню", callback_data="main_menu")],
-            ])
+            rows = [[Btn(text="🔄 Обновить все", callback_data="fcast_all"),
+                     Btn(text="🎯 Polymarket", url=POLY_REF)]]
+            if not has_access:
+                rows.insert(0, [Btn(text="🔓 Открыть полные сигналы", callback_data="subscription")])
+            rows.append([Btn(text="« Меню", callback_data="main_menu")])
+            kb = InlineKeyboardMarkup(inline_keyboard=rows)
             await call.message.edit_text(text, reply_markup=kb,
                                           parse_mode="HTML", disable_web_page_preview=True)
         except Exception as e:
@@ -87,9 +112,16 @@ async def cb_forecast(call: CallbackQuery):
         parse_mode="HTML"
     )
     try:
+        user = await _get_user(call)
+        has_access = user and user.has_access()
         forecast = await get_short_forecast(coin)
-        text = format_forecast(forecast)
-        await call.message.edit_text(text, reply_markup=_forecast_kb(coin),
+        if has_access:
+            text = format_forecast(forecast)
+            kb = _forecast_kb(coin)
+        else:
+            text = format_forecast_free(forecast)
+            kb = _forecast_kb_free(coin)
+        await call.message.edit_text(text, reply_markup=kb,
                                       parse_mode="HTML", disable_web_page_preview=True)
     except Exception as e:
         import html

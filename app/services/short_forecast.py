@@ -457,3 +457,46 @@ def format_forecast(f: dict) -> str:
         f"🔗 <a href=\"{POLY_REF}\">Ставить на Polymarket</a>"
         f"{src_note}"
     )
+
+
+def format_forecast_free(f: dict) -> str:
+    """Free version — shows indicator summary only, hides direction/SL/TP."""
+    import html as _html
+    coin  = f["coin"]
+    price = f.get("price", 0.0)
+    now   = datetime.now(timezone.utc).strftime("%H:%M UTC")
+
+    tv_buy     = f.get("tv_buy", 0)
+    tv_sell    = f.get("tv_sell", 0)
+    tv_neutral = f.get("tv_neutral", 0)
+    tv_verdict = f.get("tv_verdict", "Нейтрально")
+    total_ind  = tv_buy + tv_sell + tv_neutral
+
+    if tv_buy > tv_sell:
+        verdict_emoji = "🟢"
+    elif tv_sell > tv_buy:
+        verdict_emoji = "🔴"
+    else:
+        verdict_emoji = "⚪"
+
+    def _p(v: float) -> str:
+        return f"${v:,.2f}" if v >= 1000 else f"${v:.4f}" if v >= 1 else f"${v:.6f}"
+
+    direction = f.get("direction", "FLAT")
+    sigs = f.get("signals", [])
+    sigs_text = "\n".join(f"  • {_html.escape(s)}" for s in sigs[:2]) if sigs else "  • Нейтральные условия"
+
+    return (
+        f"📊 <b>{coin}/USDT — Анализ индикаторов</b>  ·  {now}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"💵 Цена: <b>{_p(price)}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"📈 <b>Сводка ({total_ind} индикаторов)</b>\n"
+        f"  🟢 Покупать: <b>{tv_buy}</b>  ⚪ Нейтр: <b>{tv_neutral}</b>  🔴 Продавать: <b>{tv_sell}</b>\n"
+        f"  {verdict_emoji} Итог: <b>{tv_verdict}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"<b>Сигналы:</b>\n{sigs_text}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔒 <b>Направление, вход, SL и TP</b> — по подписке\n"
+        f"👇 Нажми кнопку ниже чтобы открыть полный сигнал"
+    )
