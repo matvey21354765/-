@@ -1,6 +1,6 @@
 """
 broker.py — парсинг объявлений о продаже авто в Екатеринбурге
-Источники: Авито, Авто.ру, Дром, Юла
+Источники: Авито, Авто.ру, Дром
 Использует Playwright (реальный браузер Chromium) для обхода антибот-защиты.
 """
 
@@ -354,20 +354,6 @@ def scrape_drom(context: BrowserContext, pages: int = 5) -> list[dict]:
                 human_delay(1.5, 3)
                 continue
 
-            # Отладка: показываем все data-ftid внутри первой карточки
-            if containers and p == 1:
-                try:
-                    ftids = page.evaluate("""
-                        () => {
-                            const card = document.querySelector("[data-ftid='bulls-list_bull']");
-                            if (!card) return [];
-                            return [...card.querySelectorAll('[data-ftid]')]
-                                .map(el => el.getAttribute('data-ftid') + ': ' + el.innerText.trim().slice(0,60));
-                        }
-                    """)
-                    print(f"  [debug Дром data-ftid]: {ftids}")
-                except Exception as e:
-                    print(f"  [debug Дром error]: {e}")
 
             for card in containers:
                 try:
@@ -387,22 +373,8 @@ def scrape_drom(context: BrowserContext, pages: int = 5) -> list[dict]:
                     )
                     price = price_el.inner_text().strip() if price_el else ""
 
-                    # Дром хранит дату в разных местах — перебираем все варианты
-                    date_text = ""
-                    for date_sel in [
-                        "span[data-ftid='bull_date-created']",
-                        "span[data-ftid='bull_date']",
-                        "[class*='date-created']",
-                        "[class*='dateCreated']",
-                        "time",
-                        "[class*='date']",
-                    ]:
-                        date_el = card.query_selector(date_sel)
-                        if date_el:
-                            t = date_el.get_attribute("datetime") or date_el.inner_text().strip()
-                            if t:
-                                date_text = t
-                                break
+                    date_el = card.query_selector("[data-ftid='bull_date']")
+                    date_text = date_el.inner_text().strip() if date_el else ""
                     date = parse_ru_date(date_text)
 
                     photo_cnt = 0
@@ -443,154 +415,6 @@ def scrape_drom(context: BrowserContext, pages: int = 5) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Юла
-# ---------------------------------------------------------------------------
-
-def scrape_youla(context: BrowserContext, pages: int = 3) -> list[dict]:
-    results = []
-    page = context.new_page()
-    try:
-        for p in range(1, pages + 1):
-            print(f"  Юла стр. {p}…")
-            url = (
-                "https://youla.ru/ekaterinburg/avtomobili"
-                if p == 1
-                else f"https://youla.ru/ekaterinburg/avtomobili?page={p}"
-            )
-            page.goto(url, wait_until="networkidle", timeout=40000)
-            # Ждём пока хотя бы один из известных контейнеров с карточками появится в DOM
-            for wait_sel in ["[class*='ProductItem']", "article", "[class*='snippet']", "ul li a"]:
-                try:
-                    page.wait_for_selector(wait_sel, timeout=8000)
-                    break
-                except Exception:
-                    pass
-            human_delay(2, 4)
-
-            # Отладка: показываем все data-атрибуты первого найденного элемента
-            if p == 1:
-                try:
-                    debug_html = page.evaluate("""
-                        () => {
-                            // ищем любой элемент похожий на карточку товара
-                            const sel = ['[class*="ProductItem"]','[class*="product"]','article','[class*="Card"]','[class*="item"]'];
-                            for (const s of sel) {
-                                const el = document.querySelector(s);
-                                if (el && el.innerText.length > 10) {
-                                    return s + ' => ' + el.outerHTML.slice(0, 400);
-                                }
-                            }
-                            return 'not found, body: ' + document.body.innerText.slice(0, 200);
-                        }
-                    """)
-                    print(f"  [debug Юла]: {debug_html}")
-                except Exception:
-                    pass
-
-            # Пробуем извлечь данные из Redux-стора
-            raw = page.evaluate("""
-                () => {
-                    try {
-                        const s = window.__REDUX_STATE__ || window.__INITIAL_STATE__;
-                        if (s) return JSON.stringify(s);
-                    } catch(e) {}
-                    return null;
-                }
-            """)
-
-            if raw:
-                try:
-                    js = json.loads(raw)
-                    # Ищем массив товаров в любом ключе
-                    def find_products(obj, depth=0):
-                        if depth > 5:
-                            return []
-                        if isinstance(obj, list) and obj and isinstance(obj[0], dict) and "name" in obj[0]:
-                            return obj
-                        if isinstance(obj, dict):
-                            for v in obj.values():
-                                r = find_products(v, depth + 1)
-                                if r:
-                                    return r
-                        return []
-
-                    products = find_products(js)
-                    for item in products:
-                        title = item.get("name", "")
-                        price_data = item.get("price", {})
-                        price = str(price_data.get("product_price", price_data) if isinstance(price_data, dict) else price_data)
-                        uri = item.get("uri") or item.get("url", "")
-                        url_item = ("https://youla.ru" + uri) if uri and not uri.startswith("http") else uri
-                        date_ts = item.get("date_created") or item.get("published_at")
-                        date = datetime.date.fromtimestamp(int(date_ts)) if date_ts else None
-                        photos = item.get("images") or []
-                        photo_cnt = len(photos) if isinstance(photos, list) else 0
-                        results.append({
-                            "source": "youla",
-                            "title": title,
-                            "price": price,
-                            "url": url_item,
-                            "date": str(date) if date else "",
-                            "_date_parsed": date,
-                            "_photo_cnt": photo_cnt,
-                            "description": item.get("description", ""),
-                        })
-                    if products:
-                        human_delay(2, 3)
-                        continue
-                except Exception:
-                    pass
-
-            # Запасной вариант — HTML-карточки (перебираем все известные варианты)
-            cards = (
-                page.query_selector_all("div[class*='product_item']")
-                or page.query_selector_all("li[class*='ProductItem']")
-                or page.query_selector_all("[data-test*='product']")
-                or page.query_selector_all("article")
-                or page.query_selector_all("[class*='SnippetCard']")
-                or page.query_selector_all("[class*='snippet']")
-                or page.query_selector_all("ul[class*='list'] > li")
-                or page.query_selector_all("a[href*='/product/']")
-                or page.query_selector_all("[class*='Card']")
-                or page.query_selector_all("[class*='item_']")
-            )
-            if not cards:
-                print("  Юла: карточки не найдены (сайт мог изменить вёрстку)")
-                break
-
-            for card in cards:
-                try:
-                    link = card.query_selector("a")
-                    href = link.get_attribute("href") if link else ""
-                    title_el = card.query_selector("[class*='title'], h3, h2")
-                    title = title_el.inner_text().strip() if title_el else (link.inner_text().strip() if link else "")
-                    price_el = card.query_selector("[class*='price']")
-                    price = price_el.inner_text().strip() if price_el else ""
-                    url_item = ("https://youla.ru" + href) if href and not href.startswith("http") else href
-                    imgs = card.query_selector_all("img")
-                    photo_cnt = len(imgs)
-                    results.append({
-                        "source": "youla",
-                        "title": title,
-                        "price": price,
-                        "url": url_item,
-                        "date": "",
-                        "_date_parsed": None,
-                        "_photo_cnt": photo_cnt,
-                        "description": "",
-                    })
-                except Exception:
-                    pass
-
-            human_delay(2, 4)
-    finally:
-        page.close()
-
-    print(f"  Юла: {len(results)} объявлений")
-    return results
-
-
-# ---------------------------------------------------------------------------
 # Сбор, фильтрация, оценка
 # ---------------------------------------------------------------------------
 
@@ -603,7 +427,6 @@ def fetch_all() -> list[dict]:
                 ("Авито",   scrape_avito),
                 ("Авто.ру", scrape_autoru),
                 ("Дром",    scrape_drom),
-                ("Юла",     scrape_youla),
             ]
             for name, fn in scrapers:
                 print(f"\n[{name}]")
@@ -697,7 +520,7 @@ def start_server() -> None:
 # ---------------------------------------------------------------------------
 
 def main():
-    print("=== Broker: авто Екатеринбург (Авито / Авто.ру / Дром / Юла) ===")
+    print("=== Broker: авто Екатеринбург (Авито / Авто.ру / Дром) ===")
     items = fetch_all()
     listings = filter_and_score(items)
     save(listings)
