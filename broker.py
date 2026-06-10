@@ -621,8 +621,16 @@ def scrape_autoru(context: BrowserContext, pages: int = 5) -> list[dict]:
 # Дром
 # ---------------------------------------------------------------------------
 
-def scrape_drom(context: BrowserContext, pages: int = 5) -> list[dict]:
+def scrape_drom(context: BrowserContext, pages: int = 30) -> list[dict]:
+    """
+    Дром сортирует от новых к старым. Чтобы найти объявления ≥14 дней,
+    нужно листать глубоко — при ~20 объявлений/стр. и ~14 дней охвата
+    это ~30+ страниц. Останавливаемся досрочно если все объявления свежее
+    MIN_DAYS_POSTED подряд (значит, дальше тоже не будет старых).
+    """
     results = []
+    # Счётчик подряд идущих свежих страниц — ранняя остановка
+    fresh_pages_streak = 0
     page = context.new_page()
     try:
         for p in range(1, pages + 1):
@@ -692,6 +700,22 @@ def scrape_drom(context: BrowserContext, pages: int = 5) -> list[dict]:
                     })
                 except Exception:
                     pass
+
+            # Ранняя остановка: если на этой странице нет ни одного объявления
+            # старше MIN_DAYS_POSTED — скорее всего дальше тоже нет смысла.
+            # НО: едем ещё минимум 5 страниц после первого попадания.
+            page_has_old = any(
+                days_ago(r["_date_parsed"]) >= MIN_DAYS_POSTED
+                for r in results[-len(containers):]
+                if "_date_parsed" in r
+            )
+            if page_has_old:
+                fresh_pages_streak = 0
+            else:
+                fresh_pages_streak += 1
+                if fresh_pages_streak >= 3 and p > 5:
+                    print(f"  Дром: 3 страницы подряд без старых объявлений — стоп на стр. {p}")
+                    break
 
             human_delay(1.5, 3)
     finally:
