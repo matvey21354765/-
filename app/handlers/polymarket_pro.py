@@ -135,10 +135,11 @@ def _markets_kb(coin: str) -> InlineKeyboardMarkup:
 
 
 def _wc_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [Btn(text="🎯 Ставить на ЧМ 2026", url=POLY_WC)],
-        [Btn(text="« Назад", callback_data="poly_pro")],
-    ])
+    rows = []
+    for home, away, pick, reason in _WC_MATCHES:
+        rows.append([Btn(text=f"{home} vs {away}", url=POLY_WC)])
+    rows.append([Btn(text="« Назад", callback_data="poly_pro")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 @router.callback_query(F.data == "poly_pro")
