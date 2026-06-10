@@ -46,8 +46,9 @@ def _forecast_kb_free(coin: str) -> InlineKeyboardMarkup:
 async def _get_user(call: CallbackQuery):
     try:
         from app.services.user_service import get_or_create_user
-        return await get_or_create_user(call.from_user.id, call.from_user.username,
-                                        call.from_user.full_name)
+        user, _ = await get_or_create_user(call.from_user.id, call.from_user.username,
+                                           call.from_user.full_name)
+        return user
     except Exception:
         return None
 
