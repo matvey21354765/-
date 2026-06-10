@@ -511,7 +511,6 @@ def format_forecast_free(f: dict) -> str:
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📈 <b>Сводка ({total_ind} индикаторов)</b>\n"
         f"  🟢 Покупать: <b>{tv_buy}</b>  ⚪ Нейтр: <b>{tv_neutral}</b>  🔴 Продавать: <b>{tv_sell}</b>\n"
-        f"  {direction_hint}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"<b>Сигналы:</b>\n{sigs_text}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
