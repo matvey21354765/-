@@ -12,33 +12,35 @@ POLY_REG     = "https://polymarket.com/?via=max-chron0n"
 POLY_BTC     = "https://polymarket.com/markets/crypto/bitcoin?via=max-chron0n"
 POLY_ETH     = "https://polymarket.com/markets/crypto/ethereum?via=max-chron0n"
 POLY_SOL     = "https://polymarket.com/markets/crypto/solana?via=max-chron0n"
-POLY_WC      = "https://polymarket.com/markets/sports/soccer?via=max-chron0n"
+POLY_WC      = "https://polymarket.com/ru/sports/world-cup/games"
 
-# World Cup 2026 match predictions based on FIFA rankings & form
+_BASE = "https://polymarket.com"
+
+# Real WC 2026 matches from Polymarket with direct URLs
 _WC_MATCHES = [
-    ("🇧🇷 Бразилия", "🇨🇷 Коста-Рика",  "Бразилия",    "Явный фаворит, топ-5 FIFA"),
-    ("🇫🇷 Франция",  "🇲🇽 Мексика",     "Франция",     "Действующий чемпион"),
-    ("🇦🇷 Аргентина","🇸🇦 Саудовская Аравия", "Аргентина", "Мировой чемпион, Месси"),
-    ("🏴󠁧󠁢󠁥󠁮󠁧󠁿 Англия",   "🇨🇴 Колумбия",   "Англия",      "Сильная сборная, FIFA топ-10"),
-    ("🇩🇪 Германия", "🇯🇵 Япония",      "Ничья/Япония","Япония опрокидывала Германию в 2022"),
-    ("🇪🇸 Испания",  "🇭🇷 Хорватия",    "Испания",     "Доминирующий стиль, молодёжь"),
-    ("🇵🇹 Португалия","🇺🇸 США",         "Португалия",  "Роналду, опыт на ЧМ"),
-    ("🇳🇱 Нидерланды","🇸🇳 Сенегал",    "Нидерланды",  "Ван Дейк, ди Йонг — стабильны"),
-    ("🇺🇾 Уругвай",  "🇰🇷 Южная Корея", "Уругвай",     "Нуньес в форме, атака топ"),
-    ("🇲🇦 Марокко",  "🇨🇦 Канада",      "Марокко",     "Полуфиналисты 2022, дома мотивация"),
+    ("🇲🇽 Мексика",      "🇿🇦 ЮАР",          "Мексика",    "Дома, FIFA топ-15",          f"{_BASE}/ru/sports/world-cup/fifwc-mex-rsa-2026-06-11"),
+    ("🇰🇷 Корея",        "🇨🇿 Чехия",         "Корея",      "Сон Хын Мин в форме",        f"{_BASE}/ru/sports/world-cup/fifwc-kr-cze-2026-06-11"),
+    ("🇺🇸 США",          "🇵🇾 Парагвай",      "США",        "Хозяева, Пулисик горячий",   f"{_BASE}/ru/sports/world-cup/fifwc-usa-par-2026-06-12"),
+    ("🇧🇷 Бразилия",     "🇲🇦 Марокко",       "Бразилия",   "Фаворит, топ-5 FIFA",        f"{_BASE}/ru/sports/world-cup/fifwc-bra-mar-2026-06-13"),
+    ("🇩🇪 Германия",     "🇨🇼 Кюрасао",       "Германия",   "Разгром ожидается",          f"{_BASE}/ru/sports/world-cup/fifwc-ger-kor-2026-06-14"),
+    ("🇳🇱 Нидерланды",   "🇯🇵 Япония",        "Ничья/Япония","Япония бьёт топов",         f"{_BASE}/ru/sports/world-cup/fifwc-nld-jpn-2026-06-14"),
+    ("🇪🇸 Испания",      "🇨🇻 Кабо-Верде",    "Испания",    "Лёгкая победа, топ-1 FIFA",  f"{_BASE}/ru/sports/world-cup/fifwc-esp-cvi-2026-06-15"),
+    ("🇧🇪 Бельгия",      "🇪🇬 Египет",        "Бельгия",    "Де Брёйне, сильный состав",  f"{_BASE}/ru/sports/world-cup/fifwc-bel-egy-2026-06-15"),
+    ("🇸🇦 Саудовская Аравия", "🇺🇾 Уругвай",  "Уругвай",    "Нуньес, опыт на ЧМ",         f"{_BASE}/ru/sports/world-cup/fifwc-ksa-ury-2026-06-15"),
+    ("🇶🇦 Катар",        "🇨🇭 Швейцария",     "Швейцария",  "Класс выше, Эмболо",         f"{_BASE}/ru/sports/world-cup/fifwc-qat-che-2026-06-13"),
 ]
 
 
 def _wc_text() -> str:
     lines = []
-    for home, away, pick, reason in _WC_MATCHES:
-        lines.append(f"{home} vs {away} → <b>{pick}</b> <i>({reason})</i>")
+    for home, away, pick, reason, url in _WC_MATCHES:
+        lines.append(f'<a href="{url}">{home} vs {away}</a> → <b>{pick}</b> <i>({reason})</i>')
     return (
         "⚽ <b>ЧМ 2026 — ставки Polymarket</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         + "\n".join(lines) +
         "\n━━━━━━━━━━━━━━━━━━━━\n"
-        "<i>Нажми кнопку ниже чтобы ставить на ЧМ 2026</i>"
+        "<i>Нажми на матч → сразу на Polymarket</i>"
     )
 
 
@@ -133,10 +135,9 @@ def _markets_kb(coin: str) -> InlineKeyboardMarkup:
 
 
 def _wc_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [Btn(text="🎯 Ставить на ЧМ 2026", url=POLY_WC)],
-        [Btn(text="« Назад", callback_data="poly_pro")],
-    ])
+    rows = [[Btn(text=f"{home} vs {away}", url=url)] for home, away, pick, reason, url in _WC_MATCHES]
+    rows.append([Btn(text="« Назад", callback_data="poly_pro")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 @router.callback_query(F.data == "poly_pro")
