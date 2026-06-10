@@ -4,7 +4,13 @@ broker.py — парсинг объявлений о продаже авто в 
 
 Настройка (заполни ниже):
   PROXY       — HTTP/SOCKS5 прокси для обхода блокировок (опционально)
-  CAPTCHA_KEY — API-ключ 2captcha.com для решения капч Авито (опционально)
+  CAPTCHA_KEY — API-ключ 2captcha.com для решения капч (опционально)
+  HEADLESS    — False = видимый браузер (лучше обходит защиту, но открывает окно)
+
+Бесплатный обход капчи:
+  - playwright-stealth патчит 30+ векторов отслеживания
+  - Сессия сохраняется в папку browser_profile/ между запусками
+  - Имитация человека: скролл, движение мыши, случайные паузы
 """
 
 import json
@@ -16,9 +22,17 @@ import threading
 import re
 import base64
 import urllib.request
+import urllib.parse
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright, BrowserContext
+
+try:
+    from playwright_stealth import stealth_sync
+    HAS_STEALTH = True
+except ImportError:
+    HAS_STEALTH = False
+    print("[warn] playwright-stealth не установлен — запусти: pip install playwright-stealth")
 
 # ============================================================
 #  НАСТРОЙКИ — заполни свои значения
@@ -28,9 +42,14 @@ from playwright.sync_api import sync_playwright, BrowserContext
 # Оставь пустой строкой если прокси нет
 PROXY = ""
 
-# API-ключ 2captcha.com (регистрация бесплатна, капчи ~$1 за 1000)
-# Оставь пустой строкой если решать капчи не нужно
+# API-ключ 2captcha.com (опционально, ~$1 за 1000 капч)
 CAPTCHA_KEY = ""
+
+# True = скрытый браузер | False = видимый (лучше обходит Авито, открывает окно)
+HEADLESS = True
+
+# Папка для хранения сессии (куки, localStorage) между запусками
+SESSION_DIR = Path("browser_profile")
 
 # ============================================================
 
@@ -119,6 +138,27 @@ def hotness(title: str, desc: str, photos: int, days: int) -> float:
 
 def human_delay(lo: float = 1.0, hi: float = 3.0) -> None:
     time.sleep(random.uniform(lo, hi))
+
+
+def human_behavior(page) -> None:
+    """Имитирует поведение человека: скролл + движение мыши."""
+    try:
+        w = random.randint(300, 900)
+        h = random.randint(200, 600)
+        # Плавный скролл вниз небольшими шагами
+        for _ in range(random.randint(3, 7)):
+            page.mouse.move(
+                random.randint(100, w),
+                random.randint(100, h),
+            )
+            page.evaluate(f"window.scrollBy(0, {random.randint(80, 250)})")
+            time.sleep(random.uniform(0.3, 0.9))
+        # Пауза как будто читаем страницу
+        time.sleep(random.uniform(1.0, 2.5))
+        # Скролл немного обратно
+        page.evaluate(f"window.scrollBy(0, -{random.randint(50, 150)})")
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -270,7 +310,22 @@ def handle_avito_captcha(page) -> bool:
                     print("  Картиночная капча решена!")
                     return True
 
-    print("  [!] Не удалось решить капчу автоматически")
+    # Бесплатная попытка: ждём и пробуем снова (иногда Авито снимает блок сам)
+    print("  Ждём 30 сек и пробуем снова (бесплатная попытка)…")
+    time.sleep(30)
+    page.reload(wait_until="domcontentloaded", timeout=30000)
+    html2 = page.content()
+    still_blocked = (
+        "captcha" in page.url.lower()
+        or "Доступ ограничен" in html2
+        or page.query_selector("[class*='captcha']") is not None
+    )
+    if not still_blocked:
+        print("  Блок снят!")
+        return True
+
+    print("  [!] Не удалось обойти капчу бесплатно.")
+    print("  Совет: установи HEADLESS = False — видимый браузер лучше обходит защиту.")
     return False
 
 
@@ -279,18 +334,23 @@ def handle_avito_captcha(page) -> bool:
 # ---------------------------------------------------------------------------
 
 def make_context(playwright, proxy: str = "") -> tuple:
-    """Создаёт браузер и контекст с русскими настройками и опциональным прокси."""
+    """
+    Создаёт браузер с persistent profile (сессия сохраняется между запусками).
+    Применяет playwright-stealth если установлен.
+    """
+    SESSION_DIR.mkdir(exist_ok=True)
 
     launch_args = [
         "--no-sandbox",
         "--disable-blink-features=AutomationControlled",
         "--disable-infobars",
         "--disable-dev-shm-usage",
+        "--disable-extensions",
+        f"--window-size={random.randint(1280,1920)},{random.randint(700,900)}",
     ]
 
     proxy_cfg = None
     if proxy:
-        # Playwright принимает proxy как {"server": "...", "username": ..., "password": ...}
         m = re.match(r"(\w+)://(?:([^:@]+):([^@]+)@)?(.+)", proxy)
         if m:
             scheme, user, pwd, host = m.groups()
@@ -301,13 +361,12 @@ def make_context(playwright, proxy: str = "") -> tuple:
                 proxy_cfg["password"] = pwd
             print(f"  Прокси: {scheme}://{host}")
 
-    browser = playwright.chromium.launch(
-        headless=True,
+    # persistent_context сохраняет куки/localStorage на диск
+    context = playwright.chromium.launch_persistent_context(
+        user_data_dir=str(SESSION_DIR),
+        headless=HEADLESS,
         args=launch_args,
         proxy=proxy_cfg,
-    )
-
-    context = browser.new_context(
         viewport={"width": random.randint(1280, 1920), "height": random.randint(700, 900)},
         locale="ru-RU",
         timezone_id="Asia/Yekaterinburg",
@@ -316,46 +375,42 @@ def make_context(playwright, proxy: str = "") -> tuple:
             "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         },
-        # Отключаем WebRTC чтобы не утекал реальный IP через прокси
         ignore_https_errors=True,
     )
 
-    # Максимально скрываем признаки автоматизации
-    context.add_init_script("""
-        // Убираем webdriver
-        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-        // Эмулируем реальные плагины
-        Object.defineProperty(navigator, 'plugins', {
-            get: () => {
-                const arr = [
-                    {name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer'},
-                    {name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai'},
-                    {name: 'Native Client', filename: 'internal-nacl-plugin'},
-                ];
-                arr.__proto__ = PluginArray.prototype;
-                return arr;
-            }
-        });
-        // Chrome runtime
-        window.chrome = {
-            runtime: {
-                connect: () => {},
-                sendMessage: () => {},
-            },
-            loadTimes: () => ({}),
-            csi: () => ({}),
-        };
-        // Языки
-        Object.defineProperty(navigator, 'languages', {get: () => ['ru-RU', 'ru', 'en-US', 'en']});
-        // Разрешения
-        const origQuery = window.navigator.permissions.query;
-        window.navigator.permissions.query = (parameters) =>
-            parameters.name === 'notifications'
-                ? Promise.resolve({state: Notification.permission})
-                : origQuery(parameters);
-    """)
+    if HAS_STEALTH:
+        # stealth_sync патчит: webdriver, plugins, navigator, canvas, WebGL,
+        # audio fingerprint, chrome runtime, permissions и др.
+        for page in context.pages:
+            stealth_sync(page)
+        # Применяем stealth ко всем новым страницам
+        context.on("page", lambda p: stealth_sync(p))
+        print("  playwright-stealth: активен")
+    else:
+        # Минимальный ручной stealth если библиотека не установлена
+        context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            Object.defineProperty(navigator, 'plugins', {
+                get: () => {
+                    const arr = [
+                        {name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer'},
+                        {name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai'},
+                        {name: 'Native Client', filename: 'internal-nacl-plugin'},
+                    ];
+                    arr.__proto__ = PluginArray.prototype;
+                    return arr;
+                }
+            });
+            window.chrome = {runtime: {connect:()=>{}, sendMessage:()=>{}}, loadTimes:()=>({}), csi:()=>({})};
+            Object.defineProperty(navigator, 'languages', {get: () => ['ru-RU','ru','en-US','en']});
+            const _pq = window.navigator.permissions.query;
+            window.navigator.permissions.query = (p) =>
+                p.name === 'notifications'
+                    ? Promise.resolve({state: Notification.permission})
+                    : _pq(p);
+        """)
 
-    return browser, context
+    return context, context  # persistent_context сам является и browser, и context
 
 
 # ---------------------------------------------------------------------------
@@ -366,15 +421,19 @@ def scrape_avito(context: BrowserContext, pages: int = 5) -> list[dict]:
     results = []
     page = context.new_page()
     try:
-        # Прогреваем сессию
+        # Прогреваем сессию — открываем главную страницу как обычный пользователь
         page.goto("https://www.avito.ru/", wait_until="domcontentloaded", timeout=30000)
-        handle_avito_captcha(page)
+        human_behavior(page)
+        if not handle_avito_captcha(page):
+            print("  Авито: не удалось пройти защиту на главной")
+            return results
         human_delay(2, 4)
 
         for p in range(1, pages + 1):
             print(f"  Авито стр. {p}…")
             url = f"https://www.avito.ru/ekaterinburg/avtomobili?p={p}&s=104"
             page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            human_behavior(page)
             human_delay(2, 4)
 
             # Обрабатываем капчу если появилась
@@ -631,7 +690,7 @@ def scrape_drom(context: BrowserContext, pages: int = 5) -> list[dict]:
 def fetch_all() -> list[dict]:
     all_items: list[dict] = []
     with sync_playwright() as pw:
-        browser, context = make_context(pw, proxy=PROXY)
+        context, _ = make_context(pw, proxy=PROXY)
         try:
             scrapers = [
                 ("Авито",   scrape_avito),
@@ -646,7 +705,6 @@ def fetch_all() -> list[dict]:
                     print(f"  [!] Ошибка {name}: {e}")
         finally:
             context.close()
-            browser.close()
     return all_items
 
 
@@ -728,12 +786,12 @@ def start_server() -> None:
 
 def main():
     print("=== Broker: авто Екатеринбург (Авито / Авто.ру / Дром) ===")
+    mode = "видимый" if not HEADLESS else "скрытый"
+    print(f"Браузер: {mode}  |  Stealth: {'да' if HAS_STEALTH else 'нет (pip install playwright-stealth)'}  |  Сессия: {SESSION_DIR}/")
     if PROXY:
         print(f"Прокси: {PROXY}")
     if CAPTCHA_KEY:
         print("2captcha: включён")
-    else:
-        print("2captcha: отключён (CAPTCHA_KEY не задан)")
 
     items = fetch_all()
     listings = filter_and_score(items)
