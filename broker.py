@@ -320,32 +320,47 @@ def handle_avito_captcha(page, critical: bool = True) -> bool:
 
     # --- Бесплатные методы ---
 
-    # 1. Ждём — иногда Авито снимает блок через ~20 сек
+    # Видимый режим: сразу просим решить вручную (не ждём 20 сек впустую)
+    if not HEADLESS:
+        print("  ┌──────────────────────────────────────────────────────────┐")
+        print("  │  В окне браузера открыта капча Авито.                   │")
+        print("  │  Реши её мышкой, дождись загрузки страницы с авто,      │")
+        print("  │  затем нажми Enter в этом терминале.                    │")
+        print("  └──────────────────────────────────────────────────────────┘")
+        input("  [Enter после решения капчи] ")
+        try:
+            page.wait_for_load_state("domcontentloaded", timeout=20000)
+        except Exception:
+            pass
+        if not is_avito_blocked(page):
+            print("  Готово! Сессия сохранена — следующие запуски без капчи.")
+            return True
+        # Если страница всё ещё заблокирована — пробуем перейти напрямую
+        try:
+            page.goto("https://www.avito.ru/ekaterinburg/avtomobili",
+                      wait_until="domcontentloaded", timeout=20000)
+            if not is_avito_blocked(page):
+                return True
+        except Exception:
+            pass
+        return not critical
+
+    # Скрытый режим: ждём, вдруг снимут сами
     print("  Ждём 20 сек (Авито иногда снимает блок сам)…")
     time.sleep(20)
-    page.reload(wait_until="domcontentloaded", timeout=30000)
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=20000)
+    except Exception:
+        try:
+            page.goto("https://www.avito.ru/ekaterinburg/avtomobili",
+                      wait_until="domcontentloaded", timeout=20000)
+        except Exception:
+            return not critical
     if not is_avito_blocked(page):
         print("  Блок снят автоматически!")
         return True
 
-    # 2. Видимый браузер — просим пользователя решить вручную
-    if not HEADLESS:
-        print("  ┌─────────────────────────────────────────────────────┐")
-        print("  │  Реши капчу в открытом окне браузера, затем нажми  │")
-        print("  │  Enter в этом терминале для продолжения.           │")
-        print("  └─────────────────────────────────────────────────────┘")
-        input("  [Enter после решения капчи] ")
-        try:
-            page.wait_for_load_state("domcontentloaded", timeout=15000)
-        except Exception:
-            pass
-        if not is_avito_blocked(page):
-            print("  Готово! Сессия сохранена — следующие запуски пройдут без капчи.")
-            return True
-    else:
-        print("  Совет: поставь HEADLESS = False — увидишь окно браузера и сможешь")
-        print("         решить капчу вручную один раз. Сессия сохранится навсегда.")
-
+    print("  Совет: поставь HEADLESS = False и реши капчу вручную один раз.")
     return not critical
 
 
@@ -442,9 +457,14 @@ def scrape_avito(context: BrowserContext, pages: int = 5) -> list[dict]:
     page = context.new_page()
     try:
         # Прогреваем сессию — главная страница для получения куков
-        page.goto("https://www.avito.ru/", wait_until="domcontentloaded", timeout=30000)
-        human_behavior(page)
-        handle_avito_captcha(page, critical=False)  # не блокируем если капча на главной
+        try:
+            page.goto("https://www.avito.ru/", wait_until="domcontentloaded", timeout=30000)
+            human_behavior(page)
+        except Exception:
+            pass
+        if not handle_avito_captcha(page, critical=True):
+            print("  Авито: капча не решена, пропускаем")
+            return results
         human_delay(2, 4)
 
         for p in range(1, pages + 1):
