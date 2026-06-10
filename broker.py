@@ -76,8 +76,9 @@ def parse_ru_date(text: str) -> datetime.date | None:
 
 
 def days_ago(d: datetime.date | None) -> int:
+    # Если дата неизвестна — считаем объявление достаточно старым, не отфильтровываем
     if d is None:
-        return 0
+        return MIN_DAYS_POSTED
     return max(0, (datetime.date.today() - d).days)
 
 
@@ -353,16 +354,25 @@ def scrape_drom(context: BrowserContext, pages: int = 5) -> list[dict]:
                 human_delay(1.5, 3)
                 continue
 
+            # Отладка: показываем HTML первой карточки чтобы видеть актуальные атрибуты
+            if containers and p == 1:
+                try:
+                    sample = containers[0].inner_html()
+                    print(f"  [debug] первая карточка (первые 400 симв.):\n  {sample[:400]}")
+                except Exception:
+                    pass
+
             for card in containers:
                 try:
                     link = (
                         card.query_selector("a[data-ftid='bull_title']")
                         or card.query_selector("h3 a")
                         or card.query_selector("a[class*='title']")
+                        or card.query_selector("a")
                     )
                     title = link.inner_text().strip() if link else ""
                     href = link.get_attribute("href") if link else ""
-                    url_item = href if href and href.startswith("http") else ("https://www.drom.ru" + (href or ""))
+                    url_item = href if href and href.startswith("http") else ("https://ekaterinburg.drom.ru" + (href or ""))
 
                     price_el = (
                         card.query_selector("span[data-ftid='bull_price']")
@@ -370,19 +380,37 @@ def scrape_drom(context: BrowserContext, pages: int = 5) -> list[dict]:
                     )
                     price = price_el.inner_text().strip() if price_el else ""
 
-                    date_el = (
-                        card.query_selector("span[data-ftid='bull_date-created']")
-                        or card.query_selector("[class*='date']")
-                    )
-                    date_text = date_el.inner_text().strip() if date_el else ""
+                    # Дром хранит дату в разных местах — перебираем все варианты
+                    date_text = ""
+                    for date_sel in [
+                        "span[data-ftid='bull_date-created']",
+                        "span[data-ftid='bull_date']",
+                        "[class*='date-created']",
+                        "[class*='dateCreated']",
+                        "time",
+                        "[class*='date']",
+                    ]:
+                        date_el = card.query_selector(date_sel)
+                        if date_el:
+                            t = date_el.get_attribute("datetime") or date_el.inner_text().strip()
+                            if t:
+                                date_text = t
+                                break
                     date = parse_ru_date(date_text)
 
                     photo_cnt = 0
-                    photo_el = card.query_selector("span[data-ftid='bull_images-count']")
-                    if photo_el:
-                        m = re.search(r"(\d+)", photo_el.inner_text())
-                        if m:
-                            photo_cnt = int(m.group(1))
+                    for photo_sel in [
+                        "span[data-ftid='bull_images-count']",
+                        "[class*='images-count']",
+                        "[class*='photo-count']",
+                        "[class*='photosCount']",
+                    ]:
+                        photo_el = card.query_selector(photo_sel)
+                        if photo_el:
+                            m = re.search(r"(\d+)", photo_el.inner_text())
+                            if m:
+                                photo_cnt = int(m.group(1))
+                                break
                     if photo_cnt == 0:
                         photo_cnt = len(card.query_selector_all("img"))
 
@@ -479,14 +507,26 @@ def scrape_youla(context: BrowserContext, pages: int = 3) -> list[dict]:
                 except Exception:
                     pass
 
-            # Запасной вариант — HTML-карточки
+            # Отладка: выводим первые 500 символов body чтобы понять структуру
+            if p == 1:
+                try:
+                    body_preview = page.evaluate("() => document.body.innerHTML.slice(0, 500)")
+                    print(f"  [debug Юла] body preview:\n  {body_preview}")
+                except Exception:
+                    pass
+
+            # Запасной вариант — HTML-карточки (перебираем все известные варианты)
             cards = (
                 page.query_selector_all("div[class*='product_item']")
                 or page.query_selector_all("li[class*='ProductItem']")
                 or page.query_selector_all("[data-test*='product']")
+                or page.query_selector_all("article")
+                or page.query_selector_all("[class*='SnippetCard']")
+                or page.query_selector_all("[class*='snippet']")
+                or page.query_selector_all("ul[class*='list'] > li")
             )
             if not cards:
-                print("  Юла: карточки не найдены")
+                print("  Юла: карточки не найдены (сайт мог изменить вёрстку)")
                 break
 
             for card in cards:
