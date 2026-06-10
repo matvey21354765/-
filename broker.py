@@ -241,92 +241,112 @@ def solve_recaptcha_v2(site_key: str, page_url: str) -> str | None:
 # Обработчик капчи Авито
 # ---------------------------------------------------------------------------
 
-def handle_avito_captcha(page) -> bool:
-    """
-    Проверяет наличие капчи на странице и пытается её решить.
-    Возвращает True если страница чистая (капчи нет или решена).
-    """
+def is_avito_blocked(page) -> bool:
+    """Точная проверка: показывает ли Авито капчу или страницу блокировки."""
     url = page.url
-    html = page.content()
+    # URL-признак блокировки
+    if "captcha" in url.lower() or "/blocked" in url:
+        return True
+    # Специфичные элементы капчи Авито (не просто слово в HTML)
+    if page.query_selector("[class*='firewall-page']"):
+        return True
+    if page.query_selector("form[action*='captcha']"):
+        return True
+    # Текст страницы блокировки
+    try:
+        body = page.inner_text("body")
+        if "Доступ ограничен" in body or "Подтвердите, что вы не робот" in body:
+            return True
+    except Exception:
+        pass
+    return False
 
-    # Авито использует несколько видов защиты
-    is_blocked = (
-        "captcha" in url.lower()
-        or page.query_selector("[class*='firewall']") is not None
-        or page.query_selector("[class*='captcha']") is not None
-        or "Доступ ограничен" in html
-        or "robot" in html.lower()
-    )
 
-    if not is_blocked:
-        return True  # всё чисто
-
-    print("  [!] Авито: обнаружена защита/капча")
-
-    if not CAPTCHA_KEY:
-        print("  [!] CAPTCHA_KEY не задан — капча не решается. Укажи ключ 2captcha в начале файла.")
-        return False
-
-    # Попытка 1: reCAPTCHA v2 (iframe от Google)
-    recaptcha_frame = page.query_selector("iframe[src*='recaptcha']")
-    if recaptcha_frame:
-        src = recaptcha_frame.get_attribute("src") or ""
-        m = re.search(r"k=([A-Za-z0-9_-]+)", src)
-        if m:
-            site_key = m.group(1)
-            print(f"  Решаем reCAPTCHA v2 (sitekey={site_key[:20]}…) через 2captcha…")
-            token = solve_recaptcha_v2(site_key, url)
-            if token:
-                # Вставляем токен в скрытое поле и сабмитим
-                page.evaluate(f"""
-                    document.getElementById('g-recaptcha-response').value = '{token}';
-                    if (typeof onCaptchaSuccess === 'function') onCaptchaSuccess('{token}');
-                    if (typeof grecaptcha !== 'undefined') {{
-                        const cb = ___grecaptcha_cfg.clients[0]['l']['l']['callback'];
-                        if (typeof cb === 'function') cb('{token}');
-                    }}
-                """)
-                human_delay(2, 3)
-                page.wait_for_load_state("domcontentloaded", timeout=15000)
-                print("  reCAPTCHA решена!")
-                return True
-
-    # Попытка 2: картиночная капча — делаем скриншот и отправляем в 2captcha
-    captcha_img = page.query_selector("img[class*='captcha'], img[src*='captcha']")
-    if captcha_img:
-        print("  Решаем картиночную капчу через 2captcha…")
-        img_bytes = captcha_img.screenshot()
-        img_b64 = base64.b64encode(img_bytes).decode()
-        answer = solve_image_captcha(img_b64)
-        if answer:
-            inp = page.query_selector("input[class*='captcha'], input[name*='captcha'], input[type='text']")
-            if inp:
-                inp.fill(answer)
-                btn = page.query_selector("button[type='submit'], input[type='submit']")
-                if btn:
-                    btn.click()
-                    human_delay(2, 3)
-                    page.wait_for_load_state("domcontentloaded", timeout=15000)
-                    print("  Картиночная капча решена!")
-                    return True
-
-    # Бесплатная попытка: ждём и пробуем снова (иногда Авито снимает блок сам)
-    print("  Ждём 30 сек и пробуем снова (бесплатная попытка)…")
-    time.sleep(30)
-    page.reload(wait_until="domcontentloaded", timeout=30000)
-    html2 = page.content()
-    still_blocked = (
-        "captcha" in page.url.lower()
-        or "Доступ ограничен" in html2
-        or page.query_selector("[class*='captcha']") is not None
-    )
-    if not still_blocked:
-        print("  Блок снят!")
+def handle_avito_captcha(page, critical: bool = True) -> bool:
+    """
+    Проверяет капчу и пытается решить.
+    critical=False — не блокирует парсинг при неудаче (для прогрева).
+    """
+    if not is_avito_blocked(page):
         return True
 
-    print("  [!] Не удалось обойти капчу бесплатно.")
-    print("  Совет: установи HEADLESS = False — видимый браузер лучше обходит защиту.")
-    return False
+    print("  [!] Авито: обнаружена защита/капча")
+    url = page.url
+
+    # --- Платное решение через 2captcha ---
+    if CAPTCHA_KEY:
+        # reCAPTCHA v2
+        recaptcha_frame = page.query_selector("iframe[src*='recaptcha']")
+        if recaptcha_frame:
+            src = recaptcha_frame.get_attribute("src") or ""
+            m = re.search(r"k=([A-Za-z0-9_-]+)", src)
+            if m:
+                site_key = m.group(1)
+                print(f"  Решаем reCAPTCHA v2 через 2captcha…")
+                token = solve_recaptcha_v2(site_key, url)
+                if token:
+                    page.evaluate(f"""
+                        document.getElementById('g-recaptcha-response').value = '{token}';
+                        if (typeof onCaptchaSuccess === 'function') onCaptchaSuccess('{token}');
+                        try {{
+                            const cb = ___grecaptcha_cfg.clients[0]['l']['l']['callback'];
+                            if (typeof cb === 'function') cb('{token}');
+                        }} catch(e) {{}}
+                    """)
+                    human_delay(2, 3)
+                    page.wait_for_load_state("domcontentloaded", timeout=15000)
+                    if not is_avito_blocked(page):
+                        print("  reCAPTCHA решена!")
+                        return True
+
+        # Картиночная капча
+        captcha_img = page.query_selector("img[class*='captcha'], img[src*='captcha']")
+        if captcha_img:
+            print("  Решаем картиночную капчу через 2captcha…")
+            img_b64 = base64.b64encode(captcha_img.screenshot()).decode()
+            answer = solve_image_captcha(img_b64)
+            if answer:
+                inp = page.query_selector("input[class*='captcha'], input[name*='captcha'], input[type='text']")
+                if inp:
+                    inp.fill(answer)
+                    btn = page.query_selector("button[type='submit'], input[type='submit']")
+                    if btn:
+                        btn.click()
+                        human_delay(2, 3)
+                        page.wait_for_load_state("domcontentloaded", timeout=15000)
+                        if not is_avito_blocked(page):
+                            print("  Капча решена!")
+                            return True
+
+    # --- Бесплатные методы ---
+
+    # 1. Ждём — иногда Авито снимает блок через ~20 сек
+    print("  Ждём 20 сек (Авито иногда снимает блок сам)…")
+    time.sleep(20)
+    page.reload(wait_until="domcontentloaded", timeout=30000)
+    if not is_avito_blocked(page):
+        print("  Блок снят автоматически!")
+        return True
+
+    # 2. Видимый браузер — просим пользователя решить вручную
+    if not HEADLESS:
+        print("  ┌─────────────────────────────────────────────────────┐")
+        print("  │  Реши капчу в открытом окне браузера, затем нажми  │")
+        print("  │  Enter в этом терминале для продолжения.           │")
+        print("  └─────────────────────────────────────────────────────┘")
+        input("  [Enter после решения капчи] ")
+        try:
+            page.wait_for_load_state("domcontentloaded", timeout=15000)
+        except Exception:
+            pass
+        if not is_avito_blocked(page):
+            print("  Готово! Сессия сохранена — следующие запуски пройдут без капчи.")
+            return True
+    else:
+        print("  Совет: поставь HEADLESS = False — увидишь окно браузера и сможешь")
+        print("         решить капчу вручную один раз. Сессия сохранится навсегда.")
+
+    return not critical
 
 
 # ---------------------------------------------------------------------------
@@ -421,12 +441,10 @@ def scrape_avito(context: BrowserContext, pages: int = 5) -> list[dict]:
     results = []
     page = context.new_page()
     try:
-        # Прогреваем сессию — открываем главную страницу как обычный пользователь
+        # Прогреваем сессию — главная страница для получения куков
         page.goto("https://www.avito.ru/", wait_until="domcontentloaded", timeout=30000)
         human_behavior(page)
-        if not handle_avito_captcha(page):
-            print("  Авито: не удалось пройти защиту на главной")
-            return results
+        handle_avito_captcha(page, critical=False)  # не блокируем если капча на главной
         human_delay(2, 4)
 
         for p in range(1, pages + 1):
