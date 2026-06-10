@@ -486,13 +486,13 @@ def format_forecast_free(f: dict) -> str:
 
     if tv_buy > tv_sell:
         verdict_emoji = "🟢"
-        direction_hint = f"📈 Сигнал: <b>ЛОНГ</b> ({tv_buy} из {total_ind} за покупку)"
+        direction_hint = f"📈 Больше сигналов на рост ({tv_buy}/{total_ind})"
     elif tv_sell > tv_buy:
         verdict_emoji = "🔴"
-        direction_hint = f"📉 Сигнал: <b>ШОРТ</b> ({tv_sell} из {total_ind} за продажу)"
+        direction_hint = f"📉 Больше сигналов на падение ({tv_sell}/{total_ind})"
     else:
         verdict_emoji = "⚪"
-        direction_hint = f"⚪ Сигнал: <b>Нейтрально</b> — ждём"
+        direction_hint = f"⚪ Смешанные сигналы — нет чёткого направления"
 
     def _p(v: float) -> str:
         return f"${v:,.2f}" if v >= 1000 else f"${v:.4f}" if v >= 1 else f"${v:.6f}"

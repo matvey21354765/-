@@ -100,6 +100,16 @@ async def cb_toggle_notifications(call: CallbackQuery):
 
 @router.callback_query(F.data.startswith("sig_"))
 async def cb_signal(call: CallbackQuery):
+    from app.services.user_service import get_or_create_user
+    user, _ = await get_or_create_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
+    if not user.has_access():
+        await call.answer("🔒 Только для подписчиков", show_alert=True)
+        await call.message.edit_text(
+            "🔒 <b>Сигналы BTC/ETH/SOL — по подписке</b>\n\n"
+            "Получи полный анализ с направлением, входом, SL и TP.",
+            reply_markup=subscription_kb(), parse_mode="HTML"
+        )
+        return
     coin = call.data.split("_")[1]
     await call.answer(f"⚙️ Анализирую {coin}...")
     await call.message.edit_text(
@@ -178,6 +188,16 @@ async def cb_back_to_signal(call: CallbackQuery):
 
 @router.callback_query(F.data == "overview")
 async def cb_overview(call: CallbackQuery):
+    from app.services.user_service import get_or_create_user
+    user, _ = await get_or_create_user(call.from_user.id, call.from_user.username, call.from_user.full_name)
+    if not user.has_access():
+        await call.answer("🔒 Только для подписчиков", show_alert=True)
+        await call.message.edit_text(
+            "🔒 <b>Обзор рынка — по подписке</b>\n\n"
+            "Полный анализ BTC, ETH и SOL в одном экране.",
+            reply_markup=subscription_kb(), parse_mode="HTML"
+        )
+        return
     await call.answer("🌐 Загружаю обзор рынка...")
     await call.message.edit_text(
         "⏳ <b>Загружаю последние данные BTC · ETH · SOL...</b>",
