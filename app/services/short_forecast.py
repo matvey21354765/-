@@ -486,10 +486,13 @@ def format_forecast_free(f: dict) -> str:
 
     if tv_buy > tv_sell:
         verdict_emoji = "🟢"
+        direction_hint = f"📈 Сигнал: <b>ЛОНГ</b> ({tv_buy} из {total_ind} за покупку)"
     elif tv_sell > tv_buy:
         verdict_emoji = "🔴"
+        direction_hint = f"📉 Сигнал: <b>ШОРТ</b> ({tv_sell} из {total_ind} за продажу)"
     else:
         verdict_emoji = "⚪"
+        direction_hint = f"⚪ Сигнал: <b>Нейтрально</b> — ждём"
 
     def _p(v: float) -> str:
         return f"${v:,.2f}" if v >= 1000 else f"${v:.4f}" if v >= 1 else f"${v:.6f}"
@@ -505,7 +508,7 @@ def format_forecast_free(f: dict) -> str:
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📈 <b>Сводка ({total_ind} индикаторов)</b>\n"
         f"  🟢 Покупать: <b>{tv_buy}</b>  ⚪ Нейтр: <b>{tv_neutral}</b>  🔴 Продавать: <b>{tv_sell}</b>\n"
-        f"  {verdict_emoji} Итог: <b>{tv_verdict}</b>\n"
+        f"  {direction_hint}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"<b>Сигналы:</b>\n{sigs_text}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
