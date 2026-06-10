@@ -1,7 +1,7 @@
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton as Btn
 from app.services.user_service import get_user
-from app.keyboards.inline import back_kb, main_menu
+from app.keyboards.inline import back_kb, main_menu, subscription_kb
 import logging
 
 router = Router()
@@ -12,9 +12,38 @@ POLY_REG     = "https://polymarket.com/?via=max-chron0n"
 POLY_BTC     = "https://polymarket.com/markets/crypto/bitcoin?via=max-chron0n"
 POLY_ETH     = "https://polymarket.com/markets/crypto/ethereum?via=max-chron0n"
 POLY_SOL     = "https://polymarket.com/markets/crypto/solana?via=max-chron0n"
+POLY_WC      = "https://polymarket.com/markets/sports/soccer?via=max-chron0n"
+
+# World Cup 2026 match predictions based on FIFA rankings & form
+_WC_MATCHES = [
+    ("🇧🇷 Бразилия", "🇨🇷 Коста-Рика",  "Бразилия",    "Явный фаворит, топ-5 FIFA"),
+    ("🇫🇷 Франция",  "🇲🇽 Мексика",     "Франция",     "Действующий чемпион"),
+    ("🇦🇷 Аргентина","🇸🇦 Саудовская Аравия", "Аргентина", "Мировой чемпион, Месси"),
+    ("🏴󠁧󠁢󠁥󠁮󠁧󠁿 Англия",   "🇨🇴 Колумбия",   "Англия",      "Сильная сборная, FIFA топ-10"),
+    ("🇩🇪 Германия", "🇯🇵 Япония",      "Ничья/Япония","Япония опрокидывала Германию в 2022"),
+    ("🇪🇸 Испания",  "🇭🇷 Хорватия",    "Испания",     "Доминирующий стиль, молодёжь"),
+    ("🇵🇹 Португалия","🇺🇸 США",         "Португалия",  "Роналду, опыт на ЧМ"),
+    ("🇳🇱 Нидерланды","🇸🇳 Сенегал",    "Нидерланды",  "Ван Дейк, ди Йонг — стабильны"),
+    ("🇺🇾 Уругвай",  "🇰🇷 Южная Корея", "Уругвай",     "Нуньес в форме, атака топ"),
+    ("🇲🇦 Марокко",  "🇨🇦 Канада",      "Марокко",     "Полуфиналисты 2022, дома мотивация"),
+]
+
+
+def _wc_text() -> str:
+    lines = []
+    for home, away, pick, reason in _WC_MATCHES:
+        lines.append(f"{home} vs {away}\n  → <b>{pick}</b> <i>({reason})</i>")
+    return (
+        "⚽ <b>ЧМ 2026 — ставки Polymarket</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "Прогнозы на основе FIFA-рейтинга и формы команд:\n\n"
+        + "\n\n".join(lines) +
+        "\n\n━━━━━━━━━━━━━━━━━━━━\n"
+        "<i>Нажми кнопку ниже чтобы найти матч на Polymarket</i>"
+    )
+
 
 _GUIDE = [
-    # 0 — что это
     (
         "🎯 <b>Polymarket — рынок предсказаний</b>\n\n"
         "Ты ставишь USDC на исход события:\n"
@@ -28,7 +57,6 @@ _GUIDE = [
         "Если нет → теряешь вложенное\n\n"
         "<i>Работает на блокчейне Polygon. Всё прозрачно.</i>"
     ),
-    # 1 — регистрация
     (
         "📝 <b>Как зарегистрироваться</b>\n\n"
         f"1. Перейди: <a href=\"{POLY_REG}\">polymarket.com</a>\n"
@@ -42,7 +70,6 @@ _GUIDE = [
         "  • Минимум: $1\n\n"
         "<i>Рекомендуем начать с $10–50 USDC</i>"
     ),
-    # 2 — как ставить
     (
         "💡 <b>Как делать ставки</b>\n\n"
         "1. Зайди в раздел <b>Crypto</b>\n"
@@ -56,7 +83,6 @@ _GUIDE = [
         "  ⚡ Прогноз 3–5м → для краткосрочных рынков\n\n"
         "<i>Никогда не ставь больше 5–10% депозита на одну ставку</i>"
     ),
-    # 3 — текущие рынки
     (
         "📊 <b>Текущие крипто-рынки Polymarket</b>\n\n"
         "Нажми на монету чтобы увидеть\n"
@@ -92,6 +118,7 @@ def _main_kb(alerts_on: bool) -> InlineKeyboardMarkup:
         [Btn(text="₿ BTC ставки",  callback_data="pg_markets_BTC"),
          Btn(text="Ξ ETH ставки",  callback_data="pg_markets_ETH")],
         [Btn(text="◎ SOL ставки",  callback_data="pg_markets_SOL")],
+        [Btn(text="⚽ ЧМ 2026 — прогнозы", callback_data="pg_wc2026")],
         [Btn(text=toggle, callback_data="toggle_btc_alerts")],
         [Btn(text="🎯 Открыть Polymarket", url=POLY_REF)],
         [Btn(text="« Меню", callback_data="main_menu")],
@@ -106,20 +133,47 @@ def _markets_kb(coin: str) -> InlineKeyboardMarkup:
     ])
 
 
+def _wc_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [Btn(text="🎯 Ставить на ЧМ 2026", url=POLY_WC)],
+        [Btn(text="« Назад", callback_data="poly_pro")],
+    ])
+
+
 @router.callback_query(F.data == "poly_pro")
 async def cb_poly_pro(call: CallbackQuery):
     user = await get_user(call.from_user.id)
-    alerts_on = getattr(user, "btc_alerts_enabled", False) if user else False
+    if not user or not user.has_access():
+        await call.answer("🔒 Только для подписчиков", show_alert=True)
+        await call.message.edit_text(
+            "🔒 <b>Polymarket Pro — по подписке</b>\n\n"
+            "Полный гайд, ставки по BTC/ETH/SOL и прогнозы на ЧМ 2026.",
+            reply_markup=subscription_kb(), parse_mode="HTML"
+        )
+        return
+    alerts_on = getattr(user, "btc_alerts_enabled", False)
     await call.message.edit_text(
         "🎯 <b>Polymarket Pro</b>\n\n"
         "Здесь ты найдёшь:\n"
         "  📚 Полный гайд как зарабатывать на Polymarket\n"
         "  💰 Актуальные ставки по BTC / ETH / SOL\n"
+        "  ⚽ Прогнозы на матчи ЧМ 2026\n"
         "  ⚡ Алерты когда рынок даёт точку входа\n\n"
         "Используй прогнозы бота чтобы знать куда ставить 👇",
         reply_markup=_main_kb(alerts_on), parse_mode="HTML"
     )
     await call.answer()
+
+
+@router.callback_query(F.data == "pg_wc2026")
+async def cb_wc2026(call: CallbackQuery):
+    await call.answer()
+    await call.message.edit_text(
+        _wc_text(),
+        reply_markup=_wc_kb(),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
 
 
 @router.callback_query(F.data.startswith("pg_step_"))
@@ -145,12 +199,11 @@ async def cb_markets(call: CallbackQuery):
     await call.answer(f"⏳ Загружаю {coin} рынки...")
 
     try:
-        from app.services.short_forecast import get_short_forecast, format_forecast, KRAKEN_PAIR
+        from app.services.short_forecast import get_short_forecast
         forecast = await get_short_forecast(coin)
-        f = forecast
-        direction = f["direction"]
-        conf = f["confidence"]
-        price = f["price"]
+        direction = forecast["direction"]
+        conf = forecast["confidence"]
+        price = forecast["price"]
         price_str = f"${price:,.2f}" if price >= 1000 else f"${price:.4f}"
 
         if direction == "UP":
@@ -174,11 +227,7 @@ async def cb_markets(call: CallbackQuery):
         )
     except Exception as e:
         logger.error(f"pg_markets {coin}: {e}")
-        urls = {"BTC": POLY_BTC, "ETH": POLY_ETH, "SOL": POLY_SOL}
-        text = (
-            f"💰 <b>{coin} — рынки Polymarket</b>\n\n"
-            f"Нажми кнопку ниже чтобы открыть актуальные рынки по {coin} 👇"
-        )
+        text = f"💰 <b>{coin} — рынки Polymarket</b>\n\nНажми кнопку ниже чтобы открыть актуальные рынки 👇"
 
     await call.message.edit_text(text, reply_markup=_markets_kb(coin),
                                   parse_mode="HTML", disable_web_page_preview=True)
