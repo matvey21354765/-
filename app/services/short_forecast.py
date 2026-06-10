@@ -99,19 +99,20 @@ def _bb(closes: pd.Series, p: int = 20) -> dict:
 
 
 def _sl_tp(price: float, atr: float, direction: str) -> dict:
-    sl_dist = atr * 1.5
+    # Wider SL (2x ATR) so position isn't stopped out by noise
+    sl_dist = atr * 2.0
     sl_pct  = sl_dist / price * 100
     if direction == "UP":
         sl  = price - sl_dist
-        tp1 = price + atr * 1.5
-        tp2 = price + atr * 3.0
+        tp1 = price + atr * 2.0   # 1:1
+        tp2 = price + atr * 4.0   # 1:2
     elif direction == "DOWN":
         sl  = price + sl_dist
-        tp1 = price - atr * 1.5
-        tp2 = price - atr * 3.0
+        tp1 = price - atr * 2.0
+        tp2 = price - atr * 4.0
     else:
         return {}
-    lev = "3–5x" if sl_pct > 1.0 else "5–10x" if sl_pct > 0.5 else "10–20x"
+    lev = "2–3x" if sl_pct > 1.5 else "3–5x" if sl_pct > 0.8 else "5–10x"
     return {"sl": round(sl, 2), "tp1": round(tp1, 2), "tp2": round(tp2, 2),
             "sl_pct": round(sl_pct, 2), "leverage": lev}
 
@@ -247,12 +248,12 @@ def _score(df1m: pd.DataFrame, df5m: pd.DataFrame, df15m: pd.DataFrame) -> dict:
     if direction == "FLAT":
         conf = 40
     else:
-        base  = 60 + abs(total) * 3
-        base += 8 if (m5_std["cross_up"] or m5_std["cross_down"]) else 0
-        base += 4 if (m5_fast["cross_up"] or m5_fast["cross_down"]) else 0
-        base += 4 if vr >= 1.2 else 0
+        base  = 52 + abs(total) * 3
+        base += 6 if (m5_std["cross_up"] or m5_std["cross_down"]) else 0
+        base += 3 if (m5_fast["cross_up"] or m5_fast["cross_down"]) else 0
+        base += 3 if vr >= 1.2 else 0
         base += 3 if adx5 >= 25 else 0
-        conf  = min(base, 95)
+        conf  = min(base, 78)  # cap at 78% — честнее для пользователя
 
     # ── ТЕКСТ СИГНАЛОВ ───────────────────────────────────────────────────────
     sigs = []
@@ -264,7 +265,6 @@ def _score(df1m: pd.DataFrame, df5m: pd.DataFrame, df15m: pd.DataFrame) -> dict:
         if majority_bull:         sigs.append(f"{bulls}/6 свечей 5м зелёные 🟢")
         if accel_up:              sigs.append("1м ускорение вверх 🚀")
         elif last3_bull:          sigs.append("3 бычьих 1м свечи 🟢")
-        if srsi_oversold:         sigs.append(f"StochRSI {srsi5:.0f} — перепродан 💡")
         if bb5["near_lower"]:     sigs.append("Цена у нижней BB — отскок 📊")
         if roc5 > 0.10:           sigs.append(f"ROC 5м: +{roc5:.2f}%")
     elif direction == "DOWN":
@@ -275,7 +275,6 @@ def _score(df1m: pd.DataFrame, df5m: pd.DataFrame, df15m: pd.DataFrame) -> dict:
         if majority_bear:           sigs.append(f"{6-bulls}/6 свечей 5м красные 🔴")
         if accel_down:              sigs.append("1м ускорение вниз 📉")
         elif last3_bear:            sigs.append("3 медвежьих 1м свечи 🔴")
-        if srsi_overbought:         sigs.append(f"StochRSI {srsi5:.0f} — перекуплен ⚠️")
         if bb5["near_upper"]:       sigs.append("Цена у верхней BB — разворот 📊")
         if roc5 < -0.10:            sigs.append(f"ROC 5м: {roc5:.2f}%")
     else:
