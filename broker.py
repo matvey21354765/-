@@ -354,13 +354,20 @@ def scrape_drom(context: BrowserContext, pages: int = 5) -> list[dict]:
                 human_delay(1.5, 3)
                 continue
 
-            # Отладка: показываем HTML первой карточки чтобы видеть актуальные атрибуты
+            # Отладка: показываем все data-ftid внутри первой карточки
             if containers and p == 1:
                 try:
-                    sample = containers[0].inner_html()
-                    print(f"  [debug] первая карточка (первые 400 симв.):\n  {sample[:400]}")
-                except Exception:
-                    pass
+                    ftids = page.evaluate("""
+                        () => {
+                            const card = document.querySelector("[data-ftid='bulls-list_bull']");
+                            if (!card) return [];
+                            return [...card.querySelectorAll('[data-ftid]')]
+                                .map(el => el.getAttribute('data-ftid') + ': ' + el.innerText.trim().slice(0,60));
+                        }
+                    """)
+                    print(f"  [debug Дром data-ftid]: {ftids}")
+                except Exception as e:
+                    print(f"  [debug Дром error]: {e}")
 
             for card in containers:
                 try:
@@ -451,7 +458,34 @@ def scrape_youla(context: BrowserContext, pages: int = 3) -> list[dict]:
                 else f"https://youla.ru/ekaterinburg/avtomobili?page={p}"
             )
             page.goto(url, wait_until="networkidle", timeout=40000)
+            # Ждём пока хотя бы один из известных контейнеров с карточками появится в DOM
+            for wait_sel in ["[class*='ProductItem']", "article", "[class*='snippet']", "ul li a"]:
+                try:
+                    page.wait_for_selector(wait_sel, timeout=8000)
+                    break
+                except Exception:
+                    pass
             human_delay(2, 4)
+
+            # Отладка: показываем все data-атрибуты первого найденного элемента
+            if p == 1:
+                try:
+                    debug_html = page.evaluate("""
+                        () => {
+                            // ищем любой элемент похожий на карточку товара
+                            const sel = ['[class*="ProductItem"]','[class*="product"]','article','[class*="Card"]','[class*="item"]'];
+                            for (const s of sel) {
+                                const el = document.querySelector(s);
+                                if (el && el.innerText.length > 10) {
+                                    return s + ' => ' + el.outerHTML.slice(0, 400);
+                                }
+                            }
+                            return 'not found, body: ' + document.body.innerText.slice(0, 200);
+                        }
+                    """)
+                    print(f"  [debug Юла]: {debug_html}")
+                except Exception:
+                    pass
 
             # Пробуем извлечь данные из Redux-стора
             raw = page.evaluate("""
@@ -507,14 +541,6 @@ def scrape_youla(context: BrowserContext, pages: int = 3) -> list[dict]:
                 except Exception:
                     pass
 
-            # Отладка: выводим первые 500 символов body чтобы понять структуру
-            if p == 1:
-                try:
-                    body_preview = page.evaluate("() => document.body.innerHTML.slice(0, 500)")
-                    print(f"  [debug Юла] body preview:\n  {body_preview}")
-                except Exception:
-                    pass
-
             # Запасной вариант — HTML-карточки (перебираем все известные варианты)
             cards = (
                 page.query_selector_all("div[class*='product_item']")
@@ -524,6 +550,9 @@ def scrape_youla(context: BrowserContext, pages: int = 3) -> list[dict]:
                 or page.query_selector_all("[class*='SnippetCard']")
                 or page.query_selector_all("[class*='snippet']")
                 or page.query_selector_all("ul[class*='list'] > li")
+                or page.query_selector_all("a[href*='/product/']")
+                or page.query_selector_all("[class*='Card']")
+                or page.query_selector_all("[class*='item_']")
             )
             if not cards:
                 print("  Юла: карточки не найдены (сайт мог изменить вёрстку)")
