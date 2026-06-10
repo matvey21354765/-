@@ -20,17 +20,21 @@ MIN_DAYS_POSTED = 14
 MAX_PHOTOS = 3
 
 HOT_WORDS = re.compile(
-    r"\b(срочно|срочная|срочный|торг|торгуюсь|уступлю|снижу|скидка|дёшево|дешево|отдам)\b",
+    r"(срочно|срочная|срочный|торг|торгуюсь|уступлю|снижу|скидка|дёшево|дешево|отдам)",
     re.IGNORECASE,
 )
 
-HEADERS = {
+BASE_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/124.0.0.0 Safari/537.36"
     ),
-    "Accept-Language": "ru-RU,ru;q=0.9",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
 }
 
 MONTHS = {
@@ -39,14 +43,20 @@ MONTHS = {
     "авг": 8, "сен": 9, "окт": 10, "ноя": 11, "дек": 12,
 }
 
+# Единая сессия для переиспользования TCP-соединений и хранения куков
+SESSION = requests.Session()
+SESSION.headers.update(BASE_HEADERS)
+
 
 # ---------------------------------------------------------------------------
 # Утилиты
 # ---------------------------------------------------------------------------
 
-def get(url: str, **kwargs) -> requests.Response | None:
+def get(url: str, extra_headers: dict | None = None, **kwargs) -> requests.Response | None:
+    """GET через общую сессию. extra_headers добавляются поверх BASE_HEADERS."""
     try:
-        r = requests.get(url, headers=HEADERS, timeout=20, **kwargs)
+        hdrs = {**BASE_HEADERS, **(extra_headers or {})}
+        r = SESSION.get(url, headers=hdrs, timeout=20, **kwargs)
         r.raise_for_status()
         return r
     except Exception as e:
@@ -55,18 +65,28 @@ def get(url: str, **kwargs) -> requests.Response | None:
 
 
 def parse_ru_date(text: str) -> datetime.date | None:
-    """«10 июня», «10 июн.», «10.06.2024», «2024-06-10»."""
+    """Парсит «10 июня», «10 июн.», «10.06.2024», «2024-06-10», «вчера»."""
+    if not text:
+        return None
     text = text.strip()
     today = datetime.date.today()
 
-    if "сегодня" in text.lower():
+    low = text.lower()
+    if "сегодня" in low:
         return today
-    if "вчера" in text.lower():
+    if "вчера" in low:
         return today - datetime.timedelta(days=1)
+    # «N дней назад»
+    m = re.search(r"(\d+)\s+дн", low)
+    if m:
+        return today - datetime.timedelta(days=int(m.group(1)))
+    # «N часов/минут назад» → сегодня
+    if re.search(r"\d+\s+(час|мин|секунд)", low):
+        return today
 
-    # ISO / DD.MM.YYYY
     for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d.%m.%y"):
         try:
+            s = re.sub(r"\s+", "", text)[:10]
             return datetime.datetime.strptime(text[:10], fmt).date()
         except ValueError:
             pass
@@ -79,7 +99,11 @@ def parse_ru_date(text: str) -> datetime.date | None:
         year = int(m.group(3)) if m.group(3) else today.year
         if mon:
             try:
-                return datetime.date(year, mon, day)
+                d = datetime.date(year, mon, day)
+                # если дата в будущем — прошлый год
+                if d > today:
+                    d = d.replace(year=year - 1)
+                return d
             except ValueError:
                 pass
     return None
@@ -100,21 +124,35 @@ def hotness(title: str, desc: str, photos: int, days: int) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Авито
+# Авито — обходим 429 через cookie-сессию и задержки
 # ---------------------------------------------------------------------------
 
 def scrape_avito(pages: int = 5) -> list[dict]:
     base = "https://www.avito.ru/ekaterinburg/avtomobili"
     results = []
+
+    # Сначала «прогреваем» сессию главной страницей, чтобы получить куки
+    print("  Авито: инициализация сессии…")
+    get("https://www.avito.ru/")
+    time.sleep(2)
+
     for page in range(1, pages + 1):
         print(f"  Авито стр. {page}…")
         r = get(base, params={"p": page, "s": 104})
         if not r:
-            break
+            # 429 — ждём и пробуем ещё раз
+            print("  Авито: пауза 15 сек после блокировки…")
+            time.sleep(15)
+            r = get(base, params={"p": page, "s": 104})
+            if not r:
+                break
+
         soup = BeautifulSoup(r.text, "html.parser")
         items = soup.select("[data-marker='item']")
         if not items:
+            print("  Авито: объявления не найдены (возможно, блокировка)")
             break
+
         for item in items:
             try:
                 title_el = item.select_one("[itemprop='name']") or item.select_one("h3")
@@ -128,37 +166,41 @@ def scrape_avito(pages: int = 5) -> list[dict]:
                 )
                 price = (
                     price_el.get("content") or price_el.get_text(strip=True)
-                    if price_el
-                    else ""
+                    if price_el else ""
                 )
 
-                date_el = item.select_one("[data-marker='item-date']") or item.select_one(
-                    "span[class*='date']"
+                date_el = (
+                    item.select_one("[data-marker='item-date']")
+                    or item.select_one("span[class*='date']")
                 )
                 date_text = date_el.get_text(strip=True) if date_el else ""
                 date = parse_ru_date(date_text)
 
-                imgs = item.select("img[src]")
-                photo_cnt = len([i for i in imgs if "avito" in i.get("src", "")])
-                # иногда фото — атрибут data-src
+                # Количество фото — ищем счётчик вида «12 фото»
+                photo_cnt = 0
+                photo_counter = item.select_one("[class*='iva-item-photo']")
+                if photo_counter:
+                    m = re.search(r"(\d+)", photo_counter.get_text())
+                    if m:
+                        photo_cnt = int(m.group(1))
                 if photo_cnt == 0:
-                    photo_cnt = len(item.select("[class*='photo']"))
+                    photo_cnt = len(item.select("img[src*='avito']"))
 
-                results.append(
-                    {
-                        "source": "avito",
-                        "title": title,
-                        "price": price,
-                        "url": url,
-                        "date": str(date) if date else date_text,
-                        "_date_parsed": date,
-                        "_photo_cnt": photo_cnt,
-                        "description": "",
-                    }
-                )
+                results.append({
+                    "source": "avito",
+                    "title": title,
+                    "price": price,
+                    "url": url,
+                    "date": str(date) if date else date_text,
+                    "_date_parsed": date,
+                    "_photo_cnt": photo_cnt,
+                    "description": "",
+                })
             except Exception:
                 pass
-        time.sleep(1.5)
+
+        time.sleep(3)  # вежливая пауза между страницами
+
     print(f"  Авито: {len(results)} объявлений")
     return results
 
@@ -168,54 +210,54 @@ def scrape_avito(pages: int = 5) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def scrape_autoru(pages: int = 5) -> list[dict]:
-    base = "https://auto.ru/cars/used/sale/ekaterinburg/"
     results = []
     for page in range(1, pages + 1):
         print(f"  Авто.ру стр. {page}…")
-        url = base if page == 1 else f"{base}?page={page}"
-        r = get(url)
-        if not r:
-            break
-        soup = BeautifulSoup(r.text, "html.parser")
+        api_url = "https://auto.ru/-/ajax/desktop/listing/"
+        r = get(
+            api_url,
+            extra_headers={
+                "x-requested-with": "XMLHttpRequest",
+                "Referer": "https://auto.ru/cars/used/sale/ekaterinburg/",
+            },
+            params={
+                "category": "cars",
+                "section": "used",
+                "geo_id": 54,
+                "page": page,
+                "page_size": 37,
+            },
+        )
 
-        # Авто.ру — React-приложение; начальное состояние рендерится в JSON внутри <script>
-        scripts = soup.find_all("script")
         data = []
-        for s in scripts:
-            txt = s.string or ""
-            if "listing" in txt and "saleId" in txt:
-                # Ищем массив объявлений
-                m = re.search(r'"offers"\s*:\s*(\[.*?\])\s*,\s*"', txt, re.DOTALL)
-                if m:
-                    try:
-                        data = json.loads(m.group(1))
-                    except Exception:
-                        pass
-                    break
+        if r:
+            try:
+                data = r.json().get("offers", [])
+            except Exception:
+                pass
+
+        # Запасной вариант — парсить HTML
+        if not data:
+            url = (
+                "https://auto.ru/cars/used/sale/ekaterinburg/"
+                if page == 1
+                else f"https://auto.ru/cars/used/sale/ekaterinburg/?page={page}"
+            )
+            r2 = get(url)
+            if r2:
+                soup = BeautifulSoup(r2.text, "html.parser")
+                for script in soup.find_all("script"):
+                    txt = script.string or ""
+                    m = re.search(r'"offers"\s*:\s*(\[.+?\])\s*,\s*"pagination"', txt, re.DOTALL)
+                    if m:
+                        try:
+                            data = json.loads(m.group(1))
+                        except Exception:
+                            pass
+                        break
 
         if not data:
-            # Попробуем API
-            api_url = (
-                "https://auto.ru/-/ajax/desktop/listing/"
-                if page == 1
-                else f"https://auto.ru/-/ajax/desktop/listing/?page={page}"
-            )
-            ar = get(
-                api_url,
-                headers={**HEADERS, "x-requested-with": "XMLHttpRequest"},
-                params={
-                    "category": "cars",
-                    "section": "used",
-                    "geo_id": 54,  # Екатеринбург
-                    "page": page,
-                    "page_size": 37,
-                },
-            )
-            if ar:
-                try:
-                    data = ar.json().get("offers", [])
-                except Exception:
-                    pass
+            break
 
         for offer in data:
             try:
@@ -224,46 +266,38 @@ def scrape_autoru(pages: int = 5) -> list[dict]:
                 mark = vehicle.get("mark_info", {}).get("name", "")
                 model = vehicle.get("model_info", {}).get("name", "")
                 year = docs.get("year", "")
-                title = f"{mark} {model} {year}".strip()
+                title = f"{mark} {model} {year}".strip() or offer.get("name", "")
 
-                price = offer.get("price_info", {}).get("RUR", "")
+                price = str(offer.get("price_info", {}).get("RUR", ""))
                 sale_id = offer.get("saleId") or offer.get("id", "")
-                url_path = offer.get("url", "") or (
+                url_item = offer.get("url", "") or (
                     f"https://auto.ru/cars/used/sale/{sale_id}/" if sale_id else ""
                 )
 
-                ts = offer.get("additional_info", {}).get("fresh_date") or offer.get(
-                    "creation_date"
+                ts = (
+                    offer.get("additional_info", {}).get("fresh_date")
+                    or offer.get("creation_date")
                 )
-                if ts:
-                    date = datetime.date.fromtimestamp(int(str(ts)[:10]))
-                else:
-                    date = None
+                date = datetime.date.fromtimestamp(int(str(ts)[:10])) if ts else None
 
-                photos = offer.get("photo_urls") or offer.get("state", {}).get(
-                    "image_urls", []
-                )
+                photos = offer.get("photo_urls") or offer.get("state", {}).get("image_urls", [])
                 photo_cnt = len(photos) if isinstance(photos, list) else 0
 
-                desc = offer.get("description", "")
-
-                results.append(
-                    {
-                        "source": "autoru",
-                        "title": title,
-                        "price": str(price),
-                        "url": url_path,
-                        "date": str(date) if date else "",
-                        "_date_parsed": date,
-                        "_photo_cnt": photo_cnt,
-                        "description": desc,
-                    }
-                )
+                results.append({
+                    "source": "autoru",
+                    "title": title,
+                    "price": price,
+                    "url": url_item,
+                    "date": str(date) if date else "",
+                    "_date_parsed": date,
+                    "_photo_cnt": photo_cnt,
+                    "description": offer.get("description", ""),
+                })
             except Exception:
                 pass
-        if not data:
-            break
+
         time.sleep(1.5)
+
     print(f"  Авто.ру: {len(results)} объявлений")
     return results
 
@@ -282,15 +316,10 @@ def scrape_drom(pages: int = 5) -> list[dict]:
         if not r:
             break
         soup = BeautifulSoup(r.text, "html.parser")
-        cards = soup.select("a[data-ftid='bull_title']")
-        if not cards:
-            # Альтернативный селектор
-            cards = soup.select("div[data-ftid='bulls-list_bull']")
-
-        if not cards:
+        containers = soup.select("div[data-ftid='bulls-list_bull']")
+        if not containers:
             break
 
-        containers = soup.select("div[data-ftid='bulls-list_bull']")
         for card in containers:
             try:
                 link = card.select_one("a[data-ftid='bull_title']")
@@ -303,26 +332,35 @@ def scrape_drom(pages: int = 5) -> list[dict]:
 
                 date_el = card.select_one("span[data-ftid='bull_date-created']")
                 date_text = date_el.get_text(strip=True) if date_el else ""
+
+                # Дром иногда пишет «10 июня» без года
                 date = parse_ru_date(date_text)
 
-                imgs = card.select("img")
-                photo_cnt = len(imgs)
+                # Количество фото — ищем счётчик «12 фото» или иконки
+                photo_cnt = 0
+                photo_el = card.select_one("span[data-ftid='bull_images-count']")
+                if photo_el:
+                    m = re.search(r"(\d+)", photo_el.get_text())
+                    if m:
+                        photo_cnt = int(m.group(1))
+                if photo_cnt == 0:
+                    photo_cnt = len(card.select("img"))
 
-                results.append(
-                    {
-                        "source": "drom",
-                        "title": title,
-                        "price": price,
-                        "url": url_item,
-                        "date": str(date) if date else date_text,
-                        "_date_parsed": date,
-                        "_photo_cnt": photo_cnt,
-                        "description": "",
-                    }
-                )
+                results.append({
+                    "source": "drom",
+                    "title": title,
+                    "price": price,
+                    "url": url_item,
+                    "date": str(date) if date else date_text,
+                    "_date_parsed": date,
+                    "_photo_cnt": photo_cnt,
+                    "description": "",
+                })
             except Exception:
                 pass
+
         time.sleep(1.5)
+
     print(f"  Дром: {len(results)} объявлений")
     return results
 
@@ -332,20 +370,23 @@ def scrape_drom(pages: int = 5) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def scrape_youla(pages: int = 3) -> list[dict]:
-    """Юла частично рендерится на сервере; используем публичный API."""
     results = []
-    api = "https://youla.ru/api/products"
     cursor = None
     for page in range(pages):
         print(f"  Юла стр. {page + 1}…")
-        params = {
+        params: dict = {
             "category_slug": "avtomobili",
             "city_slug": "ekaterinburg",
             "limit": 48,
         }
         if cursor:
             params["cursor"] = cursor
-        r = get(api, params=params, headers={**HEADERS, "Accept": "application/json"})
+
+        r = get(
+            "https://youla.ru/api/products",
+            extra_headers={"Accept": "application/json"},
+            params=params,
+        )
         if not r:
             break
         try:
@@ -355,8 +396,8 @@ def scrape_youla(pages: int = 3) -> list[dict]:
 
         items = js.get("data", {}).get("products", []) or js.get("products", [])
         if not items:
-            # Попробуем GraphQL-подобный эндпоинт
             break
+
         cursor = js.get("data", {}).get("cursor") or js.get("cursor")
 
         for item in items:
@@ -365,31 +406,27 @@ def scrape_youla(pages: int = 3) -> list[dict]:
                 price = str(item.get("price", {}).get("product_price", ""))
                 url_item = "https://youla.ru" + (item.get("uri") or item.get("url", ""))
                 date_ts = item.get("date_created") or item.get("published_at")
-                date = (
-                    datetime.date.fromtimestamp(int(date_ts)) if date_ts else None
-                )
+                date = datetime.date.fromtimestamp(int(date_ts)) if date_ts else None
                 photos = item.get("images") or []
                 photo_cnt = len(photos) if isinstance(photos, list) else 0
-                desc = item.get("description", "")
 
-                results.append(
-                    {
-                        "source": "youla",
-                        "title": title,
-                        "price": price,
-                        "url": url_item,
-                        "date": str(date) if date else "",
-                        "_date_parsed": date,
-                        "_photo_cnt": photo_cnt,
-                        "description": desc,
-                    }
-                )
+                results.append({
+                    "source": "youla",
+                    "title": title,
+                    "price": price,
+                    "url": url_item,
+                    "date": str(date) if date else "",
+                    "_date_parsed": date,
+                    "_photo_cnt": photo_cnt,
+                    "description": item.get("description", ""),
+                })
             except Exception:
                 pass
 
         if not cursor:
             break
         time.sleep(1.0)
+
     print(f"  Юла: {len(results)} объявлений")
     return results
 
@@ -417,42 +454,48 @@ def fetch_all() -> list[dict]:
 
 def filter_and_score(items: list[dict]) -> list[dict]:
     result = []
+    skipped_photos = 0
+    skipped_days = 0
+    no_date = 0
+
     for item in items:
         photos = item.get("_photo_cnt", 0)
-        date = item.get("_date_parsed")
-        # Удаляем нессериализуемый объект даты перед сохранением
-        item.pop("_date_parsed", None)
-
+        date = item.pop("_date_parsed", None)
         d = days_ago(date)
+
+        if date is None:
+            no_date += 1
+
         if photos > MAX_PHOTOS:
+            skipped_photos += 1
             continue
         if d < MIN_DAYS_POSTED:
+            skipped_days += 1
             continue
 
-        title = item.get("title", "")
-        desc = item.get("description", "")
-        score = hotness(title, desc, photos, d)
-
+        score = hotness(item.get("title", ""), item.get("description", ""), photos, d)
         item["_photos"] = photos
         item["_days_on_site"] = d
         item["_hot_score"] = score
         result.append(item)
 
     result.sort(key=lambda x: x["_hot_score"], reverse=True)
-    print(f"\nПосле фильтрации: {len(result)} объявлений")
+    print(
+        f"\nФильтрация: исходно {len(items)}, "
+        f"пропущено (много фото): {skipped_photos}, "
+        f"пропущено (мало дней / нет даты): {skipped_days}, "
+        f"без даты всего: {no_date}, "
+        f"прошло фильтр: {len(result)}"
+    )
     return result
 
-
-# ---------------------------------------------------------------------------
-# Сохранение
-# ---------------------------------------------------------------------------
 
 def save(listings: list[dict]) -> None:
     Path(OUTPUT_FILE).write_text(
         json.dumps(listings, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    print(f"Сохранено → {OUTPUT_FILE}")
+    print(f"Сохранено → {OUTPUT_FILE}  ({len(listings)} объявлений)")
 
 
 # ---------------------------------------------------------------------------
