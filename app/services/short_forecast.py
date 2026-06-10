@@ -499,7 +499,10 @@ def format_forecast_free(f: dict) -> str:
 
     direction = f.get("direction", "FLAT")
     sigs = f.get("signals", [])
-    sigs_text = "\n".join(f"  • {_html.escape(s)}" for s in sigs[:2]) if sigs else "  • Нейтральные условия"
+    clean_sigs = [s for s in sigs[:2] if not s.startswith("Скор ")]
+    if not clean_sigs:
+        clean_sigs = ["Подробный анализ — по подписке"]
+    sigs_text = "\n".join(f"  • {_html.escape(s)}" for s in clean_sigs)
 
     return (
         f"📊 <b>{coin}/USDT — Анализ индикаторов</b>  ·  {now}\n"
