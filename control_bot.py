@@ -1072,19 +1072,14 @@ async def handle_document(msg: Message):
 
         fname = doc.file_name.lower()
 
-        # Cookies файл (avito_cookies.json или drom_cookies.json)
-        if "cookie" in fname or "avito_cook" in fname or "drom_cook" in fname:
-            if not isinstance(data, list):
-                await msg.answer("❌ Файл куки должен быть массивом JSON")
-                return
-            domain = "avito" if "avito" in fname else "drom"
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, lambda: None)  # flush
-            await _load_cookies_to_browser(data, domain)
-            await msg.answer(
-                f"✅ Куки для {domain} загружены!\n"
-                f"Теперь бот может писать продавцам на {'Авито' if domain=='avito' else 'Дроме'}."
-            )
+        # Cookies файл — определяем по имени или по содержимому
+        is_cookie_file = (
+            "cookie" in fname
+            or (isinstance(data, list) and data and "domain" in data[0] and "name" in data[0] and "value" in data[0])
+        )
+        if is_cookie_file:
+            text_repr = json.dumps(data)
+            await _process_cookie_text(msg, text_repr)
             return
 
         # Объединяем с существующими
