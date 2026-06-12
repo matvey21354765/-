@@ -717,7 +717,7 @@ async def scrape_avito_playwright_async(pages: int = 5) -> list[dict]:
                     try:
                         await page.goto(url, wait_until="domcontentloaded", timeout=30000)
                     except Exception as nav_err:
-                        if "ERR_CONNECTION_CLOSED" in str(nav_err) or "ERR_TUNNEL_CONNECTION_FAILED" in str(nav_err):
+                        if any(e in str(nav_err) for e in ("ERR_CONNECTION_CLOSED", "ERR_TUNNEL_CONNECTION_FAILED", "ERR_SSL_PROTOCOL_ERROR", "ERR_PROXY_CONNECTION_FAILED")):
                             await bot.send_message(MY_CHAT_ID, "⚠️ Прокси не работает, пробую напрямую...")
                             await page.close()
                             # Пересоздаём контекст без прокси
