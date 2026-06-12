@@ -796,21 +796,16 @@ async def _solve_yandex_captcha(page, page_num: int) -> bool:
 
     event = asyncio.Event()
     captcha_wait[MY_CHAT_ID] = {"answer": None, "event": event}
-    waiting_input[MY_CHAT_ID] = {"action": "captcha"}
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🌐 Открыть Авито", url="https://www.avito.ru/ekaterinburg/avtomobili")],
-        [InlineKeyboardButton(text="✅ Куки отправил, продолжай", callback_data="captcha_done")],
+        [InlineKeyboardButton(text="✅ Готово, продолжай", callback_data="captcha_done")],
     ])
 
     await bot.send_message(
         MY_CHAT_ID,
-        f"🔒 *Авито заблокировало* (стр. {page_num})\n\n"
-        f"1️⃣ Нажми «Открыть Авито» и войди в аккаунт\n"
-        f"2️⃣ Реши капчу если появится\n"
-        f"3️⃣ Экспортируй куки через расширение *EditThisCookie* → Export → сохрани как `avito_cookies.json`\n"
-        f"4️⃣ Отправь файл `avito_cookies.json` боту\n"
-        f"5️⃣ Нажми кнопку «Куки отправил, продолжай»",
+        f"🔒 Авито показало капчу (стр. {page_num})\n\n"
+        f"Открой Авито по кнопке, реши капчу если есть, затем нажми *Готово*.",
         reply_markup=kb,
         parse_mode="Markdown"
     )
