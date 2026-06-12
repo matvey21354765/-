@@ -844,25 +844,7 @@ async def scrape_avito_playwright_async(pages: int = 5) -> list[dict]:
                 url = f"https://www.avito.ru/ekaterinburg/avtomobili?p={p}&s=104"
                 page = await context.new_page()
                 try:
-                    try:
-                        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                    except Exception as nav_err:
-                        if any(e in str(nav_err) for e in ("ERR_CONNECTION_CLOSED", "ERR_TUNNEL_CONNECTION_FAILED", "ERR_SSL_PROTOCOL_ERROR", "ERR_PROXY_CONNECTION_FAILED")):
-                            await page.close()
-                            await context.close()
-                            # Fallback: без прокси
-                            context = await pw.chromium.launch_persistent_context(
-                                user_data_dir=str(SESSION_DIR) + "_noproxy",
-                                headless=IS_SERVER,
-                                args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
-                                viewport={"width": 1280, "height": 900},
-                                locale="ru-RU",
-                                timezone_id="Asia/Yekaterinburg",
-                            )
-                            page = await context.new_page()
-                            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                        else:
-                            raise
+                    await page.goto(url, wait_until="domcontentloaded", timeout=40000)
                     await asyncio.sleep(_rnd.uniform(2, 4))
 
                     # Проверяем капчу
