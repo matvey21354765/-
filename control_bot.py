@@ -694,23 +694,37 @@ async def cmd_xray(msg: Message):
 
     await msg.answer("\n".join(lines) + "\n\n⏳ Тестирую IP через прокси...")
 
-    # Тест через aiohttp + socks
+    # Тест SOCKS5 через низкоуровневый сокет
+    try:
+        import socket as _sock, struct as _struct
+
+        def _socks5_test(target_host: str, target_port: int) -> tuple[bool, str]:
+            s = _sock.socket()
+            s.settimeout(10)
+            s.connect(("127.0.0.1", 10808))
+            s.send(b'\x05\x01\x00')
+            r = s.recv(2)
+            if r != b'\x05\x00':
+                return False, f"SOCKS5 auth error: {r.hex()}"
+            host_b = target_host.encode()
+            s.send(b'\x05\x01\x00\x03' + bytes([len(host_b)]) + host_b + _struct.pack('>H', target_port))
+            r = s.recv(10)
+            s.close()
+            if len(r) < 2 or r[1] != 0:
+                code = r[1] if len(r) > 1 else -1
+                errs = {1:"General failure",2:"Not allowed",3:"Network unreachable",4:"Host unreachable",5:"Connection refused"}
+                return False, f"SOCKS5 error {code}: {errs.get(code,'unknown')}"
+            return True, "OK"
+
+        loop = asyncio.get_event_loop()
+        ok, detail = await loop.run_in_executor(None, lambda: _socks5_test("api.ipify.org", 443))
+        lines.append(f"{'✅' if ok else '❌'} SOCKS5→api.ipify.org:443: {detail}")
+    except Exception as e:
+        lines.append(f"❌ SOCKS5 тест: {e}")
+
+    # IP сервера без прокси
     try:
         import aiohttp
-        connector = aiohttp.TCPConnector()
-        async with aiohttp.ClientSession(connector=connector) as session:
-            async with session.get(
-                "https://api.ipify.org",
-                proxy="socks5://127.0.0.1:10808",
-                timeout=aiohttp.ClientTimeout(total=15)
-            ) as resp:
-                ip = await resp.text()
-                lines.append(f"📍 Внешний IP через прокси: {ip.strip()}")
-    except Exception as e:
-        lines.append(f"❌ Прокси не работает: {e}")
-
-    # Тест без прокси (реальный IP сервера)
-    try:
         async with aiohttp.ClientSession() as session:
             async with session.get("https://api.ipify.org", timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 real_ip = await resp.text()
