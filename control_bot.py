@@ -670,6 +670,56 @@ async def cmd_active(msg: Message):
         kb = InlineKeyboardMarkup(inline_keyboard=buttons)
         await msg.answer(text, reply_markup=kb)
 
+@dp.message(Command("xray"))
+async def cmd_xray(msg: Message):
+    """Проверяет статус xray прокси."""
+    lines = []
+
+    # Статус процесса
+    if _xray_proc is None:
+        lines.append("❌ xray не запускался (бинарь не найден?)")
+    elif _xray_proc.poll() is not None:
+        lines.append(f"❌ xray упал (код {_xray_proc.poll()})")
+    else:
+        lines.append("✅ xray процесс работает (PID " + str(_xray_proc.pid) + ")")
+
+    # Проверяем порт
+    import socket
+    try:
+        s = socket.create_connection(("127.0.0.1", 10808), timeout=2)
+        s.close()
+        lines.append("✅ SOCKS5 порт 10808 открыт")
+    except Exception as e:
+        lines.append(f"❌ Порт 10808 недоступен: {e}")
+
+    # Тест реального запроса через прокси
+    await msg.answer("\n".join(lines) + "\n\n⏳ Тестирую запрос через прокси...")
+    try:
+        import subprocess as _sp
+        result = _sp.run(
+            ["curl", "-s", "--socks5", "127.0.0.1:10808", "--max-time", "10",
+             "-o", "/dev/null", "-w", "%{http_code} | IP: %{remote_ip}",
+             "https://2ip.ru/"],
+            capture_output=True, text=True, timeout=15
+        )
+        lines.append(f"🌐 Тест curl: {result.stdout or result.stderr}")
+    except Exception as e:
+        lines.append(f"❌ curl ошибка: {e}")
+
+    # Тест IP через прокси
+    try:
+        result2 = _sp.run(
+            ["curl", "-s", "--socks5", "127.0.0.1:10808", "--max-time", "10",
+             "https://api.ipify.org"],
+            capture_output=True, text=True, timeout=15
+        )
+        lines.append(f"📍 Внешний IP через прокси: {result2.stdout.strip() or 'нет ответа'}")
+    except Exception as e:
+        lines.append(f"❌ IP-тест: {e}")
+
+    await msg.answer("\n".join(lines))
+
+
 @dp.message(Command("login"))
 async def cmd_login(msg: Message):
     """Отправляет cookies в браузер бота для авторизации."""
