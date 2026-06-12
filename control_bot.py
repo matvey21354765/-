@@ -250,70 +250,91 @@ def send_on_avito(url: str, message: str) -> tuple[bool, str]:
 
 
 def send_on_drom(url: str, message: str) -> tuple[bool, str]:
-    """Открывает объявление Дром и отправляет сообщение."""
+    """Открывает объявление Дром и отправляет сообщение через форму."""
     try:
         ctx = get_browser()
         page = ctx.new_page()
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            time.sleep(random.uniform(2,4))
+            time.sleep(random.uniform(2, 4))
 
+            # Дром: кнопка "Написать продавцу" или "Отправить сообщение"
             write_btn = None
             for sel in [
-                "a[href*='message']",
-                "button[class*='message']",
+                "button[data-ga-stats-name='send_message']",
+                "a[data-ga-stats-name='send_message']",
+                "button[class*='ContactForm']",
+                "a[class*='ContactForm']",
+                "button[class*='contact']",
                 "a[class*='contact']",
             ]:
                 el = page.query_selector(sel)
-                if el:
+                if el and el.is_visible():
                     write_btn = el
                     break
+
             if not write_btn:
                 for btn in page.query_selector_all("button, a"):
                     try:
-                        t = btn.inner_text().lower()
-                        if "написать" in t or "сообщение" in t or "связаться" in t:
+                        t = btn.inner_text().strip().lower()
+                        if any(w in t for w in ["написать", "сообщение продавцу", "связаться", "отправить сообщение"]):
                             write_btn = btn
                             break
                     except Exception:
                         pass
+
             if not write_btn:
                 return False, "кнопка не найдена"
 
             write_btn.click()
-            time.sleep(random.uniform(1.5,3))
+            time.sleep(random.uniform(2, 4))
 
+            # Ищем поле ввода — Дром использует textarea или modal
             input_box = None
-            for sel in ["textarea", "div[contenteditable='true']"]:
+            for sel in [
+                "textarea[name='message']",
+                "textarea[placeholder*='сообщени']",
+                "textarea[placeholder*='Сообщени']",
+                "div[class*='Modal'] textarea",
+                "div[class*='modal'] textarea",
+                "textarea",
+                "div[contenteditable='true']",
+            ]:
                 try:
                     el = page.locator(sel).first
-                    if el.is_visible(timeout=4000):
+                    if el.is_visible(timeout=5000):
                         input_box = el
                         break
                 except Exception:
                     pass
+
             if not input_box:
                 return False, "поле ввода не найдено"
 
             input_box.click()
             time.sleep(0.5)
             type_text(input_box, message)
-            time.sleep(random.uniform(0.5,1))
+            time.sleep(random.uniform(0.5, 1))
 
             send_btn = None
-            for sel in ["button[type='submit']","button[class*='send']","button[class*='submit']"]:
+            for sel in [
+                "button[type='submit']",
+                "button[class*='submit']",
+                "button[class*='Send']",
+                "input[type='submit']",
+            ]:
                 el = page.query_selector(sel)
-                if el:
+                if el and el.is_visible():
                     send_btn = el
                     break
+
             if send_btn:
                 send_btn.click()
             else:
                 input_box.press("Enter")
 
             time.sleep(2)
-            chat_url = page.url
-            return True, chat_url
+            return True, page.url
         finally:
             page.close()
     except Exception as e:
