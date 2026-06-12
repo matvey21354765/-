@@ -108,6 +108,23 @@ def load_listings() -> list:
         return []
     return json.loads(Path(LISTINGS_FILE).read_text(encoding="utf-8"))
 
+# Короткие ID для кнопок (Telegram лимит: 64 байта на callback_data)
+_id_to_url: dict[str, str] = {}
+_url_to_id: dict[str, str] = {}
+_id_counter = 0
+
+def url_to_id(url: str) -> str:
+    global _id_counter
+    if url not in _url_to_id:
+        _id_counter += 1
+        sid = str(_id_counter)
+        _url_to_id[url] = sid
+        _id_to_url[sid] = url
+    return _url_to_id[url]
+
+def id_to_url(sid: str) -> str:
+    return _id_to_url.get(sid, sid)
+
 # ============================================================
 #  ФИЛЬТРЫ
 # ============================================================
@@ -382,18 +399,19 @@ waiting_input: dict = {}
 
 
 def make_listing_keyboard(deal_key: str, stage: str) -> InlineKeyboardMarkup:
+    sid = url_to_id(deal_key)
     next_stage = STAGES.get(stage)
     buttons = []
     if next_stage and next_stage in REPLIES:
         buttons.append([
             InlineKeyboardButton(
                 text=f"✉️ Отправить: «{REPLIES[next_stage][:30]}...»",
-                callback_data=f"send_auto|{deal_key}"
+                callback_data=f"send_auto|{sid}"
             )
         ])
     buttons.append([
-        InlineKeyboardButton(text="✏️ Написать своё", callback_data=f"send_custom|{deal_key}"),
-        InlineKeyboardButton(text="❌ Пропустить",    callback_data=f"skip|{deal_key}"),
+        InlineKeyboardButton(text="✏️ Написать своё", callback_data=f"send_custom|{sid}"),
+        InlineKeyboardButton(text="❌ Пропустить",    callback_data=f"skip|{sid}"),
     ])
     buttons.append([
         InlineKeyboardButton(text="🔗 Открыть объявление",
@@ -446,10 +464,11 @@ async def notify_new_listing(item: dict):
     save_deals(deals)
 
     text = listing_card_text(item, deals[url])
+    sid = url_to_id(url)
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✉️ Написать первое сообщение",
-                              callback_data=f"send_opener|{url}")],
-        [InlineKeyboardButton(text="❌ Пропустить", callback_data=f"skip|{url}")],
+                              callback_data=f"send_opener|{sid}")],
+        [InlineKeyboardButton(text="❌ Пропустить", callback_data=f"skip|{sid}")],
         [InlineKeyboardButton(text="🔗 Объявление", url=url)],
     ])
     await bot.send_message(MY_CHAT_ID, text, reply_markup=kb, parse_mode="Markdown")
@@ -496,6 +515,7 @@ async def cmd_new(msg: Message):
     await msg.answer(f"Нашёл {len(new_items)} новых объявлений:")
     for item in new_items:
         url = item.get("url","")
+        sid = url_to_id(url)
         text = (
             f"{'🟢 Авито' if item.get('source')=='avito' else '🔵 Дром' if item.get('source')=='drom' else '🔴 Авто.ру'}\n"
             f"🚗 {item.get('title','')}\n"
@@ -503,8 +523,8 @@ async def cmd_new(msg: Message):
             f"📅 Дней: {item.get('_days_on_site','?')}"
         )
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✉️ Написать", callback_data=f"send_opener|{url}")],
-            [InlineKeyboardButton(text="❌ Пропустить", callback_data=f"skip|{url}")],
+            [InlineKeyboardButton(text="✉️ Написать", callback_data=f"send_opener|{sid}")],
+            [InlineKeyboardButton(text="❌ Пропустить", callback_data=f"skip|{sid}")],
             [InlineKeyboardButton(text="🔗 Открыть", url=url)],
         ])
         await msg.answer(text, reply_markup=kb)
@@ -519,6 +539,7 @@ async def cmd_active(msg: Message):
         return
     await msg.answer(f"Активных диалогов: {len(active)}")
     for url, deal in list(active.items())[:10]:
+        sid = url_to_id(url)
         stage = deal.get("stage","")
         next_stage = STAGES.get(stage)
         text = (
@@ -530,11 +551,11 @@ async def cmd_active(msg: Message):
         if next_stage and next_stage in REPLIES:
             buttons.append([InlineKeyboardButton(
                 text=f"✉️ «{REPLIES[next_stage][:35]}...»",
-                callback_data=f"send_auto|{url}"
+                callback_data=f"send_auto|{sid}"
             )])
         buttons.append([
-            InlineKeyboardButton(text="✏️ Своё", callback_data=f"send_custom|{url}"),
-            InlineKeyboardButton(text="❌ Закрыть", callback_data=f"close|{url}"),
+            InlineKeyboardButton(text="✏️ Своё", callback_data=f"send_custom|{sid}"),
+            InlineKeyboardButton(text="❌ Закрыть", callback_data=f"close|{sid}"),
         ])
         if url.startswith("http"):
             buttons.append([InlineKeyboardButton(text="🔗 Открыть", url=url)])
@@ -558,7 +579,7 @@ async def cmd_scan(msg: Message):
 
 @dp.callback_query(F.data.startswith("send_opener|"))
 async def cb_send_opener(cb: CallbackQuery):
-    url = cb.data.split("|", 1)[1]
+    url = id_to_url(cb.data.split("|", 1)[1])
     listings = load_listings()
     item = next((i for i in listings if i.get("url") == url), None)
     if not item:
@@ -601,7 +622,7 @@ async def cb_send_opener(cb: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("send_auto|"))
 async def cb_send_auto(cb: CallbackQuery):
-    url = cb.data.split("|", 1)[1]
+    url = id_to_url(cb.data.split("|", 1)[1])
     deals = load_deals()
     deal  = deals.get(url)
     if not deal:
@@ -645,7 +666,7 @@ async def cb_send_auto(cb: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("send_custom|"))
 async def cb_send_custom(cb: CallbackQuery):
-    url = cb.data.split("|", 1)[1]
+    url = id_to_url(cb.data.split("|", 1)[1])
     waiting_input[cb.from_user.id] = {"action": "custom_text", "deal_key": url}
     await cb.answer()
     await cb.message.reply("✏️ Напиши своё сообщение для продавца:")
@@ -653,7 +674,7 @@ async def cb_send_custom(cb: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("skip|"))
 async def cb_skip(cb: CallbackQuery):
-    url = cb.data.split("|", 1)[1]
+    url = id_to_url(cb.data.split("|", 1)[1])
     deals = load_deals()
     if url not in deals:
         deals[url] = {}
@@ -666,7 +687,7 @@ async def cb_skip(cb: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("close|"))
 async def cb_close(cb: CallbackQuery):
-    url = cb.data.split("|", 1)[1]
+    url = id_to_url(cb.data.split("|", 1)[1])
     deals = load_deals()
     if url in deals:
         deals[url]["stage"]   = "closed"
