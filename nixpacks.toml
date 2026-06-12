@@ -1,8 +1,12 @@
 [phases.setup]
-nixPkgs = ["python311", "python311Packages.pip", "chromium", "glib", "nss", "nspr", "dbus", "atk", "cups", "libdrm", "xorg.libXcomposite", "xorg.libXdamage", "xorg.libXfixes", "xorg.libXrandr", "xorg.libxcb", "libxkbcommon", "pango", "cairo", "alsa-lib"]
+nixPkgs = ["python311", "chromium"]
 
 [phases.install]
-cmds = ["pip3 install -r requirements.txt", "python3 -m playwright install chromium"]
+cmds = [
+  "python3 -m venv /app/venv",
+  "/app/venv/bin/pip install -r requirements.txt",
+  "/app/venv/bin/python -m playwright install chromium"
+]
 
 [start]
-cmd = "python3 control_bot.py"
+cmd = "/app/venv/bin/python control_bot.py"

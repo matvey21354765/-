@@ -1,8 +1,8 @@
 [build]
 builder = "NIXPACKS"
-buildCommand = "pip3 install -r requirements.txt && python3 -m playwright install chromium"
+buildCommand = "python3 -m venv /app/venv && /app/venv/bin/pip install -r requirements.txt && /app/venv/bin/python -m playwright install chromium"
 
 [deploy]
-startCommand = "python control_bot.py"
+startCommand = "/app/venv/bin/python control_bot.py"
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10
