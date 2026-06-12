@@ -91,6 +91,37 @@ REFUSE_WORDS = [
 ]
 
 # ============================================================
+#  ФИЛЬТРЫ
+# ============================================================
+
+PRICE_MIN = 400_000   # минимальная цена
+PRICE_MAX = 1_000_000 # максимальная цена
+
+DEALER_KEYWORDS = [
+    "ооо", "ип ", "автосалон", "официальный дилер", "дилер",
+    "автоцентр", "trade-in", "трейд-ин", "автохолдинг",
+    "автодом", "автомир", "рольф", "major", "lada",
+    "колёса даром", "автопланета", "автоград",
+]
+
+def parse_price(price_str: str) -> int | None:
+    """Извлекает число из строки цены. '1 500 000 ₽' → 1500000"""
+    if not price_str:
+        return None
+    digits = re.sub(r"[^\d]", "", str(price_str))
+    return int(digits) if digits else None
+
+def is_dealer(item: dict) -> bool:
+    text = (item.get("title", "") + " " + item.get("description", "")).lower()
+    return any(kw in text for kw in DEALER_KEYWORDS)
+
+def in_price_range(item: dict) -> bool:
+    price = parse_price(item.get("price", ""))
+    if price is None:
+        return True  # цена не указана — не исключаем
+    return PRICE_MIN <= price <= PRICE_MAX
+
+# ============================================================
 #  ХРАНИЛИЩЕ
 # ============================================================
 
@@ -355,14 +386,23 @@ def run():
     listings = json.loads(Path(LISTINGS_FILE).read_text(encoding="utf-8"))
     deals = load_deals()
 
-    # Только объявления с Авито (у них есть URL и мы можем написать)
+    # Только объявления с Авито, частники, в нужном диапазоне цен
+    all_avito = [i for i in listings if i.get("source") == "avito" and i.get("url")]
+
+    skipped_dealer = sum(1 for i in all_avito if is_dealer(i))
+    skipped_price  = sum(1 for i in all_avito if not is_dealer(i) and not in_price_range(i))
+
     avito_listings = [
-        item for item in listings
-        if item.get("source") == "avito" and item.get("url")
+        item for item in all_avito
+        if not is_dealer(item)
+        and in_price_range(item)
         and item.get("url") not in deals
     ]
 
-    print(f"📋 Авито объявлений для обработки: {len(avito_listings)}")
+    print(f"📋 Авито всего: {len(all_avito)}")
+    print(f"   Пропущено дилеров: {skipped_dealer}")
+    print(f"   Пропущено не в цене ({PRICE_MIN//1000}к–{PRICE_MAX//1000}к): {skipped_price}")
+    print(f"   Подходящих частников: {len(avito_listings)}")
     print(f"   Напишем сейчас: {min(len(avito_listings), MAX_NEW_PER_RUN)}")
     print(f"   Уже в работе: {len([d for d in deals.values() if d.get('stage') not in ('closed','done','error')])}\n")
 
