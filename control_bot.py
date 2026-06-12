@@ -1198,14 +1198,16 @@ async def cb_scan(cb: CallbackQuery):
             items = []
 
             if source in ("avito", "all"):
-                # Сначала пробуем HTTP с куками (быстрее, без капчи)
+                # HTTP с куками (быстрее, без браузера)
                 avito_items = await loop.run_in_executor(None, lambda: _scrape_avito_http_with_cookies(pages=5))
                 if avito_items:
                     items.extend(avito_items)
                 else:
-                    # Fallback: Playwright с прокси (медленнее, может попасть на капчу)
-                    avito_items = await scrape_avito_playwright_async(pages=5)
-                    items.extend(avito_items)
+                    await bot.send_message(
+                        MY_CHAT_ID,
+                        "⚠️ Авито HTTP заблокирован (капча/IP блок).\n"
+                        "Загрузи свежие куки через /login или подожди — Дром работает без ограничений."
+                    )
 
             if source in ("drom", "all"):
                 # Читаем следующую страницу Дрома
@@ -1596,25 +1598,51 @@ async def handle_text(msg: Message):
 # ============================================================
 
 async def background_scanner():
-    """Каждые 5 минут проверяет новые объявления и уведомляет."""
-    await asyncio.sleep(10)
+    """Каждые 30 минут сканирует Дром и уведомляет о новых объявлениях."""
+    await asyncio.sleep(30)
     while True:
         try:
-            listings = load_listings()
-            deals    = load_deals()
-            new_items = [
-                i for i in listings
-                if not is_dealer(i) and in_price_range(i)
-                and i.get("url") and i.get("url") not in deals
-            ]
-            if new_items:
-                await bot.send_message(
-                    MY_CHAT_ID,
-                    f"🔔 Найдено {len(new_items)} новых подходящих объявлений!\nНажми /new чтобы посмотреть."
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("scraper_http", "scraper_http.py")
+            scraper = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(scraper)
+
+            loop = asyncio.get_event_loop()
+
+            # Дром — всегда работает
+            state_file = Path("scan_state.json")
+            state = json.loads(state_file.read_text()) if state_file.exists() else {}
+            start = state.get("drom_bg_page", 1)
+            drom_items = await loop.run_in_executor(
+                None, lambda: scraper.scrape_drom_http(pages=10, start_page=start)
+            )
+            state["drom_bg_page"] = start + 10
+            state_file.write_text(json.dumps(state))
+
+            # Авито — пробуем HTTP
+            avito_items = await loop.run_in_executor(None, lambda: _scrape_avito_http_with_cookies(pages=3))
+
+            all_items = drom_items + avito_items
+            if all_items:
+                merged, new_count = await loop.run_in_executor(
+                    None, lambda: scraper.merge_and_save(all_items)
                 )
-        except Exception:
-            pass
-        await asyncio.sleep(300)
+                deals = load_deals()
+                suitable = [
+                    i for i in merged
+                    if not is_dealer(i) and in_price_range(i)
+                    and i.get("url") and i.get("url") not in deals
+                ]
+                if suitable:
+                    await bot.send_message(
+                        MY_CHAT_ID,
+                        f"🔔 Авто-скан: {new_count} новых объявлений!\n"
+                        f"Подходящих частников: {len(suitable)}\n"
+                        f"Нажми /new чтобы посмотреть."
+                    )
+        except Exception as e:
+            print(f"[background_scanner] {e}")
+        await asyncio.sleep(1800)  # каждые 30 минут
 
 
 # ============================================================
