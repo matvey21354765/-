@@ -36,8 +36,8 @@ from aiogram.filters import Command
 #  НАСТРОЙКИ
 # ============================================================
 
-BOT_TOKEN  = ""        # токен от @BotFather
-MY_CHAT_ID = 0         # твой Telegram ID (узнай у @userinfobot)
+BOT_TOKEN  = "8657191103:AAFBXaObKV2jcLbBsBzpYTuBfBj2bBkymrk"
+MY_CHAT_ID = 749256529
 
 LISTINGS_FILE = "listings.json"
 DEALS_FILE    = "control_deals.json"
