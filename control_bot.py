@@ -672,15 +672,15 @@ async def cmd_active(msg: Message):
 
 @dp.message(Command("login"))
 async def cmd_login(msg: Message):
-    """Инфо о входе в аккаунты."""
+    """Отправляет cookies в браузер бота для авторизации."""
     await msg.answer(
-        "🔐 Для отправки сообщений нужно войти в аккаунты:\n\n"
-        "📱 *Авито:* открой https://www.avito.ru/profile в браузере на сервере\n"
-        "📱 *Дром:* открой https://ekaterinburg.drom.ru в браузере на сервере\n\n"
-        "Так как бот работает на сервере — авторизация сохраняется в папке `browser_profile/`.\n"
-        "Без входа в аккаунт бот не может писать продавцам.\n\n"
-        "💡 *Как войти:* используй `/scan` → после открытия страницы бот покажет ошибку авторизации.\n"
-        "Нужно зайти локально, сделать `browser_profile/` и загрузить его на сервер.",
+        "🔐 *Как войти в аккаунты для отправки сообщений:*\n\n"
+        "1️⃣ Войди в Авито/Дром в браузере на своём компьютере\n"
+        "2️⃣ Установи расширение *EditThisCookie* (Chrome/Firefox)\n"
+        "3️⃣ Экспортируй куки в JSON\n"
+        "4️⃣ Отправь JSON-файл боту\n\n"
+        "Или: отправь файл `avito_cookies.json` / `drom_cookies.json`\n\n"
+        "⚠️ Бот работает на сервере — без авторизации писать продавцам не может.",
         parse_mode="Markdown"
     )
 
@@ -721,7 +721,6 @@ async def scrape_avito_playwright_async(pages: int = 5) -> list[dict]:
         )
         if proxy_cfg:
             launch_kwargs["proxy"] = proxy_cfg
-            await bot.send_message(MY_CHAT_ID, "🔌 Авито: использую VLESS прокси...")
         context = await pw.chromium.launch_persistent_context(**launch_kwargs)
         try:
             import re as _re, datetime as _dt, random as _rnd, json as _json
@@ -761,10 +760,9 @@ async def scrape_avito_playwright_async(pages: int = 5) -> list[dict]:
                         await page.goto(url, wait_until="domcontentloaded", timeout=30000)
                     except Exception as nav_err:
                         if any(e in str(nav_err) for e in ("ERR_CONNECTION_CLOSED", "ERR_TUNNEL_CONNECTION_FAILED", "ERR_SSL_PROTOCOL_ERROR", "ERR_PROXY_CONNECTION_FAILED")):
-                            await bot.send_message(MY_CHAT_ID, "⚠️ Прокси не работает, пробую напрямую...")
                             await page.close()
-                            # Пересоздаём контекст без прокси
                             await context.close()
+                            # Fallback: без прокси
                             context = await pw.chromium.launch_persistent_context(
                                 user_data_dir=str(SESSION_DIR) + "_noproxy",
                                 headless=IS_SERVER,
@@ -1043,12 +1041,27 @@ async def cb_close(cb: CallbackQuery):
 
 # ── Обработка свободного текста ──────────────────────────────
 
+async def _load_cookies_to_browser(cookies: list, domain: str):
+    """Загружает cookies в Playwright браузер."""
+    from playwright.async_api import async_playwright
+    IS_SERVER = os.getenv("RAILWAY_ENVIRONMENT") is not None
+    SESSION_DIR.mkdir(exist_ok=True)
+    async with async_playwright() as pw:
+        ctx = await pw.chromium.launch_persistent_context(
+            user_data_dir=str(SESSION_DIR),
+            headless=IS_SERVER,
+            args=["--no-sandbox"],
+        )
+        await ctx.add_cookies(cookies)
+        await ctx.close()
+
+
 @dp.message(F.document, F.chat.id == MY_CHAT_ID)
 async def handle_document(msg: Message):
-    """Принимает listings.json отправленный в чат и сохраняет на сервере."""
+    """Принимает listings.json или cookies файл и сохраняет на сервере."""
     doc = msg.document
     if not doc.file_name or not doc.file_name.endswith(".json"):
-        await msg.answer("❌ Отправь файл listings.json")
+        await msg.answer("❌ Отправь .json файл")
         return
 
     await msg.answer("⏳ Загружаю файл...")
@@ -1056,6 +1069,23 @@ async def handle_document(msg: Message):
         file = await bot.get_file(doc.file_id)
         content = await bot.download_file(file.file_path)
         data = json.loads(content.read())
+
+        fname = doc.file_name.lower()
+
+        # Cookies файл (avito_cookies.json или drom_cookies.json)
+        if "cookie" in fname or "avito_cook" in fname or "drom_cook" in fname:
+            if not isinstance(data, list):
+                await msg.answer("❌ Файл куки должен быть массивом JSON")
+                return
+            domain = "avito" if "avito" in fname else "drom"
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, lambda: None)  # flush
+            await _load_cookies_to_browser(data, domain)
+            await msg.answer(
+                f"✅ Куки для {domain} загружены!\n"
+                f"Теперь бот может писать продавцам на {'Авито' if domain=='avito' else 'Дроме'}."
+            )
+            return
 
         # Объединяем с существующими
         existing = {}
