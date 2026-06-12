@@ -692,30 +692,31 @@ async def cmd_xray(msg: Message):
     except Exception as e:
         lines.append(f"❌ Порт 10808 недоступен: {e}")
 
-    # Тест реального запроса через прокси
-    await msg.answer("\n".join(lines) + "\n\n⏳ Тестирую запрос через прокси...")
-    try:
-        import subprocess as _sp
-        result = _sp.run(
-            ["curl", "-s", "--socks5", "127.0.0.1:10808", "--max-time", "10",
-             "-o", "/dev/null", "-w", "%{http_code} | IP: %{remote_ip}",
-             "https://2ip.ru/"],
-            capture_output=True, text=True, timeout=15
-        )
-        lines.append(f"🌐 Тест curl: {result.stdout or result.stderr}")
-    except Exception as e:
-        lines.append(f"❌ curl ошибка: {e}")
+    await msg.answer("\n".join(lines) + "\n\n⏳ Тестирую IP через прокси...")
 
-    # Тест IP через прокси
+    # Тест через aiohttp + socks
     try:
-        result2 = _sp.run(
-            ["curl", "-s", "--socks5", "127.0.0.1:10808", "--max-time", "10",
-             "https://api.ipify.org"],
-            capture_output=True, text=True, timeout=15
-        )
-        lines.append(f"📍 Внешний IP через прокси: {result2.stdout.strip() or 'нет ответа'}")
+        import aiohttp
+        connector = aiohttp.TCPConnector()
+        async with aiohttp.ClientSession(connector=connector) as session:
+            async with session.get(
+                "https://api.ipify.org",
+                proxy="socks5://127.0.0.1:10808",
+                timeout=aiohttp.ClientTimeout(total=15)
+            ) as resp:
+                ip = await resp.text()
+                lines.append(f"📍 Внешний IP через прокси: {ip.strip()}")
     except Exception as e:
-        lines.append(f"❌ IP-тест: {e}")
+        lines.append(f"❌ Прокси не работает: {e}")
+
+    # Тест без прокси (реальный IP сервера)
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get("https://api.ipify.org", timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                real_ip = await resp.text()
+                lines.append(f"🖥 IP сервера (без прокси): {real_ip.strip()}")
+    except Exception as e:
+        lines.append(f"❌ Ошибка получения IP: {e}")
 
     await msg.answer("\n".join(lines))
 

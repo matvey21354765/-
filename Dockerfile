@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y \
     libatspi2.0-0 libx11-6 libxcomposite1 libxdamage1 \
     libxext6 libxfixes3 libxrandr2 libgbm1 libxcb1 \
     libxkbcommon0 libpango-1.0-0 libcairo2 libasound2t64 \
-    wget ca-certificates fonts-liberation unzip \
+    wget ca-certificates fonts-liberation unzip curl \
     --no-install-recommends && rm -rf /var/lib/apt/lists/*
 
 # Устанавливаем xray-core для VLESS прокси
