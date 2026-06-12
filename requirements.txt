@@ -4,5 +4,7 @@ playwright==1.44.0
 playwright-stealth==1.0.6
 python-dotenv==1.0.1
 cloudscraper==1.2.71
+PySocks==1.7.1
+requests==2.32.3
 beautifulsoup4==4.12.3
 lxml==5.2.2

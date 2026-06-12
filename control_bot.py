@@ -722,6 +722,20 @@ async def cmd_xray(msg: Message):
     except Exception as e:
         lines.append(f"❌ SOCKS5 тест: {e}")
 
+    # IP через прокси (requests + socks)
+    try:
+        import requests as _req
+        loop2 = asyncio.get_event_loop()
+        def _get_proxy_ip():
+            s = _req.Session()
+            s.proxies = {"https": "socks5h://127.0.0.1:10808", "http": "socks5h://127.0.0.1:10808"}
+            r = s.get("https://api.ipify.org", timeout=15)
+            return r.text.strip()
+        proxy_ip = await loop2.run_in_executor(None, _get_proxy_ip)
+        lines.append(f"📍 Внешний IP через прокси: {proxy_ip}")
+    except Exception as e:
+        lines.append(f"❌ IP через прокси: {e}")
+
     # IP сервера без прокси
     try:
         import aiohttp
