@@ -1,7 +1,6 @@
 [phases.setup]
 nixPkgs = [
   "chromium",
-  "chromium-unwrapped",
   "nss",
   "nspr",
   "atk",
