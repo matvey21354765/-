@@ -502,14 +502,56 @@ async def notify_new_listing(item: dict):
 
 @dp.message(Command("start"))
 async def cmd_start(msg: Message):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🟢 Авито",   callback_data="source|avito"),
+            InlineKeyboardButton(text="🔵 Дром",    callback_data="source|drom"),
+            InlineKeyboardButton(text="🔴 Авто.ру", callback_data="source|autoru"),
+        ],
+        [InlineKeyboardButton(text="📋 Все источники", callback_data="source|all")],
+    ])
     await msg.answer(
         "👋 Авто-брокер бот запущен!\n\n"
-        "Команды:\n"
-        "/new — показать новые объявления\n"
-        "/active — активные диалоги\n"
-        "/stats — статистика\n"
-        "/scan — запустить новое сканирование"
+        "Выбери источник объявлений:",
+        reply_markup=kb
     )
+
+@dp.callback_query(F.data.startswith("source|"))
+async def cb_source(cb: CallbackQuery):
+    source = cb.data.split("|", 1)[1]
+    source_names = {"avito": "🟢 Авито", "drom": "🔵 Дром", "autoru": "🔴 Авто.ру", "all": "📋 Все"}
+    await cb.answer(f"Выбрано: {source_names.get(source, source)}")
+
+    listings = load_listings()
+    deals = load_deals()
+    new_items = [
+        i for i in listings
+        if not is_dealer(i) and in_price_range(i)
+        and i.get("url") and i.get("url") not in deals
+        and (source == "all" or i.get("source") == source)
+    ][:10]
+
+    if not new_items:
+        await cb.message.answer(f"Нет новых объявлений для {source_names.get(source, source)}.\nНажми /scan чтобы обновить.")
+        return
+
+    await cb.message.answer(f"Нашёл {len(new_items)} объявлений ({source_names.get(source, source)}):")
+    for item in new_items:
+        url = item.get("url","")
+        sid = url_to_id(url)
+        src = item.get("source","")
+        icon = "🟢" if src=="avito" else "🔵" if src=="drom" else "🔴"
+        text = (
+            f"{icon} {item.get('title','')}\n"
+            f"💰 {item.get('price','—')}\n"
+            f"📅 Дней: {item.get('_days_on_site','?')}"
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✉️ Написать", callback_data=f"send_opener|{sid}")],
+            [InlineKeyboardButton(text="❌ Пропустить", callback_data=f"skip|{sid}")],
+            [InlineKeyboardButton(text="🔗 Открыть", url=url)],
+        ])
+        await cb.message.answer(text, reply_markup=kb)
 
 @dp.message(Command("stats"))
 async def cmd_stats(msg: Message):
@@ -524,6 +566,15 @@ async def cmd_stats(msg: Message):
 
 @dp.message(Command("new"))
 async def cmd_new(msg: Message):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🟢 Авито",   callback_data="source|avito"),
+            InlineKeyboardButton(text="🔵 Дром",    callback_data="source|drom"),
+            InlineKeyboardButton(text="🔴 Авто.ру", callback_data="source|autoru"),
+        ],
+        [InlineKeyboardButton(text="📋 Все источники", callback_data="source|all")],
+    ])
+    await msg.answer("Выбери источник:", reply_markup=kb)
     listings = load_listings()
     deals = load_deals()
     new_items = [
