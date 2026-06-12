@@ -40,6 +40,7 @@ from aiogram.filters import Command
 import os
 BOT_TOKEN  = os.getenv("BOT_TOKEN",  "8657191103:AAFBXaObKV2jcLbBsBzpYTuBfBj2bBkymrk")
 MY_CHAT_ID = int(os.getenv("MY_CHAT_ID", "749256529"))
+TWOCAPTCHA_KEY = os.getenv("TWOCAPTCHA_KEY", "d83693d29ec0a9b78bd85d0e7f869dfe")
 
 LISTINGS_FILE = "listings.json"
 DEALS_FILE    = "control_deals.json"
@@ -785,6 +786,117 @@ async def cmd_scan(msg: Message):
     await msg.answer("Что сканировать?", reply_markup=kb)
 
 
+async def _solve_yandex_captcha(page, page_num: int) -> bool:
+    """Решает Yandex SmartCaptcha через 2captcha. Возвращает True если прошли."""
+    import aiohttp as _aio, re as _re
+
+    if not TWOCAPTCHA_KEY:
+        await bot.send_message(MY_CHAT_ID, "🔒 Капча на Авито, TWOCAPTCHA_KEY не задан.")
+        return False
+
+    await bot.send_message(MY_CHAT_ID, f"🔒 Авито стр.{page_num}: капча, отправляю на решение 2captcha...")
+
+    try:
+        # Нажимаем Продолжить чтобы показалась капча
+        continue_btn = await page.query_selector("button:has-text('Продолжить'), a:has-text('Продолжить')")
+        if continue_btn:
+            await continue_btn.click()
+            await asyncio.sleep(3)
+
+        page_url = page.url
+        html = await page.content()
+
+        # Извлекаем sitekey Yandex SmartCaptcha
+        sitekey = None
+        m = _re.search(r'data-sitekey=["\']([^"\']+)["\']', html)
+        if m:
+            sitekey = m.group(1)
+        if not sitekey:
+            m = _re.search(r'"sitekey"\s*:\s*"([^"]+)"', html)
+            if m:
+                sitekey = m.group(1)
+        if not sitekey:
+            # Ищем в iframe src
+            m = _re.search(r'captcha\.yandex\.ru[^"\']*sitekey=([^&"\']+)', html)
+            if m:
+                sitekey = m.group(1)
+
+        if not sitekey:
+            await bot.send_message(MY_CHAT_ID, f"⚠️ Авито стр.{page_num}: sitekey не найден, пропускаю.")
+            return False
+
+        # Отправляем в 2captcha
+        async with _aio.ClientSession() as s:
+            data = {
+                "key": TWOCAPTCHA_KEY,
+                "method": "yandex",
+                "sitekey": sitekey,
+                "pageurl": page_url,
+                "json": 1,
+            }
+            async with s.post("https://2captcha.com/in.php", data=data, timeout=_aio.ClientTimeout(total=30)) as r:
+                resp = await r.json(content_type=None)
+
+            if resp.get("status") != 1:
+                await bot.send_message(MY_CHAT_ID, f"❌ 2captcha ошибка: {resp}")
+                return False
+
+            task_id = resp["request"]
+            await bot.send_message(MY_CHAT_ID, f"⏳ 2captcha решает капчу (ID {task_id})...")
+
+            # Ждём решения (до 3 минут)
+            token = None
+            for _ in range(36):
+                await asyncio.sleep(5)
+                async with s.get(
+                    f"https://2captcha.com/res.php?key={TWOCAPTCHA_KEY}&action=get&id={task_id}&json=1",
+                    timeout=_aio.ClientTimeout(total=15)
+                ) as r:
+                    res = await r.json(content_type=None)
+                if res.get("status") == 1:
+                    token = res["request"]
+                    break
+                if res.get("request") not in ("CAPCHA_NOT_READY", "CAPTCHA_NOT_READY"):
+                    await bot.send_message(MY_CHAT_ID, f"❌ 2captcha: {res}")
+                    return False
+
+        if not token:
+            await bot.send_message(MY_CHAT_ID, "❌ 2captcha: таймаут (3 мин), пропускаю страницу.")
+            return False
+
+        # Вставляем токен в страницу
+        await page.evaluate(f"""
+            (token) => {{
+                // Yandex SmartCaptcha callback
+                const inp = document.querySelector('input[name="smart-token"], input[name="yasc"]');
+                if (inp) inp.value = token;
+                // Пробуем глобальный callback
+                if (window.smartCaptcha && window.smartCaptcha.submit) window.smartCaptcha.submit(token);
+                // Ищем форму и сабмитим
+                const form = document.querySelector('form');
+                if (form) {{
+                    const hidden = document.createElement('input');
+                    hidden.type = 'hidden'; hidden.name = 'smart-token'; hidden.value = token;
+                    form.appendChild(hidden);
+                    form.submit();
+                }}
+            }}
+        """, token)
+
+        await asyncio.sleep(3)
+        html_after = await page.content()
+        if "captcha" not in html_after.lower() and "Доступ ограничен" not in html_after:
+            await bot.send_message(MY_CHAT_ID, f"✅ Капча стр.{page_num} решена! Продолжаю скан.")
+            return True
+        else:
+            await bot.send_message(MY_CHAT_ID, f"⚠️ Токен введён, но страница всё ещё заблокирована.")
+            return False
+
+    except Exception as e:
+        await bot.send_message(MY_CHAT_ID, f"❌ Ошибка решения капчи: {e}")
+        return False
+
+
 async def scrape_avito_playwright_async(pages: int = 5) -> list[dict]:
     """Парсит Авито через Playwright; при капче шлёт скриншот и ждёт ответа от пользователя."""
     try:
@@ -858,33 +970,12 @@ async def scrape_avito_playwright_async(pages: int = 5) -> list[dict]:
                     )
 
                     if is_captcha:
-                        # Авито заблокировал по IP — слайдер-капчу текстом не решить.
-                        # Пробуем нажать "Продолжить" один раз — иногда помогает после прохождения один раз.
-                        continue_btn = await page.query_selector("button:has-text('Продолжить'), a:has-text('Продолжить')")
-                        if continue_btn:
-                            await continue_btn.click()
-                            await asyncio.sleep(4)
-                            html = await page.content()
-                            still_blocked = "captcha" in html.lower() or "Доступ ограничен" in html
-                            if still_blocked:
-                                # Слайдер или другая непроходимая капча — останавливаем скан
-                                await bot.send_message(
-                                    MY_CHAT_ID,
-                                    f"🔒 Авито заблокировало сервер (слайдер-капча).\n"
-                                    f"Найдено до блокировки: {len(results)} объявлений.\n\n"
-                                    f"Используй /scan → 🔵 Дром — он работает без блокировок."
-                                )
-                                await page.close()
-                                break
-                        else:
-                            await bot.send_message(
-                                MY_CHAT_ID,
-                                f"🔒 Авито стр.{p} заблокирована, пропускаю."
-                            )
+                        solved = await _solve_yandex_captcha(page, p)
+                        if not solved:
                             await page.close()
-                            continue
-
-                        # Если всё ещё заблокировано — останавливаем
+                            break
+                        # Обновляем html после решения капчи
+                        html = await page.content()
                         if "captcha" in html.lower() or "Доступ ограничен" in html:
                             await page.close()
                             break
