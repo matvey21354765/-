@@ -724,104 +724,36 @@ async def scrape_avito_playwright_async(pages: int = 5) -> list[dict]:
                     )
 
                     if is_captcha:
-                        from aiogram.types import BufferedInputFile
-
-                        # Шаг 1: если есть кнопка "Продолжить" — кликаем автоматически
+                        # Авито заблокировал по IP — слайдер-капчу текстом не решить.
+                        # Пробуем нажать "Продолжить" один раз — иногда помогает после прохождения один раз.
                         continue_btn = await page.query_selector("button:has-text('Продолжить'), a:has-text('Продолжить')")
                         if continue_btn:
                             await continue_btn.click()
-                            await asyncio.sleep(3)
+                            await asyncio.sleep(4)
                             html = await page.content()
-                            # Перепроверяем — может уже прошло
                             still_blocked = "captcha" in html.lower() or "Доступ ограничен" in html
-                            if not still_blocked:
-                                await bot.send_message(MY_CHAT_ID, f"✅ Авито стр.{p}: блокировка снята, продолжаю...")
-                                # Перезагружаем страницу и парсим
-                                await page.reload(wait_until="domcontentloaded", timeout=30000)
-                                await asyncio.sleep(2)
-                                html = await page.content()
-                                # fall through to parsing below
-                            else:
-                                # Шаг 2: всё ещё капча — шлём скриншот
-                                try:
-                                    screenshot = await page.screenshot(full_page=False, timeout=10000, animations="disabled")
-                                except Exception:
-                                    screenshot = None
-
-                                if screenshot:
-                                    event = asyncio.Event()
-                                    captcha_wait[MY_CHAT_ID] = {"answer": None, "event": event}
-                                    waiting_input[MY_CHAT_ID] = {"action": "captcha"}
-                                    await bot.send_photo(
-                                        MY_CHAT_ID,
-                                        BufferedInputFile(screenshot, filename="captcha.png"),
-                                        caption=f"🔒 Авито стр.{p}: капча после нажатия Продолжить.\nЕсли есть текст — напиши его. Если нет — напиши «пропустить»:"
-                                    )
-                                    try:
-                                        await asyncio.wait_for(event.wait(), timeout=120)
-                                    except asyncio.TimeoutError:
-                                        await bot.send_message(MY_CHAT_ID, "⏱ Время ожидания истекло, прерываю скан Авито.")
-                                        break
-                                    answer = captcha_wait.pop(MY_CHAT_ID, {}).get("answer", "")
-                                    if not answer or answer.lower() == "пропустить":
-                                        await page.close()
-                                        continue
-                                    cap_input = await page.query_selector("input[name*='captcha'], input[placeholder*='апч'], input[type='text']")
-                                    if cap_input:
-                                        await cap_input.fill(answer)
-                                        submit = await page.query_selector("button[type='submit'], input[type='submit']")
-                                        if submit:
-                                            await submit.click()
-                                        else:
-                                            await cap_input.press("Enter")
-                                        await asyncio.sleep(2)
-                                        html = await page.content()
-                                else:
-                                    await bot.send_message(MY_CHAT_ID, f"⚠️ Авито стр.{p} заблокирована, пропускаю.")
-                                    await page.close()
-                                    continue
-                        else:
-                            # Нет кнопки Продолжить — сразу шлём скриншот
-                            try:
-                                screenshot = await page.screenshot(full_page=False, timeout=10000, animations="disabled")
-                            except Exception:
-                                screenshot = None
-                            if screenshot:
-                                event = asyncio.Event()
-                                captcha_wait[MY_CHAT_ID] = {"answer": None, "event": event}
-                                waiting_input[MY_CHAT_ID] = {"action": "captcha"}
-                                await bot.send_photo(
+                            if still_blocked:
+                                # Слайдер или другая непроходимая капча — останавливаем скан
+                                await bot.send_message(
                                     MY_CHAT_ID,
-                                    BufferedInputFile(screenshot, filename="captcha.png"),
-                                    caption=f"🔒 Авито стр.{p}: введи текст капчи (или «пропустить»):"
+                                    f"🔒 Авито заблокировало сервер (слайдер-капча).\n"
+                                    f"Найдено до блокировки: {len(results)} объявлений.\n\n"
+                                    f"Используй /scan → 🔵 Дром — он работает без блокировок."
                                 )
-                                try:
-                                    await asyncio.wait_for(event.wait(), timeout=120)
-                                except asyncio.TimeoutError:
-                                    await bot.send_message(MY_CHAT_ID, "⏱ Время ожидания истекло, прерываю скан Авито.")
-                                    break
-                                answer = captcha_wait.pop(MY_CHAT_ID, {}).get("answer", "")
-                                if not answer or answer.lower() == "пропустить":
-                                    await page.close()
-                                    continue
-                                cap_input = await page.query_selector("input[name*='captcha'], input[type='text']")
-                                if cap_input:
-                                    await cap_input.fill(answer)
-                                    submit = await page.query_selector("button[type='submit'], input[type='submit']")
-                                    if submit:
-                                        await submit.click()
-                                    else:
-                                        await cap_input.press("Enter")
-                                    await asyncio.sleep(2)
-                                    html = await page.content()
-                            else:
                                 await page.close()
-                                continue
-
-                        # Если всё ещё заблокировано — пропускаем
-                        if "captcha" in html.lower() or "Доступ ограничен" in html:
+                                break
+                        else:
+                            await bot.send_message(
+                                MY_CHAT_ID,
+                                f"🔒 Авито стр.{p} заблокирована, пропускаю."
+                            )
                             await page.close()
                             continue
+
+                        # Если всё ещё заблокировано — останавливаем
+                        if "captcha" in html.lower() or "Доступ ограничен" in html:
+                            await page.close()
+                            break
 
                     # Парсим карточки
                     from bs4 import BeautifulSoup as _BS
