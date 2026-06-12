@@ -916,5 +916,12 @@ def main():
 
 
 if __name__ == "__main__":
-    import urllib.parse
-    main()
+    import urllib.parse, sys
+    no_server = "--no-server" in sys.argv
+    if no_server:
+        # Режим для вызова из control_bot.py — только парсинг без сервера
+        items = fetch_all()
+        listings = filter_and_score(items)
+        save(listings)
+    else:
+        main()

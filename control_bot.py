@@ -571,16 +571,15 @@ async def cmd_scan(msg: Message):
 
     async def do_scan():
         try:
-            import importlib.util
-            spec = importlib.util.spec_from_file_location("broker", "broker.py")
-            broker = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(broker)
+            import subprocess, sys
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, "broker.py", "--no-server",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await proc.communicate()
 
-            loop = asyncio.get_event_loop()
-            items = await loop.run_in_executor(None, broker.fetch_all)
-            listings = broker.filter_and_score(items)
-            broker.save(listings)
-
+            listings = load_listings()
             deals = load_deals()
             new_items = [
                 i for i in listings
