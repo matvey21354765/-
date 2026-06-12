@@ -45,14 +45,26 @@ LISTINGS_FILE = "listings.json"
 DEALS_FILE    = "control_deals.json"
 SESSION_DIR   = Path("browser_profile")
 
-PRICE_MIN = 400_000
+PRICE_MIN = 500_000
 PRICE_MAX = 1_000_000
 
 DEALER_KEYWORDS = [
-    "ооо", "ип ", "автосалон", "официальный дилер", "дилер",
-    "автоцентр", "trade-in", "трейд-ин", "автохолдинг",
-    "автодом", "автомир", "рольф", "major", "lada",
-    "колёса даром", "автопланета", "автоград",
+    # Юр. лица
+    "ооо", "ип ", "ао ", "зао ", "пао ",
+    # Общие дилерские слова
+    "автосалон", "официальный дилер", "дилер", "автоцентр",
+    "trade-in", "трейд-ин", "автохолдинг", "автодом", "автомир",
+    # Конкретные сети
+    "рольф", "major", "lada", "колёса даром", "автопланета",
+    "автоград", "июль", "автоленд", "favorit", "фаворит",
+    "авто плюс", "автоплюс", "fresh auto", "fresh авто",
+    "автобан", "автосфера", "арконт", "ключавто", "авилон",
+    "петровский", "прагматика", "бизнес кар", "b-cars",
+    "автоимпорт", "автоальянс", "автопассаж", "авторай",
+    "максимум", "мотус", "genser", "генсер",
+    # Признаки салона
+    "кредит от", "гарантия", "автоподбор", "выкуп авто",
+    "автовыкуп", "срочный выкуп",
 ]
 
 # ============================================================
@@ -243,6 +255,9 @@ def send_on_avito(url: str, message: str) -> tuple[bool, str]:
 
             time.sleep(2)
             chat_url = page.url
+            # Проверяем авторизацию
+            if "login" in chat_url or "auth" in chat_url:
+                return False, "нужно войти в аккаунт Авито в браузере бота"
             return True, chat_url
         finally:
             page.close()
@@ -257,17 +272,15 @@ def send_on_drom(url: str, message: str) -> tuple[bool, str]:
         page = ctx.new_page()
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            time.sleep(random.uniform(2, 4))
+            time.sleep(random.uniform(3, 5))
 
-            # Дром: кнопка "Написать продавцу" или "Отправить сообщение"
+            # Дром: ищем кнопку написать
             write_btn = None
             for sel in [
-                "button[data-ga-stats-name='send_message']",
-                "a[data-ga-stats-name='send_message']",
-                "button[class*='ContactForm']",
-                "a[class*='ContactForm']",
-                "button[class*='contact']",
-                "a[class*='contact']",
+                "[data-ga-stats-name='send_message']",
+                "[data-ftid='component_bulletin-contacts_send-message']",
+                "button[class*='SendMessage']",
+                "a[class*='SendMessage']",
             ]:
                 el = page.query_selector(sel)
                 if el and el.is_visible():
@@ -278,26 +291,33 @@ def send_on_drom(url: str, message: str) -> tuple[bool, str]:
                 for btn in page.query_selector_all("button, a"):
                     try:
                         t = btn.inner_text().strip().lower()
-                        if any(w in t for w in ["написать", "сообщение продавцу", "связаться", "отправить сообщение"]):
+                        if any(w in t for w in ["написать", "сообщение продавцу", "связаться", "написать продавцу"]):
                             write_btn = btn
                             break
                     except Exception:
                         pass
 
             if not write_btn:
-                return False, "кнопка не найдена"
+                # Пробуем показать номер телефона вместо сообщения
+                phone_btn = page.query_selector("[data-ftid='component_bulletin-contacts_show-phone']")
+                if phone_btn:
+                    phone_btn.click()
+                    time.sleep(2)
+                    phone = page.query_selector("[data-ftid='component_bulletin-contacts_phone']")
+                    if phone:
+                        return False, f"тел: {phone.inner_text(strip=True)} (написать нельзя — только звонок)"
+                return False, "кнопка написать не найдена"
 
             write_btn.click()
             time.sleep(random.uniform(2, 4))
 
-            # Ищем поле ввода — Дром использует textarea или modal
+            # Поле ввода после нажатия кнопки
             input_box = None
             for sel in [
                 "textarea[name='message']",
-                "textarea[placeholder*='сообщени']",
-                "textarea[placeholder*='Сообщени']",
+                "textarea[placeholder*='ообщени']",
                 "div[class*='Modal'] textarea",
-                "div[class*='modal'] textarea",
+                "div[class*='Popup'] textarea",
                 "textarea",
                 "div[contenteditable='true']",
             ]:
@@ -310,7 +330,7 @@ def send_on_drom(url: str, message: str) -> tuple[bool, str]:
                     pass
 
             if not input_box:
-                return False, "поле ввода не найдено"
+                return False, "поле ввода не найдено (возможно, нужно войти в аккаунт Дром)"
 
             input_box.click()
             time.sleep(0.5)
@@ -322,12 +342,16 @@ def send_on_drom(url: str, message: str) -> tuple[bool, str]:
                 "button[type='submit']",
                 "button[class*='submit']",
                 "button[class*='Send']",
+                "button[class*='send']",
                 "input[type='submit']",
             ]:
-                el = page.query_selector(sel)
-                if el and el.is_visible():
-                    send_btn = el
-                    break
+                try:
+                    el = page.locator(sel).last
+                    if el.is_visible(timeout=2000):
+                        send_btn = el
+                        break
+                except Exception:
+                    pass
 
             if send_btn:
                 send_btn.click()
@@ -335,6 +359,10 @@ def send_on_drom(url: str, message: str) -> tuple[bool, str]:
                 input_box.press("Enter")
 
             time.sleep(2)
+            # Проверяем — если появилось "войдите" значит не авторизованы
+            content = page.content().lower()
+            if "войдите" in content or "авторизуйтесь" in content or "войти" in content:
+                return False, "нужно войти в аккаунт Дром в браузере бота"
             return True, page.url
         finally:
             page.close()
@@ -641,6 +669,21 @@ async def cmd_active(msg: Message):
             buttons.append([InlineKeyboardButton(text="🔗 Открыть", url=url)])
         kb = InlineKeyboardMarkup(inline_keyboard=buttons)
         await msg.answer(text, reply_markup=kb)
+
+@dp.message(Command("login"))
+async def cmd_login(msg: Message):
+    """Инфо о входе в аккаунты."""
+    await msg.answer(
+        "🔐 Для отправки сообщений нужно войти в аккаунты:\n\n"
+        "📱 *Авито:* открой https://www.avito.ru/profile в браузере на сервере\n"
+        "📱 *Дром:* открой https://ekaterinburg.drom.ru в браузере на сервере\n\n"
+        "Так как бот работает на сервере — авторизация сохраняется в папке `browser_profile/`.\n"
+        "Без входа в аккаунт бот не может писать продавцам.\n\n"
+        "💡 *Как войти:* используй `/scan` → после открытия страницы бот покажет ошибку авторизации.\n"
+        "Нужно зайти локально, сделать `browser_profile/` и загрузить его на сервер.",
+        parse_mode="Markdown"
+    )
+
 
 @dp.message(Command("scan"))
 async def cmd_scan(msg: Message):
