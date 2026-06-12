@@ -28,11 +28,13 @@
       },
       "streamSettings": {
         "network": "tcp",
-        "security": "tls",
-        "tlsSettings": {
+        "security": "reality",
+        "realitySettings": {
           "serverName": "ru.gsupport.support",
-          "allowInsecure": true,
-          "fingerprint": "chrome"
+          "fingerprint": "chrome",
+          "publicKey": "JxwG7rAbNCd_C82p9K69AZDWh51fri2nm3wLHHrfyiw",
+          "shortId": "7755e972daf8eec8",
+          "spiderX": ""
         }
       }
     }
