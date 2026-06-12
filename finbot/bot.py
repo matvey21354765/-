@@ -17,7 +17,7 @@ import os
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = os.getenv("FINBOT_TOKEN", "")
+BOT_TOKEN = os.getenv("FINBOT_TOKEN", "8496208426:AAGaQbb6HaqrEI-ONZGUpkKeU7LJAhNloLo")
 
 router = Router()
 
@@ -513,7 +513,20 @@ async def main():
     if not BOT_TOKEN:
         print("Установи переменную окружения FINBOT_TOKEN")
         return
-    bot = Bot(token=BOT_TOKEN)
+    import ssl
+    import aiohttp
+    from aiogram.client.session.aiohttp import AiohttpSession
+
+    ssl_ctx = ssl.create_default_context()
+    ssl_ctx.check_hostname = False
+    ssl_ctx.verify_mode = ssl.CERT_NONE
+
+    class NoSSLSession(AiohttpSession):
+        async def create_session(self):
+            connector = aiohttp.TCPConnector(ssl=ssl_ctx)
+            return aiohttp.ClientSession(connector=connector)
+
+    bot = Bot(token=BOT_TOKEN, session=NoSSLSession())
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
     print("✅ ФинГрам-бот запущен!")
