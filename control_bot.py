@@ -722,7 +722,7 @@ async def scrape_avito_playwright_async(pages: int = 5) -> list[dict]:
 
                     if is_captcha:
                         # Скриншот капчи
-                        screenshot = await page.screenshot(full_page=False)
+                        screenshot = await page.screenshot(full_page=False, timeout=10000, animations="disabled")
                         import io
                         from aiogram.types import BufferedInputFile
 
