@@ -567,15 +567,34 @@ async def cmd_active(msg: Message):
 
 @dp.message(Command("scan"))
 async def cmd_scan(msg: Message):
-    await msg.answer("🔄 Запускаю сканирование объявлений...\nЭто займёт несколько минут.")
+    await msg.answer("🔄 Запускаю сканирование...\nЭто займёт 5-10 минут.")
 
-    def run_broker():
-        import subprocess, sys
-        subprocess.run([sys.executable, "broker.py", "--no-server"], capture_output=True)
+    async def do_scan():
+        try:
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("broker", "broker.py")
+            broker = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(broker)
 
-    t = threading.Thread(target=run_broker, daemon=True)
-    t.start()
-    await msg.answer("✅ Сканирование запущено в фоне. Когда завершится — пришлю новые объявления.")
+            loop = asyncio.get_event_loop()
+            items = await loop.run_in_executor(None, broker.fetch_all)
+            listings = broker.filter_and_score(items)
+            broker.save(listings)
+
+            deals = load_deals()
+            new_items = [
+                i for i in listings
+                if not is_dealer(i) and in_price_range(i)
+                and i.get("url") and i.get("url") not in deals
+            ]
+            await bot.send_message(MY_CHAT_ID,
+                f"✅ Готово! Всего: {len(listings)} | Частников в диапазоне: {len(new_items)}\n"
+                f"Нажми /new чтобы посмотреть."
+            )
+        except Exception as e:
+            await bot.send_message(MY_CHAT_ID, f"❌ Ошибка: {e}")
+
+    asyncio.create_task(do_scan())
 
 
 # ── Кнопки ───────────────────────────────────────────────────
