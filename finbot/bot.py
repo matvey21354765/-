@@ -521,16 +521,21 @@ async def main():
     ssl_ctx.check_hostname = False
     ssl_ctx.verify_mode = ssl.CERT_NONE
 
-    class NoSSLSession(AiohttpSession):
-        async def create_session(self):
-            connector = aiohttp.TCPConnector(ssl=ssl_ctx)
-            return aiohttp.ClientSession(connector=connector)
+    connector = aiohttp.TCPConnector(ssl=ssl_ctx)
+    http_session = aiohttp.ClientSession(connector=connector)
 
-    bot = Bot(token=BOT_TOKEN, session=NoSSLSession())
+    aio_session = AiohttpSession()
+    await aio_session.create_session()
+    aio_session._session = http_session
+
+    bot = Bot(token=BOT_TOKEN, session=aio_session)
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
     print("✅ ФинГрам-бот запущен!")
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot, allowed_updates=["message", "callback_query"])
+    finally:
+        await http_session.close()
 
 
 if __name__ == "__main__":
