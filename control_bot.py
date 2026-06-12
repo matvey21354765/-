@@ -431,10 +431,128 @@ def send_on_autoru(url: str, message: str) -> tuple[bool, str]:
         return False, str(e)
 
 
+def _load_avito_cookies_for_requests() -> dict:
+    """Загружает куки Авито из файла для использования в requests."""
+    cookies = {}
+    f = Path("avito_cookies_raw.json")
+    if f.exists():
+        try:
+            for c in json.loads(f.read_text(encoding="utf-8")):
+                if c.get("name") and c.get("value"):
+                    cookies[c["name"]] = c["value"]
+        except Exception:
+            pass
+    return cookies
+
+
+def send_on_avito_http(item_url: str, message: str) -> tuple[bool, str]:
+    """
+    Отправляет сообщение продавцу через Авито HTTP API (без браузера).
+    Использует сохранённые куки из avito_cookies_raw.json.
+    """
+    try:
+        import requests as _req
+        import re as _re
+
+        cookies = _load_avito_cookies_for_requests()
+        if not cookies:
+            return False, "нет куки Авито — загрузи через /login"
+
+        proxies = {}
+        if _xray_proc and _xray_proc.poll() is None:
+            proxies = {"https": "socks5h://127.0.0.1:10808", "http": "socks5h://127.0.0.1:10808"}
+
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "ru-RU,ru;q=0.9",
+            "Referer": item_url,
+            "Origin": "https://www.avito.ru",
+            "X-Requested-With": "XMLHttpRequest",
+        }
+
+        session = _req.Session()
+        session.cookies.update(cookies)
+        session.headers.update(headers)
+
+        # Получаем ID объявления из URL
+        m = _re.search(r'_(\d+)$', item_url.rstrip('/'))
+        if not m:
+            m = _re.search(r'/(\d+)(?:\?|$)', item_url)
+        if not m:
+            return False, f"не могу извлечь ID из URL: {item_url}"
+        item_id = m.group(1)
+
+        # Создаём чат / получаем существующий
+        chat_resp = session.post(
+            "https://www.avito.ru/web/1/messenger/getChat",
+            json={"itemId": int(item_id)},
+            proxies=proxies,
+            timeout=20,
+        )
+        if chat_resp.status_code != 200:
+            # Пробуем альтернативный endpoint
+            chat_resp = session.post(
+                "https://www.avito.ru/api/1/messenger/createChat",
+                json={"itemId": item_id},
+                proxies=proxies,
+                timeout=20,
+            )
+
+        try:
+            chat_data = chat_resp.json()
+        except Exception:
+            chat_data = {}
+
+        chat_id = (
+            chat_data.get("result", {}).get("id")
+            or chat_data.get("chat", {}).get("id")
+            or chat_data.get("id")
+        )
+
+        if not chat_id:
+            # Последний шанс: открыть страницу объявления и найти chatId
+            page_resp = session.get(item_url, proxies=proxies, timeout=20)
+            m2 = _re.search(r'"chatId"\s*:\s*"([^"]+)"', page_resp.text)
+            if m2:
+                chat_id = m2.group(1)
+            else:
+                m2 = _re.search(r'chat_id["\s:=]+([a-z0-9_\-]+)', page_resp.text, _re.IGNORECASE)
+                if m2:
+                    chat_id = m2.group(1)
+
+        if not chat_id:
+            return False, f"не удалось получить chat_id (статус {chat_resp.status_code})"
+
+        # Отправляем сообщение
+        send_resp = session.post(
+            f"https://www.avito.ru/web/1/messenger/sendMessage",
+            json={"chatId": chat_id, "message": {"text": message}},
+            proxies=proxies,
+            timeout=20,
+        )
+
+        if send_resp.status_code == 200:
+            return True, f"https://www.avito.ru/profile/messenger/{chat_id}"
+        elif send_resp.status_code == 401:
+            return False, "сессия истекла — загрузи свежие куки через /login"
+        else:
+            return False, f"ошибка API {send_resp.status_code}: {send_resp.text[:200]}"
+
+    except Exception as e:
+        return False, str(e)
+
+
 def send_message_to_seller(item: dict, message: str) -> tuple[bool, str]:
     source = item.get("source","")
     url    = item.get("url","")
     if source == "avito":
+        # Сначала пробуем HTTP API (быстрее, без браузера)
+        ok, detail = send_on_avito_http(url, message)
+        if ok:
+            return ok, detail
+        # Если HTTP не сработал — используем Playwright
+        print(f"  [Авито HTTP API] {detail} — fallback to Playwright")
         return send_on_avito(url, message)
     elif source == "drom":
         return send_on_drom(url, message)
@@ -882,7 +1000,7 @@ def _scrape_avito_http_with_cookies(pages: int = 5) -> list[dict]:
                         })
                 except Exception:
                     pass
-            _rnd.uniform(2, 4)
+            import time as _time; _time.sleep(_rnd.uniform(2, 4))
         except Exception as e:
             print(f"  [!] Авито HTTP стр.{p}: {e}")
             break
