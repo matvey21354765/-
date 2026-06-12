@@ -31,7 +31,8 @@
         "security": "tls",
         "tlsSettings": {
           "serverName": "ru.gsupport.support",
-          "allowInsecure": false
+          "allowInsecure": true,
+          "fingerprint": "chrome"
         }
       }
     }

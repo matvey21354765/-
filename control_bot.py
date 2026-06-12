@@ -666,16 +666,20 @@ async def scrape_avito_playwright_async(pages: int = 5) -> list[dict]:
 
     async with async_playwright() as pw:
         SESSION_DIR.mkdir(exist_ok=True)
-        proxy_cfg = {"server": "socks5://127.0.0.1:10808"} if _xray_proc and _xray_proc.poll() is None else None
-        context = await pw.chromium.launch_persistent_context(
+        use_proxy = _xray_proc and _xray_proc.poll() is None
+        proxy_cfg = {"server": "socks5://127.0.0.1:10808"} if use_proxy else None
+        launch_kwargs = dict(
             user_data_dir=str(SESSION_DIR),
             headless=IS_SERVER,
             args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
             viewport={"width": 1280, "height": 900},
             locale="ru-RU",
             timezone_id="Asia/Yekaterinburg",
-            proxy=proxy_cfg,
         )
+        if proxy_cfg:
+            launch_kwargs["proxy"] = proxy_cfg
+            await bot.send_message(MY_CHAT_ID, "🔌 Авито: использую VLESS прокси...")
+        context = await pw.chromium.launch_persistent_context(**launch_kwargs)
         try:
             import re as _re, datetime as _dt, random as _rnd, json as _json
 
@@ -710,7 +714,26 @@ async def scrape_avito_playwright_async(pages: int = 5) -> list[dict]:
                 url = f"https://www.avito.ru/ekaterinburg/avtomobili?p={p}&s=104"
                 page = await context.new_page()
                 try:
-                    await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                    try:
+                        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                    except Exception as nav_err:
+                        if "ERR_CONNECTION_CLOSED" in str(nav_err) or "ERR_TUNNEL_CONNECTION_FAILED" in str(nav_err):
+                            await bot.send_message(MY_CHAT_ID, "⚠️ Прокси не работает, пробую напрямую...")
+                            await page.close()
+                            # Пересоздаём контекст без прокси
+                            await context.close()
+                            context = await pw.chromium.launch_persistent_context(
+                                user_data_dir=str(SESSION_DIR) + "_noproxy",
+                                headless=IS_SERVER,
+                                args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
+                                viewport={"width": 1280, "height": 900},
+                                locale="ru-RU",
+                                timezone_id="Asia/Yekaterinburg",
+                            )
+                            page = await context.new_page()
+                            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                        else:
+                            raise
                     await asyncio.sleep(_rnd.uniform(2, 4))
 
                     # Проверяем капчу
