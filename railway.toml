@@ -1,6 +1,6 @@
 [build]
 builder = "NIXPACKS"
-buildCommand = "pip3 install -r requirements.txt && python3 -m playwright install chromium"
+buildCommand = "pip3 install -r requirements.txt && python3 -m playwright install chromium && python3 -m playwright install-deps chromium"
 
 [deploy]
 startCommand = "python3 control_bot.py"
