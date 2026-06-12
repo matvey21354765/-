@@ -639,31 +639,64 @@ async def cmd_active(msg: Message):
 
 @dp.message(Command("scan"))
 async def cmd_scan(msg: Message):
-    await msg.answer("🔄 Запускаю сканирование...\nЭто займёт 5-10 минут.")
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🟢 Авито",   callback_data="scan|avito"),
+            InlineKeyboardButton(text="🔵 Дром",    callback_data="scan|drom"),
+        ],
+        [InlineKeyboardButton(text="📋 Авито + Дром", callback_data="scan|all")],
+    ])
+    await msg.answer("Что сканировать?", reply_markup=kb)
+
+
+@dp.callback_query(F.data.startswith("scan|"))
+async def cb_scan(cb: CallbackQuery):
+    source = cb.data.split("|", 1)[1]
+    icons = {"avito": "🟢 Авито", "drom": "🔵 Дром", "all": "📋 Авито + Дром"}
+    await cb.answer()
+    await cb.message.edit_text(f"🔄 Сканирую {icons.get(source)}...\nЭто займёт 3-10 минут.")
 
     async def do_scan():
         try:
-            import subprocess, sys
-            proc = await asyncio.create_subprocess_exec(
-                sys.executable, "broker.py", "--no-server",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            await proc.communicate()
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("scraper_http", "scraper_http.py")
+            scraper = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(scraper)
 
-            listings = load_listings()
+            loop = asyncio.get_event_loop()
+            items = []
+
+            if source in ("avito", "all"):
+                avito_items = await loop.run_in_executor(None, lambda: scraper.scrape_avito_http(pages=5))
+                items.extend(avito_items)
+
+            if source in ("drom", "all"):
+                # Читаем следующую страницу Дрома
+                state_file = Path("scan_state.json")
+                state = json.loads(state_file.read_text()) if state_file.exists() else {}
+                start = state.get("drom_next_page", 1)
+                drom_items = await loop.run_in_executor(None, lambda: scraper.scrape_drom_http(pages=20, start_page=start))
+                items.extend(drom_items)
+                # Сохраняем следующую страницу
+                state["drom_next_page"] = start + 20
+                state_file.write_text(json.dumps(state))
+
+            merged, new_count = await loop.run_in_executor(None, lambda: scraper.merge_and_save(items))
+
             deals = load_deals()
-            new_items = [
-                i for i in listings
+            suitable = [
+                i for i in merged
                 if not is_dealer(i) and in_price_range(i)
                 and i.get("url") and i.get("url") not in deals
             ]
             await bot.send_message(MY_CHAT_ID,
-                f"✅ Готово! Всего: {len(listings)} | Частников в диапазоне: {len(new_items)}\n"
+                f"✅ {icons.get(source)} готово!\n"
+                f"Найдено: {len(items)} | Новых: {new_count}\n"
+                f"Подходящих частников: {len(suitable)}\n\n"
                 f"Нажми /new чтобы посмотреть."
             )
         except Exception as e:
-            await bot.send_message(MY_CHAT_ID, f"❌ Ошибка: {e}")
+            await bot.send_message(MY_CHAT_ID, f"❌ Ошибка сканирования: {e}")
 
     asyncio.create_task(do_scan())
 
