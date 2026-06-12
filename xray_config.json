@@ -1,5 +1,5 @@
 {
-  "log": { "loglevel": "warning" },
+  "log": { "loglevel": "debug", "error": "/tmp/xray_error.log" },
   "inbounds": [
     {
       "port": 10808,

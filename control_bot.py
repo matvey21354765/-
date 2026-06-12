@@ -718,6 +718,15 @@ async def cmd_xray(msg: Message):
     except Exception as e:
         lines.append(f"❌ Ошибка получения IP: {e}")
 
+    # Показываем лог xray
+    try:
+        log_text = Path("/tmp/xray_error.log").read_text(encoding="utf-8", errors="ignore")
+        last_lines = "\n".join(log_text.strip().splitlines()[-15:])
+        if last_lines:
+            await msg.answer(f"📋 Лог xray:\n```\n{last_lines[:3000]}\n```", parse_mode="Markdown")
+    except Exception:
+        pass
+
     await msg.answer("\n".join(lines))
 
 
