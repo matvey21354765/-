@@ -36,8 +36,9 @@ from aiogram.filters import Command
 #  НАСТРОЙКИ
 # ============================================================
 
-BOT_TOKEN  = "8657191103:AAFBXaObKV2jcLbBsBzpYTuBfBj2bBkymrk"
-MY_CHAT_ID = 749256529
+import os
+BOT_TOKEN  = os.getenv("BOT_TOKEN",  "8657191103:AAFBXaObKV2jcLbBsBzpYTuBfBj2bBkymrk")
+MY_CHAT_ID = int(os.getenv("MY_CHAT_ID", "749256529"))
 
 LISTINGS_FILE = "listings.json"
 DEALS_FILE    = "control_deals.json"
@@ -157,9 +158,11 @@ def get_browser():
     from playwright.sync_api import sync_playwright
     SESSION_DIR.mkdir(exist_ok=True)
     _playwright_obj = sync_playwright().start()
+    # На сервере headless=True, локально можно поставить False
+    IS_SERVER = os.getenv("RAILWAY_ENVIRONMENT") is not None
     _browser_context = _playwright_obj.chromium.launch_persistent_context(
         user_data_dir=str(SESSION_DIR),
-        headless=False,
+        headless=IS_SERVER,
         args=["--no-sandbox","--disable-blink-features=AutomationControlled"],
         viewport={"width":1280,"height":900},
         locale="ru-RU",
