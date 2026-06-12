@@ -1128,8 +1128,96 @@ async def handle_document(msg: Message):
         await msg.answer(f"❌ Ошибка: {e}")
 
 
+async def _process_cookie_text(msg: Message, text: str):
+    """Принимает JSON-массив куков из текстового сообщения и загружает в браузер."""
+    import re as _re
+
+    def clean_domain(d: str) -> str:
+        # Убираем markdown: ".[www.avito.ru](https://...)" → ".www.avito.ru"
+        d = _re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', d)
+        return d
+
+    SAMESITE_MAP = {
+        "no_restriction": "None",
+        "unspecified": "None",
+        "lax": "Lax",
+        "strict": "Strict",
+        "none": "None",
+    }
+
+    try:
+        raw = json.loads(text)
+        if not isinstance(raw, list):
+            await msg.answer("❌ Ожидается массив JSON")
+            return
+
+        pw_cookies = []
+        for c in raw:
+            domain = clean_domain(c.get("domain", ""))
+            if not domain:
+                continue
+            cookie = {
+                "name": c["name"],
+                "value": c["value"],
+                "domain": domain,
+                "path": c.get("path", "/"),
+                "secure": c.get("secure", False),
+                "httpOnly": c.get("httpOnly", False),
+                "sameSite": SAMESITE_MAP.get(c.get("sameSite", "").lower(), "None"),
+            }
+            exp = c.get("expirationDate")
+            if exp:
+                cookie["expires"] = int(exp)
+            pw_cookies.append(cookie)
+
+        await msg.answer(f"⏳ Загружаю {len(pw_cookies)} куков в браузер Авито...")
+
+        from playwright.async_api import async_playwright
+        IS_SERVER = os.getenv("RAILWAY_ENVIRONMENT") is not None
+        SESSION_DIR.mkdir(exist_ok=True)
+
+        async with async_playwright() as pw:
+            ctx = await pw.chromium.launch_persistent_context(
+                user_data_dir=str(SESSION_DIR),
+                headless=IS_SERVER,
+                args=["--no-sandbox"],
+            )
+            try:
+                await ctx.add_cookies(pw_cookies)
+                # Проверяем — открываем профиль
+                page = await ctx.new_page()
+                await page.goto("https://www.avito.ru/profile", wait_until="domcontentloaded", timeout=20000)
+                await asyncio.sleep(2)
+                html = await page.content()
+                await page.close()
+                logged_in = "Выйти" in html or "profile" in page.url or "logout" in html
+            finally:
+                await ctx.close()
+
+        if logged_in:
+            await msg.answer("✅ Куки Авито загружены! Авторизация подтверждена.\nТеперь бот может писать продавцам на Авито.")
+        else:
+            await msg.answer("⚠️ Куки загружены, но авторизация не подтверждена (возможно куки устарели).")
+
+    except json.JSONDecodeError as e:
+        await msg.answer(f"❌ Ошибка разбора JSON: {e}")
+    except Exception as e:
+        await msg.answer(f"❌ Ошибка загрузки куков: {e}")
+
+
 @dp.message(F.chat.id == MY_CHAT_ID)
 async def handle_text(msg: Message):
+    if msg.from_user.id not in waiting_input:
+        return
+
+    # Если пользователь прислал JSON с куками прямо в текст
+    if msg.text and msg.text.strip().startswith("[") and '"domain"' in msg.text and '"avito' in msg.text.lower():
+        await _process_cookie_text(msg, msg.text)
+        return
+    if msg.text and msg.text.strip().startswith("[") and '"domain"' in msg.text and '"drom' in msg.text.lower():
+        await _process_cookie_text(msg, msg.text)
+        return
+
     if msg.from_user.id not in waiting_input:
         return
 
