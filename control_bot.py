@@ -792,6 +792,61 @@ async def cb_close(cb: CallbackQuery):
 
 # ── Обработка свободного текста ──────────────────────────────
 
+@dp.message(F.document, F.chat.id == MY_CHAT_ID)
+async def handle_document(msg: Message):
+    """Принимает listings.json отправленный в чат и сохраняет на сервере."""
+    doc = msg.document
+    if not doc.file_name or not doc.file_name.endswith(".json"):
+        await msg.answer("❌ Отправь файл listings.json")
+        return
+
+    await msg.answer("⏳ Загружаю файл...")
+    try:
+        file = await bot.get_file(doc.file_id)
+        content = await bot.download_file(file.file_path)
+        data = json.loads(content.read())
+
+        # Объединяем с существующими
+        existing = {}
+        if Path(LISTINGS_FILE).exists():
+            try:
+                for item in json.loads(Path(LISTINGS_FILE).read_text(encoding="utf-8")):
+                    if item.get("url"):
+                        existing[item["url"]] = item
+            except Exception:
+                pass
+
+        new_count = 0
+        for item in data:
+            if item.get("url") and item["url"] not in existing:
+                new_count += 1
+            if item.get("url"):
+                existing[item["url"]] = item
+
+        merged = sorted(existing.values(), key=lambda x: x.get("_hot_score", 0), reverse=True)
+        Path(LISTINGS_FILE).write_text(
+            json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+        deals = load_deals()
+        new_items = [
+            i for i in merged
+            if not is_dealer(i) and in_price_range(i)
+            and i.get("url") and i.get("url") not in deals
+        ]
+
+        await msg.answer(
+            f"✅ Загружено!\n"
+            f"Всего в файле: {len(data)}\n"
+            f"Новых добавлено: {new_count}\n"
+            f"Итого в базе: {len(merged)}\n"
+            f"Подходящих частников: {len(new_items)}\n\n"
+            f"Нажми /new чтобы посмотреть."
+        )
+    except Exception as e:
+        await msg.answer(f"❌ Ошибка: {e}")
+
+
 @dp.message(F.chat.id == MY_CHAT_ID)
 async def handle_text(msg: Message):
     if msg.from_user.id not in waiting_input:
