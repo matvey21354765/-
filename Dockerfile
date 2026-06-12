@@ -7,8 +7,16 @@ RUN apt-get update && apt-get install -y \
     libatspi2.0-0 libx11-6 libxcomposite1 libxdamage1 \
     libxext6 libxfixes3 libxrandr2 libgbm1 libxcb1 \
     libxkbcommon0 libpango-1.0-0 libcairo2 libasound2t64 \
-    wget ca-certificates fonts-liberation \
+    wget ca-certificates fonts-liberation unzip \
     --no-install-recommends && rm -rf /var/lib/apt/lists/*
+
+# Устанавливаем xray-core для VLESS прокси
+RUN wget -q https://github.com/XTLS/Xray-core/releases/download/v1.8.13/Xray-linux-64.zip \
+    -O /tmp/xray.zip && \
+    unzip /tmp/xray.zip -d /usr/local/bin/xray-dist && \
+    mv /usr/local/bin/xray-dist/xray /usr/local/bin/xray && \
+    chmod +x /usr/local/bin/xray && \
+    rm -rf /tmp/xray.zip /usr/local/bin/xray-dist
 
 WORKDIR /app
 COPY requirements.txt .

@@ -23,6 +23,7 @@ import re
 import time
 import threading
 import datetime
+import subprocess
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F
@@ -665,6 +666,7 @@ async def scrape_avito_playwright_async(pages: int = 5) -> list[dict]:
 
     async with async_playwright() as pw:
         SESSION_DIR.mkdir(exist_ok=True)
+        proxy_cfg = {"server": "socks5://127.0.0.1:10808"} if _xray_proc and _xray_proc.poll() is None else None
         context = await pw.chromium.launch_persistent_context(
             user_data_dir=str(SESSION_DIR),
             headless=IS_SERVER,
@@ -672,6 +674,7 @@ async def scrape_avito_playwright_async(pages: int = 5) -> list[dict]:
             viewport={"width": 1280, "height": 900},
             locale="ru-RU",
             timezone_id="Asia/Yekaterinburg",
+            proxy=proxy_cfg,
         )
         try:
             import re as _re, datetime as _dt, random as _rnd, json as _json
@@ -1170,6 +1173,26 @@ async def background_scanner():
 #  ЗАПУСК
 # ============================================================
 
+_xray_proc = None
+
+def start_xray():
+    global _xray_proc
+    xray_bin = "/usr/local/bin/xray"
+    config = Path("xray_config.json")
+    if not Path(xray_bin).exists() or not config.exists():
+        return
+    try:
+        _xray_proc = subprocess.Popen(
+            [xray_bin, "run", "-c", str(config)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        time.sleep(2)
+        print("✅ xray запущен (socks5://127.0.0.1:10808)")
+    except Exception as e:
+        print(f"⚠️ xray не запустился: {e}")
+
+
 async def main():
     if not BOT_TOKEN:
         print("❌ Заполни BOT_TOKEN в начале файла control_bot.py")
@@ -1180,6 +1203,7 @@ async def main():
         print("   Узнай через @userinfobot в Telegram")
         return
 
+    start_xray()
     logging.basicConfig(level=logging.WARNING)
     print("✅ Бот запущен! Открой Telegram и напиши /start своему боту.")
     print("   Ctrl+C — остановить\n")

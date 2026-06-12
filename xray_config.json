@@ -1,0 +1,39 @@
+{
+  "log": { "loglevel": "warning" },
+  "inbounds": [
+    {
+      "port": 10808,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": { "auth": "noauth", "udp": true }
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "ru.gsupport.support",
+            "port": 443,
+            "users": [
+              {
+                "id": "cd0c9b10-02fb-4456-977c-120d3db6c585",
+                "flow": "xtls-rprx-vision",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "ru.gsupport.support",
+          "allowInsecure": false
+        }
+      }
+    }
+  ]
+}
