@@ -418,8 +418,12 @@ bot = Bot(token=BOT_TOKEN)
 dp  = Dispatcher()
 
 # Временное хранилище: ожидаем ввод текста от пользователя
-# chat_id -> {"action": "custom_text", "deal_key": ...}
+# chat_id -> {"action": "custom_text"/"captcha", "deal_key": ..., "event": asyncio.Event}
 waiting_input: dict = {}
+
+# Хранит asyncio.Event для ожидания ответа на капчу
+# user_id -> {"answer": str, "event": asyncio.Event}
+captcha_wait: dict = {}
 
 
 def make_listing_keyboard(deal_key: str, stage: str) -> InlineKeyboardMarkup:
@@ -649,6 +653,164 @@ async def cmd_scan(msg: Message):
     await msg.answer("Что сканировать?", reply_markup=kb)
 
 
+async def scrape_avito_playwright_async(pages: int = 5) -> list[dict]:
+    """Парсит Авито через Playwright; при капче шлёт скриншот и ждёт ответа от пользователя."""
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError:
+        return []
+
+    results = []
+    IS_SERVER = os.getenv("RAILWAY_ENVIRONMENT") is not None
+
+    async with async_playwright() as pw:
+        SESSION_DIR.mkdir(exist_ok=True)
+        context = await pw.chromium.launch_persistent_context(
+            user_data_dir=str(SESSION_DIR),
+            headless=IS_SERVER,
+            args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
+            viewport={"width": 1280, "height": 900},
+            locale="ru-RU",
+            timezone_id="Asia/Yekaterinburg",
+        )
+        try:
+            import re as _re, datetime as _dt, random as _rnd, json as _json
+
+            MONTHS = {
+                "янв":1,"фев":2,"мар":3,"апр":4,"май":5,"мая":5,
+                "июн":6,"июл":7,"авг":8,"сен":9,"окт":10,"ноя":11,"дек":12,
+            }
+            HOT = _re.compile(r"(срочно|торг|уступлю|снижу|скидка|дёшево|дешево)", _re.IGNORECASE)
+
+            def _parse_date(text):
+                if not text: return None
+                text = text.strip(); today = _dt.date.today(); low = text.lower()
+                if "сегодня" in low: return today
+                if "вчера" in low: return today - _dt.timedelta(days=1)
+                m = _re.search(r"(\d+)\s+дн", low)
+                if m: return today - _dt.timedelta(days=int(m.group(1)))
+                if _re.search(r"\d+\s+(час|мин)", low): return today
+                m = _re.search(r"(\d{1,2})\s+([а-яё]+)", text, _re.IGNORECASE)
+                if m:
+                    mon = MONTHS.get(m.group(2)[:3].lower())
+                    if mon:
+                        try: return _dt.date(today.year, mon, int(m.group(1)))
+                        except ValueError: pass
+                return None
+
+            def _hotness(title, photos, days):
+                score = (5 - min(photos, 5)) * 2.0 + days * 0.3
+                if HOT.search(title): score += 10.0
+                return round(score, 2)
+
+            for p in range(1, pages + 1):
+                url = f"https://www.avito.ru/ekaterinburg/avtomobili?p={p}&s=104"
+                page = await context.new_page()
+                try:
+                    await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                    await asyncio.sleep(_rnd.uniform(2, 4))
+
+                    # Проверяем капчу
+                    html = await page.content()
+                    is_captcha = (
+                        "captcha" in html.lower()
+                        or "Доступ ограничен" in html
+                        or await page.query_selector("div[class*='captcha']") is not None
+                        or await page.query_selector("iframe[src*='captcha']") is not None
+                        or await page.query_selector("input[name*='captcha']") is not None
+                    )
+
+                    if is_captcha:
+                        # Скриншот капчи
+                        screenshot = await page.screenshot(full_page=False)
+                        import io
+                        from aiogram.types import BufferedInputFile
+
+                        event = asyncio.Event()
+                        captcha_wait[MY_CHAT_ID] = {"answer": None, "event": event}
+                        waiting_input[MY_CHAT_ID] = {"action": "captcha"}
+
+                        await bot.send_photo(
+                            MY_CHAT_ID,
+                            BufferedInputFile(screenshot, filename="captcha.png"),
+                            caption="🔒 Авито показало капчу на странице " + str(p) + ".\nНапиши текст с картинки:"
+                        )
+
+                        try:
+                            await asyncio.wait_for(event.wait(), timeout=120)
+                        except asyncio.TimeoutError:
+                            await bot.send_message(MY_CHAT_ID, "⏱ Время ожидания капчи истекло, прерываю скан.")
+                            break
+
+                        answer = captcha_wait.pop(MY_CHAT_ID, {}).get("answer", "")
+                        if not answer:
+                            break
+
+                        # Вводим ответ — ищем поле капчи
+                        cap_input = await page.query_selector("input[name*='captcha'], input[placeholder*='апч'], input[type='text']")
+                        if cap_input:
+                            await cap_input.click()
+                            await cap_input.fill(answer)
+                            await asyncio.sleep(0.5)
+                            # Ищем кнопку submit
+                            submit = await page.query_selector("button[type='submit'], input[type='submit']")
+                            if submit:
+                                await submit.click()
+                            else:
+                                await cap_input.press("Enter")
+                            await asyncio.sleep(2)
+                            await bot.send_message(MY_CHAT_ID, "✅ Ответ отправлен, продолжаю скан...")
+                        else:
+                            await bot.send_message(MY_CHAT_ID, "⚠️ Не нашёл поле для ввода капчи, пропускаю страницу.")
+                        await page.close()
+                        continue
+
+                    # Парсим карточки
+                    from bs4 import BeautifulSoup as _BS
+                    soup = _BS(html, "lxml")
+                    cards = soup.select("[data-marker='item']")
+                    for card in cards:
+                        try:
+                            title_el = card.select_one("[itemprop='name']") or card.select_one("h3")
+                            title = title_el.get_text(strip=True) if title_el else ""
+                            link_el = card.select_one("a[href*='/ekaterinburg/']")
+                            href = link_el.get("href","") if link_el else ""
+                            item_url = ("https://www.avito.ru" + href) if href else ""
+                            price_el = card.select_one("[itemprop='price']") or card.select_one("[class*='price']")
+                            price = ""
+                            if price_el:
+                                price = price_el.get("content") or price_el.get_text(strip=True)
+                            date_el = card.select_one("[data-marker='item-date']") or card.select_one("span[class*='date']")
+                            date_text = date_el.get_text(strip=True) if date_el else ""
+                            date = _parse_date(date_text)
+                            days = max(0, (_dt.date.today() - date).days) if date else 0
+                            photos = len(card.select("img[src*='avito']"))
+                            if title and item_url:
+                                results.append({
+                                    "source": "avito",
+                                    "title": title,
+                                    "price": price,
+                                    "url": item_url,
+                                    "date": str(date) if date else date_text,
+                                    "_photos": photos,
+                                    "_days_on_site": days,
+                                    "_hot_score": _hotness(title, photos, days),
+                                    "description": "",
+                                })
+                        except Exception:
+                            pass
+                    await asyncio.sleep(_rnd.uniform(2, 5))
+                finally:
+                    try:
+                        await page.close()
+                    except Exception:
+                        pass
+        finally:
+            await context.close()
+
+    return results
+
+
 @dp.callback_query(F.data.startswith("scan|"))
 async def cb_scan(cb: CallbackQuery):
     source = cb.data.split("|", 1)[1]
@@ -667,7 +829,7 @@ async def cb_scan(cb: CallbackQuery):
             items = []
 
             if source in ("avito", "all"):
-                avito_items = await loop.run_in_executor(None, lambda: scraper.scrape_avito_http(pages=5))
+                avito_items = await scrape_avito_playwright_async(pages=5)
                 items.extend(avito_items)
 
             if source in ("drom", "all"):
@@ -885,7 +1047,16 @@ async def handle_text(msg: Message):
     if msg.from_user.id not in waiting_input:
         return
 
-    state    = waiting_input.pop(msg.from_user.id)
+    state = waiting_input.pop(msg.from_user.id)
+
+    # Обработка капчи
+    if state.get("action") == "captcha":
+        info = captcha_wait.get(msg.from_user.id) or captcha_wait.get(MY_CHAT_ID)
+        if info:
+            info["answer"] = msg.text.strip()
+            info["event"].set()
+        return
+
     url      = state["deal_key"]
     text     = msg.text.strip()
     deals    = load_deals()
