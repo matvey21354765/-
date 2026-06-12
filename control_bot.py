@@ -172,9 +172,9 @@ def get_browser():
     from playwright.sync_api import sync_playwright
     SESSION_DIR.mkdir(exist_ok=True)
     _playwright_obj = sync_playwright().start()
-    # На сервере headless=True, локально можно поставить False
     IS_SERVER = os.getenv("RAILWAY_ENVIRONMENT") is not None
-    _browser_context = _playwright_obj.chromium.launch_persistent_context(
+    use_proxy = _xray_proc and _xray_proc.poll() is None
+    kwargs = dict(
         user_data_dir=str(SESSION_DIR),
         headless=IS_SERVER,
         args=["--no-sandbox","--disable-blink-features=AutomationControlled"],
@@ -182,6 +182,9 @@ def get_browser():
         locale="ru-RU",
         timezone_id="Asia/Yekaterinburg",
     )
+    if use_proxy:
+        kwargs["proxy"] = {"server": "socks5://127.0.0.1:10808"}
+    _browser_context = _playwright_obj.chromium.launch_persistent_context(**kwargs)
     return _browser_context
 
 def type_text(box, text: str):
@@ -786,6 +789,106 @@ async def cmd_scan(msg: Message):
     await msg.answer("Что сканировать?", reply_markup=kb)
 
 
+def _scrape_avito_http_with_cookies(pages: int = 5) -> list[dict]:
+    """Скрапинг Авито через HTTP с куками и прокси — без браузера."""
+    try:
+        import requests as _req
+        from bs4 import BeautifulSoup as _BS
+        import re as _re, datetime as _dt, random as _rnd
+    except ImportError:
+        return []
+
+    # Загружаем куки из browser_profile если есть
+    cookies_file = Path("avito_cookies_raw.json")
+    cookies = {}
+    if cookies_file.exists():
+        try:
+            raw = json.loads(cookies_file.read_text(encoding="utf-8"))
+            for c in raw:
+                name = c.get("name","")
+                value = c.get("value","")
+                if name and value:
+                    cookies[name] = value
+        except Exception:
+            pass
+
+    proxies = {"https": "socks5h://127.0.0.1:10808", "http": "socks5h://127.0.0.1:10808"} if (_xray_proc and _xray_proc.poll() is None) else {}
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept-Language": "ru-RU,ru;q=0.9",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Referer": "https://www.avito.ru/",
+    }
+
+    MONTHS = {"янв":1,"фев":2,"мар":3,"апр":4,"май":5,"мая":5,"июн":6,"июл":7,"авг":8,"сен":9,"окт":10,"ноя":11,"дек":12}
+    HOT = _re.compile(r"(срочно|торг|уступлю|снижу|скидка|дёшево|дешево)", _re.IGNORECASE)
+
+    def _parse_date(text):
+        if not text: return None
+        text = text.strip(); today = _dt.date.today(); low = text.lower()
+        if "сегодня" in low: return today
+        if "вчера" in low: return today - _dt.timedelta(days=1)
+        m = _re.search(r"(\d+)\s+дн", low)
+        if m: return today - _dt.timedelta(days=int(m.group(1)))
+        if _re.search(r"\d+\s+(час|мин)", low): return today
+        m = _re.search(r"(\d{1,2})\s+([а-яё]+)", text, _re.IGNORECASE)
+        if m:
+            mon = MONTHS.get(m.group(2)[:3].lower())
+            if mon:
+                try: return _dt.date(today.year, mon, int(m.group(1)))
+                except ValueError: pass
+        return None
+
+    results = []
+    session = _req.Session()
+    session.headers.update(headers)
+    session.cookies.update(cookies)
+
+    for p in range(1, pages + 1):
+        url = f"https://www.avito.ru/ekaterinburg/avtomobili?p={p}&s=104"
+        try:
+            r = session.get(url, proxies=proxies, timeout=20)
+            html = r.text
+            if "captcha" in html.lower() or "Доступ ограничен" in html:
+                print(f"  [!] Авито HTTP стр.{p}: блокировка")
+                break
+            soup = _BS(html, "lxml")
+            cards = soup.select("[data-marker='item']")
+            for card in cards:
+                try:
+                    title_el = card.select_one("[itemprop='name']") or card.select_one("h3")
+                    title = title_el.get_text(strip=True) if title_el else ""
+                    link_el = card.select_one("a[href*='/ekaterinburg/']")
+                    href = link_el.get("href","") if link_el else ""
+                    item_url = ("https://www.avito.ru" + href) if href else ""
+                    price_el = card.select_one("[itemprop='price']") or card.select_one("[class*='price']")
+                    price = ""
+                    if price_el:
+                        price = price_el.get("content") or price_el.get_text(strip=True)
+                    date_el = card.select_one("[data-marker='item-date']") or card.select_one("span[class*='date']")
+                    date_text = date_el.get_text(strip=True) if date_el else ""
+                    date = _parse_date(date_text)
+                    days = max(0, (_dt.date.today() - date).days) if date else 0
+                    photos = len(card.select("img[src*='avito']"))
+                    if title and item_url:
+                        results.append({
+                            "source": "avito",
+                            "title": title, "price": price, "url": item_url,
+                            "date": str(date) if date else date_text,
+                            "_photos": photos, "_days_on_site": days,
+                            "_hot_score": round((5-min(photos,5))*2.0 + days*0.3 + (10 if HOT.search(title) else 0), 2),
+                            "description": "",
+                        })
+                except Exception:
+                    pass
+            _rnd.uniform(2, 4)
+        except Exception as e:
+            print(f"  [!] Авито HTTP стр.{p}: {e}")
+            break
+    return results
+
+
 async def _solve_yandex_captcha(page, page_num: int) -> bool:
     """
     Отправляет пользователю ссылку на страницу капчи.
@@ -977,8 +1080,14 @@ async def cb_scan(cb: CallbackQuery):
             items = []
 
             if source in ("avito", "all"):
-                avito_items = await scrape_avito_playwright_async(pages=5)
-                items.extend(avito_items)
+                # Сначала пробуем HTTP с куками (быстрее, без капчи)
+                avito_items = await loop.run_in_executor(None, lambda: _scrape_avito_http_with_cookies(pages=5))
+                if avito_items:
+                    items.extend(avito_items)
+                else:
+                    # Fallback: Playwright с прокси (медленнее, может попасть на капчу)
+                    avito_items = await scrape_avito_playwright_async(pages=5)
+                    items.extend(avito_items)
 
             if source in ("drom", "all"):
                 # Читаем следующую страницу Дрома
@@ -1250,6 +1359,11 @@ async def _process_cookie_text(msg: Message, text: str):
         if not isinstance(raw, list):
             await msg.answer("❌ Ожидается массив JSON")
             return
+
+        # Сохраняем оригинальные куки для HTTP запросов
+        Path("avito_cookies_raw.json").write_text(
+            json.dumps(raw, ensure_ascii=False), encoding="utf-8"
+        )
 
         pw_cookies = []
         for c in raw:
