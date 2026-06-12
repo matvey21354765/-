@@ -55,6 +55,7 @@ SESSION_DIR = Path("browser_profile")
 
 OUTPUT_FILE = "listings.json"
 PORT = 8000
+SCAN_STATE_FILE = "scan_state.json"
 
 # ── Фильтры ─────────────────────────────────────────────────────────────────
 # Объявление висит минимум столько дней (0 = без ограничения)
@@ -646,7 +647,7 @@ def scrape_autoru(context: BrowserContext, pages: int = 5) -> list[dict]:
 # Дром
 # ---------------------------------------------------------------------------
 
-def scrape_drom(context: BrowserContext, pages: int = 30) -> list[dict]:
+def scrape_drom(context: BrowserContext, pages: int = 30, start_page: int = 1) -> list[dict]:
     """
     Дром сортирует от новых к старым. Чтобы найти объявления ≥14 дней,
     нужно листать глубоко — при ~20 объявлений/стр. и ~14 дней охвата
@@ -657,14 +658,16 @@ def scrape_drom(context: BrowserContext, pages: int = 30) -> list[dict]:
     # Счётчик подряд идущих свежих страниц — ранняя остановка
     fresh_pages_streak = 0
     page = context.new_page()
+    last_page = start_page
     try:
-        for p in range(1, pages + 1):
+        for p in range(start_page, start_page + pages):
             print(f"  Дром стр. {p}…")
             url = (
                 "https://ekaterinburg.drom.ru/auto/all/"
                 if p == 1
                 else f"https://ekaterinburg.drom.ru/auto/all/page{p}/"
             )
+            last_page = p
             page.goto(url, wait_until="domcontentloaded", timeout=30000)
             human_delay(1.5, 3)
 
@@ -746,7 +749,9 @@ def scrape_drom(context: BrowserContext, pages: int = 30) -> list[dict]:
     finally:
         page.close()
 
-    print(f"  Дром: {len(results)} объявлений")
+    # Сохраняем следующую стартовую страницу
+    save_drom_start_page(last_page + 1)
+    print(f"  Дром: {len(results)} объявлений (следующий скан со стр. {last_page + 1})")
     return results
 
 
@@ -754,15 +759,43 @@ def scrape_drom(context: BrowserContext, pages: int = 30) -> list[dict]:
 # Сбор, фильтрация, оценка
 # ---------------------------------------------------------------------------
 
+def get_drom_start_page() -> int:
+    """Возвращает следующую стартовую страницу Дрома для нового скана."""
+    if Path(SCAN_STATE_FILE).exists():
+        state = json.loads(Path(SCAN_STATE_FILE).read_text(encoding="utf-8"))
+        return state.get("drom_next_page", 1)
+    return 1
+
+def save_drom_start_page(page: int) -> None:
+    state = {}
+    if Path(SCAN_STATE_FILE).exists():
+        state = json.loads(Path(SCAN_STATE_FILE).read_text(encoding="utf-8"))
+    state["drom_next_page"] = page
+    Path(SCAN_STATE_FILE).write_text(json.dumps(state), encoding="utf-8")
+
+
 def fetch_all() -> list[dict]:
     all_items: list[dict] = []
+
+    # Читаем уже известные URL чтобы не дублировать
+    known_urls: set = set()
+    if Path(OUTPUT_FILE).exists():
+        try:
+            old = json.loads(Path(OUTPUT_FILE).read_text(encoding="utf-8"))
+            known_urls = {i.get("url") for i in old if i.get("url")}
+        except Exception:
+            pass
+
+    drom_start = get_drom_start_page()
+    print(f"[Дром] Начинаем со страницы {drom_start}")
+
     with sync_playwright() as pw:
         context, _ = make_context(pw, proxy=PROXY)
         try:
             scrapers = [
                 ("Авито",   scrape_avito),
                 ("Авто.ру", scrape_autoru),
-                ("Дром",    scrape_drom),
+                ("Дром",    lambda ctx: scrape_drom(ctx, pages=30, start_page=drom_start)),
             ]
             for name, fn in scrapers:
                 print(f"\n[{name}]")
@@ -811,8 +844,22 @@ def filter_and_score(items: list[dict]) -> list[dict]:
 
 
 def save(listings: list[dict]) -> None:
+    # Объединяем с предыдущими результатами по URL
+    existing = {}
+    if Path(OUTPUT_FILE).exists():
+        try:
+            for item in json.loads(Path(OUTPUT_FILE).read_text(encoding="utf-8")):
+                if item.get("url"):
+                    existing[item["url"]] = item
+        except Exception:
+            pass
+    for item in listings:
+        if item.get("url"):
+            existing[item["url"]] = item
+    merged = sorted(existing.values(), key=lambda x: x.get("_hot_score", 0), reverse=True)
+
     Path(OUTPUT_FILE).write_text(
-        json.dumps(listings, ensure_ascii=False, indent=2), encoding="utf-8"
+        json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     # Генерируем HTML со ссылками
     rows = []
