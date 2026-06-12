@@ -76,8 +76,11 @@ def parse_ru_date(text: str):
     return None
 
 
-def hotness(title, photos, days):
-    score = (5 - min(photos, 5)) * 2.0 + days * 0.3
+def hotness(title, photos, days, photos_known=True, days_known=True):
+    # Больше фото = меньше срочности, больше дней = больше срочности
+    photo_score = (5 - min(photos, 5)) * 2.0 if photos_known else 0
+    days_score  = days * 0.3 if days_known else 0
+    score = photo_score + days_score
     if HOT_WORDS.search(title):
         score += 10.0
     return round(score, 2)
@@ -207,13 +210,25 @@ def scrape_drom_http(pages=30, start_page=1) -> list[dict]:
                     price_el = card.select_one("span[data-ftid='bull_price']")
                     price = price_el.get_text(strip=True) if price_el else ""
 
-                    date_el = card.select_one("[data-ftid='bull_date']")
+                    date_el = (
+                        card.select_one("[data-ftid='bull_date']")
+                        or card.select_one("span[class*='date']")
+                        or card.select_one("time")
+                    )
                     date_text = date_el.get_text(strip=True) if date_el else ""
                     date = parse_ru_date(date_text)
+                    days_known = date is not None
                     days = max(0, (datetime.date.today() - date).days) if date else 0
 
-                    photo_el = card.select_one("span[data-ftid='bull_images-count']")
-                    photos = int(re.search(r"\d+", photo_el.get_text()).group()) if photo_el and re.search(r"\d+", photo_el.get_text()) else 0
+                    photo_el = (
+                        card.select_one("span[data-ftid='bull_images-count']")
+                        or card.select_one("[class*='images-count']")
+                        or card.select_one("[class*='photo']")
+                    )
+                    photos_str = photo_el.get_text() if photo_el else ""
+                    photos_match = re.search(r"\d+", photos_str)
+                    photos = int(photos_match.group()) if photos_match else 0
+                    photos_known = photo_el is not None
 
                     if title and url_item:
                         results.append({
@@ -224,7 +239,7 @@ def scrape_drom_http(pages=30, start_page=1) -> list[dict]:
                             "date": str(date) if date else date_text,
                             "_photos": photos,
                             "_days_on_site": days,
-                            "_hot_score": hotness(title, photos, days),
+                            "_hot_score": hotness(title, photos, days, photos_known, days_known),
                             "description": "",
                         })
                 except Exception:
