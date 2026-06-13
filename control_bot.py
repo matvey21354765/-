@@ -265,15 +265,12 @@ def scrape_drom(region: str, pages: int = 15, price_min: int = 0, price_max: int
     results = []
     today = datetime.date.today()
 
-    # Используем поиск по всей области через geo-параметр
-    geo_id = DROM_GEO.get(region)
-    base = "https://auto.drom.ru" if geo_id else f"https://{region}.drom.ru"
+    # Используем субдомен города — Дром автоматически показывает всю область
+    base = f"https://{region}.drom.ru"
 
     for p in range(1, pages + 1):
-        url = f"{base}/all/" if p == 1 else f"{base}/all/page{p}/"
+        url = f"{base}/auto/all/" if p == 1 else f"{base}/auto/all/page{p}/"
         params = {}
-        if geo_id:
-            params["geo"] = geo_id
         if price_min > 0:
             params["minprice"] = price_min
         if price_max < 99_000_000:
