@@ -760,24 +760,31 @@ AVITO_SLUGS = {
 }
 
 
-def _avito_get(session, target_url: str, params: dict) -> "requests.Response":
-    """Делает запрос к Авито через ScraperAPI (рендеринг JS) или напрямую."""
+def _avito_get(session, target_url: str, params: dict):
+    """Делает запрос к Авито через ScraperAPI или напрямую."""
     import requests as _req
     import urllib.parse
 
-    # Строим финальный URL с параметрами
     qs = urllib.parse.urlencode(params)
     full_url = f"{target_url}?{qs}" if qs else target_url
 
     if SCRAPER_API_KEY:
-        api_url = "http://api.scraperapi.com"
-        api_params = {
+        # Сначала пробуем без рендера (быстро, 1 кредит)
+        r = _req.get("http://api.scraperapi.com", params={
             "api_key": SCRAPER_API_KEY,
             "url": full_url,
-            "render": "true",          # рендерим JS — Авито SPA
-            "country_code": "ru",      # российский IP
-        }
-        return _req.get(api_url, params=api_params, timeout=60)
+            "country_code": "ru",
+        }, timeout=30)
+        # Если карточки нашлись — отлично
+        if r.status_code == 200 and 'data-marker="item"' in r.text:
+            return r
+        # Иначе рендерим JS (5 кредитов, но работает)
+        return _req.get("http://api.scraperapi.com", params={
+            "api_key": SCRAPER_API_KEY,
+            "url": full_url,
+            "render": "true",
+            "country_code": "ru",
+        }, timeout=60)
 
     return session.get(full_url, timeout=25)
 
@@ -1354,15 +1361,24 @@ async def do_search_for_user(uid: int, reply_to):
     loop = asyncio.get_event_loop()
 
     scraper_map = {
-        "drom":   lambda: scrape_drom(region, pages=10, price_min=pmin, price_max=pmax),
-        "autoru": lambda: scrape_autoru(region, pages=5, price_min=pmin, price_max=pmax),
-        "kolesa": lambda: scrape_kolesa(region, pages=5, price_min=pmin, price_max=pmax),
-        "bibika": lambda: scrape_bibika(region, pages=3, price_min=pmin, price_max=pmax),
-        "avito":  lambda: scrape_avito(region, pages=3, price_min=pmin, price_max=pmax),
+        "drom":   lambda: scrape_drom(region, pages=20, price_min=pmin, price_max=pmax),
+        "autoru": lambda: scrape_autoru(region, pages=10, price_min=pmin, price_max=pmax),
+        "kolesa": lambda: scrape_kolesa(region, pages=10, price_min=pmin, price_max=pmax),
+        "bibika": lambda: scrape_bibika(region, pages=5, price_min=pmin, price_max=pmax),
+        "avito":  lambda: scrape_avito(region, pages=5, price_min=pmin, price_max=pmax),
     }
     tasks = [loop.run_in_executor(None, scraper_map[src]) for src in enabled_sources if src in scraper_map]
     results = await asyncio.gather(*tasks)
-    items = [item for batch in results for item in batch]
+
+    items = []
+    stat_parts = []
+    for src, batch in zip([s for s in enabled_sources if s in scraper_map], results):
+        items.extend(batch)
+        if batch:
+            stat_parts.append(f"{SOURCE_TAGS.get(src, src)}: {len(batch)}")
+
+    if stat_parts:
+        await reply_to.answer("📊 " + " | ".join(stat_parts))
 
     suitable = [
         i for i in items
