@@ -765,15 +765,18 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
         from bs4 import BeautifulSoup as _BS
         try:
             import cloudscraper as _cs
-            session = _cs.create_scraper(browser={"browser": "chrome", "platform": "windows"})
+            session = _cs.create_scraper(browser={"browser": "chrome", "platform": "windows", "mobile": False})
         except ImportError:
             import requests as _req
             session = _req.Session()
         session.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            "Accept-Language": "ru-RU,ru;q=0.9",
-            "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+            "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
             "Referer": "https://www.avito.ru/",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "same-origin",
         })
     except ImportError:
         return []
@@ -782,7 +785,7 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
     today = datetime.date.today()
 
     for p in range(1, pages + 1):
-        params = {"p": p, "seller_type": "1"}  # без сортировки по дате — все объявления
+        params = {"p": p, "seller_type": "1"}
         if price_min > 0:
             params["pmin"] = price_min
         if price_max < 99_000_000:
@@ -791,62 +794,82 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
         url = f"https://www.avito.ru/{slug}/avtomobili"
         try:
             r = session.get(url, params=params, timeout=25)
-            if "captcha" in r.text.lower() or "Доступ ограничен" in r.text:
-                print(f"  [Авито] капча на стр.{p}")
+            if r.status_code == 429 or "captcha" in r.text.lower() or "Доступ ограничен" in r.text:
+                print(f"  [Авито] блок на стр.{p}")
                 break
 
             soup = _BS(r.text, "lxml")
-            cards = soup.select("[data-marker='item']")
-            if not cards:
-                break
 
-            for card in cards:
-                try:
-                    title_el = card.select_one("[itemprop='name']") or card.select_one("h3")
-                    title = title_el.get_text(strip=True) if title_el else ""
+            # Пробуем достать данные из JSON в <script> (Next.js / React)
+            json_items = []
+            for sc in soup.select("script"):
+                sc_text = sc.string or ""
+                if '"items"' in sc_text or '"catalog"' in sc_text:
+                    # ищем массив объявлений
+                    m = re.search(r'"items"\s*:\s*(\[[\s\S]{100,}?\})\s*[,\]]', sc_text)
+                    if m:
+                        try:
+                            json_items = json.loads(m.group(1) + "]") if not m.group(1).endswith("]") else json.loads(m.group(1))
+                        except Exception:
+                            pass
+                    if json_items:
+                        break
 
-                    link_el = card.select_one(f"a[href*='/{slug}/']") or card.select_one("a[href*='/avtomobili/']")
-                    href = link_el.get("href", "") if link_el else ""
-                    item_url = ("https://www.avito.ru" + href) if href and href.startswith("/") else href
+            if json_items:
+                for it in json_items:
+                    try:
+                        title = it.get("title", "")
+                        item_url = "https://www.avito.ru" + it.get("url", "")
+                        price = str(it.get("priceDetailed", {}).get("value", "") or it.get("price", ""))
+                        if price:
+                            price += " ₽"
+                        if title and item_url and item_url != "https://www.avito.ru":
+                            item = {
+                                "source": "avito", "title": title, "price": price,
+                                "url": item_url, "date": str(today),
+                                "_photos": 0, "_days_on_site": 0,
+                                "description": "", "seller": "", "_photo_url": "",
+                            }
+                            item["_hot_score"] = hot_score(item)
+                            results.append(item)
+                    except Exception:
+                        pass
+            else:
+                # Fallback: HTML карточки
+                cards = soup.select("[data-marker='item']")
+                if not cards:
+                    break
 
-                    price_el = card.select_one("[itemprop='price']") or card.select_one("[class*='price']")
-                    price = ""
-                    if price_el:
-                        price = price_el.get("content") or price_el.get_text(strip=True)
+                for card in cards:
+                    try:
+                        title_el = card.select_one("[itemprop='name']") or card.select_one("h3") or card.select_one("[data-marker='item-title']")
+                        title = title_el.get_text(strip=True) if title_el else ""
 
-                    date_el = card.select_one("[data-marker='item-date']") or card.select_one("span[class*='date']")
-                    date_text = date_el.get_text(strip=True) if date_el else ""
-                    date = parse_ru_date(date_text)
-                    days = max(0, (today - date).days) if date else 0
+                        link_el = card.select_one("a[data-marker='item-title']") or card.select_one("a[href*='/avto']") or card.select_one("a[href]")
+                        href = link_el.get("href", "") if link_el else ""
+                        item_url = ("https://www.avito.ru" + href) if href.startswith("/") else href
 
-                    # Фото
-                    img_el = card.select_one("img[src*='avito']") or card.select_one("img[data-src]")
-                    photo_url = ""
-                    if img_el:
-                        src = img_el.get("src") or img_el.get("data-src", "")
-                        if src and src.startswith("http"):
-                            photo_url = src
+                        price_el = card.select_one("[itemprop='price']") or card.select_one("[data-marker='item-price']") or card.select_one("[class*='price']")
+                        price = ""
+                        if price_el:
+                            price = price_el.get("content") or price_el.get_text(strip=True)
 
-                    desc_el = card.select_one("[class*='description']") or card.select_one("p")
-                    desc = desc_el.get_text(strip=True)[:300] if desc_el else ""
+                        date_el = card.select_one("[data-marker='item-date']")
+                        date_text = date_el.get_text(strip=True) if date_el else ""
+                        date = parse_ru_date(date_text)
+                        days = max(0, (today - date).days) if date else 0
 
-                    if title and item_url:
-                        item = {
-                            "source": "avito",
-                            "title": title,
-                            "price": price,
-                            "url": item_url,
-                            "date": str(date) if date else date_text,
-                            "_photos": 0,
-                            "_days_on_site": days,
-                            "description": desc,
-                            "seller": "",
-                            "_photo_url": photo_url,
-                        }
-                        item["_hot_score"] = hot_score(item)
-                        results.append(item)
-                except Exception:
-                    pass
+                        if title and item_url and "avito.ru" in item_url:
+                            item = {
+                                "source": "avito", "title": title, "price": price,
+                                "url": item_url, "date": str(date) if date else date_text,
+                                "_photos": 0, "_days_on_site": days,
+                                "description": "", "seller": "", "_photo_url": "",
+                            }
+                            item["_hot_score"] = hot_score(item)
+                            results.append(item)
+                    except Exception:
+                        pass
 
             time.sleep(random.uniform(2, 4))
         except Exception as e:
