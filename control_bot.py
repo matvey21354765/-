@@ -793,6 +793,45 @@ async def cmd_active(msg: Message):
         kb = InlineKeyboardMarkup(inline_keyboard=buttons)
         await msg.answer(text, reply_markup=kb)
 
+@dp.message(Command("testapi"))
+async def cmd_testapi(msg: Message):
+    """Тестирует ScraperAPI на одной странице Авито."""
+    if not SCRAPERAPI_KEY:
+        await msg.answer("❌ ScraperAPI ключ не установлен. Используй /scraperapi КЛЮЧ")
+        return
+    await msg.answer("⏳ Тестирую ScraperAPI...")
+
+    def _test():
+        import requests as _req
+        from bs4 import BeautifulSoup as _BS
+        target = "https://www.avito.ru/ekaterinburg/avtomobili?p=1&s=104"
+        r = _req.get(
+            "http://api.scraperapi.com/",
+            params={"api_key": SCRAPERAPI_KEY, "url": target},
+            timeout=60,
+        )
+        html = r.text
+        soup = _BS(html, "lxml")
+        cards = soup.select("[data-marker='item']")
+        title = soup.title.get_text() if soup.title else "нет тега title"
+        return r.status_code, len(html), len(cards), title[:80], html[:300]
+
+    loop = asyncio.get_event_loop()
+    try:
+        status, html_len, cards, title, preview = await loop.run_in_executor(None, _test)
+        await msg.answer(
+            f"ScraperAPI тест:\n"
+            f"• HTTP статус: {status}\n"
+            f"• Длина ответа: {html_len} символов\n"
+            f"• Карточек [data-marker='item']: {cards}\n"
+            f"• Заголовок: {title}\n\n"
+            f"Первые 300 символов HTML:\n`{preview}`",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        await msg.answer(f"❌ Ошибка: {e}")
+
+
 @dp.message(Command("scraperapi"))
 async def cmd_scraperapi(msg: Message):
     global SCRAPERAPI_KEY
