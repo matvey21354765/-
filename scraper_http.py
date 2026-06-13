@@ -239,6 +239,14 @@ def scrape_drom_http(pages=30, start_page=1) -> list[dict]:
                     )
                     seller = seller_el.get_text(strip=True) if seller_el else ""
 
+                    # Описание из карточки
+                    desc_el = (
+                        card.select_one("[data-ftid='bull_description']")
+                        or card.select_one("p[class*='description']")
+                        or card.select_one("div[class*='description']")
+                    )
+                    desc = desc_el.get_text(strip=True) if desc_el else ""
+
                     if title and url_item:
                         results.append({
                             "source": "drom",
@@ -249,7 +257,7 @@ def scrape_drom_http(pages=30, start_page=1) -> list[dict]:
                             "_photos": photos,
                             "_days_on_site": days,
                             "_hot_score": hotness(title, photos, days, photos_known, days_known),
-                            "description": seller,  # seller name for dealer filter
+                            "description": f"{seller} {desc}".strip(),
                         })
                 except Exception:
                     pass
