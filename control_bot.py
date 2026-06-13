@@ -792,6 +792,19 @@ async def cmd_active(msg: Message):
         kb = InlineKeyboardMarkup(inline_keyboard=buttons)
         await msg.answer(text, reply_markup=kb)
 
+@dp.message(Command("reset"))
+async def cmd_reset(msg: Message):
+    """Сбрасывает базу сделок и счётчик страниц Дрома."""
+    Path(DEALS_FILE).write_text("{}", encoding="utf-8")
+    Path("scan_state.json").write_text('{"drom_next_page":1,"drom_bg_page":1}', encoding="utf-8")
+    listings = load_listings()
+    await msg.answer(
+        f"✅ Сброшено!\n"
+        f"Объявлений в базе: {len(listings)}\n"
+        f"Нажми /new чтобы посмотреть все."
+    )
+
+
 @dp.message(Command("xray"))
 async def cmd_xray(msg: Message):
     """Проверяет статус xray прокси."""
@@ -1294,14 +1307,14 @@ async def cb_scan(cb: CallbackQuery):
                 items.extend(avito_items)
 
             if source in ("drom", "all"):
-                # Читаем следующую страницу Дрома
                 state_file = Path("scan_state.json")
                 state = json.loads(state_file.read_text()) if state_file.exists() else {}
                 start = state.get("drom_next_page", 1)
+                if start > 150:
+                    start = 1
                 drom_items = await loop.run_in_executor(None, lambda: scraper.scrape_drom_http(pages=20, start_page=start))
                 items.extend(drom_items)
-                # Сохраняем следующую страницу
-                state["drom_next_page"] = start + 20
+                state["drom_next_page"] = (start + 20) if drom_items else 1
                 state_file.write_text(json.dumps(state))
 
             merged, new_count = await loop.run_in_executor(None, lambda: scraper.merge_and_save(items))
