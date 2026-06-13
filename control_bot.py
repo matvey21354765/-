@@ -968,6 +968,43 @@ async def cb_do_search(cb: CallbackQuery):
     await do_search_for_user(cb.from_user.id, cb.message)
 
 
+# Фразы которые означают что объявление снято
+_REMOVED_MARKERS = [
+    "снято с продажи", "объявление не найдено", "объявление недоступно",
+    "объявление удалено", "продажа завершена", "не существует",
+    "страница не найдена", "404", "объявление снято",
+    "listing not found", "offer not found",
+]
+
+_REMOVED_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+
+
+def _check_url_active(url: str) -> bool:
+    """Возвращает True если объявление ещё активно."""
+    try:
+        import requests as _req
+        r = _req.get(url, headers=_REMOVED_HEADERS, timeout=10, allow_redirects=True)
+        if r.status_code == 404:
+            return False
+        text_lower = r.text.lower()
+        return not any(m in text_lower for m in _REMOVED_MARKERS)
+    except Exception:
+        return True  # При ошибке сети считаем активным
+
+
+async def filter_active(items: list[dict], max_check: int = 30) -> list[dict]:
+    """Проверяет до max_check объявлений на актуальность параллельно."""
+    loop = asyncio.get_event_loop()
+    to_check = items[:max_check]
+    rest = items[max_check:]
+
+    results = await asyncio.gather(
+        *[loop.run_in_executor(None, _check_url_active, i["url"]) for i in to_check]
+    )
+    active = [item for item, ok in zip(to_check, results) if ok]
+    return active + rest  # остаток не проверяем, вернём как есть
+
+
 SOURCE_TAGS = {
     "autoru": "🟠 Auto.ru",
     "kolesa": "🟢 Kolesa",
@@ -1054,8 +1091,15 @@ async def do_search_for_user(uid: int, reply_to):
         )
         return
 
+    await reply_to.answer(f"🔎 Проверяю актуальность {min(len(suitable), 30)} объявлений...")
+    suitable = await filter_active(suitable, max_check=30)
+
+    if not suitable:
+        await reply_to.answer("😔 Все найденные объявления уже сняты с продажи. Попробуй позже.")
+        return
+
     await reply_to.answer(
-        f"✅ Найдено {len(suitable)} объявлений от частников в {region_name}!\n"
+        f"✅ Найдено {len(suitable)} актуальных объявлений от частников в {region_name}!\n"
         f"Показываю лучшие (ниже рынка в приоритете):"
     )
 
