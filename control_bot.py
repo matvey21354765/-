@@ -1009,35 +1009,64 @@ async def cb_do_search(cb: CallbackQuery):
 
 # ── Загрузка деталей объявления ─────────────────────────────────
 
-def _fetch_listing_details(url: str, source: str) -> dict:
-    """Загружает страницу объявления и вытаскивает фото + описание продавца."""
+# Плейсхолдеры Дрома которые не являются фото машины
+_DROM_PLACEHOLDER_URLS = ["drom.ru/img/app", "/placeholder", "mascot", "no-photo", "nophoto", "default"]
+
+# Маркеры снятого объявления в HTML/JSON страницы
+_SOLD_MARKERS = [
+    "снят с продажи", "снято с продажи", "объявление снято",
+    "объявление не найдено", "объявление недоступно", "объявление удалено",
+    '"isSold":true', '"sold":true', '"status":"sold"', '"status":"inactive"',
+    '"isArchived":true', 'bulletin-sold', 'data-bulletin-status="sold"',
+    "listing not found", "offer not found",
+]
+
+_FETCH_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept-Language": "ru-RU,ru;q=0.9",
+}
+
+
+def _fetch_and_check(url: str, source: str) -> dict | None:
+    """
+    Один запрос на страницу объявления:
+    - проверяет активность (None = снято)
+    - возвращает фото и описание
+    """
     try:
         import requests as _req
         from bs4 import BeautifulSoup as _BS
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            "Accept-Language": "ru-RU,ru;q=0.9",
-        }
-        r = _req.get(url, headers=headers, timeout=15)
-        soup = _BS(r.text, "lxml")
+        r = _req.get(url, headers=_FETCH_HEADERS, timeout=12, allow_redirects=True)
+        if r.status_code in (404, 410):
+            return None
+        text = r.text
 
+        # Проверяем маркеры снятого объявления
+        text_lower = text.lower()
+        if any(m.lower() in text_lower for m in _SOLD_MARKERS):
+            return None
+
+        soup = _BS(text, "lxml")
+
+        # Фото: og:image
         photo_url = ""
-        description = ""
-
-        # og:image — самый надёжный источник фото на всех сайтах
         og = soup.select_one("meta[property='og:image']")
         if og:
             photo_url = og.get("content", "").strip()
-
-        # Если og:image нет — ищем первую img в галерее
+        # Отфильтровываем плейсхолдеры (логотип Дрома, хомяка и т.п.)
+        if photo_url and any(p in photo_url for p in _DROM_PLACEHOLDER_URLS):
+            photo_url = ""
+        # Если og:image не подошёл — берём первую img с cdn/s.
         if not photo_url:
             for img in soup.select("img[src]"):
                 src = img.get("src", "")
-                if src.startswith("http") and any(x in src for x in ["photo", "image", "img", "jpeg", "jpg", "png"]):
+                if src.startswith("http") and any(x in src for x in ["s.auto.", "cdn", "photos", "images"]):
                     photo_url = src
                     break
+        if photo_url and not photo_url.startswith("http"):
+            photo_url = "https:" + photo_url if photo_url.startswith("//") else ""
 
-        # Описание продавца — специфично для каждого источника
+        # Описание продавца
         if source == "drom":
             desc_el = (
                 soup.select_one("[data-ftid='bull_description']")
@@ -1057,97 +1086,37 @@ def _fetch_listing_details(url: str, source: str) -> dict:
                 or soup.select_one("p[class*='description']")
                 or soup.select_one("[itemprop='description']")
             )
-        if desc_el:
-            description = desc_el.get_text(strip=True)
+        description = desc_el.get_text(strip=True)[:500] if desc_el else ""
 
-        # Убеждаемся что URL абсолютный
-        if photo_url and not photo_url.startswith("http"):
-            photo_url = "https:" + photo_url if photo_url.startswith("//") else ""
-
-        return {
-            "_photo_url": photo_url,
-            "description": description[:500] if description else "",
-        }
+        return {"_photo_url": photo_url, "description": description}
     except Exception:
-        return {}
+        return {}  # Ошибка сети — считаем активным, без деталей
 
 
-async def enrich_items(items: list[dict]) -> list[dict]:
-    """Параллельно загружает фото и описание для каждого объявления."""
-    loop = asyncio.get_event_loop()
-    details_list = await asyncio.gather(
-        *[loop.run_in_executor(None, _fetch_listing_details, i["url"], i.get("source", "")) for i in items]
-    )
-    for item, details in zip(items, details_list):
-        if details.get("_photo_url"):
-            item["_photo_url"] = details["_photo_url"]
-        if details.get("description"):
-            item["description"] = details["description"]
-    return items
-
-
-# Фразы которые означают что объявление снято
-_REMOVED_MARKERS_TEXT = [
-    "снят с продажи", "снято с продажи", "объявление снято",
-    "объявление не найдено", "объявление недоступно", "объявление удалено",
-    "продажа завершена", "не существует", "страница не найдена",
-    "listing not found", "offer not found", "объявление архивировано",
-    "объявление заблокировано", "sold out", "is sold",
-    # Дром — специфичные маркеры в статичном HTML
-    '"isSold":true', '"sold":true', '"status":"sold"', '"status":"inactive"',
-    'data-bulletin-status="sold"', 'bulletin-sold', '"isArchived":true',
-]
-
-_REMOVED_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept-Language": "ru-RU,ru;q=0.9",
-}
-
-
-def _check_url_active(url: str) -> bool:
-    """Возвращает True если объявление ещё активно."""
-    try:
-        import requests as _req
-        from bs4 import BeautifulSoup as _BS
-        r = _req.get(url, headers=_REMOVED_HEADERS, timeout=12, allow_redirects=True)
-        if r.status_code in (404, 410):
-            return False
-        text = r.text
-        text_lower = text.lower()
-
-        # Проверяем текстовые маркеры
-        if any(m in text_lower for m in _REMOVED_MARKERS_TEXT):
-            return False
-
-        # Для Дрома: кнопка "Позвонить" заблокирована у снятых объявлений
-        if "drom.ru" in url:
-            soup = _BS(text, "lxml")
-            # Если нет кнопки звонка или она disabled — снято
-            call_btn = soup.select_one("button[data-ftid='bull_header_call-button']")
-            if call_btn and call_btn.get("disabled"):
-                return False
-            # Проверяем JSON в теге script
-            for sc in soup.select("script"):
-                sc_text = sc.string or ""
-                if any(m in sc_text for m in ['"isSold":true', '"sold":true', '"isArchived":true']):
-                    return False
-
-        return True
-    except Exception:
-        return True
-
-
-async def filter_active(items: list[dict], max_check: int = 30) -> list[dict]:
-    """Проверяет до max_check объявлений на актуальность параллельно."""
+async def enrich_and_filter(items: list[dict], max_check: int = 25) -> list[dict]:
+    """
+    Параллельно загружает страницы топ-N объявлений,
+    фильтрует снятые и обогащает фото+описанием.
+    """
     loop = asyncio.get_event_loop()
     to_check = items[:max_check]
     rest = items[max_check:]
 
     results = await asyncio.gather(
-        *[loop.run_in_executor(None, _check_url_active, i["url"]) for i in to_check]
+        *[loop.run_in_executor(None, _fetch_and_check, i["url"], i.get("source", "")) for i in to_check]
     )
-    active = [item for item, ok in zip(to_check, results) if ok]
-    return active + rest  # остаток не проверяем, вернём как есть
+    active = []
+    for item, details in zip(to_check, results):
+        if details is None:
+            continue  # снято
+        item["_enriched"] = True
+        if details.get("_photo_url"):
+            item["_photo_url"] = details["_photo_url"]
+        if details.get("description"):
+            item["description"] = details["description"]
+        active.append(item)
+
+    return active + rest
 
 
 SOURCE_TAGS = {
@@ -1170,16 +1139,22 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         return
 
     batch = items[offset:offset + 10]
-    # Подгружаем фото/описание параллельно для всей партии
+    # Подгружаем фото/описание для объявлений из второй страницы и далее
     to_enrich = [i for i in batch if not i.get("_enriched")]
     if to_enrich:
-        enriched = await enrich_items(to_enrich)
+        loop = asyncio.get_event_loop()
+        details_list = await asyncio.gather(
+            *[loop.run_in_executor(None, _fetch_and_check, i["url"], i.get("source", "")) for i in to_enrich]
+        )
         ei = 0
         for i, item in enumerate(batch):
             if not item.get("_enriched"):
-                enriched[ei]["_enriched"] = True
-                batch[i] = enriched[ei]
-                _search_cache[uid][offset + i] = enriched[ei]
+                d = details_list[ei] or {}
+                item["_enriched"] = True
+                if d.get("_photo_url"):
+                    item["_photo_url"] = d["_photo_url"]
+                if d.get("description"):
+                    item["description"] = d["description"]
                 ei += 1
 
     total = len(items)
@@ -1250,11 +1225,11 @@ async def do_search_for_user(uid: int, reply_to):
 
     loop = asyncio.get_event_loop()
     drom_items, autoru_items, kolesa_items, bibika_items, avito_items = await asyncio.gather(
-        loop.run_in_executor(None, lambda: scrape_drom(region, pages=30, price_min=pmin, price_max=pmax)),
-        loop.run_in_executor(None, lambda: scrape_autoru(region, pages=15, price_min=pmin, price_max=pmax)),
-        loop.run_in_executor(None, lambda: scrape_kolesa(region, pages=15, price_min=pmin, price_max=pmax)),
-        loop.run_in_executor(None, lambda: scrape_bibika(region, pages=10, price_min=pmin, price_max=pmax)),
-        loop.run_in_executor(None, lambda: scrape_avito(region, pages=10, price_min=pmin, price_max=pmax)),
+        loop.run_in_executor(None, lambda: scrape_drom(region, pages=10, price_min=pmin, price_max=pmax)),
+        loop.run_in_executor(None, lambda: scrape_autoru(region, pages=5, price_min=pmin, price_max=pmax)),
+        loop.run_in_executor(None, lambda: scrape_kolesa(region, pages=5, price_min=pmin, price_max=pmax)),
+        loop.run_in_executor(None, lambda: scrape_bibika(region, pages=3, price_min=pmin, price_max=pmax)),
+        loop.run_in_executor(None, lambda: scrape_avito(region, pages=3, price_min=pmin, price_max=pmax)),
     )
     items = drom_items + autoru_items + kolesa_items + bibika_items + avito_items
 
@@ -1274,15 +1249,15 @@ async def do_search_for_user(uid: int, reply_to):
         )
         return
 
-    await reply_to.answer(f"🔎 Проверяю актуальность {min(len(suitable), 50)} объявлений...")
-    suitable = await filter_active(suitable, max_check=50)
+    await reply_to.answer(f"🔎 Проверяю {min(len(suitable), 25)} объявлений и загружаю фото...")
+    suitable = await enrich_and_filter(suitable, max_check=25)
 
     if not suitable:
         await reply_to.answer("😔 Все найденные объявления уже сняты с продажи. Попробуй позже.")
         return
 
     _search_cache[uid] = suitable
-    await reply_to.answer(f"✅ Найдено {len(suitable)} объявлений!\n📸 Загружаю фото и описания первых 10...")
+    await reply_to.answer(f"✅ Найдено {len(suitable)} актуальных объявлений!")
     await send_batch(reply_to.chat.id, uid, 0)
 
 
