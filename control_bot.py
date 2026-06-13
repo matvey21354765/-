@@ -41,6 +41,7 @@ import os
 BOT_TOKEN  = os.getenv("BOT_TOKEN",  "8657191103:AAFBXaObKV2jcLbBsBzpYTuBfBj2bBkymrk")
 MY_CHAT_ID = int(os.getenv("MY_CHAT_ID", "749256529"))
 TWOCAPTCHA_KEY = os.getenv("TWOCAPTCHA_KEY", "d83693d29ec0a9b78bd85d0e7f869dfe")
+SCRAPERAPI_KEY = os.getenv("SCRAPERAPI_KEY", "")
 
 LISTINGS_FILE = "listings.json"
 DEALS_FILE    = "control_deals.json"
@@ -792,6 +793,24 @@ async def cmd_active(msg: Message):
         kb = InlineKeyboardMarkup(inline_keyboard=buttons)
         await msg.answer(text, reply_markup=kb)
 
+@dp.message(Command("scraperapi"))
+async def cmd_scraperapi(msg: Message):
+    global SCRAPERAPI_KEY
+    parts = msg.text.strip().split(maxsplit=1)
+    if len(parts) < 2:
+        status = "✅ ключ установлен" if SCRAPERAPI_KEY else "❌ не установлен"
+        await msg.answer(
+            f"ScraperAPI: {status}\n\n"
+            f"Зарегистрируйся на scraperapi.com (бесплатно — 5000 запросов/мес)\n"
+            f"Затем: `/scraperapi ВАШ_КЛЮЧ`"
+        )
+        return
+    SCRAPERAPI_KEY = parts[1].strip()
+    # Сохраняем в файл чтобы не потерять после рестарта
+    Path(".scraperapi_key").write_text(SCRAPERAPI_KEY, encoding="utf-8")
+    await msg.answer("✅ ScraperAPI ключ сохранён! Теперь /scan → Авито работает с сервера.")
+
+
 @dp.message(Command("reset"))
 async def cmd_reset(msg: Message):
     """Сбрасывает базу сделок и счётчик страниц Дрома."""
@@ -918,6 +937,97 @@ async def cmd_scan(msg: Message):
         [InlineKeyboardButton(text="📋 Авито + Дром", callback_data="scan|all")],
     ])
     await msg.answer("Что сканировать?", reply_markup=kb)
+
+
+def _scrape_avito_scraperapi(pages: int = 5) -> list[dict]:
+    """Парсит Авито через ScraperAPI с резидентными IP — работает с сервера."""
+    if not SCRAPERAPI_KEY:
+        return []
+    try:
+        import requests as _req
+        from bs4 import BeautifulSoup as _BS
+        import re as _re, datetime as _dt, random as _rnd, time as _t
+    except ImportError:
+        return []
+
+    MONTHS = {"янв":1,"фев":2,"мар":3,"апр":4,"май":5,"мая":5,"июн":6,"июл":7,"авг":8,"сен":9,"окт":10,"ноя":11,"дек":12}
+    HOT = _re.compile(r"(срочно|торг|уступлю|снижу|скидка|дёшево|дешево)", _re.IGNORECASE)
+
+    def _parse_date(text):
+        if not text: return None
+        text = text.strip(); today = _dt.date.today(); low = text.lower()
+        if "сегодня" in low: return today
+        if "вчера" in low: return today - _dt.timedelta(days=1)
+        m = _re.search(r"(\d+)\s+дн", low)
+        if m: return today - _dt.timedelta(days=int(m.group(1)))
+        if _re.search(r"\d+\s+(час|мин)", low): return today
+        m = _re.search(r"(\d{1,2})\s+([а-яё]+)", text, _re.IGNORECASE)
+        if m:
+            mon = MONTHS.get(m.group(2)[:3].lower())
+            if mon:
+                try: return _dt.date(today.year, mon, int(m.group(1)))
+                except ValueError: pass
+        return None
+
+    results = []
+    session = _req.Session()
+    session.headers.update({"Accept-Language": "ru-RU,ru;q=0.9"})
+    cookies = _load_avito_cookies_for_requests()
+    if cookies:
+        session.cookies.update(cookies)
+
+    for p in range(1, pages + 1):
+        target = f"https://www.avito.ru/ekaterinburg/avtomobili?p={p}&s=104"
+        # ScraperAPI проксирует запрос через резидентный IP
+        api_url = f"http://api.scraperapi.com?api_key={SCRAPERAPI_KEY}&url={target}&country_code=ru&render=false"
+        try:
+            r = session.get(api_url, timeout=60)
+            html = r.text
+            if "captcha" in r.headers.get("x-scraperapi-response", "").lower():
+                print(f"  [ScraperAPI] стр.{p}: капча")
+                break
+            if "Доступ ограничен" in html or "Подтвердите" in html:
+                print(f"  [ScraperAPI] стр.{p}: блок")
+                break
+
+            soup = _BS(html, "lxml")
+            cards = soup.select("[data-marker='item']")
+            if not cards:
+                break
+
+            today = _dt.date.today()
+            for card in cards:
+                try:
+                    title_el = card.select_one("[itemprop='name']") or card.select_one("h3")
+                    title = title_el.get_text(strip=True) if title_el else ""
+                    link_el = card.select_one("a[href*='/ekaterinburg/']")
+                    href = link_el.get("href", "") if link_el else ""
+                    item_url = ("https://www.avito.ru" + href) if href else ""
+                    price_el = card.select_one("[itemprop='price']") or card.select_one("[class*='price']")
+                    price = ""
+                    if price_el:
+                        price = price_el.get("content") or price_el.get_text(strip=True)
+                    date_el = card.select_one("[data-marker='item-date']") or card.select_one("span[class*='date']")
+                    date = _parse_date(date_el.get_text(strip=True) if date_el else "")
+                    days = max(0, (today - date).days) if date else 0
+                    photos = len(card.select("img[src*='avito']"))
+                    score = (5 - min(photos, 5)) * 2.0 + days * 0.3 + (10 if HOT.search(title) else 0)
+                    if title and item_url:
+                        results.append({
+                            "source": "avito", "title": title, "price": price,
+                            "url": item_url, "date": str(date) if date else "",
+                            "_photos": photos, "_days_on_site": days,
+                            "_hot_score": round(score, 2), "description": "",
+                        })
+                except Exception:
+                    pass
+            _t.sleep(_rnd.uniform(1, 2))
+        except Exception as e:
+            print(f"  [ScraperAPI] стр.{p}: {e}")
+            break
+
+    print(f"  ScraperAPI: {len(results)} объявлений")
+    return results
 
 
 def _scrape_avito_http_with_cookies(pages: int = 5) -> list[dict]:
@@ -1331,7 +1441,12 @@ async def cb_scan(cb: CallbackQuery):
             items = []
 
             if source in ("avito", "all"):
-                avito_items = await loop.run_in_executor(None, lambda: _scrape_avito_http_with_cookies(pages=5))
+                # 1. ScraperAPI (резидентный IP, работает с сервера)
+                avito_items = await loop.run_in_executor(None, lambda: _scrape_avito_scraperapi(pages=5))
+                # 2. HTTP с куками (Railway IP — часто блокирует)
+                if not avito_items:
+                    avito_items = await loop.run_in_executor(None, lambda: _scrape_avito_http_with_cookies(pages=5))
+                # 3. Playwright с капчей (последний шанс)
                 if not avito_items:
                     avito_items = await scrape_avito_playwright_async(pages=5)
                 items.extend(avito_items)
@@ -1751,8 +1866,10 @@ async def background_scanner():
             state["drom_bg_page"] = start + 10
             state_file.write_text(json.dumps(state))
 
-            # Авито — пробуем HTTP
-            avito_items = await loop.run_in_executor(None, lambda: _scrape_avito_http_with_cookies(pages=3))
+            # Авито — ScraperAPI или HTTP с куками
+            avito_items = await loop.run_in_executor(None, lambda: _scrape_avito_scraperapi(pages=3))
+            if not avito_items:
+                avito_items = await loop.run_in_executor(None, lambda: _scrape_avito_http_with_cookies(pages=3))
 
             all_items = drom_items + avito_items
             if all_items:
@@ -1802,6 +1919,12 @@ def start_xray():
 
 
 async def main():
+    global SCRAPERAPI_KEY
+    if not SCRAPERAPI_KEY and Path(".scraperapi_key").exists():
+        SCRAPERAPI_KEY = Path(".scraperapi_key").read_text(encoding="utf-8").strip()
+        if SCRAPERAPI_KEY:
+            print(f"✅ ScraperAPI ключ загружен")
+
     if not BOT_TOKEN:
         print("❌ Заполни BOT_TOKEN в начале файла control_bot.py")
         print("   Создай бота через @BotFather в Telegram")
