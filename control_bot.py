@@ -1155,90 +1155,101 @@ async def _solve_yandex_captcha(page, page_num: int) -> bool:
 
 
 async def scrape_avito_playwright_async(pages: int = 5) -> list[dict]:
-    """Парсит Авито через Playwright; при капче шлёт скриншот и ждёт ответа от пользователя."""
+    """Парсит Авито через Playwright; при капче ждёт пока пользователь решит и нажмёт Готово."""
     try:
         from playwright.async_api import async_playwright
+        from bs4 import BeautifulSoup as _BS
     except ImportError:
         return []
 
+    import re as _re, datetime as _dt, random as _rnd
+
+    MONTHS = {"янв":1,"фев":2,"мар":3,"апр":4,"май":5,"мая":5,"июн":6,"июл":7,"авг":8,"сен":9,"окт":10,"ноя":11,"дек":12}
+    HOT = _re.compile(r"(срочно|торг|уступлю|снижу|скидка|дёшево|дешево)", _re.IGNORECASE)
+
+    def _parse_date(text):
+        if not text: return None
+        text = text.strip(); today = _dt.date.today(); low = text.lower()
+        if "сегодня" in low: return today
+        if "вчера" in low: return today - _dt.timedelta(days=1)
+        m = _re.search(r"(\d+)\s+дн", low)
+        if m: return today - _dt.timedelta(days=int(m.group(1)))
+        if _re.search(r"\d+\s+(час|мин)", low): return today
+        m = _re.search(r"(\d{1,2})\s+([а-яё]+)", text, _re.IGNORECASE)
+        if m:
+            mon = MONTHS.get(m.group(2)[:3].lower())
+            if mon:
+                try: return _dt.date(today.year, mon, int(m.group(1)))
+                except ValueError: pass
+        return None
+
+    def _hotness(title, photos, days):
+        score = (5 - min(photos, 5)) * 2.0 + days * 0.3
+        if HOT.search(title): score += 10.0
+        return round(score, 2)
+
     results = []
     IS_SERVER = os.getenv("RAILWAY_ENVIRONMENT") is not None
+    use_proxy = _xray_proc and _xray_proc.poll() is None
 
     async with async_playwright() as pw:
         SESSION_DIR.mkdir(exist_ok=True)
-        use_proxy = _xray_proc and _xray_proc.poll() is None
-        proxy_cfg = {"server": "socks5://127.0.0.1:10808"} if use_proxy else None
         launch_kwargs = dict(
             user_data_dir=str(SESSION_DIR),
-            headless=IS_SERVER,
-            args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-gpu",
+                "--single-process",
+            ],
             viewport={"width": 1280, "height": 900},
             locale="ru-RU",
             timezone_id="Asia/Yekaterinburg",
         )
-        if proxy_cfg:
-            launch_kwargs["proxy"] = proxy_cfg
+        if use_proxy:
+            launch_kwargs["proxy"] = {"server": "socks5://127.0.0.1:10808"}
+
         context = await pw.chromium.launch_persistent_context(**launch_kwargs)
+
+        # Загружаем куки если есть
+        cookies = _load_avito_cookies_for_requests()
+        if cookies:
+            pw_cookies = [{"name": k, "value": v, "domain": ".avito.ru", "path": "/"} for k, v in cookies.items()]
+            try:
+                await context.add_cookies(pw_cookies)
+            except Exception:
+                pass
+
         try:
-            import re as _re, datetime as _dt, random as _rnd, json as _json
-
-            MONTHS = {
-                "янв":1,"фев":2,"мар":3,"апр":4,"май":5,"мая":5,
-                "июн":6,"июл":7,"авг":8,"сен":9,"окт":10,"ноя":11,"дек":12,
-            }
-            HOT = _re.compile(r"(срочно|торг|уступлю|снижу|скидка|дёшево|дешево)", _re.IGNORECASE)
-
-            def _parse_date(text):
-                if not text: return None
-                text = text.strip(); today = _dt.date.today(); low = text.lower()
-                if "сегодня" in low: return today
-                if "вчера" in low: return today - _dt.timedelta(days=1)
-                m = _re.search(r"(\d+)\s+дн", low)
-                if m: return today - _dt.timedelta(days=int(m.group(1)))
-                if _re.search(r"\d+\s+(час|мин)", low): return today
-                m = _re.search(r"(\d{1,2})\s+([а-яё]+)", text, _re.IGNORECASE)
-                if m:
-                    mon = MONTHS.get(m.group(2)[:3].lower())
-                    if mon:
-                        try: return _dt.date(today.year, mon, int(m.group(1)))
-                        except ValueError: pass
-                return None
-
-            def _hotness(title, photos, days):
-                score = (5 - min(photos, 5)) * 2.0 + days * 0.3
-                if HOT.search(title): score += 10.0
-                return round(score, 2)
-
             for p in range(1, pages + 1):
                 url = f"https://www.avito.ru/ekaterinburg/avtomobili?p={p}&s=104"
                 page = await context.new_page()
                 try:
-                    await page.goto(url, wait_until="domcontentloaded", timeout=40000)
+                    try:
+                        await page.goto(url, wait_until="domcontentloaded", timeout=40000)
+                    except Exception as e:
+                        if "crash" in str(e).lower() or "Target closed" in str(e):
+                            break
+                        raise
                     await asyncio.sleep(_rnd.uniform(2, 4))
 
-                    # Проверяем капчу
                     html = await page.content()
                     is_captcha = (
                         "captcha" in html.lower()
                         or "Доступ ограничен" in html
                         or await page.query_selector("div[class*='captcha']") is not None
-                        or await page.query_selector("iframe[src*='captcha']") is not None
-                        or await page.query_selector("input[name*='captcha']") is not None
                     )
 
                     if is_captcha:
                         solved = await _solve_yandex_captcha(page, p)
                         if not solved:
-                            await page.close()
                             break
-                        # Обновляем html после решения капчи
                         html = await page.content()
                         if "captcha" in html.lower() or "Доступ ограничен" in html:
-                            await page.close()
                             break
 
-                    # Парсим карточки
-                    from bs4 import BeautifulSoup as _BS
                     soup = _BS(html, "lxml")
                     cards = soup.select("[data-marker='item']")
                     for card in cards:
@@ -1246,7 +1257,7 @@ async def scrape_avito_playwright_async(pages: int = 5) -> list[dict]:
                             title_el = card.select_one("[itemprop='name']") or card.select_one("h3")
                             title = title_el.get_text(strip=True) if title_el else ""
                             link_el = card.select_one("a[href*='/ekaterinburg/']")
-                            href = link_el.get("href","") if link_el else ""
+                            href = link_el.get("href", "") if link_el else ""
                             item_url = ("https://www.avito.ru" + href) if href else ""
                             price_el = card.select_one("[itemprop='price']") or card.select_one("[class*='price']")
                             price = ""
@@ -1259,26 +1270,26 @@ async def scrape_avito_playwright_async(pages: int = 5) -> list[dict]:
                             photos = len(card.select("img[src*='avito']"))
                             if title and item_url:
                                 results.append({
-                                    "source": "avito",
-                                    "title": title,
-                                    "price": price,
-                                    "url": item_url,
-                                    "date": str(date) if date else date_text,
-                                    "_photos": photos,
-                                    "_days_on_site": days,
-                                    "_hot_score": _hotness(title, photos, days),
-                                    "description": "",
+                                    "source": "avito", "title": title, "price": price,
+                                    "url": item_url, "date": str(date) if date else date_text,
+                                    "_photos": photos, "_days_on_site": days,
+                                    "_hot_score": _hotness(title, photos, days), "description": "",
                                 })
                         except Exception:
                             pass
-                    await asyncio.sleep(_rnd.uniform(2, 5))
+                    await asyncio.sleep(_rnd.uniform(2, 4))
+                except Exception:
+                    pass
                 finally:
                     try:
                         await page.close()
                     except Exception:
                         pass
         finally:
-            await context.close()
+            try:
+                await context.close()
+            except Exception:
+                pass
 
     return results
 
@@ -1303,7 +1314,7 @@ async def cb_scan(cb: CallbackQuery):
             if source in ("avito", "all"):
                 avito_items = await loop.run_in_executor(None, lambda: _scrape_avito_http_with_cookies(pages=5))
                 if not avito_items:
-                    avito_items = await loop.run_in_executor(None, lambda: _scrape_avito_mobile_api(pages=5))
+                    avito_items = await scrape_avito_playwright_async(pages=5)
                 items.extend(avito_items)
 
             if source in ("drom", "all"):
