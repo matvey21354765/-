@@ -760,7 +760,8 @@ AVITO_SLUGS = {
 
 
 def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int = 99_000_000) -> list[dict]:
-    slug = AVITO_REGION_SLUGS.get(region, AVITO_SLUGS.get(region, region))
+    # Используем городской слаг — с ним Авито отдаёт карточки в HTML
+    slug = AVITO_SLUGS.get(region, region)
     try:
         from bs4 import BeautifulSoup as _BS
         try:
@@ -845,7 +846,12 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
                         title_el = card.select_one("[itemprop='name']") or card.select_one("h3") or card.select_one("[data-marker='item-title']")
                         title = title_el.get_text(strip=True) if title_el else ""
 
-                        link_el = card.select_one("a[data-marker='item-title']") or card.select_one("a[href*='/avto']") or card.select_one("a[href]")
+                        link_el = (
+                            card.select_one("a[data-marker='item-title']")
+                            or card.select_one(f"a[href*='/{slug}/']")
+                            or card.select_one("a[href*='/avtomobili/']")
+                            or card.select_one("a[href^='/'][href*='_']")
+                        )
                         href = link_el.get("href", "") if link_el else ""
                         item_url = ("https://www.avito.ru" + href) if href.startswith("/") else href
 
