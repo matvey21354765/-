@@ -374,7 +374,15 @@ def scrape_autoru(region: str, pages: int = 5, price_min: int = 0, price_max: in
                                     days = max(0, (today - dt).days)
                                 except Exception:
                                     pass
-                            desc = offer.get("description", "")[:100]
+                            desc = offer.get("description", "")[:300]
+                            # Собираем характеристики из технических данных
+                            tech = offer.get("vehicle_info", {}).get("tech_param", {})
+                            if tech and not desc:
+                                engine = tech.get("engine_type", "")
+                                hp = tech.get("power", "")
+                                gearbox = tech.get("transmission", "")
+                                parts = [p for p in [engine, f"{hp} л.с." if hp else "", gearbox] if p]
+                                desc = ", ".join(parts)
                             if title and item_url:
                                 item = {
                                     "source": "autoru",
@@ -523,8 +531,18 @@ def scrape_kolesa(region: str, pages: int = 5, price_min: int = 0, price_max: in
                     date = parse_ru_date(date_text)
                     days = max(0, (today - date).days) if date else 0
 
-                    desc_el = card.select_one(".a-descr") or card.select_one("[class*='descr']")
-                    desc = desc_el.get_text(strip=True) if desc_el else ""
+                    desc_el = (
+                        card.select_one(".a-descr")
+                        or card.select_one("[class*='descr']")
+                        or card.select_one("[class*='description']")
+                        or card.select_one("p")
+                    )
+                    desc = desc_el.get_text(strip=True)[:300] if desc_el else ""
+
+                    # Характеристики из тегов внутри карточки
+                    params_el = card.select_one("[class*='params']") or card.select_one("[class*='spec']")
+                    if params_el and not desc:
+                        desc = params_el.get_text(separator=" | ", strip=True)[:300]
 
                     if title and item_url and "/cars/" in item_url:
                         item = {
@@ -625,6 +643,14 @@ def scrape_bibika(region: str, pages: int = 3, price_min: int = 0, price_max: in
                     date = parse_ru_date(date_text)
                     days = max(0, (today - date).days) if date else 0
 
+                    desc_el = (
+                        card.select_one("[class*='descr']")
+                        or card.select_one("[class*='description']")
+                        or card.select_one("[itemprop='description']")
+                        or card.select_one("p")
+                    )
+                    desc = desc_el.get_text(strip=True)[:300] if desc_el else ""
+
                     if title and item_url:
                         item = {
                             "source": "bibika",
@@ -634,7 +660,7 @@ def scrape_bibika(region: str, pages: int = 3, price_min: int = 0, price_max: in
                             "date": str(date) if date else date_text,
                             "_photos": 0,
                             "_days_on_site": days,
-                            "description": "",
+                            "description": desc,
                             "seller": "",
                         }
                         item["_hot_score"] = hot_score(item)
@@ -864,7 +890,7 @@ async def do_search_for_user(uid: int, reply_to):
             f"📅 {days_str}"
         )
         if item.get("description"):
-            text += f"\n📝 {item['description'][:80]}"
+            text += f"\n📝 {item['description'][:200]}"
 
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [
@@ -955,7 +981,7 @@ async def cb_more(cb: CallbackQuery):
             f"📅 {days_str}"
         )
         if item.get("description"):
-            text += f"\n📝 {item['description'][:80]}"
+            text += f"\n📝 {item['description'][:200]}"
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [
                 InlineKeyboardButton(text="🔗 Открыть", url=url),
