@@ -1110,48 +1110,43 @@ def _scrape_avito_mobile_api(pages: int = 5) -> list[dict]:
     return results
 
 
-async def _solve_yandex_captcha(page, page_num: int) -> bool:
+async def _notify_avito_blocked() -> bool:
     """
-    Отправляет пользователю ссылку на страницу капчи.
-    Пользователь открывает в браузере, решает, отправляет куки боту.
-    Бот загружает новые куки и продолжает парсинг.
+    Авито заблокировало сервер. Просит пользователя отправить куки.
+    Ждёт получения нового файла куков (до 5 минут).
+    Возвращает True если куки получены.
     """
-    page_url = page.url or f"https://www.avito.ru/ekaterinburg/avtomobili?p={page_num}&s=104"
-
     event = asyncio.Event()
     captcha_wait[MY_CHAT_ID] = {"answer": None, "event": event}
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🌐 Открыть Авито", url="https://www.avito.ru/ekaterinburg/avtomobili")],
-        [InlineKeyboardButton(text="✅ Готово, продолжай", callback_data="captcha_done")],
+        [InlineKeyboardButton(text="✅ Куки отправил, продолжай", callback_data="captcha_done")],
     ])
 
     await bot.send_message(
         MY_CHAT_ID,
-        f"🔒 Авито показало капчу (стр. {page_num})\n\n"
-        f"Открой Авито по кнопке, реши капчу если есть, затем нажми *Готово*.",
+        "🔒 *Авито заблокировало сервер*\n\n"
+        "1. Открой Авито по кнопке\n"
+        "2. Установи [EditThisCookie](https://chrome.google.com/webstore/detail/editthiscookie/fngmhnnpilhplaeedifhccceomclgfbg) в браузер\n"
+        "3. Нажми на иконку → Экспорт (кнопка со стрелкой)\n"
+        "4. Отправь скопированное в этот чат как файл `avito_cookies.json`\n\n"
+        "После отправки куков нажми кнопку ниже.",
         reply_markup=kb,
-        parse_mode="Markdown"
+        parse_mode="Markdown",
+        disable_web_page_preview=True,
     )
 
     try:
         await asyncio.wait_for(event.wait(), timeout=300)
     except asyncio.TimeoutError:
         captcha_wait.pop(MY_CHAT_ID, None)
-        await bot.send_message(MY_CHAT_ID, "⏱ Таймаут ожидания — продолжаю без решения капчи.")
         return False
 
     captcha_wait.pop(MY_CHAT_ID, None)
-    # Небольшая пауза после обновления куков
-    await asyncio.sleep(2)
-    # Перезагружаем страницу с новыми куками
-    await page.reload(wait_until="domcontentloaded", timeout=30000)
-    await asyncio.sleep(2)
-    html = await page.content()
-    if "captcha" not in html.lower() and "Доступ ограничен" not in html:
-        await bot.send_message(MY_CHAT_ID, f"✅ Авито стр.{page_num}: продолжаю парсинг!")
-        return True
-    return False
+    await asyncio.sleep(1)
+    # Проверяем что куки реально есть
+    return Path("avito_cookies_raw.json").exists()
 
 
 async def scrape_avito_playwright_async(pages: int = 5) -> list[dict]:
@@ -1243,12 +1238,18 @@ async def scrape_avito_playwright_async(pages: int = 5) -> list[dict]:
                     )
 
                     if is_captcha:
-                        solved = await _solve_yandex_captcha(page, p)
-                        if not solved:
-                            break
-                        html = await page.content()
-                        if "captcha" in html.lower() or "Доступ ограничен" in html:
-                            break
+                        try:
+                            await page.close()
+                        except Exception:
+                            pass
+                        # Просим пользователя отправить куки, затем переключаемся на HTTP
+                        got_cookies = await _notify_avito_blocked()
+                        if got_cookies:
+                            http_results = await asyncio.get_event_loop().run_in_executor(
+                                None, lambda: _scrape_avito_http_with_cookies(pages=pages - p + 1)
+                            )
+                            results.extend(http_results)
+                        break
 
                     soup = _BS(html, "lxml")
                     cards = soup.select("[data-marker='item']")
