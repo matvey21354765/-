@@ -277,6 +277,13 @@ def scrape_drom(region: str, pages: int = 15, price_min: int = 0, price_max: int
                     pm = re.search(r"\d+", photos_str)
                     photos = int(pm.group()) if pm else 0
 
+                    img_el = card.select_one("img[data-src]") or card.select_one("img[src]")
+                    photo_url = ""
+                    if img_el:
+                        src = img_el.get("data-src") or img_el.get("src", "")
+                        if src and src.startswith("http") and "drom" in src:
+                            photo_url = src
+
                     if title and item_url:
                         item = {
                             "source": "drom",
@@ -288,6 +295,7 @@ def scrape_drom(region: str, pages: int = 15, price_min: int = 0, price_max: int
                             "_days_on_site": days,
                             "description": desc,
                             "seller": seller,
+                            "_photo_url": photo_url,
                         }
                         item["_hot_score"] = hot_score(item)
                         results.append(item)
@@ -375,7 +383,6 @@ def scrape_autoru(region: str, pages: int = 5, price_min: int = 0, price_max: in
                                 except Exception:
                                     pass
                             desc = offer.get("description", "")[:300]
-                            # Собираем характеристики из технических данных
                             tech = offer.get("vehicle_info", {}).get("tech_param", {})
                             if tech and not desc:
                                 engine = tech.get("engine_type", "")
@@ -383,6 +390,12 @@ def scrape_autoru(region: str, pages: int = 5, price_min: int = 0, price_max: in
                                 gearbox = tech.get("transmission", "")
                                 parts = [p for p in [engine, f"{hp} л.с." if hp else "", gearbox] if p]
                                 desc = ", ".join(parts)
+                            photo_url = ""
+                            photos_list = offer.get("photos", [])
+                            if photos_list:
+                                p0 = photos_list[0]
+                                sizes = p0.get("sizes", {})
+                                photo_url = sizes.get("1200x900", sizes.get("832x624", sizes.get("456x342", "")))
                             if title and item_url:
                                 item = {
                                     "source": "autoru",
@@ -394,6 +407,7 @@ def scrape_autoru(region: str, pages: int = 5, price_min: int = 0, price_max: in
                                     "_days_on_site": days,
                                     "description": desc,
                                     "seller": "",
+                                    "_photo_url": photo_url,
                                 }
                                 item["_hot_score"] = hot_score(item)
                                 results.append(item)
@@ -544,6 +558,13 @@ def scrape_kolesa(region: str, pages: int = 5, price_min: int = 0, price_max: in
                     if params_el and not desc:
                         desc = params_el.get_text(separator=" | ", strip=True)[:300]
 
+                    img_el = card.select_one("img[data-src]") or card.select_one("img[src]")
+                    photo_url = ""
+                    if img_el:
+                        src = img_el.get("data-src") or img_el.get("src", "")
+                        if src and src.startswith("http"):
+                            photo_url = src
+
                     if title and item_url and "/cars/" in item_url:
                         item = {
                             "source": "kolesa",
@@ -555,6 +576,7 @@ def scrape_kolesa(region: str, pages: int = 5, price_min: int = 0, price_max: in
                             "_days_on_site": days,
                             "description": desc,
                             "seller": "",
+                            "_photo_url": photo_url,
                         }
                         item["_hot_score"] = hot_score(item)
                         results.append(item)
@@ -662,6 +684,7 @@ def scrape_bibika(region: str, pages: int = 3, price_min: int = 0, price_max: in
                             "_days_on_site": days,
                             "description": desc,
                             "seller": "",
+                            "_photo_url": "",
                         }
                         item["_hot_score"] = hot_score(item)
                         results.append(item)
@@ -673,6 +696,125 @@ def scrape_bibika(region: str, pages: int = 3, price_min: int = 0, price_max: in
             print(f"  [Bibika {region}] стр.{p}: {e}")
             break
 
+    return results
+
+
+# ── Парсер Авито ────────────────────────────────────────────────
+
+AVITO_SLUGS = {
+    "ekaterinburg": "ekaterinburg",
+    "moscow":       "moskva",
+    "spb":          "sankt-peterburg",
+    "novosibirsk":  "novosibirsk",
+    "kazan":        "kazan",
+    "chelyabinsk":  "chelyabinsk",
+    "ufa":          "ufa",
+    "krasnodar":    "krasnodar",
+    "omsk":         "omsk",
+    "tyumen":       "tyumen",
+    "perm":         "perm",
+    "krasnoyarsk":  "krasnoyarsk",
+    "voronezh":     "voronezh",
+    "samara":       "samara",
+    "rostov":       "rostov-na-donu",
+}
+
+
+def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int = 99_000_000) -> list[dict]:
+    slug = AVITO_SLUGS.get(region, region)
+    try:
+        from bs4 import BeautifulSoup as _BS
+        try:
+            import cloudscraper as _cs
+            session = _cs.create_scraper(browser={"browser": "chrome", "platform": "windows"})
+        except ImportError:
+            import requests as _req
+            session = _req.Session()
+        session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept-Language": "ru-RU,ru;q=0.9",
+            "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+            "Referer": "https://www.avito.ru/",
+        })
+    except ImportError:
+        return []
+
+    results = []
+    today = datetime.date.today()
+
+    for p in range(1, pages + 1):
+        params = {"p": p, "s": 104, "seller_type": "1"}  # seller_type=1 — частники
+        if price_min > 0:
+            params["pmin"] = price_min
+        if price_max < 99_000_000:
+            params["pmax"] = price_max
+
+        url = f"https://www.avito.ru/{slug}/avtomobili"
+        try:
+            r = session.get(url, params=params, timeout=25)
+            if "captcha" in r.text.lower() or "Доступ ограничен" in r.text:
+                print(f"  [Авито] капча на стр.{p}")
+                break
+
+            soup = _BS(r.text, "lxml")
+            cards = soup.select("[data-marker='item']")
+            if not cards:
+                break
+
+            for card in cards:
+                try:
+                    title_el = card.select_one("[itemprop='name']") or card.select_one("h3")
+                    title = title_el.get_text(strip=True) if title_el else ""
+
+                    link_el = card.select_one(f"a[href*='/{slug}/']") or card.select_one("a[href*='/avtomobili/']")
+                    href = link_el.get("href", "") if link_el else ""
+                    item_url = ("https://www.avito.ru" + href) if href and href.startswith("/") else href
+
+                    price_el = card.select_one("[itemprop='price']") or card.select_one("[class*='price']")
+                    price = ""
+                    if price_el:
+                        price = price_el.get("content") or price_el.get_text(strip=True)
+
+                    date_el = card.select_one("[data-marker='item-date']") or card.select_one("span[class*='date']")
+                    date_text = date_el.get_text(strip=True) if date_el else ""
+                    date = parse_ru_date(date_text)
+                    days = max(0, (today - date).days) if date else 0
+
+                    # Фото
+                    img_el = card.select_one("img[src*='avito']") or card.select_one("img[data-src]")
+                    photo_url = ""
+                    if img_el:
+                        src = img_el.get("src") or img_el.get("data-src", "")
+                        if src and src.startswith("http"):
+                            photo_url = src
+
+                    desc_el = card.select_one("[class*='description']") or card.select_one("p")
+                    desc = desc_el.get_text(strip=True)[:300] if desc_el else ""
+
+                    if title and item_url:
+                        item = {
+                            "source": "avito",
+                            "title": title,
+                            "price": price,
+                            "url": item_url,
+                            "date": str(date) if date else date_text,
+                            "_photos": 0,
+                            "_days_on_site": days,
+                            "description": desc,
+                            "seller": "",
+                            "_photo_url": photo_url,
+                        }
+                        item["_hot_score"] = hot_score(item)
+                        results.append(item)
+                except Exception:
+                    pass
+
+            time.sleep(random.uniform(2, 4))
+        except Exception as e:
+            print(f"  [Авито {region}] стр.{p}: {e}")
+            break
+
+    print(f"  [Авито] {len(results)} объявлений")
     return results
 
 
@@ -826,6 +968,48 @@ async def cb_do_search(cb: CallbackQuery):
     await do_search_for_user(cb.from_user.id, cb.message)
 
 
+SOURCE_TAGS = {
+    "autoru": "🟠 Auto.ru",
+    "kolesa": "🟢 Kolesa",
+    "bibika": "🟣 Bibika",
+    "avito":  "🔴 Авито",
+    "drom":   "🔵 Дром",
+}
+
+
+async def send_item_card(chat_id: int, item: dict, uid: int):
+    url = item.get("url", "")
+    sid = url_to_id(url)
+    days = item.get("_days_on_site", 0)
+    days_str = "сегодня" if days == 0 else f"{days} дн. назад"
+    score = item.get("_hot_score", 0)
+    hot_tag = " 🔥" if score >= 15 else " ⭐" if score >= 5 else ""
+    source_tag = SOURCE_TAGS.get(item.get("source", ""), "🔵")
+
+    caption = (
+        f"{source_tag} {item.get('title', '')}{hot_tag}\n"
+        f"💰 {item.get('price', '—')}\n"
+        f"📅 {days_str}"
+    )
+    if item.get("description"):
+        caption += f"\n📝 {item['description'][:200]}"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🔗 Открыть", url=url),
+        InlineKeyboardButton(text="❌ Скрыть", callback_data=f"hide|{sid}|{uid}"),
+    ]])
+
+    photo_url = item.get("_photo_url", "")
+    if photo_url:
+        try:
+            await bot.send_photo(chat_id, photo=photo_url, caption=caption, reply_markup=kb)
+            return
+        except Exception:
+            pass  # Если фото не загрузилось — отправим текстом
+
+    await bot.send_message(chat_id, caption, reply_markup=kb)
+
+
 async def do_search_for_user(uid: int, reply_to):
     s = load_settings(uid)
     if not s.get("region"):
@@ -842,13 +1026,14 @@ async def do_search_for_user(uid: int, reply_to):
     skipped = load_skipped(uid)
 
     loop = asyncio.get_event_loop()
-    drom_items, autoru_items, kolesa_items, bibika_items = await asyncio.gather(
+    drom_items, autoru_items, kolesa_items, bibika_items, avito_items = await asyncio.gather(
         loop.run_in_executor(None, lambda: scrape_drom(region, pages=10, price_min=pmin, price_max=pmax)),
         loop.run_in_executor(None, lambda: scrape_autoru(region, pages=5, price_min=pmin, price_max=pmax)),
         loop.run_in_executor(None, lambda: scrape_kolesa(region, pages=5, price_min=pmin, price_max=pmax)),
         loop.run_in_executor(None, lambda: scrape_bibika(region, pages=3, price_min=pmin, price_max=pmax)),
+        loop.run_in_executor(None, lambda: scrape_avito(region, pages=3, price_min=pmin, price_max=pmax)),
     )
-    items = drom_items + autoru_items + kolesa_items + bibika_items
+    items = drom_items + autoru_items + kolesa_items + bibika_items + avito_items
 
     # Фильтрация
     suitable = [
@@ -874,31 +1059,9 @@ async def do_search_for_user(uid: int, reply_to):
         f"Показываю лучшие (ниже рынка в приоритете):"
     )
 
+    chat_id = reply_to.chat.id
     for item in suitable[:10]:
-        url = item.get("url", "")
-        sid = url_to_id(url)
-        days = item.get("_days_on_site", 0)
-        days_str = "сегодня" if days == 0 else f"{days} дн. назад"
-        score = item.get("_hot_score", 0)
-        hot_tag = " 🔥" if score >= 15 else " ⭐" if score >= 5 else ""
-
-        source = item.get("source", "")
-        source_tag = {"autoru": "🟠 Auto.ru", "kolesa": "🟢 Kolesa", "bibika": "🟣 Bibika"}.get(source, "🔵 Дром")
-        text = (
-            f"{source_tag} {item.get('title', '')}{hot_tag}\n"
-            f"💰 {item.get('price', '—')}\n"
-            f"📅 {days_str}"
-        )
-        if item.get("description"):
-            text += f"\n📝 {item['description'][:200]}"
-
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(text="🔗 Открыть", url=url),
-                InlineKeyboardButton(text="❌ Скрыть", callback_data=f"hide|{sid}|{uid}"),
-            ],
-        ])
-        await reply_to.answer(text, reply_markup=kb)
+        await send_item_card(chat_id, item, uid)
 
     if len(suitable) > 10:
         await reply_to.answer(
@@ -946,13 +1109,14 @@ async def cb_more(cb: CallbackQuery):
     skipped = load_skipped(uid)
 
     loop = asyncio.get_event_loop()
-    drom_items, autoru_items, kolesa_items, bibika_items = await asyncio.gather(
+    drom_items, autoru_items, kolesa_items, bibika_items, avito_items = await asyncio.gather(
         loop.run_in_executor(None, lambda: scrape_drom(region, pages=10, price_min=pmin, price_max=pmax)),
         loop.run_in_executor(None, lambda: scrape_autoru(region, pages=5, price_min=pmin, price_max=pmax)),
         loop.run_in_executor(None, lambda: scrape_kolesa(region, pages=5, price_min=pmin, price_max=pmax)),
         loop.run_in_executor(None, lambda: scrape_bibika(region, pages=3, price_min=pmin, price_max=pmax)),
+        loop.run_in_executor(None, lambda: scrape_avito(region, pages=3, price_min=pmin, price_max=pmax)),
     )
-    items = drom_items + autoru_items + kolesa_items + bibika_items
+    items = drom_items + autoru_items + kolesa_items + bibika_items + avito_items
     suitable = [
         i for i in items
         if not is_dealer(i)
@@ -967,28 +1131,7 @@ async def cb_more(cb: CallbackQuery):
         return
 
     for item in batch:
-        url = item.get("url", "")
-        sid = url_to_id(url)
-        days = item.get("_days_on_site", 0)
-        days_str = "сегодня" if days == 0 else f"{days} дн. назад"
-        score = item.get("_hot_score", 0)
-        hot_tag = " 🔥" if score >= 15 else " ⭐" if score >= 5 else ""
-        source = item.get("source", "")
-        source_tag = {"autoru": "🟠 Auto.ru", "kolesa": "🟢 Kolesa", "bibika": "🟣 Bibika"}.get(source, "🔵 Дром")
-        text = (
-            f"{source_tag} {item.get('title', '')}{hot_tag}\n"
-            f"💰 {item.get('price', '—')}\n"
-            f"📅 {days_str}"
-        )
-        if item.get("description"):
-            text += f"\n📝 {item['description'][:200]}"
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(text="🔗 Открыть", url=url),
-                InlineKeyboardButton(text="❌ Скрыть", callback_data=f"hide|{sid}|{uid}"),
-            ],
-        ])
-        await cb.message.answer(text, reply_markup=kb)
+        await send_item_card(cb.message.chat.id, item, uid)
 
     if len(suitable) > offset + 10:
         await cb.message.answer(
