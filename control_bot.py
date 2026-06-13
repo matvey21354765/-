@@ -557,6 +557,65 @@ def send_on_avito_http(item_url: str, message: str) -> tuple[bool, str]:
         return False, str(e)
 
 
+def send_on_drom_http(url: str, message: str) -> tuple[bool, str]:
+    """Отправляет сообщение на Дром через HTTP форму."""
+    try:
+        import requests as _req, re as _re
+
+        proxies = {}
+        if _xray_proc and _xray_proc.poll() is None:
+            proxies = {"https": "socks5h://127.0.0.1:10808", "http": "socks5h://127.0.0.1:10808"}
+
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept-Language": "ru-RU,ru;q=0.9",
+            "Referer": url,
+        }
+        session = _req.Session()
+        session.headers.update(headers)
+
+        # Загружаем страницу объявления
+        r = session.get(url, proxies=proxies, timeout=20)
+        html = r.text
+
+        # Ищем bull_id из URL
+        m = _re.search(r'/(\d+)\.html', url)
+        if not m:
+            m = _re.search(r'bull_id=(\d+)', html)
+        if not m:
+            return False, "не могу найти ID объявления"
+        bull_id = m.group(1)
+
+        # CSRF токен
+        csrf = ""
+        m_csrf = _re.search(r'name=["\']_csrf_token["\']\s+value=["\']([\w-]+)', html)
+        if not m_csrf:
+            m_csrf = _re.search(r'"csrf_token"\s*:\s*"([\w-]+)"', html)
+        if m_csrf:
+            csrf = m_csrf.group(1)
+
+        # Отправляем сообщение
+        resp = session.post(
+            "https://ekaterinburg.drom.ru/ajax/sendmessage.html",
+            data={
+                "bull_id": bull_id,
+                "message": message,
+                "_csrf_token": csrf,
+            },
+            proxies=proxies,
+            timeout=20,
+        )
+        data = resp.json() if resp.headers.get("content-type","").startswith("application/json") else {}
+        if resp.status_code == 200 and data.get("success"):
+            return True, url
+        elif "войдите" in resp.text.lower() or "авторизу" in resp.text.lower():
+            return False, "нужно войти в аккаунт Дром"
+        else:
+            return False, f"HTTP {resp.status_code}: {resp.text[:200]}"
+    except Exception as e:
+        return False, str(e)
+
+
 def send_message_to_seller(item: dict, message: str) -> tuple[bool, str]:
     source = item.get("source","")
     url    = item.get("url","")
@@ -569,6 +628,9 @@ def send_message_to_seller(item: dict, message: str) -> tuple[bool, str]:
         print(f"  [Авито HTTP API] {detail} — fallback to Playwright")
         return send_on_avito(url, message)
     elif source == "drom":
+        ok, detail = send_on_drom_http(url, message)
+        if ok:
+            return ok, detail
         return send_on_drom(url, message)
     elif source == "autoru":
         return send_on_autoru(url, message)
@@ -1582,12 +1644,14 @@ async def cb_send_opener(cb: CallbackQuery):
             ])
         )
     else:
+        err = chat_url or "не удалось подключиться к сайту"
         await cb.message.edit_text(
             f"❌ {icon} {item.get('title', '')}\n"
-            f"Ошибка: {chat_url}\n\n"
-            f"[Открыть объявление]({url})",
-            parse_mode="Markdown",
+            f"💰 {item.get('price', '—')}\n\n"
+            f"Ошибка: {err[:300]}\n\n"
+            f"Напиши вручную по кнопке:",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔗 Открыть объявление", url=url)],
                 [InlineKeyboardButton(text="🔄 Попробовать ещё раз", callback_data=f"send_opener|{url_to_id(url)}")],
             ])
         )
