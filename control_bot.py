@@ -1194,38 +1194,34 @@ async def scrape_avito_playwright_async(pages: int = 5) -> list[dict]:
         return round(score, 2)
 
     results = []
-    IS_SERVER = os.getenv("RAILWAY_ENVIRONMENT") is not None
     use_proxy = _xray_proc and _xray_proc.poll() is None
 
     async with async_playwright() as pw:
-        SESSION_DIR.mkdir(exist_ok=True)
-        launch_kwargs = dict(
-            user_data_dir=str(SESSION_DIR),
+        launch_args = [
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-blink-features=AutomationControlled",
+            "--disable-gpu",
+        ]
+        proxy_cfg = {"server": "socks5://127.0.0.1:10808"} if use_proxy else None
+        browser = await pw.chromium.launch(
             headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-blink-features=AutomationControlled",
-                "--disable-gpu",
-                "--single-process",
-            ],
+            args=launch_args,
+            proxy=proxy_cfg,
+        )
+
+        # Загружаем куки
+        cookies = _load_avito_cookies_for_requests()
+        pw_cookies = [{"name": k, "value": v, "domain": ".avito.ru", "path": "/"} for k, v in cookies.items()] if cookies else []
+
+        context = await browser.new_context(
             viewport={"width": 1280, "height": 900},
             locale="ru-RU",
             timezone_id="Asia/Yekaterinburg",
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         )
-        if use_proxy:
-            launch_kwargs["proxy"] = {"server": "socks5://127.0.0.1:10808"}
-
-        context = await pw.chromium.launch_persistent_context(**launch_kwargs)
-
-        # Загружаем куки если есть
-        cookies = _load_avito_cookies_for_requests()
-        if cookies:
-            pw_cookies = [{"name": k, "value": v, "domain": ".avito.ru", "path": "/"} for k, v in cookies.items()]
-            try:
-                await context.add_cookies(pw_cookies)
-            except Exception:
-                pass
+        if pw_cookies:
+            await context.add_cookies(pw_cookies)
 
         try:
             for p in range(1, pages + 1):
@@ -1299,6 +1295,10 @@ async def scrape_avito_playwright_async(pages: int = 5) -> list[dict]:
         finally:
             try:
                 await context.close()
+            except Exception:
+                pass
+            try:
+                await browser.close()
             except Exception:
                 pass
 
