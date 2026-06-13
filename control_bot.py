@@ -350,156 +350,161 @@ def scrape_drom(region: str, pages: int = 15, price_min: int = 0, price_max: int
     return results
 
 
+# ── Auto.ru geo IDs для API ──────────────────────────────────────
+AUTORU_GEO_IDS = {
+    "ekaterinburg": [56],    # Свердловская обл.
+    "moscow":       [1],     # Москва
+    "spb":          [10174], # Санкт-Петербург
+    "novosibirsk":  [65],    # Новосибирская обл.
+    "kazan":        [11119], # Татарстан
+    "chelyabinsk":  [56088], # Челябинская обл.
+    "ufa":          [102],   # Башкортостан
+    "krasnodar":    [35],    # Краснодарский кр.
+    "omsk":         [66],    # Омская обл.
+    "tyumen":       [61],    # Тюменская обл.
+    "perm":         [51],    # Пермский кр.
+    "krasnoyarsk":  [54],    # Красноярский кр.
+    "voronezh":     [193],   # Воронежская обл.
+    "samara":       [11162], # Самарская обл.
+    "rostov":       [39],    # Ростовская обл.
+}
+
 # ── Парсер Auto.ru ──────────────────────────────────────────────
+
+def _autoru_parse_offers(data: dict, today) -> list[dict]:
+    """Парсит список объявлений из JSON Auto.ru."""
+    results = []
+    listing = (
+        data.get("listing", {}).get("data", {}).get("offers", [])
+        or data.get("search", {}).get("offers", {}).get("offers", [])
+        or data.get("offers", [])
+    )
+    for offer in listing:
+        try:
+            vehicle = offer.get("vehicle_info", {})
+            mark = vehicle.get("mark_info", {}).get("name", "")
+            model = vehicle.get("model_info", {}).get("name", "")
+            year = offer.get("documents", {}).get("year", "")
+            title = f"{mark} {model} {year}".strip()
+            price_val = offer.get("price_info", {}).get("price", "")
+            price_str = f"{int(price_val):,} ₽".replace(",", " ") if price_val else ""
+            item_url = offer.get("url", "") or f"https://auto.ru/cars/used/sale/{offer.get('id', '')}"
+            if offer.get("seller_type") == "COMMERCIAL":
+                continue
+            photos_list = offer.get("photos", [])
+            photo_url = ""
+            if photos_list:
+                sizes = photos_list[0].get("sizes", {})
+                photo_url = sizes.get("1200x900") or sizes.get("832x624") or sizes.get("456x342") or ""
+            days = 0
+            date_str = offer.get("additional_info", {}).get("creation_date", "")
+            if date_str:
+                try:
+                    dt = datetime.datetime.fromisoformat(date_str[:10]).date()
+                    days = max(0, (today - dt).days)
+                except Exception:
+                    pass
+            desc = offer.get("description", "")[:300]
+            tech = vehicle.get("tech_param", {})
+            if tech and not desc:
+                parts = [x for x in [tech.get("engine_type",""), f"{tech.get('power','')} л.с." if tech.get("power") else "", tech.get("transmission","")] if x]
+                desc = ", ".join(parts)
+            if title and item_url:
+                item = {
+                    "source": "autoru", "title": title, "price": price_str,
+                    "url": item_url, "date": str(today - datetime.timedelta(days=days)),
+                    "_photos": len(photos_list), "_days_on_site": days,
+                    "description": desc, "seller": "", "_photo_url": photo_url,
+                }
+                item["_hot_score"] = hot_score(item)
+                results.append(item)
+        except Exception:
+            pass
+    return results
+
 
 def scrape_autoru(region: str, pages: int = 5, price_min: int = 0, price_max: int = 99_000_000) -> list[dict]:
     slug = AUTORU_SLUGS.get(region, region)
+    geo_ids = AUTORU_GEO_IDS.get(region, [])
     try:
         import requests as _req
         from bs4 import BeautifulSoup as _BS
-        try:
-            import cloudscraper as _cs
-            session = _cs.create_scraper(browser={"browser": "chrome", "platform": "windows"})
-        except ImportError:
-            session = _req.Session()
-            session.headers.update({
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                "Accept-Language": "ru-RU,ru;q=0.9",
-            })
     except ImportError:
         return []
 
     results = []
     today = datetime.date.today()
+    session = _req.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept-Language": "ru-RU,ru;q=0.9",
+        "Accept": "application/json,text/html,*/*",
+        "Referer": "https://auto.ru/",
+        "x-client-app": "autoru-frontend-application",
+        "x-requested-with": "fetch",
+    })
 
+    # Сначала пробуем JSON API (быстро и надёжно)
+    api_url = "https://auto.ru/-/ajax/desktop/listing/"
     for p in range(1, pages + 1):
-        params = {
-            "seller_group": "PRIVATE",
+        body: dict = {
+            "category": "cars",
+            "section": "used",
+            "seller_type": ["PRIVATE"],
             "page": p,
+            "page_size": 37,
+            "sort": "fresh_relevance_1-desc",
         }
+        if geo_ids:
+            body["geo_id"] = geo_ids
         if price_min > 0:
-            params["price_from"] = price_min
+            body["price_from"] = price_min
         if price_max < 99_000_000:
-            params["price_to"] = price_max
-
-        url = f"https://auto.ru/{slug}/cars/used/"
+            body["price_to"] = price_max
         try:
-            r = session.get(url, params=params, timeout=20)
-            if r.status_code != 200:
-                break
-
-            # Auto.ru кладёт данные в JSON внутри тега <script>
-            m = re.search(
-                r'window\.__INITIAL_STATE__\s*=\s*(\{.*?\});\s*</script>',
-                r.text, re.DOTALL
-            )
-            if m:
+            r = session.post(api_url, json=body, timeout=20)
+            if r.status_code == 200:
                 try:
-                    data = json.loads(m.group(1))
-                    listing = (
-                        data.get("listing", {}).get("data", {}).get("offers", [])
-                        or data.get("search", {}).get("offers", {}).get("offers", [])
-                    )
-                    for offer in listing:
-                        try:
-                            vehicle = offer.get("vehicle_info", {})
-                            mark = vehicle.get("mark_info", {}).get("name", "")
-                            model = vehicle.get("model_info", {}).get("name", "")
-                            year = offer.get("documents", {}).get("year", "")
-                            title = f"{mark} {model} {year}".strip()
-                            price = offer.get("price_info", {}).get("price", "")
-                            price_str = f"{int(price):,} ₽".replace(",", " ") if price else ""
-                            item_url = offer.get("url", "") or f"https://auto.ru/cars/used/sale/{offer.get('id','')}"
-                            seller_type = offer.get("seller_type", "")
-                            if seller_type == "COMMERCIAL":
-                                continue
-                            photos = len(offer.get("photos", []))
-                            date_str = offer.get("additional_info", {}).get("creation_date", "")
-                            days = 0
-                            if date_str:
-                                try:
-                                    dt = datetime.datetime.fromisoformat(date_str[:10]).date()
-                                    days = max(0, (today - dt).days)
-                                except Exception:
-                                    pass
-                            desc = offer.get("description", "")[:300]
-                            tech = offer.get("vehicle_info", {}).get("tech_param", {})
-                            if tech and not desc:
-                                engine = tech.get("engine_type", "")
-                                hp = tech.get("power", "")
-                                gearbox = tech.get("transmission", "")
-                                parts = [p for p in [engine, f"{hp} л.с." if hp else "", gearbox] if p]
-                                desc = ", ".join(parts)
-                            photo_url = ""
-                            photos_list = offer.get("photos", [])
-                            if photos_list:
-                                p0 = photos_list[0]
-                                sizes = p0.get("sizes", {})
-                                photo_url = sizes.get("1200x900", sizes.get("832x624", sizes.get("456x342", "")))
-                            if title and item_url:
-                                item = {
-                                    "source": "autoru",
-                                    "title": title,
-                                    "price": price_str,
-                                    "url": item_url,
-                                    "date": str(today - datetime.timedelta(days=days)),
-                                    "_photos": photos,
-                                    "_days_on_site": days,
-                                    "description": desc,
-                                    "seller": "",
-                                    "_photo_url": photo_url,
-                                }
-                                item["_hot_score"] = hot_score(item)
-                                results.append(item)
-                        except Exception:
-                            pass
-                    if listing:
-                        time.sleep(random.uniform(1, 2))
+                    data = r.json()
+                    batch = _autoru_parse_offers(data, today)
+                    if batch:
+                        results.extend(batch)
+                        time.sleep(random.uniform(0.5, 1))
                         continue
                 except Exception:
                     pass
-
-            # Fallback: HTML парсинг
-            soup = _BS(r.text, "lxml")
-            cards = soup.select("div[class*='ListingItem']") or soup.select("article[class*='listing-item']")
-            if not cards:
-                break
-
-            for card in cards:
-                try:
-                    title_el = card.select_one("a[class*='title']") or card.select_one("h3")
-                    title = title_el.get_text(strip=True) if title_el else ""
-                    href = title_el.get("href", "") if title_el and title_el.name == "a" else ""
-                    if not href:
-                        link = card.select_one("a[href*='/cars/']")
-                        href = link.get("href", "") if link else ""
-                    item_url = href if href.startswith("http") else ("https://auto.ru" + href)
-
-                    price_el = card.select_one("[class*='price']")
-                    price = price_el.get_text(strip=True) if price_el else ""
-
-                    if title and item_url:
-                        item = {
-                            "source": "autoru",
-                            "title": title,
-                            "price": price,
-                            "url": item_url,
-                            "date": str(today),
-                            "_photos": 0,
-                            "_days_on_site": 0,
-                            "description": "",
-                            "seller": "",
-                        }
-                        item["_hot_score"] = hot_score(item)
-                        results.append(item)
-                except Exception:
-                    pass
-
-            time.sleep(random.uniform(1, 2))
+            # Fallback: ScraperAPI + HTML
+            if SCRAPER_API_KEY:
+                url = f"https://auto.ru/{slug}/cars/used/?seller_group=PRIVATE&page={p}"
+                if price_min > 0:
+                    url += f"&price_from={price_min}"
+                if price_max < 99_000_000:
+                    url += f"&price_to={price_max}"
+                r2 = _req.get("http://api.scraperapi.com", params={
+                    "api_key": SCRAPER_API_KEY, "url": url, "country_code": "ru",
+                }, timeout=30)
+                if r2.status_code == 200:
+                    # Ищем __INITIAL_STATE__ в HTML
+                    text = r2.text
+                    idx = text.find("window.__INITIAL_STATE__")
+                    if idx != -1:
+                        brace_start = text.find("{", idx)
+                        if brace_start != -1:
+                            # Найдём конец объекта по скрипт-тегу
+                            script_end = text.find("</script>", brace_start)
+                            json_str = text[brace_start:script_end].rstrip("; \n\r")
+                            try:
+                                data = json.loads(json_str)
+                                batch = _autoru_parse_offers(data, today)
+                                results.extend(batch)
+                            except Exception:
+                                pass
+            break
         except Exception as e:
             print(f"  [Auto.ru {region}] стр.{p}: {e}")
             break
 
+    print(f"  [Auto.ru] {len(results)} объявлений")
     return results
 
 
@@ -527,34 +532,28 @@ KOLESA_SLUGS = {
 def scrape_kolesa(region: str, pages: int = 5, price_min: int = 0, price_max: int = 99_000_000) -> list[dict]:
     slug = KOLESA_SLUGS.get(region, region)
     try:
+        import requests as _req
         from bs4 import BeautifulSoup as _BS
-        try:
-            import cloudscraper as _cs
-            session = _cs.create_scraper(browser={"browser": "chrome", "platform": "windows"})
-        except ImportError:
-            import requests as _req
-            session = _req.Session()
-            session.headers.update({
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Accept-Language": "ru-RU,ru;q=0.9",
-            })
     except ImportError:
         return []
 
     results = []
     today = datetime.date.today()
+    session = _req.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept-Language": "ru-RU,ru;q=0.9",
+        "Accept": "text/html,application/xhtml+xml,*/*",
+    })
 
     for p in range(1, pages + 1):
+        # Kolesa.ru: частники = seller=1, регион через city[]
         url = f"https://kolesa.ru/cars/"
-        params = {
-            "city": slug,
-            "seller": "private",
-            "page": p,
-        }
+        params: dict = {"city[]": slug, "seller": "1", "page": p}
         if price_min > 0:
-            params["price_from"] = price_min
+            params["price[from]"] = price_min
         if price_max < 99_000_000:
-            params["price_to"] = price_max
+            params["price[to]"] = price_max
 
         try:
             r = session.get(url, params=params, timeout=20)
@@ -562,41 +561,47 @@ def scrape_kolesa(region: str, pages: int = 5, price_min: int = 0, price_max: in
                 break
             soup = _BS(r.text, "lxml")
 
+            # Kolesa использует article.a-card или div.a-list__item
             cards = (
-                soup.select("div.a-list__item")
-                or soup.select("[class*='listing-item']")
-                or soup.select("article[data-id]")
+                soup.select("article.a-card")
+                or soup.select("div.a-list__item")
+                or soup.select("div[class*='listing-item']")
+                or soup.select("li[data-id]")
             )
             if not cards:
+                print(f"  [Kolesa {region}] стр.{p}: нет карточек (HTTP {r.status_code}, {len(r.text)} байт)")
                 break
 
             for card in cards:
                 try:
-                    link = card.select_one("a.a-el-link") or card.select_one("a[href*='/cars/']")
+                    link = (
+                        card.select_one("a.a-card__title")
+                        or card.select_one("a[class*='title']")
+                        or card.select_one("h5 a")
+                        or card.select_one("h2 a")
+                        or card.select_one("a[href*='/cars/']")
+                    )
                     title = link.get_text(strip=True) if link else ""
                     href = link.get("href", "") if link else ""
                     item_url = href if href.startswith("http") else ("https://kolesa.ru" + href)
 
-                    price_el = card.select_one(".a-price__number") or card.select_one("[class*='price']")
+                    price_el = (
+                        card.select_one(".a-card__price")
+                        or card.select_one("[class*='price']")
+                    )
                     price = price_el.get_text(strip=True) if price_el else ""
 
-                    date_el = card.select_one(".a-info__date") or card.select_one("[class*='date']")
+                    date_el = card.select_one("[class*='date']") or card.select_one("time")
                     date_text = date_el.get_text(strip=True) if date_el else ""
-                    date = parse_ru_date(date_text)
-                    days = max(0, (today - date).days) if date else 0
+                    date_obj = parse_ru_date(date_text)
+                    days = max(0, (today - date_obj).days) if date_obj else 0
 
                     desc_el = (
-                        card.select_one(".a-descr")
+                        card.select_one(".a-card__description")
                         or card.select_one("[class*='descr']")
                         or card.select_one("[class*='description']")
-                        or card.select_one("p")
                     )
                     desc = desc_el.get_text(strip=True)[:300] if desc_el else ""
-
-                    # Характеристики из тегов внутри карточки
-                    params_el = card.select_one("[class*='params']") or card.select_one("[class*='spec']")
-                    if params_el and not desc:
-                        desc = params_el.get_text(separator=" | ", strip=True)[:300]
 
                     img_el = card.select_one("img[data-src]") or card.select_one("img[src]")
                     photo_url = ""
@@ -605,18 +610,12 @@ def scrape_kolesa(region: str, pages: int = 5, price_min: int = 0, price_max: in
                         if src and src.startswith("http"):
                             photo_url = src
 
-                    if title and item_url and "/cars/" in item_url:
+                    if title and item_url and "kolesa.ru" in item_url:
                         item = {
-                            "source": "kolesa",
-                            "title": title,
-                            "price": price,
-                            "url": item_url,
-                            "date": str(date) if date else date_text,
-                            "_photos": 0,
-                            "_days_on_site": days,
-                            "description": desc,
-                            "seller": "",
-                            "_photo_url": photo_url,
+                            "source": "kolesa", "title": title, "price": price,
+                            "url": item_url, "date": str(date_obj) if date_obj else date_text,
+                            "_photos": 0, "_days_on_site": days,
+                            "description": desc, "seller": "", "_photo_url": photo_url,
                         }
                         item["_hot_score"] = hot_score(item)
                         results.append(item)
@@ -628,6 +627,7 @@ def scrape_kolesa(region: str, pages: int = 5, price_min: int = 0, price_max: in
             print(f"  [Kolesa {region}] стр.{p}: {e}")
             break
 
+    print(f"  [Kolesa] {len(results)} объявлений")
     return results
 
 
@@ -655,44 +655,53 @@ BIBIKA_REGIONS = {
 def scrape_bibika(region: str, pages: int = 3, price_min: int = 0, price_max: int = 99_000_000) -> list[dict]:
     slug = BIBIKA_REGIONS.get(region, region)
     try:
+        import requests as _req
         from bs4 import BeautifulSoup as _BS
-        try:
-            import cloudscraper as _cs
-            session = _cs.create_scraper(browser={"browser": "chrome", "platform": "windows"})
-        except ImportError:
-            import requests as _req
-            session = _req.Session()
-            session.headers.update({
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Accept-Language": "ru-RU,ru;q=0.9",
-            })
     except ImportError:
         return []
 
     results = []
     today = datetime.date.today()
+    session = _req.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept-Language": "ru-RU,ru;q=0.9",
+    })
 
     for p in range(1, pages + 1):
+        # bibika.ru: частные объявления
         url = f"https://bibika.ru/auto/{slug}/"
-        params = {"page": p, "seller": "1"}  # seller=1 — частники
+        params: dict = {"page": p, "private": "1"}
         if price_min > 0:
-            params["price_min"] = price_min
+            params["price_from"] = price_min
         if price_max < 99_000_000:
-            params["price_max"] = price_max
+            params["price_to"] = price_max
 
         try:
             r = session.get(url, params=params, timeout=20)
             if r.status_code != 200:
+                print(f"  [Bibika {region}] HTTP {r.status_code}")
                 break
             soup = _BS(r.text, "lxml")
 
-            cards = soup.select(".auto-item") or soup.select("[class*='auto-item']") or soup.select("div[itemtype*='Product']")
+            cards = (
+                soup.select("div.bull-item")
+                or soup.select(".auto-item")
+                or soup.select("article.car-item")
+                or soup.select("div[itemtype*='Product']")
+                or soup.select("[class*='auto-item']")
+            )
             if not cards:
+                print(f"  [Bibika {region}] стр.{p}: нет карточек")
                 break
 
             for card in cards:
                 try:
-                    link = card.select_one("a[href*='/auto/']") or card.select_one("h2 a") or card.select_one("h3 a")
+                    link = (
+                        card.select_one("a[href*='/auto/']")
+                        or card.select_one("h2 a")
+                        or card.select_one("h3 a")
+                    )
                     title = link.get_text(strip=True) if link else ""
                     href = link.get("href", "") if link else ""
                     item_url = href if href.startswith("http") else ("https://bibika.ru" + href)
@@ -713,18 +722,12 @@ def scrape_bibika(region: str, pages: int = 3, price_min: int = 0, price_max: in
                     )
                     desc = desc_el.get_text(strip=True)[:300] if desc_el else ""
 
-                    if title and item_url:
+                    if title and item_url and "bibika.ru" in item_url:
                         item = {
-                            "source": "bibika",
-                            "title": title,
-                            "price": price,
-                            "url": item_url,
-                            "date": str(date) if date else date_text,
-                            "_photos": 0,
-                            "_days_on_site": days,
-                            "description": desc,
-                            "seller": "",
-                            "_photo_url": "",
+                            "source": "bibika", "title": title, "price": price,
+                            "url": item_url, "date": str(date) if date else date_text,
+                            "_photos": 0, "_days_on_site": days,
+                            "description": desc, "seller": "", "_photo_url": "",
                         }
                         item["_hot_score"] = hot_score(item)
                         results.append(item)
@@ -736,6 +739,7 @@ def scrape_bibika(region: str, pages: int = 3, price_min: int = 0, price_max: in
             print(f"  [Bibika {region}] стр.{p}: {e}")
             break
 
+    print(f"  [Bibika] {len(results)} объявлений")
     return results
 
 
@@ -789,12 +793,134 @@ def _avito_get(session, target_url: str, params: dict):
     return session.get(full_url, timeout=25)
 
 
+def _parse_avito_items(soup, today, slug: str) -> list[dict]:
+    """Парсит объявления Авито из soup: сначала __NEXT_DATA__, потом HTML."""
+    results = []
+
+    # 1. __NEXT_DATA__ (Next.js)
+    nd = soup.find("script", {"id": "__NEXT_DATA__"})
+    if nd and nd.string:
+        try:
+            data = json.loads(nd.string)
+            # Путь к листингу может меняться, ищем items рекурсивно
+            def find_items(obj, depth=0):
+                if depth > 8 or not isinstance(obj, (dict, list)):
+                    return []
+                if isinstance(obj, list):
+                    for x in obj:
+                        r = find_items(x, depth + 1)
+                        if r:
+                            return r
+                    return []
+                if isinstance(obj, dict):
+                    if "items" in obj and isinstance(obj["items"], list) and len(obj["items"]) > 3:
+                        # проверим что это объявления (есть title или id)
+                        sample = obj["items"][0] if obj["items"] else {}
+                        if "title" in sample or "id" in sample:
+                            return obj["items"]
+                    for v in obj.values():
+                        r = find_items(v, depth + 1)
+                        if r:
+                            return r
+                return []
+            items_raw = find_items(data)
+            for it in items_raw:
+                try:
+                    title = it.get("title", "")
+                    url_path = it.get("urlPath") or it.get("url", "")
+                    item_url = ("https://www.avito.ru" + url_path) if url_path.startswith("/") else url_path
+                    price_info = it.get("priceDetailed") or it.get("price") or {}
+                    if isinstance(price_info, dict):
+                        price_val = price_info.get("value") or price_info.get("number") or ""
+                        price = f"{int(price_val):,} ₽".replace(",", " ") if price_val else ""
+                    else:
+                        price = str(price_info)
+                    images = it.get("images") or it.get("photos") or []
+                    photo_url = ""
+                    if images and isinstance(images, list):
+                        img = images[0]
+                        if isinstance(img, dict):
+                            photo_url = img.get("864x648") or img.get("640x480") or img.get("url") or list(img.values())[0] if img else ""
+                        elif isinstance(img, str):
+                            photo_url = img
+                    if title and item_url and "avito.ru" in item_url:
+                        item = {
+                            "source": "avito", "title": title, "price": price,
+                            "url": item_url, "date": str(today),
+                            "_photos": len(images), "_days_on_site": 0,
+                            "description": it.get("description", "")[:300],
+                            "seller": "", "_photo_url": photo_url,
+                        }
+                        item["_hot_score"] = hot_score(item)
+                        results.append(item)
+                except Exception:
+                    pass
+            if results:
+                return results
+        except Exception as e:
+            print(f"  [Авито __NEXT_DATA__] ошибка: {e}")
+
+    # 2. HTML карточки [data-marker='item']
+    cards = soup.select("[data-marker='item']")
+    for card in cards:
+        try:
+            title_el = (
+                card.select_one("[data-marker='item-title']")
+                or card.select_one("[itemprop='name']")
+                or card.select_one("h3")
+            )
+            title = title_el.get_text(strip=True) if title_el else ""
+
+            link_el = (
+                card.select_one("a[data-marker='item-title']")
+                or card.select_one(f"a[href*='/avtomobili/']")
+                or card.select_one("a[itemprop='url']")
+                or card.select_one(f"a[href*='/{slug}/']")
+            )
+            href = link_el.get("href", "") if link_el else ""
+            item_url = ("https://www.avito.ru" + href) if href.startswith("/") else href
+
+            price_el = (
+                card.select_one("[itemprop='price']")
+                or card.select_one("[data-marker='item-price']")
+                or card.select_one("[class*='price-text']")
+            )
+            price = ""
+            if price_el:
+                price = price_el.get("content") or price_el.get_text(strip=True)
+
+            img_el = card.select_one("img[src*='avito']") or card.select_one("img[data-src]") or card.select_one("img")
+            photo_url = ""
+            if img_el:
+                src = img_el.get("src") or img_el.get("data-src") or ""
+                if src.startswith("http"):
+                    photo_url = src
+
+            date_el = card.select_one("[data-marker='item-date']")
+            date_text = date_el.get_text(strip=True) if date_el else ""
+            date_obj = parse_ru_date(date_text)
+            days = max(0, (today - date_obj).days) if date_obj else 0
+
+            if title and item_url and "avito.ru" in item_url:
+                item = {
+                    "source": "avito", "title": title, "price": price,
+                    "url": item_url, "date": str(date_obj) if date_obj else date_text,
+                    "_photos": 0, "_days_on_site": days,
+                    "description": "", "seller": "", "_photo_url": photo_url,
+                }
+                item["_hot_score"] = hot_score(item)
+                results.append(item)
+        except Exception:
+            pass
+
+    return results
+
+
 def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int = 99_000_000) -> list[dict]:
-    # Используем городской слаг — с ним Авито отдаёт карточки в HTML
     slug = AVITO_SLUGS.get(region, region)
     try:
-        from bs4 import BeautifulSoup as _BS
         import requests as _req
+        from bs4 import BeautifulSoup as _BS
         try:
             import cloudscraper as _cs
             session = _cs.create_scraper(browser={"browser": "chrome", "platform": "windows", "mobile": False})
@@ -803,7 +929,6 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
         session.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "Accept-Language": "ru-RU,ru;q=0.9",
-            "Referer": "https://www.avito.ru/",
         })
     except ImportError:
         return []
@@ -812,7 +937,7 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
     today = datetime.date.today()
 
     for p in range(1, pages + 1):
-        params = {"p": p, "seller_type": "1"}
+        params: dict = {"p": p, "seller_type": "1"}
         if price_min > 0:
             params["pmin"] = price_min
         if price_max < 99_000_000:
@@ -826,84 +951,12 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
                 break
 
             soup = _BS(r.text, "lxml")
-
-            # Пробуем достать данные из JSON в <script> (Next.js / React)
-            json_items = []
-            for sc in soup.select("script"):
-                sc_text = sc.string or ""
-                if '"items"' in sc_text or '"catalog"' in sc_text:
-                    # ищем массив объявлений
-                    m = re.search(r'"items"\s*:\s*(\[[\s\S]{100,}?\})\s*[,\]]', sc_text)
-                    if m:
-                        try:
-                            json_items = json.loads(m.group(1) + "]") if not m.group(1).endswith("]") else json.loads(m.group(1))
-                        except Exception:
-                            pass
-                    if json_items:
-                        break
-
-            if json_items:
-                for it in json_items:
-                    try:
-                        title = it.get("title", "")
-                        item_url = "https://www.avito.ru" + it.get("url", "")
-                        price = str(it.get("priceDetailed", {}).get("value", "") or it.get("price", ""))
-                        if price:
-                            price += " ₽"
-                        if title and item_url and item_url != "https://www.avito.ru":
-                            item = {
-                                "source": "avito", "title": title, "price": price,
-                                "url": item_url, "date": str(today),
-                                "_photos": 0, "_days_on_site": 0,
-                                "description": "", "seller": "", "_photo_url": "",
-                            }
-                            item["_hot_score"] = hot_score(item)
-                            results.append(item)
-                    except Exception:
-                        pass
-            else:
-                # Fallback: HTML карточки
-                cards = soup.select("[data-marker='item']")
-                if not cards:
-                    break
-
-                for card in cards:
-                    try:
-                        title_el = card.select_one("[itemprop='name']") or card.select_one("h3") or card.select_one("[data-marker='item-title']")
-                        title = title_el.get_text(strip=True) if title_el else ""
-
-                        link_el = (
-                            card.select_one("a[data-marker='item-title']")
-                            or card.select_one(f"a[href*='/{slug}/']")
-                            or card.select_one("a[href*='/avtomobili/']")
-                            or card.select_one("a[href^='/'][href*='_']")
-                        )
-                        href = link_el.get("href", "") if link_el else ""
-                        item_url = ("https://www.avito.ru" + href) if href.startswith("/") else href
-
-                        price_el = card.select_one("[itemprop='price']") or card.select_one("[data-marker='item-price']") or card.select_one("[class*='price']")
-                        price = ""
-                        if price_el:
-                            price = price_el.get("content") or price_el.get_text(strip=True)
-
-                        date_el = card.select_one("[data-marker='item-date']")
-                        date_text = date_el.get_text(strip=True) if date_el else ""
-                        date = parse_ru_date(date_text)
-                        days = max(0, (today - date).days) if date else 0
-
-                        if title and item_url and "avito.ru" in item_url:
-                            item = {
-                                "source": "avito", "title": title, "price": price,
-                                "url": item_url, "date": str(date) if date else date_text,
-                                "_photos": 0, "_days_on_site": days,
-                                "description": "", "seller": "", "_photo_url": "",
-                            }
-                            item["_hot_score"] = hot_score(item)
-                            results.append(item)
-                    except Exception:
-                        pass
-
-            time.sleep(random.uniform(2, 4))
+            batch = _parse_avito_items(soup, today, slug)
+            if not batch:
+                print(f"  [Авито {region}] стр.{p}: нет карточек (HTTP {r.status_code})")
+                break
+            results.extend(batch)
+            time.sleep(random.uniform(2, 3))
         except Exception as e:
             print(f"  [Авито {region}] стр.{p}: {e}")
             break
