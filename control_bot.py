@@ -1016,7 +1016,7 @@ def sources_keyboard(enabled: list[str]) -> InlineKeyboardMarkup:
         )])
     rows.append([
         InlineKeyboardButton(text="🌐 Все площадки", callback_data="src_all"),
-        InlineKeyboardButton(text="🔍 Искать", callback_data="do_search"),
+        InlineKeyboardButton(text="🔍 Искать", callback_data="start_search"),
     ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -1061,6 +1061,19 @@ async def cb_src_all(cb: CallbackQuery):
 
 @dp.callback_query(F.data == "do_search")
 async def cb_do_search(cb: CallbackQuery):
+    uid = cb.from_user.id
+    s = load_settings(uid)
+    if not s.get("region"):
+        await cb.answer()
+        await cb.message.answer("Сначала настрой поиск: /start")
+        return
+    await cb.answer()
+    enabled = s.get("sources", ALL_SOURCES)
+    await cb.message.answer("Выбери площадки для поиска:", reply_markup=sources_keyboard(enabled))
+
+
+@dp.callback_query(F.data == "start_search")
+async def cb_start_search(cb: CallbackQuery):
     await cb.answer()
     await do_search_for_user(cb.from_user.id, cb.message)
 
