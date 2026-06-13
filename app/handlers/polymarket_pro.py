@@ -16,31 +16,122 @@ POLY_WC      = "https://polymarket.com/ru/sports/world-cup/games"
 
 _BASE = "https://polymarket.com"
 
-# Real WC 2026 matches from Polymarket with direct URLs
+# Real WC 2026 matches — (home, away, pick, date, analysis, url)
 _WC_MATCHES = [
-    ("🇲🇽 Мексика",      "🇿🇦 ЮАР",          "Мексика",    "Дома, FIFA топ-15",          f"{_BASE}/ru/sports/world-cup/fifwc-mex-rsa-2026-06-11"),
-    ("🇰🇷 Корея",        "🇨🇿 Чехия",         "Корея",      "Сон Хын Мин в форме",        f"{_BASE}/ru/sports/world-cup/fifwc-kr-cze-2026-06-11"),
-    ("🇺🇸 США",          "🇵🇾 Парагвай",      "США",        "Хозяева, Пулисик горячий",   f"{_BASE}/ru/sports/world-cup/fifwc-usa-par-2026-06-12"),
-    ("🇧🇷 Бразилия",     "🇲🇦 Марокко",       "Бразилия",   "Фаворит, топ-5 FIFA",        f"{_BASE}/ru/sports/world-cup/fifwc-bra-mar-2026-06-13"),
-    ("🇩🇪 Германия",     "🇨🇼 Кюрасао",       "Германия",   "Разгром ожидается",          f"{_BASE}/ru/sports/world-cup/fifwc-ger-kor-2026-06-14"),
-    ("🇳🇱 Нидерланды",   "🇯🇵 Япония",        "Ничья/Япония","Япония бьёт топов",         f"{_BASE}/ru/sports/world-cup/fifwc-nld-jpn-2026-06-14"),
-    ("🇪🇸 Испания",      "🇨🇻 Кабо-Верде",    "Испания",    "Лёгкая победа, топ-1 FIFA",  f"{_BASE}/ru/sports/world-cup/fifwc-esp-cvi-2026-06-15"),
-    ("🇧🇪 Бельгия",      "🇪🇬 Египет",        "Бельгия",    "Де Брёйне, сильный состав",  f"{_BASE}/ru/sports/world-cup/fifwc-bel-egy-2026-06-15"),
-    ("🇸🇦 Саудовская Аравия", "🇺🇾 Уругвай",  "Уругвай",    "Нуньес, опыт на ЧМ",         f"{_BASE}/ru/sports/world-cup/fifwc-ksa-ury-2026-06-15"),
-    ("🇶🇦 Катар",        "🇨🇭 Швейцария",     "Швейцария",  "Класс выше, Эмболо",         f"{_BASE}/ru/sports/world-cup/fifwc-qat-che-2026-06-13"),
+    (
+        "🇲🇽 Мексика", "🇿🇦 ЮАР", "Мексика", "11 июня",
+        "Мексика играет на своём поле в США/Канаде — фактически домашняя атмосфера. "
+        "FIFA рейтинг топ-15, атака во главе с Хименесом и Лосано стабильна. "
+        "ЮАР — дебютант на ЧМ после 2010, разница в классе очевидна.\n"
+        "📊 Прогноз: <b>Победа Мексики</b> с вероятностью ~75%\n"
+        "💰 Ставка: YES на победу Мексики",
+        f"{_BASE}/ru/sports/world-cup/fifwc-mex-rsa-2026-06-11"
+    ),
+    (
+        "🇰🇷 Корея", "🇨🇿 Чехия", "Корея", "11 июня",
+        "Сон Хын Мин в отличной форме в Тоттенхэме. Корея мотивирована после ЧМ-2022. "
+        "Чехия потеряла Шика — главного форварда, атака ослаблена. "
+        "Азиатские команды сейчас показывают высокий уровень.\n"
+        "📊 Прогноз: <b>Победа Кореи или ничья</b> ~65%\n"
+        "💰 Ставка: YES на Корею / ничью",
+        f"{_BASE}/ru/sports/world-cup/fifwc-kr-cze-2026-06-11"
+    ),
+    (
+        "🇺🇸 США", "🇵🇾 Парагвай", "США", "12 июня",
+        "США — хозяева турнира, огромная поддержка трибун. "
+        "Пулисик (Милан), Рейна, Мусса — звёздный состав по меркам КОНКАКАФ. "
+        "Парагвай — середняк КОНМЕБОЛ, не попадал на ЧМ с 2010 года.\n"
+        "📊 Прогноз: <b>Победа США</b> с вероятностью ~80%\n"
+        "💰 Ставка: YES на победу США",
+        f"{_BASE}/ru/sports/world-cup/fifwc-usa-par-2026-06-12"
+    ),
+    (
+        "🇶🇦 Катар", "🇨🇭 Швейцария", "Швейцария", "13 июня",
+        "Катар — хозяин ЧМ-2022, но на чужом турнире уровень резко падает. "
+        "Швейцария — топ-10 FIFA, Шакири, Эмболо, Акандже — опытный состав. "
+        "Швейцарцы стабильно выходят из групп на последних 4 чемпионатах.\n"
+        "📊 Прогноз: <b>Победа Швейцарии</b> ~82%\n"
+        "💰 Ставка: YES на победу Швейцарии",
+        f"{_BASE}/ru/sports/world-cup/fifwc-qat-che-2026-06-13"
+    ),
+    (
+        "🇧🇷 Бразилия", "🇲🇦 Марокко", "Бразилия", "13 июня",
+        "Бразилия — топ-5 FIFA, Винисиус, Родриго, Эндрик в атаке. "
+        "Марокко — сенсация 2022 (полуфинал), но потеряли Зиеша и Буфала. "
+        "Ключевой матч группы — оба захотят победы, но класс Бразилии выше.\n"
+        "📊 Прогноз: <b>Победа Бразилии</b> ~68%\n"
+        "💰 Ставка: YES на победу Бразилии",
+        f"{_BASE}/ru/sports/world-cup/fifwc-bra-mar-2026-06-13"
+    ),
+    (
+        "🇩🇪 Германия", "🇨🇼 Кюрасао", "Германия", "14 июня",
+        "Германия — топ-5 FIFA, Мусиала, Кай Хавертц, Гюндоган в составе. "
+        "Кюрасао — дебютант ЧМ, сборная из Карибского бассейна. "
+        "Разрыв в классе колоссальный — немцы настроены показать зрелищный футбол.\n"
+        "📊 Прогноз: <b>Разгром Германии</b> ~95%\n"
+        "💰 Ставка: YES на победу Германии (+ тотал больше 3.5)",
+        f"{_BASE}/ru/sports/world-cup/fifwc-ger-kor-2026-06-14"
+    ),
+    (
+        "🇳🇱 Нидерланды", "🇯🇵 Япония", "Ничья/Япония", "14 июня",
+        "Япония — убийца топов: обыграли Германию и Испанию в 2022. "
+        "Нидерланды сильны (Ван Дейк, ди Йонг), но Япония быстрая и дисциплинированная. "
+        "Японские тренеры образцово готовятся к сильным соперникам.\n"
+        "📊 Прогноз: <b>Ничья или победа Японии</b> ~55%\n"
+        "💰 Ставка: NO на победу Нидерландов",
+        f"{_BASE}/ru/sports/world-cup/fifwc-nld-jpn-2026-06-14"
+    ),
+    (
+        "🇪🇸 Испания", "🇨🇻 Кабо-Верде", "Испания", "15 июня",
+        "Испания — действующий чемпион Европы, топ-1 FIFA. "
+        "Ямаль, Педри, Мората — лучшее поколение за 10 лет. "
+        "Кабо-Верде — дебютант, 160-е место в рейтинге FIFA.\n"
+        "📊 Прогноз: <b>Разгром Испании</b> ~97%\n"
+        "💰 Ставка: YES на победу Испании (+ тотал больше 4.5)",
+        f"{_BASE}/ru/sports/world-cup/fifwc-esp-cvi-2026-06-15"
+    ),
+    (
+        "🇧🇪 Бельгия", "🇪🇬 Египет", "Бельгия", "15 июня",
+        "Бельгия — топ-10 FIFA, Де Брёйне, Лукаку, Тибо Куртуа. "
+        "Последний шанс «золотого поколения» бельгийцев — мотивация максимальная. "
+        "Египет зависит от Салаха, но один игрок не вытащит матч.\n"
+        "📊 Прогноз: <b>Победа Бельгии</b> ~78%\n"
+        "💰 Ставка: YES на победу Бельгии",
+        f"{_BASE}/ru/sports/world-cup/fifwc-bel-egy-2026-06-15"
+    ),
+    (
+        "🇸🇦 Саудовская Аравия", "🇺🇾 Уругвай", "Уругвай", "15 июня",
+        "Уругвай — один из сильнейших в КОНМЕБОЛ: Нуньес, Вальверде, Бентанкур. "
+        "Саудовская Аравия обыграла Аргентину в 2022, но это был разовый подвиг. "
+        "На классе и стабильности Уругвай должен брать своё.\n"
+        "📊 Прогноз: <b>Победа Уругвая</b> ~72%\n"
+        "💰 Ставка: YES на победу Уругвая",
+        f"{_BASE}/ru/sports/world-cup/fifwc-ksa-ury-2026-06-15"
+    ),
 ]
 
 
-def _wc_text() -> str:
+def _wc_list_text() -> str:
     lines = []
-    for home, away, pick, reason, url in _WC_MATCHES:
-        lines.append(f'<a href="{url}">{home} vs {away}</a> → <b>{pick}</b> <i>({reason})</i>')
+    for i, (home, away, pick, date, analysis, url) in enumerate(_WC_MATCHES):
+        lines.append(f"{i+1}. {home} vs {away} <i>({date})</i> → <b>{pick}</b>")
     return (
-        "⚽ <b>ЧМ 2026 — ставки Polymarket</b>\n"
+        "⚽ <b>ЧМ 2026 — анализ матчей</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        + "\n".join(lines) +
-        "\n━━━━━━━━━━━━━━━━━━━━\n"
-        "<i>Нажми на матч → сразу на Polymarket</i>"
+        "Выбери матч для подробного разбора 👇\n\n"
+        + "\n".join(lines)
+    )
+
+
+def _wc_match_text(i: int) -> str:
+    home, away, pick, date, analysis, url = _WC_MATCHES[i]
+    return (
+        f"⚽ <b>{home} vs {away}</b>\n"
+        f"📅 {date} | Прогноз: <b>{pick}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"{analysis}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"<i>Матч {i+1} из {len(_WC_MATCHES)}</i>"
     )
 
 
@@ -134,9 +225,27 @@ def _markets_kb(coin: str) -> InlineKeyboardMarkup:
     ])
 
 
-def _wc_kb() -> InlineKeyboardMarkup:
-    rows = [[Btn(text=f"{home} vs {away}", url=url)] for home, away, pick, reason, url in _WC_MATCHES]
+def _wc_list_kb() -> InlineKeyboardMarkup:
+    rows = []
+    for i, (home, away, pick, date, analysis, url) in enumerate(_WC_MATCHES):
+        rows.append([Btn(text=f"{home} vs {away} ({date})", callback_data=f"pg_wc_match_{i}")])
     rows.append([Btn(text="« Назад", callback_data="poly_pro")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _wc_match_kb(i: int) -> InlineKeyboardMarkup:
+    url = _WC_MATCHES[i][5]
+    nav = []
+    if i > 0:
+        nav.append(Btn(text="← Пред", callback_data=f"pg_wc_match_{i-1}"))
+    if i < len(_WC_MATCHES) - 1:
+        nav.append(Btn(text="След →", callback_data=f"pg_wc_match_{i+1}"))
+    rows = []
+    if nav:
+        rows.append(nav)
+    rows.append([Btn(text="🎯 Ставить на Polymarket", url=url)])
+    rows.append([Btn(text="← Все матчи", callback_data="pg_wc2026")])
+    rows.append([Btn(text="« Меню", callback_data="main_menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -169,8 +278,24 @@ async def cb_poly_pro(call: CallbackQuery):
 async def cb_wc2026(call: CallbackQuery):
     await call.answer()
     await call.message.edit_text(
-        _wc_text(),
-        reply_markup=_wc_kb(),
+        _wc_list_text(),
+        reply_markup=_wc_list_kb(),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+
+
+@router.callback_query(F.data.startswith("pg_wc_match_"))
+async def cb_wc_match(call: CallbackQuery):
+    try:
+        i = int(call.data.split("_")[-1])
+    except (ValueError, IndexError):
+        i = 0
+    i = max(0, min(i, len(_WC_MATCHES) - 1))
+    await call.answer()
+    await call.message.edit_text(
+        _wc_match_text(i),
+        reply_markup=_wc_match_kb(i),
         parse_mode="HTML",
         disable_web_page_preview=True,
     )
