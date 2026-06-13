@@ -943,8 +943,6 @@ def _scrape_avito_http_with_cookies(pages: int = 5) -> list[dict]:
         except Exception:
             pass
 
-    proxies = {"https": "socks5h://127.0.0.1:10808", "http": "socks5h://127.0.0.1:10808"} if (_xray_proc and _xray_proc.poll() is None) else {}
-
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Accept-Language": "ru-RU,ru;q=0.9",
@@ -971,6 +969,11 @@ def _scrape_avito_http_with_cookies(pages: int = 5) -> list[dict]:
                 except ValueError: pass
         return None
 
+    # Прокси варианты: сначала без прокси, потом с прокси
+    proxy_options = [{}]
+    if _xray_proc and _xray_proc.poll() is None:
+        proxy_options.append({"https": "socks5h://127.0.0.1:10808", "http": "socks5h://127.0.0.1:10808"})
+
     results = []
     session = _req.Session()
     session.headers.update(headers)
@@ -979,10 +982,17 @@ def _scrape_avito_http_with_cookies(pages: int = 5) -> list[dict]:
     for p in range(1, pages + 1):
         url = f"https://www.avito.ru/ekaterinburg/avtomobili?p={p}&s=104"
         try:
-            r = session.get(url, proxies=proxies, timeout=20)
-            html = r.text
-            if "captcha" in html.lower() or "Доступ ограничен" in html:
-                print(f"  [!] Авито HTTP стр.{p}: блокировка")
+            html = None
+            for proxies in proxy_options:
+                try:
+                    r = session.get(url, proxies=proxies, timeout=20)
+                    if "captcha" not in r.text.lower() and "Доступ ограничен" not in r.text:
+                        html = r.text
+                        break
+                except Exception:
+                    continue
+            if not html:
+                print(f"  [!] Авито HTTP стр.{p}: блокировка на всех IP")
                 break
             soup = _BS(html, "lxml")
             cards = soup.select("[data-marker='item']")
