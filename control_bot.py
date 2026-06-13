@@ -978,16 +978,20 @@ def _scrape_avito_scraperapi(pages: int = 5) -> list[dict]:
 
     for p in range(1, pages + 1):
         target = f"https://www.avito.ru/ekaterinburg/avtomobili?p={p}&s=104"
-        # ScraperAPI проксирует запрос через резидентный IP
-        api_url = f"http://api.scraperapi.com?api_key={SCRAPERAPI_KEY}&url={target}&country_code=ru&render=false"
         try:
-            r = session.get(api_url, timeout=60)
+            import urllib.parse as _up
+            r = session.get(
+                "http://api.scraperapi.com/",
+                params={"api_key": SCRAPERAPI_KEY, "url": target},
+                timeout=60,
+            )
+            print(f"  [ScraperAPI] стр.{p}: status={r.status_code} len={len(r.text)}")
             html = r.text
-            if "captcha" in r.headers.get("x-scraperapi-response", "").lower():
-                print(f"  [ScraperAPI] стр.{p}: капча")
+            if r.status_code != 200:
+                print(f"  [ScraperAPI] ошибка: {html[:200]}")
                 break
             if "Доступ ограничен" in html or "Подтвердите" in html:
-                print(f"  [ScraperAPI] стр.{p}: блок")
+                print(f"  [ScraperAPI] стр.{p}: Авито блок")
                 break
 
             soup = _BS(html, "lxml")
