@@ -46,23 +46,61 @@ REGIONS = {
     "rostov":       "Ростов-на-Дону",
 }
 
-# Слаги для Auto.ru (отличаются от Дрома)
+# Слаги для Auto.ru — используем область целиком, не только город
 AUTORU_SLUGS = {
-    "ekaterinburg": "ekaterinburg",
+    "ekaterinburg": "sverdlovskaya_oblast",
     "moscow":       "moskva",
     "spb":          "sankt-peterburg",
-    "novosibirsk":  "novosibirsk",
-    "kazan":        "kazan",
-    "chelyabinsk":  "chelyabinsk",
-    "ufa":          "ufa",
-    "krasnodar":    "krasnodar",
-    "omsk":         "omsk",
-    "tyumen":       "tyumen",
-    "perm":         "perm",
-    "krasnoyarsk":  "krasnoyarsk",
-    "voronezh":     "voronezh",
-    "samara":       "samara",
-    "rostov":       "rostov-na-donu",
+    "novosibirsk":  "novosibirskaya_oblast",
+    "kazan":        "tatarstan",
+    "chelyabinsk":  "chelyabinskaya_oblast",
+    "ufa":          "bashkortostan",
+    "krasnodar":    "krasnodarskiy_kray",
+    "omsk":         "omskaya_oblast",
+    "tyumen":       "tyumenskaya_oblast",
+    "perm":         "permskiy_kray",
+    "krasnoyarsk":  "krasnoyarskiy_kray",
+    "voronezh":     "voronezhskaya_oblast",
+    "samara":       "samarskaya_oblast",
+    "rostov":       "rostovskaya_oblast",
+}
+
+# Слаги для Авито — область целиком
+AVITO_REGION_SLUGS = {
+    "ekaterinburg": "sverdlovskaya_oblast",
+    "moscow":       "moskva",
+    "spb":          "sankt-peterburg",
+    "novosibirsk":  "novosibirskaya_oblast",
+    "kazan":        "tatarstan",
+    "chelyabinsk":  "chelyabinskaya_oblast",
+    "ufa":          "bashkortostan",
+    "krasnodar":    "krasnodarskiy_kray",
+    "omsk":         "omskaya_oblast",
+    "tyumen":       "tyumenskaya_oblast",
+    "perm":         "permskiy_kray",
+    "krasnoyarsk":  "krasnoyarskiy_kray",
+    "voronezh":     "voronezhskaya_oblast",
+    "samara":       "samarskaya_oblast",
+    "rostov":       "rostovskaya_oblast",
+}
+
+# Слаги для Дрома — область (geo-параметр)
+DROM_GEO = {
+    "ekaterinburg": 12,    # Свердловская область
+    "moscow":       1,     # Москва и МО
+    "spb":          2,     # СПб и ЛО
+    "novosibirsk":  15,    # Новосибирская обл.
+    "kazan":        23,    # Татарстан
+    "chelyabinsk":  13,    # Челябинская обл.
+    "ufa":          3,     # Башкортостан
+    "krasnodar":    18,    # Краснодарский кр.
+    "omsk":         16,    # Омская обл.
+    "tyumen":       27,    # Тюменская обл.
+    "perm":         8,     # Пермский кр.
+    "krasnoyarsk":  24,    # Красноярский кр.
+    "voronezh":     36,    # Воронежская обл.
+    "samara":       26,    # Самарская обл.
+    "rostov":       20,    # Ростовская обл.
 }
 
 # ── Дилерские признаки ──────────────────────────────────────────
@@ -227,11 +265,15 @@ def scrape_drom(region: str, pages: int = 15, price_min: int = 0, price_max: int
     results = []
     today = datetime.date.today()
 
+    # Используем поиск по всей области через geo-параметр
+    geo_id = DROM_GEO.get(region)
+    base = "https://auto.drom.ru" if geo_id else f"https://{region}.drom.ru"
+
     for p in range(1, pages + 1):
-        base = f"https://{region}.drom.ru"
-        url = f"{base}/auto/all/" if p == 1 else f"{base}/auto/all/page{p}/"
-        # Добавляем фильтр цены в URL
+        url = f"{base}/all/" if p == 1 else f"{base}/all/page{p}/"
         params = {}
+        if geo_id:
+            params["geo"] = geo_id
         if price_min > 0:
             params["minprice"] = price_min
         if price_max < 99_000_000:
@@ -721,7 +763,7 @@ AVITO_SLUGS = {
 
 
 def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int = 99_000_000) -> list[dict]:
-    slug = AVITO_SLUGS.get(region, region)
+    slug = AVITO_REGION_SLUGS.get(region, AVITO_SLUGS.get(region, region))
     try:
         from bs4 import BeautifulSoup as _BS
         try:
@@ -1066,10 +1108,11 @@ async def enrich_items(items: list[dict]) -> list[dict]:
 
 # Фразы которые означают что объявление снято
 _REMOVED_MARKERS = [
-    "снято с продажи", "объявление не найдено", "объявление недоступно",
-    "объявление удалено", "продажа завершена", "не существует",
-    "страница не найдена", "404", "объявление снято",
-    "listing not found", "offer not found",
+    "снят с продажи", "снято с продажи", "объявление снято",
+    "объявление не найдено", "объявление недоступно", "объявление удалено",
+    "продажа завершена", "не существует", "страница не найдена",
+    "listing not found", "offer not found", "объявление архивировано",
+    "объявление заблокировано",
 ]
 
 _REMOVED_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
