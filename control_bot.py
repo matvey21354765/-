@@ -1024,58 +1024,41 @@ def _fetch_listing_details(url: str, source: str) -> dict:
         photo_url = ""
         description = ""
 
+        # og:image — самый надёжный источник фото на всех сайтах
+        og = soup.select_one("meta[property='og:image']")
+        if og:
+            photo_url = og.get("content", "").strip()
+
+        # Если og:image нет — ищем первую img в галерее
+        if not photo_url:
+            for img in soup.select("img[src]"):
+                src = img.get("src", "")
+                if src.startswith("http") and any(x in src for x in ["photo", "image", "img", "jpeg", "jpg", "png"]):
+                    photo_url = src
+                    break
+
+        # Описание продавца — специфично для каждого источника
         if source == "drom":
-            # Первое большое фото в галерее
-            img = (
-                soup.select_one("div[class*='gallery'] img")
-                or soup.select_one("div[class*='photo'] img")
-                or soup.select_one("img[class*='gallery']")
-                or soup.select_one("meta[property='og:image']")
-            )
-            if img:
-                photo_url = img.get("content") or img.get("src") or img.get("data-src", "")
-            # Описание продавца
             desc_el = (
-                soup.select_one("div[class*='comment']")
+                soup.select_one("[data-ftid='bull_description']")
                 or soup.select_one("[data-ftid='item_description']")
+                or soup.select_one("div[class*='comment']")
                 or soup.select_one("div[class*='description']")
             )
-            if desc_el:
-                description = desc_el.get_text(strip=True)
-
-        elif source == "autoru":
-            # og:image обычно первое фото
-            og = soup.select_one("meta[property='og:image']")
-            if og:
-                photo_url = og.get("content", "")
-            desc_el = soup.select_one("div[class*='description']") or soup.select_one("p[class*='description']")
-            if desc_el:
-                description = desc_el.get_text(strip=True)
-
         elif source == "avito":
-            og = soup.select_one("meta[property='og:image']")
-            if og:
-                photo_url = og.get("content", "")
             desc_el = (
                 soup.select_one("div[itemprop='description']")
                 or soup.select_one("[data-marker='item-view/item-description']")
-                or soup.select_one("div[class*='description']")
+                or soup.select_one("div[class*='description-text']")
             )
-            if desc_el:
-                description = desc_el.get_text(strip=True)
-
-        elif source == "kolesa":
-            og = soup.select_one("meta[property='og:image']")
-            if og:
-                photo_url = og.get("content", "")
-            desc_el = soup.select_one("div[class*='description']") or soup.select_one("p[class*='description']")
-            if desc_el:
-                description = desc_el.get_text(strip=True)
-
         else:
-            og = soup.select_one("meta[property='og:image']")
-            if og:
-                photo_url = og.get("content", "")
+            desc_el = (
+                soup.select_one("div[class*='description']")
+                or soup.select_one("p[class*='description']")
+                or soup.select_one("[itemprop='description']")
+            )
+        if desc_el:
+            description = desc_el.get_text(strip=True)
 
         # Убеждаемся что URL абсолютный
         if photo_url and not photo_url.startswith("http"):
@@ -1104,28 +1087,54 @@ async def enrich_items(items: list[dict]) -> list[dict]:
 
 
 # Фразы которые означают что объявление снято
-_REMOVED_MARKERS = [
+_REMOVED_MARKERS_TEXT = [
     "снят с продажи", "снято с продажи", "объявление снято",
     "объявление не найдено", "объявление недоступно", "объявление удалено",
     "продажа завершена", "не существует", "страница не найдена",
     "listing not found", "offer not found", "объявление архивировано",
-    "объявление заблокировано",
+    "объявление заблокировано", "sold out", "is sold",
+    # Дром — специфичные маркеры в статичном HTML
+    '"isSold":true', '"sold":true', '"status":"sold"', '"status":"inactive"',
+    'data-bulletin-status="sold"', 'bulletin-sold', '"isArchived":true',
 ]
 
-_REMOVED_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+_REMOVED_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept-Language": "ru-RU,ru;q=0.9",
+}
 
 
 def _check_url_active(url: str) -> bool:
     """Возвращает True если объявление ещё активно."""
     try:
         import requests as _req
-        r = _req.get(url, headers=_REMOVED_HEADERS, timeout=10, allow_redirects=True)
-        if r.status_code == 404:
+        from bs4 import BeautifulSoup as _BS
+        r = _req.get(url, headers=_REMOVED_HEADERS, timeout=12, allow_redirects=True)
+        if r.status_code in (404, 410):
             return False
-        text_lower = r.text.lower()
-        return not any(m in text_lower for m in _REMOVED_MARKERS)
+        text = r.text
+        text_lower = text.lower()
+
+        # Проверяем текстовые маркеры
+        if any(m in text_lower for m in _REMOVED_MARKERS_TEXT):
+            return False
+
+        # Для Дрома: кнопка "Позвонить" заблокирована у снятых объявлений
+        if "drom.ru" in url:
+            soup = _BS(text, "lxml")
+            # Если нет кнопки звонка или она disabled — снято
+            call_btn = soup.select_one("button[data-ftid='bull_header_call-button']")
+            if call_btn and call_btn.get("disabled"):
+                return False
+            # Проверяем JSON в теге script
+            for sc in soup.select("script"):
+                sc_text = sc.string or ""
+                if any(m in sc_text for m in ['"isSold":true', '"sold":true', '"isArchived":true']):
+                    return False
+
+        return True
     except Exception:
-        return True  # При ошибке сети считаем активным
+        return True
 
 
 async def filter_active(items: list[dict], max_check: int = 30) -> list[dict]:
