@@ -1021,6 +1021,14 @@ def sources_keyboard(enabled: list[str]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def _get_enabled_sources(s: dict) -> list[str]:
+    """Возвращает список включённых площадок, по умолчанию — все."""
+    enabled = s.get("sources", [])
+    if not enabled:
+        return list(ALL_SOURCES)
+    return enabled
+
+
 @dp.message(Command("search"))
 async def cmd_search(msg: Message):
     uid = msg.from_user.id
@@ -1028,7 +1036,7 @@ async def cmd_search(msg: Message):
     if not s.get("region"):
         await msg.answer("Сначала настрой поиск: /start")
         return
-    enabled = s.get("sources", ALL_SOURCES)
+    enabled = _get_enabled_sources(s)
     await msg.answer("Выбери площадки для поиска:", reply_markup=sources_keyboard(enabled))
 
 
@@ -1037,7 +1045,7 @@ async def cb_toggle_src(cb: CallbackQuery):
     src = cb.data.split("|")[1]
     uid = cb.from_user.id
     s = load_settings(uid)
-    enabled = list(s.get("sources", ALL_SOURCES))
+    enabled = list(_get_enabled_sources(s))
     if src in enabled:
         if len(enabled) > 1:  # оставляем хотя бы одну
             enabled.remove(src)
@@ -1068,7 +1076,7 @@ async def cb_do_search(cb: CallbackQuery):
         await cb.message.answer("Сначала настрой поиск: /start")
         return
     await cb.answer()
-    enabled = s.get("sources", ALL_SOURCES)
+    enabled = _get_enabled_sources(s)
     await cb.message.answer("Выбери площадки для поиска:", reply_markup=sources_keyboard(enabled))
 
 
@@ -1289,7 +1297,7 @@ async def do_search_for_user(uid: int, reply_to):
     pmin = s.get("price_min", 0)
     pmax = s.get("price_max", 99_000_000)
     region_name = REGIONS.get(region, region)
-    enabled_sources = s.get("sources", ALL_SOURCES)
+    enabled_sources = _get_enabled_sources(s)
 
     src_labels = " ".join(SOURCE_TAGS.get(src, src) for src in enabled_sources)
     await reply_to.answer(f"🔍 Ищу в {region_name} ({pmin:,}–{pmax:,} ₽)\n{src_labels}")
