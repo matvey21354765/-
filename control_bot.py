@@ -807,8 +807,8 @@ async def cmd_testapi(msg: Message):
         target = "https://www.avito.ru/ekaterinburg/avtomobili?p=1&s=104"
         r = _req.get(
             "http://api.scraperapi.com/",
-            params={"api_key": SCRAPERAPI_KEY, "url": target},
-            timeout=60,
+            params={"api_key": SCRAPERAPI_KEY, "url": target, "render": "true"},
+            timeout=120,
         )
         html = r.text
         soup = _BS(html, "lxml")
@@ -1021,8 +1021,8 @@ def _scrape_avito_scraperapi(pages: int = 5) -> list[dict]:
             import urllib.parse as _up
             r = session.get(
                 "http://api.scraperapi.com/",
-                params={"api_key": SCRAPERAPI_KEY, "url": target},
-                timeout=60,
+                params={"api_key": SCRAPERAPI_KEY, "url": target, "render": "true"},
+                timeout=120,
             )
             print(f"  [ScraperAPI] стр.{p}: status={r.status_code} len={len(r.text)}")
             html = r.text
