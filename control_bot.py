@@ -1007,6 +1007,96 @@ def _scrape_avito_http_with_cookies(pages: int = 5) -> list[dict]:
     return results
 
 
+def _scrape_avito_mobile_api(pages: int = 5) -> list[dict]:
+    """Парсит Авито через мобильный API — обходит часть блокировок."""
+    try:
+        import requests as _req, datetime as _dt, random as _rnd, re as _re
+    except ImportError:
+        return []
+
+    proxies = {}
+    if _xray_proc and _xray_proc.poll() is None:
+        proxies = {"https": "socks5h://127.0.0.1:10808", "http": "socks5h://127.0.0.1:10808"}
+
+    cookies = _load_avito_cookies_for_requests()
+
+    headers = {
+        "User-Agent": "Avito/17.0 (Android 11; ru_RU)",
+        "Accept": "application/json",
+        "Accept-Language": "ru-RU",
+        "x-device-type": "android",
+    }
+
+    results = []
+    session = _req.Session()
+    session.headers.update(headers)
+    session.cookies.update(cookies)
+
+    MONTHS = {"янв":1,"фев":2,"мар":3,"апр":4,"май":5,"мая":5,"июн":6,"июл":7,"авг":8,"сен":9,"окт":10,"ноя":11,"дек":12}
+    HOT = _re.compile(r"(срочно|торг|уступлю|снижу|скидка|дёшево|дешево)", _re.IGNORECASE)
+
+    for p in range(1, pages + 1):
+        try:
+            resp = session.get(
+                "https://api.avito.ru/core/v1/items",
+                params={
+                    "categoryId": 9,  # Автомобили
+                    "locationId": 637640,  # Екатеринбург
+                    "page": p,
+                    "per_page": 50,
+                    "sort": "date",
+                    "priceMin": PRICE_MIN,
+                    "priceMax": PRICE_MAX,
+                },
+                proxies=proxies,
+                timeout=20,
+            )
+            if resp.status_code != 200:
+                break
+
+            data = resp.json()
+            listing_items = data.get("items", []) or data.get("result", {}).get("items", [])
+            if not listing_items:
+                break
+
+            today = _dt.date.today()
+            for it in listing_items:
+                try:
+                    title = it.get("title", "") or it.get("name", "")
+                    price_raw = it.get("price", {})
+                    if isinstance(price_raw, dict):
+                        price = str(price_raw.get("value", "") or price_raw.get("amount", ""))
+                    else:
+                        price = str(price_raw)
+                    item_id = it.get("id", "")
+                    item_url = f"https://www.avito.ru{it.get('url', '')}" if it.get("url","").startswith("/") else it.get("url", f"https://www.avito.ru/ekaterinburg/{item_id}")
+                    photos = it.get("images_count", 0) or len(it.get("images", []))
+                    time_created = it.get("time_created", "") or it.get("date", "")
+                    days = 0
+                    if time_created:
+                        try:
+                            from datetime import datetime as _dtt
+                            d = _dtt.fromisoformat(str(time_created)[:10]).date()
+                            days = max(0, (today - d).days)
+                        except Exception:
+                            pass
+                    score = (5 - min(photos, 5)) * 2.0 + days * 0.3 + (10 if HOT.search(title) else 0)
+                    if title and item_url:
+                        results.append({
+                            "source": "avito", "title": title, "price": price,
+                            "url": item_url, "date": str(today - _dt.timedelta(days=days)),
+                            "_photos": photos, "_days_on_site": days,
+                            "_hot_score": round(score, 2), "description": "",
+                        })
+                except Exception:
+                    pass
+            import time as _t; _t.sleep(_rnd.uniform(1, 2))
+        except Exception:
+            break
+
+    return results
+
+
 async def _solve_yandex_captcha(page, page_num: int) -> bool:
     """
     Отправляет пользователю ссылку на страницу капчи.
@@ -1198,16 +1288,10 @@ async def cb_scan(cb: CallbackQuery):
             items = []
 
             if source in ("avito", "all"):
-                # HTTP с куками (быстрее, без браузера)
                 avito_items = await loop.run_in_executor(None, lambda: _scrape_avito_http_with_cookies(pages=5))
-                if avito_items:
-                    items.extend(avito_items)
-                else:
-                    await bot.send_message(
-                        MY_CHAT_ID,
-                        "⚠️ Авито HTTP заблокирован (капча/IP блок).\n"
-                        "Загрузи свежие куки через /login или подожди — Дром работает без ограничений."
-                    )
+                if not avito_items:
+                    avito_items = await loop.run_in_executor(None, lambda: _scrape_avito_mobile_api(pages=5))
+                items.extend(avito_items)
 
             if source in ("drom", "all"):
                 # Читаем следующую страницу Дрома
