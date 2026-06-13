@@ -26,6 +26,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 # ── Токен ───────────────────────────────────────────────────────
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8923014188:AAHvNW2B5fin2XCmbVhlaLNjWhLwI3JhZ90")
+SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY", "b317ae63b4d847805e2f91a1dc073b40")
 
 # ── Регионы ─────────────────────────────────────────────────────
 REGIONS = {
@@ -759,25 +760,43 @@ AVITO_SLUGS = {
 }
 
 
+def _avito_get(session, target_url: str, params: dict) -> "requests.Response":
+    """Делает запрос к Авито через ScraperAPI (рендеринг JS) или напрямую."""
+    import requests as _req
+    import urllib.parse
+
+    # Строим финальный URL с параметрами
+    qs = urllib.parse.urlencode(params)
+    full_url = f"{target_url}?{qs}" if qs else target_url
+
+    if SCRAPER_API_KEY:
+        api_url = "http://api.scraperapi.com"
+        api_params = {
+            "api_key": SCRAPER_API_KEY,
+            "url": full_url,
+            "render": "true",          # рендерим JS — Авито SPA
+            "country_code": "ru",      # российский IP
+        }
+        return _req.get(api_url, params=api_params, timeout=60)
+
+    return session.get(full_url, timeout=25)
+
+
 def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int = 99_000_000) -> list[dict]:
     # Используем городской слаг — с ним Авито отдаёт карточки в HTML
     slug = AVITO_SLUGS.get(region, region)
     try:
         from bs4 import BeautifulSoup as _BS
+        import requests as _req
         try:
             import cloudscraper as _cs
             session = _cs.create_scraper(browser={"browser": "chrome", "platform": "windows", "mobile": False})
         except ImportError:
-            import requests as _req
             session = _req.Session()
         session.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "ru-RU,ru;q=0.9",
             "Referer": "https://www.avito.ru/",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "same-origin",
         })
     except ImportError:
         return []
@@ -794,7 +813,7 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
 
         url = f"https://www.avito.ru/{slug}/avtomobili"
         try:
-            r = session.get(url, params=params, timeout=25)
+            r = _avito_get(session, url, params)
             if r.status_code == 429 or "captcha" in r.text.lower() or "Доступ ограничен" in r.text:
                 print(f"  [Авито] блок на стр.{p}")
                 break
