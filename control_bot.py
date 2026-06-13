@@ -27,7 +27,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 # ── Токен ───────────────────────────────────────────────────────
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8923014188:AAHvNW2B5fin2XCmbVhlaLNjWhLwI3JhZ90")
 
-# ── Регионы Дрома ───────────────────────────────────────────────
+# ── Регионы ─────────────────────────────────────────────────────
 REGIONS = {
     "ekaterinburg": "Екатеринбург",
     "moscow":       "Москва",
@@ -44,6 +44,25 @@ REGIONS = {
     "voronezh":     "Воронеж",
     "samara":       "Самара",
     "rostov":       "Ростов-на-Дону",
+}
+
+# Слаги для Auto.ru (отличаются от Дрома)
+AUTORU_SLUGS = {
+    "ekaterinburg": "ekaterinburg",
+    "moscow":       "moskva",
+    "spb":          "sankt-peterburg",
+    "novosibirsk":  "novosibirsk",
+    "kazan":        "kazan",
+    "chelyabinsk":  "chelyabinsk",
+    "ufa":          "ufa",
+    "krasnodar":    "krasnodar",
+    "omsk":         "omsk",
+    "tyumen":       "tyumen",
+    "perm":         "perm",
+    "krasnoyarsk":  "krasnoyarsk",
+    "voronezh":     "voronezh",
+    "samara":       "samara",
+    "rostov":       "rostov-na-donu",
 }
 
 # ── Дилерские признаки ──────────────────────────────────────────
@@ -283,6 +302,145 @@ def scrape_drom(region: str, pages: int = 15, price_min: int = 0, price_max: int
     return results
 
 
+# ── Парсер Auto.ru ──────────────────────────────────────────────
+
+def scrape_autoru(region: str, pages: int = 5, price_min: int = 0, price_max: int = 99_000_000) -> list[dict]:
+    slug = AUTORU_SLUGS.get(region, region)
+    try:
+        import requests as _req
+        from bs4 import BeautifulSoup as _BS
+        try:
+            import cloudscraper as _cs
+            session = _cs.create_scraper(browser={"browser": "chrome", "platform": "windows"})
+        except ImportError:
+            session = _req.Session()
+            session.headers.update({
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                "Accept-Language": "ru-RU,ru;q=0.9",
+            })
+    except ImportError:
+        return []
+
+    results = []
+    today = datetime.date.today()
+
+    for p in range(1, pages + 1):
+        params = {
+            "seller_group": "PRIVATE",
+            "page": p,
+        }
+        if price_min > 0:
+            params["price_from"] = price_min
+        if price_max < 99_000_000:
+            params["price_to"] = price_max
+
+        url = f"https://auto.ru/{slug}/cars/used/"
+        try:
+            r = session.get(url, params=params, timeout=20)
+            if r.status_code != 200:
+                break
+
+            # Auto.ru кладёт данные в JSON внутри тега <script>
+            m = re.search(
+                r'window\.__INITIAL_STATE__\s*=\s*(\{.*?\});\s*</script>',
+                r.text, re.DOTALL
+            )
+            if m:
+                try:
+                    data = json.loads(m.group(1))
+                    listing = (
+                        data.get("listing", {}).get("data", {}).get("offers", [])
+                        or data.get("search", {}).get("offers", {}).get("offers", [])
+                    )
+                    for offer in listing:
+                        try:
+                            vehicle = offer.get("vehicle_info", {})
+                            mark = vehicle.get("mark_info", {}).get("name", "")
+                            model = vehicle.get("model_info", {}).get("name", "")
+                            year = offer.get("documents", {}).get("year", "")
+                            title = f"{mark} {model} {year}".strip()
+                            price = offer.get("price_info", {}).get("price", "")
+                            price_str = f"{int(price):,} ₽".replace(",", " ") if price else ""
+                            item_url = offer.get("url", "") or f"https://auto.ru/cars/used/sale/{offer.get('id','')}"
+                            seller_type = offer.get("seller_type", "")
+                            if seller_type == "COMMERCIAL":
+                                continue
+                            photos = len(offer.get("photos", []))
+                            date_str = offer.get("additional_info", {}).get("creation_date", "")
+                            days = 0
+                            if date_str:
+                                try:
+                                    dt = datetime.datetime.fromisoformat(date_str[:10]).date()
+                                    days = max(0, (today - dt).days)
+                                except Exception:
+                                    pass
+                            desc = offer.get("description", "")[:100]
+                            if title and item_url:
+                                item = {
+                                    "source": "autoru",
+                                    "title": title,
+                                    "price": price_str,
+                                    "url": item_url,
+                                    "date": str(today - datetime.timedelta(days=days)),
+                                    "_photos": photos,
+                                    "_days_on_site": days,
+                                    "description": desc,
+                                    "seller": "",
+                                }
+                                item["_hot_score"] = hot_score(item)
+                                results.append(item)
+                        except Exception:
+                            pass
+                    if listing:
+                        time.sleep(random.uniform(1, 2))
+                        continue
+                except Exception:
+                    pass
+
+            # Fallback: HTML парсинг
+            soup = _BS(r.text, "lxml")
+            cards = soup.select("div[class*='ListingItem']") or soup.select("article[class*='listing-item']")
+            if not cards:
+                break
+
+            for card in cards:
+                try:
+                    title_el = card.select_one("a[class*='title']") or card.select_one("h3")
+                    title = title_el.get_text(strip=True) if title_el else ""
+                    href = title_el.get("href", "") if title_el and title_el.name == "a" else ""
+                    if not href:
+                        link = card.select_one("a[href*='/cars/']")
+                        href = link.get("href", "") if link else ""
+                    item_url = href if href.startswith("http") else ("https://auto.ru" + href)
+
+                    price_el = card.select_one("[class*='price']")
+                    price = price_el.get_text(strip=True) if price_el else ""
+
+                    if title and item_url:
+                        item = {
+                            "source": "autoru",
+                            "title": title,
+                            "price": price,
+                            "url": item_url,
+                            "date": str(today),
+                            "_photos": 0,
+                            "_days_on_site": 0,
+                            "description": "",
+                            "seller": "",
+                        }
+                        item["_hot_score"] = hot_score(item)
+                        results.append(item)
+                except Exception:
+                    pass
+
+            time.sleep(random.uniform(1, 2))
+        except Exception as e:
+            print(f"  [Auto.ru {region}] стр.{p}: {e}")
+            break
+
+    return results
+
+
 # ── FSM состояния ────────────────────────────────────────────────
 
 class Setup(StatesGroup):
@@ -449,10 +607,16 @@ async def do_search_for_user(uid: int, reply_to):
     skipped = load_skipped(uid)
 
     loop = asyncio.get_event_loop()
-    items = await loop.run_in_executor(
+    drom_fut = loop.run_in_executor(
         None,
         lambda: scrape_drom(region, pages=10, price_min=pmin, price_max=pmax)
     )
+    autoru_fut = loop.run_in_executor(
+        None,
+        lambda: scrape_autoru(region, pages=5, price_min=pmin, price_max=pmax)
+    )
+    drom_items, autoru_items = await asyncio.gather(drom_fut, autoru_fut)
+    items = drom_items + autoru_items
 
     # Фильтрация
     suitable = [
@@ -486,8 +650,10 @@ async def do_search_for_user(uid: int, reply_to):
         score = item.get("_hot_score", 0)
         hot_tag = " 🔥" if score >= 15 else " ⭐" if score >= 5 else ""
 
+        source = item.get("source", "")
+        source_tag = "🟠 Auto.ru" if source == "autoru" else "🔵 Дром"
         text = (
-            f"🔵 {item.get('title', '')}{hot_tag}\n"
+            f"{source_tag} {item.get('title', '')}{hot_tag}\n"
             f"💰 {item.get('price', '—')}\n"
             f"📅 {days_str}"
         )
@@ -548,10 +714,10 @@ async def cb_more(cb: CallbackQuery):
     skipped = load_skipped(uid)
 
     loop = asyncio.get_event_loop()
-    items = await loop.run_in_executor(
-        None,
-        lambda: scrape_drom(region, pages=10, price_min=pmin, price_max=pmax)
-    )
+    drom_fut = loop.run_in_executor(None, lambda: scrape_drom(region, pages=10, price_min=pmin, price_max=pmax))
+    autoru_fut = loop.run_in_executor(None, lambda: scrape_autoru(region, pages=5, price_min=pmin, price_max=pmax))
+    drom_items, autoru_items = await asyncio.gather(drom_fut, autoru_fut)
+    items = drom_items + autoru_items
     suitable = [
         i for i in items
         if not is_dealer(i)
@@ -572,11 +738,15 @@ async def cb_more(cb: CallbackQuery):
         days_str = "сегодня" if days == 0 else f"{days} дн. назад"
         score = item.get("_hot_score", 0)
         hot_tag = " 🔥" if score >= 15 else " ⭐" if score >= 5 else ""
+        source = item.get("source", "")
+        source_tag = "🟠 Auto.ru" if source == "autoru" else "🔵 Дром"
         text = (
-            f"🔵 {item.get('title', '')}{hot_tag}\n"
+            f"{source_tag} {item.get('title', '')}{hot_tag}\n"
             f"💰 {item.get('price', '—')}\n"
             f"📅 {days_str}"
         )
+        if item.get("description"):
+            text += f"\n📝 {item['description'][:80]}"
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [
                 InlineKeyboardButton(text="🔗 Открыть", url=url),
