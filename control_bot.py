@@ -743,7 +743,7 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
     today = datetime.date.today()
 
     for p in range(1, pages + 1):
-        params = {"p": p, "s": 104, "seller_type": "1"}  # seller_type=1 — частники
+        params = {"p": p, "seller_type": "1"}  # без сортировки по дате — все объявления
         if price_min > 0:
             params["pmin"] = price_min
         if price_max < 99_000_000:
@@ -1064,11 +1064,11 @@ async def do_search_for_user(uid: int, reply_to):
 
     loop = asyncio.get_event_loop()
     drom_items, autoru_items, kolesa_items, bibika_items, avito_items = await asyncio.gather(
-        loop.run_in_executor(None, lambda: scrape_drom(region, pages=10, price_min=pmin, price_max=pmax)),
-        loop.run_in_executor(None, lambda: scrape_autoru(region, pages=5, price_min=pmin, price_max=pmax)),
-        loop.run_in_executor(None, lambda: scrape_kolesa(region, pages=5, price_min=pmin, price_max=pmax)),
-        loop.run_in_executor(None, lambda: scrape_bibika(region, pages=3, price_min=pmin, price_max=pmax)),
-        loop.run_in_executor(None, lambda: scrape_avito(region, pages=3, price_min=pmin, price_max=pmax)),
+        loop.run_in_executor(None, lambda: scrape_drom(region, pages=30, price_min=pmin, price_max=pmax)),
+        loop.run_in_executor(None, lambda: scrape_autoru(region, pages=15, price_min=pmin, price_max=pmax)),
+        loop.run_in_executor(None, lambda: scrape_kolesa(region, pages=15, price_min=pmin, price_max=pmax)),
+        loop.run_in_executor(None, lambda: scrape_bibika(region, pages=10, price_min=pmin, price_max=pmax)),
+        loop.run_in_executor(None, lambda: scrape_avito(region, pages=10, price_min=pmin, price_max=pmax)),
     )
     items = drom_items + autoru_items + kolesa_items + bibika_items + avito_items
 
@@ -1091,8 +1091,8 @@ async def do_search_for_user(uid: int, reply_to):
         )
         return
 
-    await reply_to.answer(f"🔎 Проверяю актуальность {min(len(suitable), 30)} объявлений...")
-    suitable = await filter_active(suitable, max_check=30)
+    await reply_to.answer(f"🔎 Проверяю актуальность {min(len(suitable), 50)} объявлений...")
+    suitable = await filter_active(suitable, max_check=50)
 
     if not suitable:
         await reply_to.answer("😔 Все найденные объявления уже сняты с продажи. Попробуй позже.")
@@ -1154,11 +1154,11 @@ async def cb_more(cb: CallbackQuery):
 
     loop = asyncio.get_event_loop()
     drom_items, autoru_items, kolesa_items, bibika_items, avito_items = await asyncio.gather(
-        loop.run_in_executor(None, lambda: scrape_drom(region, pages=10, price_min=pmin, price_max=pmax)),
-        loop.run_in_executor(None, lambda: scrape_autoru(region, pages=5, price_min=pmin, price_max=pmax)),
-        loop.run_in_executor(None, lambda: scrape_kolesa(region, pages=5, price_min=pmin, price_max=pmax)),
-        loop.run_in_executor(None, lambda: scrape_bibika(region, pages=3, price_min=pmin, price_max=pmax)),
-        loop.run_in_executor(None, lambda: scrape_avito(region, pages=3, price_min=pmin, price_max=pmax)),
+        loop.run_in_executor(None, lambda: scrape_drom(region, pages=30, price_min=pmin, price_max=pmax)),
+        loop.run_in_executor(None, lambda: scrape_autoru(region, pages=15, price_min=pmin, price_max=pmax)),
+        loop.run_in_executor(None, lambda: scrape_kolesa(region, pages=15, price_min=pmin, price_max=pmax)),
+        loop.run_in_executor(None, lambda: scrape_bibika(region, pages=10, price_min=pmin, price_max=pmax)),
+        loop.run_in_executor(None, lambda: scrape_avito(region, pages=10, price_min=pmin, price_max=pmax)),
     )
     items = drom_items + autoru_items + kolesa_items + bibika_items + avito_items
     suitable = [
