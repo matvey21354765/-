@@ -1,18 +1,6 @@
 """
-control_bot.py — Telegram бот-пульт для авто-брокера
-Управляй диалогами с продавцами прямо из Telegram.
-
-Установка:
-    pip install aiogram playwright playwright-stealth
-    playwright install chromium
-
-Настройка:
-    1. Создай бота через @BotFather в Telegram → получи токен
-    2. Узнай свой Telegram ID: напиши @userinfobot
-    3. Заполни BOT_TOKEN и MY_CHAT_ID ниже
-
-Запуск:
-    python control_bot.py
+Авто-брокер бот — публичная версия.
+Каждый пользователь выбирает регион и бюджет, бот ищет частников ниже рынка.
 """
 
 import asyncio
@@ -21,10 +9,10 @@ import logging
 import random
 import re
 import time
-import threading
 import datetime
 import subprocess
 from pathlib import Path
+import os
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
@@ -32,110 +20,287 @@ from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton,
 )
 from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
 
-# ============================================================
-#  НАСТРОЙКИ
-# ============================================================
+# ── Токен ───────────────────────────────────────────────────────
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8923014188:AAHvNW2B5fin2XCmbVhlaLNjWhLwI3JhZ90")
 
-import os
-BOT_TOKEN  = os.getenv("BOT_TOKEN",  "8657191103:AAFBXaObKV2jcLbBsBzpYTuBfBj2bBkymrk")
-MY_CHAT_ID = int(os.getenv("MY_CHAT_ID", "749256529"))
-TWOCAPTCHA_KEY = os.getenv("TWOCAPTCHA_KEY", "d83693d29ec0a9b78bd85d0e7f869dfe")
-SCRAPERAPI_KEY = os.getenv("SCRAPERAPI_KEY", "")
+# ── Регионы Дрома ───────────────────────────────────────────────
+REGIONS = {
+    "ekaterinburg": "Екатеринбург",
+    "moscow":       "Москва",
+    "spb":          "Санкт-Петербург",
+    "novosibirsk":  "Новосибирск",
+    "kazan":        "Казань",
+    "chelyabinsk":  "Челябинск",
+    "ufa":          "Уфа",
+    "krasnodar":    "Краснодар",
+    "omsk":         "Омск",
+    "tyumen":       "Тюмень",
+    "perm":         "Пермь",
+    "krasnoyarsk":  "Красноярск",
+    "voronezh":     "Воронеж",
+    "samara":       "Самара",
+    "rostov":       "Ростов-на-Дону",
+}
 
-LISTINGS_FILE = "listings.json"
-DEALS_FILE    = "control_deals.json"
-SESSION_DIR   = Path("browser_profile")
-
-PRICE_MIN = 500_000
-PRICE_MAX = 1_000_000
-
+# ── Дилерские признаки ──────────────────────────────────────────
 DEALER_KEYWORDS = [
-    # Юр. лица
-    "ооо", "ип ", " ао ", "зао ", "пао ",
-    # Общие дилерские слова
-    "автосалон", "официальный дилер", "дилер", "автоцентр",
-    "trade-in", "трейд-ин", "автохолдинг", "автодом", "автомир",
-    # Конкретные сети (Екатеринбург и федеральные)
-    "рольф", "major", "колёса даром", "автопланета",
-    "автоград", "июль авто", "июль-авто", "автоленд", "favorit", "фаворит",
-    "авто плюс", "автоплюс", "fresh auto", "fresh авто",
-    "автобан", "автосфера", "арконт", "ключавто", "авилон",
-    "петровский", "прагматика", "бизнес кар", "b-cars",
-    "автоимпорт", "автоальянс", "автопассаж", "авторай",
-    "максимум авто", "мотус", "genser", "генсер",
-    "ац урал", "автоцентр урал", "восток авто", "сити авто",
-    "планета авто", "автомир", "автодилер", "cars",
-    # Признаки салона в описании
-    "кредит от", "автоподбор", "выкуп авто", "выкуп автомобил",
-    "автовыкуп", "срочный выкуп", "выкупаем", "принимаем в трейд",
-    "обмен на новый", "гарантия 1 год", "гарантия на автомобиль",
-    "официальная гарантия", "сервисное обслуживание", "тест-драйв",
-    "запишитесь на тест", "наш автосалон", "наш салон",
-    "купить в кредит", "лизинг", "рассрочка от",
-    "подбор автомобил", "проверим любой автомобиль",
-    "помогу с продажей", "продаю по доверенности от салон",
+    "ооо", "зао", "пао", "автосалон", "официальный дилер", "дилер",
+    "автоцентр", "trade-in", "трейд-ин", "автохолдинг",
+    "рольф", "major", "колёса даром", "автопланета", "автоград",
+    "июль", "автоленд", "favorit", "фаворит", "авто плюс", "автоплюс",
+    "fresh auto", "автобан", "автосфера", "арконт", "ключавто", "авилон",
+    "петровский", "прагматика", "бизнес кар", "максимум авто", "мотус",
+    "genser", "генсер", "ац урал", "восток авто", "сити авто",
+    "кредит от", "автоподбор", "выкуп авто", "автовыкуп",
+    "срочный выкуп", "выкупаем", "лизинг", "рассрочка от",
+    "наш автосалон", "купить в кредит", "тест-драйв",
+    "гарантия на автомобиль", "официальная гарантия",
 ]
 
-# ============================================================
-#  СЦЕНАРИЙ
-# ============================================================
+HOT_WORDS = re.compile(
+    r"(срочно|торг|уступлю|снижу|скидка|дёшево|дешево|продам быстро|срочная продажа)",
+    re.IGNORECASE,
+)
 
-OPENER = "Здравствуйте\nещё продаёте ?"
-
-STAGES = {
-    "opener":    "offer",
-    "offer":     "price_ask",
-    "price_ask": "deal",
-    "deal":      "details",
-    "details":   "photos",
-    "photos":    "active",
-    "active":    None,
+MONTHS = {
+    "янв":1,"фев":2,"мар":3,"апр":4,"май":5,"мая":5,
+    "июн":6,"июл":7,"авг":8,"сен":9,"окт":10,"ноя":11,"дек":12,
 }
 
-REPLIES = {
-    "offer":     "Могу дополнительно продвигать её через свои соцсети и искать покупателей. Если клиент приходит через меня — беру комиссию после сделки. Можем попробовать поработать.",
-    "price_ask": "Скажите свою последнюю цену",
-    "deal":      "Можем тогда если найду покупателя выше вашей крайней цены, все что сверху себе возьму. Без наглости 🙂",
-    "details":   "по машине есть какие то повреждение по кузову и есть ли запрет ?\nПроверьте машину в Автотеке. Отчёт может показать:\n→ ДТП и повреждения\n→ скрутки пробега\n→ работу в такси\n→ ограничения на регистрацию\n→ залог и многое другое\n\nПроверить от 115 ₽",
-    "photos":    "Можете тогда какие нибудь другие, но хорошие фотографии с машиной ещё скинуть",
-    "active":    "Хорошо, если что напишу вам 👍",
-}
+# ── Пользователи ────────────────────────────────────────────────
+USERS_DIR = Path("users")
+USERS_DIR.mkdir(exist_ok=True)
 
-STAGE_NAMES = {
-    "opener":    "Первое сообщение",
-    "offer":     "Предложение",
-    "price_ask": "Спрос цены",
-    "deal":      "Схема работы",
-    "details":   "Состояние авто",
-    "photos":    "Фотографии",
-    "active":    "Активный",
-    "closed":    "Закрыт",
-}
 
-# ============================================================
-#  ХРАНИЛИЩЕ
-# ============================================================
+def user_dir(uid: int) -> Path:
+    d = USERS_DIR / str(uid)
+    d.mkdir(exist_ok=True)
+    return d
 
-def load_deals() -> dict:
-    if Path(DEALS_FILE).exists():
-        return json.loads(Path(DEALS_FILE).read_text(encoding="utf-8"))
+
+def load_settings(uid: int) -> dict:
+    f = user_dir(uid) / "settings.json"
+    if f.exists():
+        try:
+            return json.loads(f.read_text(encoding="utf-8"))
+        except Exception:
+            pass
     return {}
 
-def save_deals(deals: dict) -> None:
-    Path(DEALS_FILE).write_text(
-        json.dumps(deals, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
 
-def load_listings() -> list:
-    if not Path(LISTINGS_FILE).exists():
-        return []
-    return json.loads(Path(LISTINGS_FILE).read_text(encoding="utf-8"))
+def save_settings(uid: int, s: dict):
+    f = user_dir(uid) / "settings.json"
+    f.write_text(json.dumps(s, ensure_ascii=False, indent=2), encoding="utf-8")
 
-# Короткие ID для кнопок (Telegram лимит: 64 байта на callback_data)
+
+def load_seen(uid: int) -> set:
+    f = user_dir(uid) / "seen.json"
+    if f.exists():
+        try:
+            return set(json.loads(f.read_text(encoding="utf-8")))
+        except Exception:
+            pass
+    return set()
+
+
+def save_seen(uid: int, seen: set):
+    f = user_dir(uid) / "seen.json"
+    f.write_text(json.dumps(list(seen), ensure_ascii=False), encoding="utf-8")
+
+
+def load_skipped(uid: int) -> set:
+    f = user_dir(uid) / "skipped.json"
+    if f.exists():
+        try:
+            return set(json.loads(f.read_text(encoding="utf-8")))
+        except Exception:
+            pass
+    return set()
+
+
+def save_skipped(uid: int, skipped: set):
+    f = user_dir(uid) / "skipped.json"
+    f.write_text(json.dumps(list(skipped), ensure_ascii=False), encoding="utf-8")
+
+
+# ── Фильтры ─────────────────────────────────────────────────────
+
+def parse_price(s: str) -> int | None:
+    digits = re.sub(r"[^\d]", "", str(s or ""))
+    return int(digits) if digits else None
+
+
+def is_dealer(item: dict) -> bool:
+    text = (
+        item.get("title", "") + " " +
+        item.get("description", "") + " " +
+        item.get("seller", "")
+    ).lower()
+    return any(k in text for k in DEALER_KEYWORDS)
+
+
+def in_price_range(item: dict, price_min: int, price_max: int) -> bool:
+    p = parse_price(item.get("price", ""))
+    if p is None:
+        return True
+    return price_min <= p <= price_max
+
+
+def hot_score(item: dict) -> float:
+    """Оценка привлекательности: ниже рынка = выше."""
+    title = item.get("title", "")
+    photos = item.get("_photos", 0)
+    days = item.get("_days_on_site", 0)
+    score = 0.0
+    if HOT_WORDS.search(title):
+        score += 15.0
+    # Мало фото = меньше уверенности = возможно срочная продажа
+    if photos == 0:
+        score += 3.0
+    # Давно висит = мотивированный продавец
+    score += min(days, 30) * 0.5
+    return round(score, 2)
+
+
+# ── Парсер Дрома ────────────────────────────────────────────────
+
+def parse_ru_date(text: str):
+    if not text:
+        return None
+    text = text.strip()
+    today = datetime.date.today()
+    low = text.lower()
+    if "сегодня" in low: return today
+    if "вчера" in low: return today - datetime.timedelta(days=1)
+    m = re.search(r"(\d+)\s+дн", low)
+    if m: return today - datetime.timedelta(days=int(m.group(1)))
+    if re.search(r"\d+\s+(час|мин)", low): return today
+    m = re.search(r"(\d{1,2})\s+([а-яё]+)", text, re.IGNORECASE)
+    if m:
+        day, mon_str = int(m.group(1)), MONTHS.get(m.group(2)[:3].lower())
+        if mon_str:
+            try: return datetime.date(today.year, mon_str, day)
+            except ValueError: pass
+    return None
+
+
+def scrape_drom(region: str, pages: int = 15, price_min: int = 0, price_max: int = 99_000_000) -> list[dict]:
+    try:
+        import requests as _req
+        from bs4 import BeautifulSoup as _BS
+        import cloudscraper as _cs
+        session = _cs.create_scraper(browser={"browser": "chrome", "platform": "windows"})
+    except ImportError:
+        try:
+            import requests as _req
+            from bs4 import BeautifulSoup as _BS
+            session = _req.Session()
+            session.headers.update({
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            })
+        except ImportError:
+            return []
+
+    results = []
+    today = datetime.date.today()
+
+    for p in range(1, pages + 1):
+        base = f"https://{region}.drom.ru"
+        url = f"{base}/auto/all/" if p == 1 else f"{base}/auto/all/page{p}/"
+        # Добавляем фильтр цены в URL
+        params = {}
+        if price_min > 0:
+            params["minprice"] = price_min
+        if price_max < 99_000_000:
+            params["maxprice"] = price_max
+
+        try:
+            r = session.get(url, params=params, timeout=20)
+            soup = _BS(r.text, "lxml")
+            cards = soup.select("div[data-ftid='bulls-list_bull']")
+            if not cards:
+                break
+
+            for card in cards:
+                try:
+                    link = card.select_one("a[data-ftid='bull_title']") or card.select_one("h3 a")
+                    title = link.get_text(strip=True) if link else ""
+                    href = link.get("href", "") if link else ""
+                    item_url = href if href.startswith("http") else (base + href)
+
+                    price_el = card.select_one("span[data-ftid='bull_price']")
+                    price = price_el.get_text(strip=True) if price_el else ""
+
+                    seller_el = (
+                        card.select_one("[data-ftid='bull_seller']")
+                        or card.select_one("a[class*='seller']")
+                        or card.select_one("span[class*='seller']")
+                    )
+                    seller = seller_el.get_text(strip=True) if seller_el else ""
+
+                    desc_el = card.select_one("[data-ftid='bull_description']")
+                    desc = desc_el.get_text(strip=True) if desc_el else ""
+
+                    date_el = (
+                        card.select_one("[data-ftid='bull_date']")
+                        or card.select_one("time")
+                    )
+                    date_text = date_el.get_text(strip=True) if date_el else ""
+                    date = parse_ru_date(date_text)
+                    days = max(0, (today - date).days) if date else 0
+
+                    photo_el = card.select_one("span[data-ftid='bull_images-count']")
+                    photos_str = photo_el.get_text() if photo_el else ""
+                    pm = re.search(r"\d+", photos_str)
+                    photos = int(pm.group()) if pm else 0
+
+                    if title and item_url:
+                        item = {
+                            "source": "drom",
+                            "title": title,
+                            "price": price,
+                            "url": item_url,
+                            "date": str(date) if date else date_text,
+                            "_photos": photos,
+                            "_days_on_site": days,
+                            "description": desc,
+                            "seller": seller,
+                        }
+                        item["_hot_score"] = hot_score(item)
+                        results.append(item)
+                except Exception:
+                    pass
+
+            time.sleep(random.uniform(1, 2))
+        except Exception as e:
+            print(f"  [Дром {region}] стр.{p}: {e}")
+            break
+
+    return results
+
+
+# ── FSM состояния ────────────────────────────────────────────────
+
+class Setup(StatesGroup):
+    region = State()
+    price_min = State()
+    price_max = State()
+
+
+# ── Бот ─────────────────────────────────────────────────────────
+
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher(storage=MemoryStorage())
+
+# URL-ID маппинг для кнопок
 _id_to_url: dict[str, str] = {}
 _url_to_id: dict[str, str] = {}
 _id_counter = 0
+
 
 def url_to_id(url: str) -> str:
     global _id_counter
@@ -146,1931 +311,309 @@ def url_to_id(url: str) -> str:
         _id_to_url[sid] = url
     return _url_to_id[url]
 
+
 def id_to_url(sid: str) -> str:
     return _id_to_url.get(sid, sid)
 
-# ============================================================
-#  ФИЛЬТРЫ
-# ============================================================
 
-def parse_price(s: str) -> int | None:
-    digits = re.sub(r"[^\d]", "", str(s or ""))
-    return int(digits) if digits else None
+def region_keyboard():
+    rows = []
+    items = list(REGIONS.items())
+    for i in range(0, len(items), 2):
+        row = []
+        for slug, name in items[i:i+2]:
+            row.append(InlineKeyboardButton(text=name, callback_data=f"region|{slug}"))
+        rows.append(row)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
-def is_dealer(item: dict) -> bool:
-    text = (
-        item.get("title", "") + " " +
-        item.get("description", "") + " " +
-        item.get("seller", "") + " " +
-        item.get("company", "")
-    ).lower()
-    return any(k in text for k in DEALER_KEYWORDS)
-
-def in_price_range(item: dict) -> bool:
-    p = parse_price(item.get("price",""))
-    if p is None:
-        return True
-    return PRICE_MIN <= p <= PRICE_MAX
-
-# ============================================================
-#  PLAYWRIGHT — отправка сообщений
-# ============================================================
-
-_browser_context = None
-_playwright_obj  = None
-
-def get_browser():
-    global _browser_context, _playwright_obj
-    if _browser_context:
-        return _browser_context
-    from playwright.sync_api import sync_playwright
-    SESSION_DIR.mkdir(exist_ok=True)
-    _playwright_obj = sync_playwright().start()
-    IS_SERVER = os.getenv("RAILWAY_ENVIRONMENT") is not None
-    use_proxy = _xray_proc and _xray_proc.poll() is None
-    kwargs = dict(
-        user_data_dir=str(SESSION_DIR),
-        headless=IS_SERVER,
-        args=["--no-sandbox","--disable-blink-features=AutomationControlled"],
-        viewport={"width":1280,"height":900},
-        locale="ru-RU",
-        timezone_id="Asia/Yekaterinburg",
-    )
-    if use_proxy:
-        kwargs["proxy"] = {"server": "socks5://127.0.0.1:10808"}
-    _browser_context = _playwright_obj.chromium.launch_persistent_context(**kwargs)
-    return _browser_context
-
-def type_text(box, text: str):
-    for line in text.split("\n"):
-        for ch in line:
-            box.type(ch, delay=random.randint(40,110))
-        if line != text.split("\n")[-1]:
-            box.press("Shift+Enter")
-            time.sleep(random.uniform(0.2,0.5))
-
-def send_on_avito(url: str, message: str) -> tuple[bool, str]:
-    """Открывает объявление Авито и отправляет сообщение. Возвращает (успех, url_чата)."""
-    try:
-        ctx = get_browser()
-        page = ctx.new_page()
-        try:
-            page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            time.sleep(random.uniform(2,4))
-
-            # Ищем кнопку "Написать"
-            write_btn = None
-            for sel in [
-                "[data-marker='item-view/write-sms']",
-                "[data-marker='seller-info/write']",
-                "button[class*='write']",
-            ]:
-                el = page.query_selector(sel)
-                if el:
-                    write_btn = el
-                    break
-            if not write_btn:
-                for btn in page.query_selector_all("button, a"):
-                    try:
-                        if "написать" in btn.inner_text().lower():
-                            write_btn = btn
-                            break
-                    except Exception:
-                        pass
-            if not write_btn:
-                return False, ""
-
-            write_btn.click()
-            time.sleep(random.uniform(1.5,3))
-
-            # Поле ввода
-            input_box = None
-            for sel in [
-                "textarea[data-marker='messenger/input']",
-                "textarea[placeholder*='ообщени']",
-                "textarea",
-            ]:
-                try:
-                    el = page.locator(sel).first
-                    if el.is_visible(timeout=4000):
-                        input_box = el
-                        break
-                except Exception:
-                    pass
-            if not input_box:
-                return False, ""
-
-            input_box.click()
-            time.sleep(0.5)
-            type_text(input_box, message)
-            time.sleep(random.uniform(0.5,1))
-
-            send_btn = page.query_selector("button[data-marker='messenger/send-button']")
-            if send_btn:
-                send_btn.click()
-            else:
-                input_box.press("Enter")
-
-            time.sleep(2)
-            chat_url = page.url
-            # Проверяем авторизацию
-            if "login" in chat_url or "auth" in chat_url:
-                return False, "нужно войти в аккаунт Авито в браузере бота"
-            return True, chat_url
-        finally:
-            page.close()
-    except Exception as e:
-        return False, str(e)
-
-
-def send_on_drom(url: str, message: str) -> tuple[bool, str]:
-    """Открывает объявление Дром и отправляет сообщение через форму."""
-    try:
-        ctx = get_browser()
-        page = ctx.new_page()
-        try:
-            page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            time.sleep(random.uniform(3, 5))
-
-            # Дром: ищем кнопку написать
-            write_btn = None
-            for sel in [
-                "[data-ga-stats-name='send_message']",
-                "[data-ftid='component_bulletin-contacts_send-message']",
-                "button[class*='SendMessage']",
-                "a[class*='SendMessage']",
-            ]:
-                el = page.query_selector(sel)
-                if el and el.is_visible():
-                    write_btn = el
-                    break
-
-            if not write_btn:
-                for btn in page.query_selector_all("button, a"):
-                    try:
-                        t = btn.inner_text().strip().lower()
-                        if any(w in t for w in ["написать", "сообщение продавцу", "связаться", "написать продавцу"]):
-                            write_btn = btn
-                            break
-                    except Exception:
-                        pass
-
-            if not write_btn:
-                # Пробуем показать номер телефона вместо сообщения
-                phone_btn = page.query_selector("[data-ftid='component_bulletin-contacts_show-phone']")
-                if phone_btn:
-                    phone_btn.click()
-                    time.sleep(2)
-                    phone = page.query_selector("[data-ftid='component_bulletin-contacts_phone']")
-                    if phone:
-                        return False, f"тел: {phone.inner_text(strip=True)} (написать нельзя — только звонок)"
-                return False, "кнопка написать не найдена"
-
-            write_btn.click()
-            time.sleep(random.uniform(2, 4))
-
-            # Поле ввода после нажатия кнопки
-            input_box = None
-            for sel in [
-                "textarea[name='message']",
-                "textarea[placeholder*='ообщени']",
-                "div[class*='Modal'] textarea",
-                "div[class*='Popup'] textarea",
-                "textarea",
-                "div[contenteditable='true']",
-            ]:
-                try:
-                    el = page.locator(sel).first
-                    if el.is_visible(timeout=5000):
-                        input_box = el
-                        break
-                except Exception:
-                    pass
-
-            if not input_box:
-                return False, "поле ввода не найдено (возможно, нужно войти в аккаунт Дром)"
-
-            input_box.click()
-            time.sleep(0.5)
-            type_text(input_box, message)
-            time.sleep(random.uniform(0.5, 1))
-
-            send_btn = None
-            for sel in [
-                "button[type='submit']",
-                "button[class*='submit']",
-                "button[class*='Send']",
-                "button[class*='send']",
-                "input[type='submit']",
-            ]:
-                try:
-                    el = page.locator(sel).last
-                    if el.is_visible(timeout=2000):
-                        send_btn = el
-                        break
-                except Exception:
-                    pass
-
-            if send_btn:
-                send_btn.click()
-            else:
-                input_box.press("Enter")
-
-            time.sleep(2)
-            # Проверяем — если появилось "войдите" значит не авторизованы
-            content = page.content().lower()
-            if "войдите" in content or "авторизуйтесь" in content or "войти" in content:
-                return False, "нужно войти в аккаунт Дром в браузере бота"
-            return True, page.url
-        finally:
-            page.close()
-    except Exception as e:
-        return False, str(e)
-
-
-def send_on_autoru(url: str, message: str) -> tuple[bool, str]:
-    """Открывает объявление Авто.ру и отправляет сообщение."""
-    try:
-        ctx = get_browser()
-        page = ctx.new_page()
-        try:
-            page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            time.sleep(random.uniform(2,4))
-
-            write_btn = None
-            for btn in page.query_selector_all("button, a"):
-                try:
-                    t = btn.inner_text().lower()
-                    if "написать" in t or "сообщение" in t:
-                        write_btn = btn
-                        break
-                except Exception:
-                    pass
-            if not write_btn:
-                return False, "кнопка не найдена"
-
-            write_btn.click()
-            time.sleep(random.uniform(1.5,3))
-
-            input_box = None
-            for sel in ["textarea","div[contenteditable='true']"]:
-                try:
-                    el = page.locator(sel).first
-                    if el.is_visible(timeout=4000):
-                        input_box = el
-                        break
-                except Exception:
-                    pass
-            if not input_box:
-                return False, "поле ввода не найдено"
-
-            input_box.click()
-            time.sleep(0.5)
-            type_text(input_box, message)
-            time.sleep(random.uniform(0.5,1))
-
-            for sel in ["button[type='submit']","button[class*='send']"]:
-                el = page.query_selector(sel)
-                if el:
-                    el.click()
-                    break
-            else:
-                input_box.press("Enter")
-
-            time.sleep(2)
-            return True, page.url
-        finally:
-            page.close()
-    except Exception as e:
-        return False, str(e)
-
-
-def _load_avito_cookies_for_requests() -> dict:
-    """Загружает куки Авито из файла для использования в requests."""
-    cookies = {}
-    f = Path("avito_cookies_raw.json")
-    if f.exists():
-        try:
-            for c in json.loads(f.read_text(encoding="utf-8")):
-                if c.get("name") and c.get("value"):
-                    cookies[c["name"]] = c["value"]
-        except Exception:
-            pass
-    return cookies
-
-
-def send_on_avito_http(item_url: str, message: str) -> tuple[bool, str]:
-    """
-    Отправляет сообщение продавцу через Авито HTTP API (без браузера).
-    Использует сохранённые куки из avito_cookies_raw.json.
-    """
-    try:
-        import requests as _req
-        import re as _re
-
-        cookies = _load_avito_cookies_for_requests()
-        if not cookies:
-            return False, "нет куки Авито — загрузи через /login"
-
-        proxies = {}
-        if _xray_proc and _xray_proc.poll() is None:
-            proxies = {"https": "socks5h://127.0.0.1:10808", "http": "socks5h://127.0.0.1:10808"}
-
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            "Accept": "application/json, text/plain, */*",
-            "Accept-Language": "ru-RU,ru;q=0.9",
-            "Referer": item_url,
-            "Origin": "https://www.avito.ru",
-            "X-Requested-With": "XMLHttpRequest",
-        }
-
-        session = _req.Session()
-        session.cookies.update(cookies)
-        session.headers.update(headers)
-
-        # Получаем ID объявления из URL
-        m = _re.search(r'_(\d+)$', item_url.rstrip('/'))
-        if not m:
-            m = _re.search(r'/(\d+)(?:\?|$)', item_url)
-        if not m:
-            return False, f"не могу извлечь ID из URL: {item_url}"
-        item_id = m.group(1)
-
-        # Создаём чат / получаем существующий
-        chat_resp = session.post(
-            "https://www.avito.ru/web/1/messenger/getChat",
-            json={"itemId": int(item_id)},
-            proxies=proxies,
-            timeout=20,
-        )
-        if chat_resp.status_code != 200:
-            # Пробуем альтернативный endpoint
-            chat_resp = session.post(
-                "https://www.avito.ru/api/1/messenger/createChat",
-                json={"itemId": item_id},
-                proxies=proxies,
-                timeout=20,
-            )
-
-        try:
-            chat_data = chat_resp.json()
-        except Exception:
-            chat_data = {}
-
-        chat_id = (
-            chat_data.get("result", {}).get("id")
-            or chat_data.get("chat", {}).get("id")
-            or chat_data.get("id")
-        )
-
-        if not chat_id:
-            # Последний шанс: открыть страницу объявления и найти chatId
-            page_resp = session.get(item_url, proxies=proxies, timeout=20)
-            m2 = _re.search(r'"chatId"\s*:\s*"([^"]+)"', page_resp.text)
-            if m2:
-                chat_id = m2.group(1)
-            else:
-                m2 = _re.search(r'chat_id["\s:=]+([a-z0-9_\-]+)', page_resp.text, _re.IGNORECASE)
-                if m2:
-                    chat_id = m2.group(1)
-
-        if not chat_id:
-            return False, f"не удалось получить chat_id (статус {chat_resp.status_code})"
-
-        # Отправляем сообщение
-        send_resp = session.post(
-            f"https://www.avito.ru/web/1/messenger/sendMessage",
-            json={"chatId": chat_id, "message": {"text": message}},
-            proxies=proxies,
-            timeout=20,
-        )
-
-        if send_resp.status_code == 200:
-            return True, f"https://www.avito.ru/profile/messenger/{chat_id}"
-        elif send_resp.status_code == 401:
-            return False, "сессия истекла — загрузи свежие куки через /login"
-        else:
-            return False, f"ошибка API {send_resp.status_code}: {send_resp.text[:200]}"
-
-    except Exception as e:
-        return False, str(e)
-
-
-def send_on_drom_http(url: str, message: str) -> tuple[bool, str]:
-    """Отправляет сообщение на Дром через HTTP форму."""
-    try:
-        import requests as _req, re as _re
-
-        proxies = {}
-        if _xray_proc and _xray_proc.poll() is None:
-            proxies = {"https": "socks5h://127.0.0.1:10808", "http": "socks5h://127.0.0.1:10808"}
-
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            "Accept-Language": "ru-RU,ru;q=0.9",
-            "Referer": url,
-        }
-        session = _req.Session()
-        session.headers.update(headers)
-
-        # Загружаем страницу объявления
-        r = session.get(url, proxies=proxies, timeout=20)
-        html = r.text
-
-        # Ищем bull_id из URL
-        m = _re.search(r'/(\d+)\.html', url)
-        if not m:
-            m = _re.search(r'bull_id=(\d+)', html)
-        if not m:
-            return False, "не могу найти ID объявления"
-        bull_id = m.group(1)
-
-        # CSRF токен
-        csrf = ""
-        m_csrf = _re.search(r'name=["\']_csrf_token["\']\s+value=["\']([\w-]+)', html)
-        if not m_csrf:
-            m_csrf = _re.search(r'"csrf_token"\s*:\s*"([\w-]+)"', html)
-        if m_csrf:
-            csrf = m_csrf.group(1)
-
-        # Отправляем сообщение
-        resp = session.post(
-            "https://ekaterinburg.drom.ru/ajax/sendmessage.html",
-            data={
-                "bull_id": bull_id,
-                "message": message,
-                "_csrf_token": csrf,
-            },
-            proxies=proxies,
-            timeout=20,
-        )
-        data = resp.json() if resp.headers.get("content-type","").startswith("application/json") else {}
-        if resp.status_code == 200 and data.get("success"):
-            return True, url
-        elif "войдите" in resp.text.lower() or "авторизу" in resp.text.lower():
-            return False, "нужно войти в аккаунт Дром"
-        else:
-            return False, f"HTTP {resp.status_code}: {resp.text[:200]}"
-    except Exception as e:
-        return False, str(e)
-
-
-def send_message_to_seller(item: dict, message: str) -> tuple[bool, str]:
-    source = item.get("source","")
-    url    = item.get("url","")
-    if source == "avito":
-        # Сначала пробуем HTTP API (быстрее, без браузера)
-        ok, detail = send_on_avito_http(url, message)
-        if ok:
-            return ok, detail
-        # Если HTTP не сработал — используем Playwright
-        print(f"  [Авито HTTP API] {detail} — fallback to Playwright")
-        return send_on_avito(url, message)
-    elif source == "drom":
-        ok, detail = send_on_drom_http(url, message)
-        if ok:
-            return ok, detail
-        return send_on_drom(url, message)
-    elif source == "autoru":
-        return send_on_autoru(url, message)
-    return False, "неизвестный источник"
-
-
-# ============================================================
-#  БОТ
-# ============================================================
-
-bot = Bot(token=BOT_TOKEN)
-dp  = Dispatcher()
-
-# Временное хранилище: ожидаем ввод текста от пользователя
-# chat_id -> {"action": "custom_text"/"captcha", "deal_key": ..., "event": asyncio.Event}
-waiting_input: dict = {}
-
-# Хранит asyncio.Event для ожидания ответа на капчу
-# user_id -> {"answer": str, "event": asyncio.Event}
-captcha_wait: dict = {}
-
-
-def make_listing_keyboard(deal_key: str, stage: str) -> InlineKeyboardMarkup:
-    sid = url_to_id(deal_key)
-    next_stage = STAGES.get(stage)
-    buttons = []
-    if next_stage and next_stage in REPLIES:
-        buttons.append([
-            InlineKeyboardButton(
-                text=f"✉️ Отправить: «{REPLIES[next_stage][:30]}...»",
-                callback_data=f"send_auto|{sid}"
-            )
-        ])
-    buttons.append([
-        InlineKeyboardButton(text="✏️ Написать своё", callback_data=f"send_custom|{sid}"),
-        InlineKeyboardButton(text="❌ Пропустить",    callback_data=f"skip|{sid}"),
-    ])
-    buttons.append([
-        InlineKeyboardButton(text="🔗 Открыть объявление",
-                             url=deal_key if deal_key.startswith("http") else "https://avito.ru"),
-    ])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-
-def listing_card_text(item: dict, deal: dict) -> str:
-    stage_name = STAGE_NAMES.get(deal.get("stage",""), deal.get("stage",""))
-    price = item.get("price","—")
-    source_icons = {"avito":"🟢 Авито", "drom":"🔵 Дром", "autoru":"🔴 Авто.ру"}
-    source = source_icons.get(item.get("source",""), item.get("source",""))
-    title  = item.get("title","")
-    days   = item.get("_days_on_site", "?")
-    score  = item.get("_hot_score", "")
-
-    text = (
-        f"{source}  |  {stage_name}\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"🚗 {title}\n"
-        f"💰 {price}\n"
-        f"📅 Дней на сайте: {days}\n"
-    )
-    if score:
-        text += f"🔥 Рейтинг: {score}\n"
-    if deal.get("stage") not in ("new","opener"):
-        next_stage = STAGES.get(deal.get("stage",""))
-        if next_stage and next_stage in REPLIES:
-            text += f"\n📝 Следующая фраза:\n_{REPLIES[next_stage][:120]}_"
-    return text
-
-
-async def notify_new_listing(item: dict):
-    """Отправляет уведомление о новом подходящем объявлении."""
-    deals = load_deals()
-    url = item.get("url","")
-    if url in deals:
-        return
-
-    deals[url] = {
-        "stage": "new",
-        "title": item.get("title",""),
-        "source": item.get("source",""),
-        "listing_url": url,
-        "chat_url": None,
-        "sent": None,
-        "updated": datetime.datetime.now().isoformat(),
-    }
-    save_deals(deals)
-
-    text = listing_card_text(item, deals[url])
-    sid = url_to_id(url)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✉️ Написать первое сообщение",
-                              callback_data=f"send_opener|{sid}")],
-        [InlineKeyboardButton(text="❌ Пропустить", callback_data=f"skip|{sid}")],
-        [InlineKeyboardButton(text="🔗 Объявление", url=url)],
-    ])
-    await bot.send_message(MY_CHAT_ID, text, reply_markup=kb, parse_mode="Markdown")
-
-
-# ── Команды ──────────────────────────────────────────────────
 
 @dp.message(Command("start"))
-async def cmd_start(msg: Message):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="🟢 Авито",   callback_data="source|avito"),
-            InlineKeyboardButton(text="🔵 Дром",    callback_data="source|drom"),
-            InlineKeyboardButton(text="🔴 Авто.ру", callback_data="source|autoru"),
-        ],
-        [InlineKeyboardButton(text="📋 Все источники", callback_data="source|all")],
-    ])
+async def cmd_start(msg: Message, state: FSMContext):
+    await state.clear()
+    s = load_settings(msg.from_user.id)
+    if s.get("region"):
+        region_name = REGIONS.get(s["region"], s["region"])
+        pmin = s.get("price_min", 0)
+        pmax = s.get("price_max", 99_000_000)
+        await msg.answer(
+            f"👋 Привет! Твои настройки:\n"
+            f"📍 Регион: {region_name}\n"
+            f"💰 Бюджет: {pmin:,} – {pmax:,} ₽\n\n"
+            f"/search — найти объявления\n"
+            f"/settings — изменить настройки",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔍 Найти авто", callback_data="do_search")],
+                [InlineKeyboardButton(text="⚙️ Изменить настройки", callback_data="change_settings")],
+            ])
+        )
+    else:
+        await msg.answer(
+            "👋 Привет! Я ищу автомобили от частных лиц по цене ниже рынка.\n\n"
+            "Для начала выбери регион поиска:"
+        )
+        await msg.answer("📍 Выбери город:", reply_markup=region_keyboard())
+        await state.set_state(Setup.region)
+
+
+@dp.callback_query(F.data == "change_settings")
+async def cb_change_settings(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    await cb.message.answer("📍 Выбери город:", reply_markup=region_keyboard())
+    await state.set_state(Setup.region)
+
+
+@dp.callback_query(F.data.startswith("region|"), Setup.region)
+async def cb_region(cb: CallbackQuery, state: FSMContext):
+    slug = cb.data.split("|", 1)[1]
+    await state.update_data(region=slug)
+    await cb.answer(f"✅ {REGIONS.get(slug, slug)}")
+    await cb.message.answer(
+        f"📍 Регион: {REGIONS.get(slug, slug)}\n\n"
+        f"💰 Теперь введи минимальную цену в рублях\n"
+        f"(например: 300000 или 0 для любой цены):"
+    )
+    await state.set_state(Setup.price_min)
+
+
+@dp.message(Setup.price_min)
+async def fsm_price_min(msg: Message, state: FSMContext):
+    digits = re.sub(r"[^\d]", "", msg.text or "")
+    pmin = int(digits) if digits else 0
+    await state.update_data(price_min=pmin)
     await msg.answer(
-        "👋 Авто-брокер бот запущен!\n\n"
-        "Выбери источник объявлений:",
-        reply_markup=kb
+        f"✅ Минимальная цена: {pmin:,} ₽\n\n"
+        f"💰 Теперь введи максимальную цену\n"
+        f"(например: 1000000):"
+    )
+    await state.set_state(Setup.price_max)
+
+
+@dp.message(Setup.price_max)
+async def fsm_price_max(msg: Message, state: FSMContext):
+    digits = re.sub(r"[^\d]", "", msg.text or "")
+    pmax = int(digits) if digits else 99_000_000
+    data = await state.get_data()
+    region = data.get("region", "ekaterinburg")
+    pmin = data.get("price_min", 0)
+
+    s = {"region": region, "price_min": pmin, "price_max": pmax}
+    save_settings(msg.from_user.id, s)
+    await state.clear()
+
+    region_name = REGIONS.get(region, region)
+    await msg.answer(
+        f"✅ Настройки сохранены!\n\n"
+        f"📍 Регион: {region_name}\n"
+        f"💰 Бюджет: {pmin:,} – {pmax:,} ₽\n\n"
+        f"Нажми кнопку чтобы найти авто:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔍 Найти авто", callback_data="do_search")],
+        ])
     )
 
-@dp.callback_query(F.data.startswith("source|"))
-async def cb_source(cb: CallbackQuery):
-    source = cb.data.split("|", 1)[1]
-    source_names = {"avito": "🟢 Авито", "drom": "🔵 Дром", "autoru": "🔴 Авто.ру", "all": "📋 Все"}
-    await cb.answer(f"Выбрано: {source_names.get(source, source)}")
 
-    listings = load_listings()
-    deals = load_deals()
-    new_items = [
-        i for i in listings
-        if not is_dealer(i) and in_price_range(i)
-        and i.get("url") and i.get("url") not in deals
-        and (source == "all" or i.get("source") == source)
-    ][:10]
+@dp.message(Command("settings"))
+async def cmd_settings(msg: Message, state: FSMContext):
+    await cb_change_settings.__wrapped__(
+        type("cb", (), {"answer": lambda *a, **kw: None, "message": msg, "from_user": msg.from_user})(),
+        state
+    )
+    await msg.answer("📍 Выбери город:", reply_markup=region_keyboard())
+    await state.set_state(Setup.region)
 
-    if not new_items:
-        await cb.message.answer(f"Нет новых объявлений для {source_names.get(source, source)}.\nНажми /scan чтобы обновить.")
+
+@dp.message(Command("search"))
+async def cmd_search(msg: Message):
+    await do_search_for_user(msg.from_user.id, msg)
+
+
+@dp.callback_query(F.data == "do_search")
+async def cb_do_search(cb: CallbackQuery):
+    await cb.answer()
+    await do_search_for_user(cb.from_user.id, cb.message)
+
+
+async def do_search_for_user(uid: int, reply_to):
+    s = load_settings(uid)
+    if not s.get("region"):
+        await reply_to.answer("Сначала настрой поиск: /start")
         return
 
-    await cb.message.answer(f"Нашёл {len(new_items)} объявлений ({source_names.get(source, source)}):")
-    for item in new_items:
-        url = item.get("url","")
-        sid = url_to_id(url)
-        src = item.get("source","")
-        icon = "🟢" if src=="avito" else "🔵" if src=="drom" else "🔴"
-        text = (
-            f"{icon} {item.get('title','')}\n"
-            f"💰 {item.get('price','—')}\n"
-            f"📅 Дней: {item.get('_days_on_site','?')}"
-        )
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✉️ Написать", callback_data=f"send_opener|{sid}")],
-            [InlineKeyboardButton(text="❌ Пропустить", callback_data=f"skip|{sid}")],
-            [InlineKeyboardButton(text="🔗 Открыть", url=url)],
-        ])
-        await cb.message.answer(text, reply_markup=kb)
+    region = s["region"]
+    pmin = s.get("price_min", 0)
+    pmax = s.get("price_max", 99_000_000)
+    region_name = REGIONS.get(region, region)
 
-@dp.message(Command("stats"))
-async def cmd_stats(msg: Message):
-    deals = load_deals()
-    from collections import Counter
-    stages = Counter(d.get("stage","?") for d in deals.values())
-    lines = ["📊 Статистика диалогов:\n"]
-    for stage, cnt in sorted(stages.items()):
-        lines.append(f"  {STAGE_NAMES.get(stage, stage)}: {cnt}")
-    lines.append(f"\nВсего: {len(deals)}")
-    await msg.answer("\n".join(lines))
+    await reply_to.answer(f"🔍 Ищу авто в {region_name} ({pmin:,}–{pmax:,} ₽)...\nЭто займёт ~1 минуту.")
 
-@dp.message(Command("new"))
-async def cmd_new(msg: Message):
-    listings = load_listings()
-    deals = load_deals()
+    skipped = load_skipped(uid)
 
-    # Все подходящие объявления — не только новые, сортируем по дням на сайте
+    loop = asyncio.get_event_loop()
+    items = await loop.run_in_executor(
+        None,
+        lambda: scrape_drom(region, pages=10, price_min=pmin, price_max=pmax)
+    )
+
+    # Фильтрация
     suitable = [
-        i for i in listings
-        if not is_dealer(i) and in_price_range(i) and i.get("url")
-        and deals.get(i["url"], {}).get("stage") not in ("opener","offer","price_ask","deal","details","photos","active","closed")
+        i for i in items
+        if not is_dealer(i)
+        and in_price_range(i, pmin, pmax)
+        and i.get("url")
+        and i["url"] not in skipped
     ]
-    # Сортировка: сначала свежие (0 дней), потом постарше
-    suitable.sort(key=lambda x: x.get("_days_on_site", 999))
+
+    # Сортировка: сначала с горячими словами, потом по дням
+    suitable.sort(key=lambda x: (-x.get("_hot_score", 0), x.get("_days_on_site", 999)))
 
     if not suitable:
-        await msg.answer("Нет подходящих объявлений. Нажми /scan чтобы обновить.")
+        await reply_to.answer(
+            f"😔 Не нашёл частников в {region_name} по твоему бюджету.\n\n"
+            f"Попробуй расширить диапазон цен: /settings"
+        )
         return
 
-    await msg.answer(f"📋 Найдено {len(suitable)} объявлений (частники, 500к–1М):\nПоказываю первые 15 — нажми ✉️ чтобы сразу написать")
+    await reply_to.answer(
+        f"✅ Найдено {len(suitable)} объявлений от частников в {region_name}!\n"
+        f"Показываю лучшие (ниже рынка в приоритете):"
+    )
 
-    for item in suitable[:15]:
+    for item in suitable[:10]:
         url = item.get("url", "")
         sid = url_to_id(url)
-        src = item.get("source", "")
-        icon = "🟢" if src == "avito" else "🔵" if src == "drom" else "🔴"
-        days = item.get("_days_on_site", "?")
-        days_str = "сегодня" if days == 0 else f"{days} дн."
-        stage = deals.get(url, {}).get("stage", "")
-        stage_icon = "✅ " if stage == "opener" else ""
+        days = item.get("_days_on_site", 0)
+        days_str = "сегодня" if days == 0 else f"{days} дн. назад"
+        score = item.get("_hot_score", 0)
+        hot_tag = " 🔥" if score >= 15 else " ⭐" if score >= 5 else ""
 
         text = (
-            f"{stage_icon}{icon} {item.get('title', '')}\n"
-            f"💰 {item.get('price', '—')}  📅 {days_str}"
+            f"🔵 {item.get('title', '')}{hot_tag}\n"
+            f"💰 {item.get('price', '—')}\n"
+            f"📅 {days_str}"
+        )
+        if item.get("description"):
+            text += f"\n📝 {item['description'][:80]}"
+
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🔗 Открыть", url=url),
+                InlineKeyboardButton(text="❌ Скрыть", callback_data=f"hide|{sid}|{uid}"),
+            ],
+        ])
+        await reply_to.answer(text, reply_markup=kb)
+
+    if len(suitable) > 10:
+        await reply_to.answer(
+            f"... и ещё {len(suitable) - 10} объявлений.\n\nНажми чтобы показать ещё:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="➡️ Ещё объявления", callback_data=f"more|{uid}|10")],
+            ])
+        )
+
+    # Сохраняем показанные в seen
+    seen = load_seen(uid)
+    for item in suitable[:10]:
+        seen.add(item.get("url", ""))
+    save_seen(uid, seen)
+
+
+@dp.callback_query(F.data.startswith("hide|"))
+async def cb_hide(cb: CallbackQuery):
+    parts = cb.data.split("|")
+    sid = parts[1]
+    uid = int(parts[2]) if len(parts) > 2 else cb.from_user.id
+    url = id_to_url(sid)
+    skipped = load_skipped(uid)
+    skipped.add(url)
+    save_skipped(uid, skipped)
+    await cb.answer("Скрыто")
+    await cb.message.delete()
+
+
+@dp.callback_query(F.data.startswith("more|"))
+async def cb_more(cb: CallbackQuery):
+    parts = cb.data.split("|")
+    uid = int(parts[1])
+    offset = int(parts[2])
+    await cb.answer()
+
+    s = load_settings(uid)
+    if not s.get("region"):
+        await cb.message.answer("Настрой поиск: /start")
+        return
+
+    region = s["region"]
+    pmin = s.get("price_min", 0)
+    pmax = s.get("price_max", 99_000_000)
+    skipped = load_skipped(uid)
+
+    loop = asyncio.get_event_loop()
+    items = await loop.run_in_executor(
+        None,
+        lambda: scrape_drom(region, pages=10, price_min=pmin, price_max=pmax)
+    )
+    suitable = [
+        i for i in items
+        if not is_dealer(i)
+        and in_price_range(i, pmin, pmax)
+        and i.get("url") and i["url"] not in skipped
+    ]
+    suitable.sort(key=lambda x: (-x.get("_hot_score", 0), x.get("_days_on_site", 999)))
+
+    batch = suitable[offset:offset + 10]
+    if not batch:
+        await cb.message.answer("Больше объявлений нет. Попробуй /search снова завтра.")
+        return
+
+    for item in batch:
+        url = item.get("url", "")
+        sid = url_to_id(url)
+        days = item.get("_days_on_site", 0)
+        days_str = "сегодня" if days == 0 else f"{days} дн. назад"
+        score = item.get("_hot_score", 0)
+        hot_tag = " 🔥" if score >= 15 else " ⭐" if score >= 5 else ""
+        text = (
+            f"🔵 {item.get('title', '')}{hot_tag}\n"
+            f"💰 {item.get('price', '—')}\n"
+            f"📅 {days_str}"
         )
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [
-                InlineKeyboardButton(text="✉️ Написать", callback_data=f"send_opener|{sid}"),
-                InlineKeyboardButton(text="❌ Пропустить", callback_data=f"skip|{sid}"),
+                InlineKeyboardButton(text="🔗 Открыть", url=url),
+                InlineKeyboardButton(text="❌ Скрыть", callback_data=f"hide|{sid}|{uid}"),
             ],
-            [InlineKeyboardButton(text="🔗 Открыть", url=url)],
         ])
-        await msg.answer(text, reply_markup=kb)
+        await cb.message.answer(text, reply_markup=kb)
 
-@dp.message(Command("active"))
-async def cmd_active(msg: Message):
-    deals = load_deals()
-    active = {k:v for k,v in deals.items()
-              if v.get("stage") not in ("closed","done","error","new",None)}
-    if not active:
-        await msg.answer("Нет активных диалогов.")
-        return
-    await msg.answer(f"Активных диалогов: {len(active)}")
-    for url, deal in list(active.items())[:10]:
-        sid = url_to_id(url)
-        stage = deal.get("stage","")
-        next_stage = STAGES.get(stage)
-        text = (
-            f"{'🟢 Авито' if deal.get('source')=='avito' else '🔵 Дром' if deal.get('source')=='drom' else '🔴'}\n"
-            f"🚗 {deal.get('title','')[:50]}\n"
-            f"📍 Стадия: {STAGE_NAMES.get(stage, stage)}"
+    if len(suitable) > offset + 10:
+        await cb.message.answer(
+            "Показать ещё?",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="➡️ Ещё", callback_data=f"more|{uid}|{offset+10}")],
+            ])
         )
-        buttons = []
-        if next_stage and next_stage in REPLIES:
-            buttons.append([InlineKeyboardButton(
-                text=f"✉️ «{REPLIES[next_stage][:35]}...»",
-                callback_data=f"send_auto|{sid}"
-            )])
-        buttons.append([
-            InlineKeyboardButton(text="✏️ Своё", callback_data=f"send_custom|{sid}"),
-            InlineKeyboardButton(text="❌ Закрыть", callback_data=f"close|{sid}"),
-        ])
-        if url.startswith("http"):
-            buttons.append([InlineKeyboardButton(text="🔗 Открыть", url=url)])
-        kb = InlineKeyboardMarkup(inline_keyboard=buttons)
-        await msg.answer(text, reply_markup=kb)
-
-@dp.message(Command("testapi"))
-async def cmd_testapi(msg: Message):
-    """Тестирует ScraperAPI на одной странице Авито."""
-    if not SCRAPERAPI_KEY:
-        await msg.answer("❌ ScraperAPI ключ не установлен. Используй /scraperapi КЛЮЧ")
-        return
-    await msg.answer("⏳ Тестирую ScraperAPI...")
-
-    def _test():
-        import requests as _req
-        from bs4 import BeautifulSoup as _BS
-        target = "https://www.avito.ru/ekaterinburg/avtomobili?p=1&s=104"
-        r = _req.get(
-            "http://api.scraperapi.com/",
-            params={"api_key": SCRAPERAPI_KEY, "url": target, "render": "true"},
-            timeout=120,
-        )
-        html = r.text
-        soup = _BS(html, "lxml")
-        cards = soup.select("[data-marker='item']")
-        title = soup.title.get_text() if soup.title else "нет тега title"
-        return r.status_code, len(html), len(cards), title[:80], html[:300]
-
-    loop = asyncio.get_event_loop()
-    try:
-        status, html_len, cards, title, preview = await loop.run_in_executor(None, _test)
-        await msg.answer(
-            f"ScraperAPI тест:\n"
-            f"• HTTP статус: {status}\n"
-            f"• Длина ответа: {html_len} символов\n"
-            f"• Карточек [data-marker='item']: {cards}\n"
-            f"• Заголовок: {title}\n\n"
-            f"Первые 300 символов HTML:\n`{preview}`",
-            parse_mode="Markdown"
-        )
-    except Exception as e:
-        await msg.answer(f"❌ Ошибка: {e}")
 
 
-@dp.message(Command("scraperapi"))
-async def cmd_scraperapi(msg: Message):
-    global SCRAPERAPI_KEY
-    parts = msg.text.strip().split(maxsplit=1)
-    if len(parts) < 2:
-        status = "✅ ключ установлен" if SCRAPERAPI_KEY else "❌ не установлен"
-        await msg.answer(
-            f"ScraperAPI: {status}\n\n"
-            f"Зарегистрируйся на scraperapi.com (бесплатно — 5000 запросов/мес)\n"
-            f"Затем: `/scraperapi ВАШ_КЛЮЧ`"
-        )
-        return
-    SCRAPERAPI_KEY = parts[1].strip()
-    # Сохраняем в файл чтобы не потерять после рестарта
-    Path(".scraperapi_key").write_text(SCRAPERAPI_KEY, encoding="utf-8")
-    await msg.answer("✅ ScraperAPI ключ сохранён! Теперь /scan → Авито работает с сервера.")
-
-
-@dp.message(Command("reset"))
-async def cmd_reset(msg: Message):
-    """Сбрасывает базу сделок и счётчик страниц Дрома."""
-    Path(DEALS_FILE).write_text("{}", encoding="utf-8")
-    Path("scan_state.json").write_text('{"drom_next_page":1,"drom_bg_page":1}', encoding="utf-8")
-    listings = load_listings()
+@dp.message(Command("help"))
+async def cmd_help(msg: Message):
     await msg.answer(
-        f"✅ Сброшено!\n"
-        f"Объявлений в базе: {len(listings)}\n"
-        f"Нажми /new чтобы посмотреть все."
-    )
-
-
-@dp.message(Command("xray"))
-async def cmd_xray(msg: Message):
-    """Проверяет статус xray прокси."""
-    lines = []
-
-    # Статус процесса
-    if _xray_proc is None:
-        lines.append("❌ xray не запускался (бинарь не найден?)")
-    elif _xray_proc.poll() is not None:
-        lines.append(f"❌ xray упал (код {_xray_proc.poll()})")
-    else:
-        lines.append("✅ xray процесс работает (PID " + str(_xray_proc.pid) + ")")
-
-    # Проверяем порт
-    import socket
-    try:
-        s = socket.create_connection(("127.0.0.1", 10808), timeout=2)
-        s.close()
-        lines.append("✅ SOCKS5 порт 10808 открыт")
-    except Exception as e:
-        lines.append(f"❌ Порт 10808 недоступен: {e}")
-
-    await msg.answer("\n".join(lines) + "\n\n⏳ Тестирую IP через прокси...")
-
-    # Тест SOCKS5 через низкоуровневый сокет
-    try:
-        import socket as _sock, struct as _struct
-
-        def _socks5_test(target_host: str, target_port: int) -> tuple[bool, str]:
-            s = _sock.socket()
-            s.settimeout(10)
-            s.connect(("127.0.0.1", 10808))
-            s.send(b'\x05\x01\x00')
-            r = s.recv(2)
-            if r != b'\x05\x00':
-                return False, f"SOCKS5 auth error: {r.hex()}"
-            host_b = target_host.encode()
-            s.send(b'\x05\x01\x00\x03' + bytes([len(host_b)]) + host_b + _struct.pack('>H', target_port))
-            r = s.recv(10)
-            s.close()
-            if len(r) < 2 or r[1] != 0:
-                code = r[1] if len(r) > 1 else -1
-                errs = {1:"General failure",2:"Not allowed",3:"Network unreachable",4:"Host unreachable",5:"Connection refused"}
-                return False, f"SOCKS5 error {code}: {errs.get(code,'unknown')}"
-            return True, "OK"
-
-        loop = asyncio.get_event_loop()
-        ok, detail = await loop.run_in_executor(None, lambda: _socks5_test("api.ipify.org", 443))
-        lines.append(f"{'✅' if ok else '❌'} SOCKS5→api.ipify.org:443: {detail}")
-    except Exception as e:
-        lines.append(f"❌ SOCKS5 тест: {e}")
-
-    # IP через прокси (requests + socks)
-    try:
-        import requests as _req
-        loop2 = asyncio.get_event_loop()
-        def _get_proxy_ip():
-            s = _req.Session()
-            s.proxies = {"https": "socks5h://127.0.0.1:10808", "http": "socks5h://127.0.0.1:10808"}
-            r = s.get("https://api.ipify.org", timeout=15)
-            return r.text.strip()
-        proxy_ip = await loop2.run_in_executor(None, _get_proxy_ip)
-        lines.append(f"📍 Внешний IP через прокси: {proxy_ip}")
-    except Exception as e:
-        lines.append(f"❌ IP через прокси: {e}")
-
-    # IP сервера без прокси
-    try:
-        import aiohttp
-        async with aiohttp.ClientSession() as session:
-            async with session.get("https://api.ipify.org", timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                real_ip = await resp.text()
-                lines.append(f"🖥 IP сервера (без прокси): {real_ip.strip()}")
-    except Exception as e:
-        lines.append(f"❌ Ошибка получения IP: {e}")
-
-    # Показываем лог xray
-    try:
-        log_text = Path("/tmp/xray_error.log").read_text(encoding="utf-8", errors="ignore")
-        last_lines = "\n".join(log_text.strip().splitlines()[-15:])
-        if last_lines:
-            await msg.answer(f"📋 Лог xray:\n```\n{last_lines[:3000]}\n```", parse_mode="Markdown")
-    except Exception:
-        pass
-
-    await msg.answer("\n".join(lines))
-
-
-@dp.message(Command("login"))
-async def cmd_login(msg: Message):
-    """Отправляет cookies в браузер бота для авторизации."""
-    await msg.answer(
-        "🔐 *Как войти в аккаунты для отправки сообщений:*\n\n"
-        "1️⃣ Войди в Авито/Дром в браузере на своём компьютере\n"
-        "2️⃣ Установи расширение *EditThisCookie* (Chrome/Firefox)\n"
-        "3️⃣ Экспортируй куки в JSON\n"
-        "4️⃣ Отправь JSON-файл боту\n\n"
-        "Или: отправь файл `avito_cookies.json` / `drom_cookies.json`\n\n"
-        "⚠️ Бот работает на сервере — без авторизации писать продавцам не может.",
+        "🤖 *Авто-брокер — поиск авто ниже рынка*\n\n"
+        "Команды:\n"
+        "/start — начало работы\n"
+        "/search — найти авто по твоим настройкам\n"
+        "/settings — изменить регион и бюджет\n"
+        "/help — помощь\n\n"
+        "🔥 — объявления с признаками срочной продажи (торг, срочно, уступлю)\n"
+        "⭐ — объявления давно висят — продавец мотивирован",
         parse_mode="Markdown"
     )
 
 
-@dp.message(Command("scan"))
-async def cmd_scan(msg: Message):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="🟢 Авито",   callback_data="scan|avito"),
-            InlineKeyboardButton(text="🔵 Дром",    callback_data="scan|drom"),
-        ],
-        [InlineKeyboardButton(text="📋 Авито + Дром", callback_data="scan|all")],
-    ])
-    await msg.answer("Что сканировать?", reply_markup=kb)
-
-
-def _scrape_avito_scraperapi(pages: int = 5) -> list[dict]:
-    """Парсит Авито через ScraperAPI с резидентными IP — работает с сервера."""
-    if not SCRAPERAPI_KEY:
-        return []
-    try:
-        import requests as _req
-        from bs4 import BeautifulSoup as _BS
-        import re as _re, datetime as _dt, random as _rnd, time as _t
-    except ImportError:
-        return []
-
-    MONTHS = {"янв":1,"фев":2,"мар":3,"апр":4,"май":5,"мая":5,"июн":6,"июл":7,"авг":8,"сен":9,"окт":10,"ноя":11,"дек":12}
-    HOT = _re.compile(r"(срочно|торг|уступлю|снижу|скидка|дёшево|дешево)", _re.IGNORECASE)
-
-    def _parse_date(text):
-        if not text: return None
-        text = text.strip(); today = _dt.date.today(); low = text.lower()
-        if "сегодня" in low: return today
-        if "вчера" in low: return today - _dt.timedelta(days=1)
-        m = _re.search(r"(\d+)\s+дн", low)
-        if m: return today - _dt.timedelta(days=int(m.group(1)))
-        if _re.search(r"\d+\s+(час|мин)", low): return today
-        m = _re.search(r"(\d{1,2})\s+([а-яё]+)", text, _re.IGNORECASE)
-        if m:
-            mon = MONTHS.get(m.group(2)[:3].lower())
-            if mon:
-                try: return _dt.date(today.year, mon, int(m.group(1)))
-                except ValueError: pass
-        return None
-
-    results = []
-    session = _req.Session()
-    session.headers.update({"Accept-Language": "ru-RU,ru;q=0.9"})
-    cookies = _load_avito_cookies_for_requests()
-    if cookies:
-        session.cookies.update(cookies)
-
-    for p in range(1, pages + 1):
-        target = f"https://www.avito.ru/ekaterinburg/avtomobili?p={p}&s=104"
-        try:
-            import urllib.parse as _up
-            r = session.get(
-                "http://api.scraperapi.com/",
-                params={"api_key": SCRAPERAPI_KEY, "url": target, "render": "true"},
-                timeout=120,
-            )
-            print(f"  [ScraperAPI] стр.{p}: status={r.status_code} len={len(r.text)}")
-            html = r.text
-            if r.status_code != 200:
-                print(f"  [ScraperAPI] ошибка: {html[:200]}")
-                break
-            if "Доступ ограничен" in html or "Подтвердите" in html:
-                print(f"  [ScraperAPI] стр.{p}: Авито блок")
-                break
-
-            soup = _BS(html, "lxml")
-            cards = soup.select("[data-marker='item']")
-            if not cards:
-                break
-
-            today = _dt.date.today()
-            for card in cards:
-                try:
-                    title_el = card.select_one("[itemprop='name']") or card.select_one("h3")
-                    title = title_el.get_text(strip=True) if title_el else ""
-                    link_el = card.select_one("a[href*='/ekaterinburg/']")
-                    href = link_el.get("href", "") if link_el else ""
-                    item_url = ("https://www.avito.ru" + href) if href else ""
-                    price_el = card.select_one("[itemprop='price']") or card.select_one("[class*='price']")
-                    price = ""
-                    if price_el:
-                        price = price_el.get("content") or price_el.get_text(strip=True)
-                    date_el = card.select_one("[data-marker='item-date']") or card.select_one("span[class*='date']")
-                    date = _parse_date(date_el.get_text(strip=True) if date_el else "")
-                    days = max(0, (today - date).days) if date else 0
-                    photos = len(card.select("img[src*='avito']"))
-                    score = (5 - min(photos, 5)) * 2.0 + days * 0.3 + (10 if HOT.search(title) else 0)
-                    if title and item_url:
-                        results.append({
-                            "source": "avito", "title": title, "price": price,
-                            "url": item_url, "date": str(date) if date else "",
-                            "_photos": photos, "_days_on_site": days,
-                            "_hot_score": round(score, 2), "description": "",
-                        })
-                except Exception:
-                    pass
-            _t.sleep(_rnd.uniform(1, 2))
-        except Exception as e:
-            print(f"  [ScraperAPI] стр.{p}: {e}")
-            break
-
-    print(f"  ScraperAPI: {len(results)} объявлений")
-    return results
-
-
-def _scrape_avito_http_with_cookies(pages: int = 5) -> list[dict]:
-    """Скрапинг Авито через HTTP с куками и прокси — без браузера."""
-    try:
-        import requests as _req
-        from bs4 import BeautifulSoup as _BS
-        import re as _re, datetime as _dt, random as _rnd
-    except ImportError:
-        return []
-
-    # Загружаем куки из browser_profile если есть
-    cookies_file = Path("avito_cookies_raw.json")
-    cookies = {}
-    if cookies_file.exists():
-        try:
-            raw = json.loads(cookies_file.read_text(encoding="utf-8"))
-            for c in raw:
-                name = c.get("name","")
-                value = c.get("value","")
-                if name and value:
-                    cookies[name] = value
-        except Exception:
-            pass
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept-Language": "ru-RU,ru;q=0.9",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Referer": "https://www.avito.ru/",
-    }
-
-    MONTHS = {"янв":1,"фев":2,"мар":3,"апр":4,"май":5,"мая":5,"июн":6,"июл":7,"авг":8,"сен":9,"окт":10,"ноя":11,"дек":12}
-    HOT = _re.compile(r"(срочно|торг|уступлю|снижу|скидка|дёшево|дешево)", _re.IGNORECASE)
-
-    def _parse_date(text):
-        if not text: return None
-        text = text.strip(); today = _dt.date.today(); low = text.lower()
-        if "сегодня" in low: return today
-        if "вчера" in low: return today - _dt.timedelta(days=1)
-        m = _re.search(r"(\d+)\s+дн", low)
-        if m: return today - _dt.timedelta(days=int(m.group(1)))
-        if _re.search(r"\d+\s+(час|мин)", low): return today
-        m = _re.search(r"(\d{1,2})\s+([а-яё]+)", text, _re.IGNORECASE)
-        if m:
-            mon = MONTHS.get(m.group(2)[:3].lower())
-            if mon:
-                try: return _dt.date(today.year, mon, int(m.group(1)))
-                except ValueError: pass
-        return None
-
-    # Варианты прокси: без прокси, потом через VLESS
-    proxy_options = [{}]
-    if _xray_proc and _xray_proc.poll() is None:
-        proxy_options.append({"https": "socks5h://127.0.0.1:10808", "http": "socks5h://127.0.0.1:10808"})
-
-    # Создаём cloudscraper сессию (имитирует Chrome, обходит антибот)
-    try:
-        import cloudscraper as _cs
-        session = _cs.create_scraper(browser={"browser": "chrome", "platform": "windows", "mobile": False})
-    except Exception:
-        session = _req.Session()
-    session.headers.update(headers)
-    session.cookies.update(cookies)
-
-    results = []
-
-    for p in range(1, pages + 1):
-        url = f"https://www.avito.ru/ekaterinburg/avtomobili?p={p}&s=104"
-        try:
-            html = None
-            for proxies in proxy_options:
-                try:
-                    r = session.get(url, proxies=proxies, timeout=25)
-                    body = r.text
-                    if "captcha" not in body.lower() and "Доступ ограничен" not in body and len(body) > 5000:
-                        html = body
-                        break
-                    print(f"  [Авито] стр.{p} прокси={bool(proxies)}: заблокировано (len={len(body)})")
-                except Exception as ex:
-                    print(f"  [Авито] стр.{p} прокси={bool(proxies)}: {ex}")
-            if not html:
-                print(f"  [!] Авито HTTP стр.{p}: блокировка на всех вариантах")
-                break
-            soup = _BS(html, "lxml")
-            cards = soup.select("[data-marker='item']")
-            for card in cards:
-                try:
-                    title_el = card.select_one("[itemprop='name']") or card.select_one("h3")
-                    title = title_el.get_text(strip=True) if title_el else ""
-                    link_el = card.select_one("a[href*='/ekaterinburg/']")
-                    href = link_el.get("href","") if link_el else ""
-                    item_url = ("https://www.avito.ru" + href) if href else ""
-                    price_el = card.select_one("[itemprop='price']") or card.select_one("[class*='price']")
-                    price = ""
-                    if price_el:
-                        price = price_el.get("content") or price_el.get_text(strip=True)
-                    date_el = card.select_one("[data-marker='item-date']") or card.select_one("span[class*='date']")
-                    date_text = date_el.get_text(strip=True) if date_el else ""
-                    date = _parse_date(date_text)
-                    days = max(0, (_dt.date.today() - date).days) if date else 0
-                    photos = len(card.select("img[src*='avito']"))
-                    if title and item_url:
-                        results.append({
-                            "source": "avito",
-                            "title": title, "price": price, "url": item_url,
-                            "date": str(date) if date else date_text,
-                            "_photos": photos, "_days_on_site": days,
-                            "_hot_score": round((5-min(photos,5))*2.0 + days*0.3 + (10 if HOT.search(title) else 0), 2),
-                            "description": "",
-                        })
-                except Exception:
-                    pass
-            import time as _time; _time.sleep(_rnd.uniform(2, 4))
-        except Exception as e:
-            print(f"  [!] Авито HTTP стр.{p}: {e}")
-            break
-    return results
-
-
-def _scrape_avito_mobile_api(pages: int = 5) -> list[dict]:
-    """Парсит Авито через мобильный API — обходит часть блокировок."""
-    try:
-        import requests as _req, datetime as _dt, random as _rnd, re as _re
-    except ImportError:
-        return []
-
-    proxies = {}
-    if _xray_proc and _xray_proc.poll() is None:
-        proxies = {"https": "socks5h://127.0.0.1:10808", "http": "socks5h://127.0.0.1:10808"}
-
-    cookies = _load_avito_cookies_for_requests()
-
-    headers = {
-        "User-Agent": "Avito/17.0 (Android 11; ru_RU)",
-        "Accept": "application/json",
-        "Accept-Language": "ru-RU",
-        "x-device-type": "android",
-    }
-
-    results = []
-    session = _req.Session()
-    session.headers.update(headers)
-    session.cookies.update(cookies)
-
-    MONTHS = {"янв":1,"фев":2,"мар":3,"апр":4,"май":5,"мая":5,"июн":6,"июл":7,"авг":8,"сен":9,"окт":10,"ноя":11,"дек":12}
-    HOT = _re.compile(r"(срочно|торг|уступлю|снижу|скидка|дёшево|дешево)", _re.IGNORECASE)
-
-    for p in range(1, pages + 1):
-        try:
-            resp = session.get(
-                "https://api.avito.ru/core/v1/items",
-                params={
-                    "categoryId": 9,  # Автомобили
-                    "locationId": 637640,  # Екатеринбург
-                    "page": p,
-                    "per_page": 50,
-                    "sort": "date",
-                    "priceMin": PRICE_MIN,
-                    "priceMax": PRICE_MAX,
-                },
-                proxies=proxies,
-                timeout=20,
-            )
-            if resp.status_code != 200:
-                break
-
-            data = resp.json()
-            listing_items = data.get("items", []) or data.get("result", {}).get("items", [])
-            if not listing_items:
-                break
-
-            today = _dt.date.today()
-            for it in listing_items:
-                try:
-                    title = it.get("title", "") or it.get("name", "")
-                    price_raw = it.get("price", {})
-                    if isinstance(price_raw, dict):
-                        price = str(price_raw.get("value", "") or price_raw.get("amount", ""))
-                    else:
-                        price = str(price_raw)
-                    item_id = it.get("id", "")
-                    item_url = f"https://www.avito.ru{it.get('url', '')}" if it.get("url","").startswith("/") else it.get("url", f"https://www.avito.ru/ekaterinburg/{item_id}")
-                    photos = it.get("images_count", 0) or len(it.get("images", []))
-                    time_created = it.get("time_created", "") or it.get("date", "")
-                    days = 0
-                    if time_created:
-                        try:
-                            from datetime import datetime as _dtt
-                            d = _dtt.fromisoformat(str(time_created)[:10]).date()
-                            days = max(0, (today - d).days)
-                        except Exception:
-                            pass
-                    score = (5 - min(photos, 5)) * 2.0 + days * 0.3 + (10 if HOT.search(title) else 0)
-                    if title and item_url:
-                        results.append({
-                            "source": "avito", "title": title, "price": price,
-                            "url": item_url, "date": str(today - _dt.timedelta(days=days)),
-                            "_photos": photos, "_days_on_site": days,
-                            "_hot_score": round(score, 2), "description": "",
-                        })
-                except Exception:
-                    pass
-            import time as _t; _t.sleep(_rnd.uniform(1, 2))
-        except Exception:
-            break
-
-    return results
-
-
-async def _notify_avito_blocked() -> bool:
-    """
-    Авито заблокировало сервер. Просит пользователя отправить куки.
-    Ждёт получения нового файла куков (до 5 минут).
-    Возвращает True если куки получены.
-    """
-    event = asyncio.Event()
-    captcha_wait[MY_CHAT_ID] = {"answer": None, "event": event}
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🌐 Открыть Авито", url="https://www.avito.ru/ekaterinburg/avtomobili")],
-        [InlineKeyboardButton(text="✅ Куки отправил, продолжай", callback_data="captcha_done")],
-    ])
-
-    await bot.send_message(
-        MY_CHAT_ID,
-        "🔒 *Авито заблокировало сервер*\n\n"
-        "1. Открой Авито по кнопке\n"
-        "2. Установи [EditThisCookie](https://chrome.google.com/webstore/detail/editthiscookie/fngmhnnpilhplaeedifhccceomclgfbg) в браузер\n"
-        "3. Нажми на иконку → Экспорт (кнопка со стрелкой)\n"
-        "4. Отправь скопированное в этот чат как файл `avito_cookies.json`\n\n"
-        "После отправки куков нажми кнопку ниже.",
-        reply_markup=kb,
-        parse_mode="Markdown",
-        disable_web_page_preview=True,
-    )
-
-    try:
-        await asyncio.wait_for(event.wait(), timeout=300)
-    except asyncio.TimeoutError:
-        captcha_wait.pop(MY_CHAT_ID, None)
-        return False
-
-    captcha_wait.pop(MY_CHAT_ID, None)
-    await asyncio.sleep(1)
-    # Проверяем что куки реально есть
-    return Path("avito_cookies_raw.json").exists()
-
-
-async def scrape_avito_playwright_async(pages: int = 5) -> list[dict]:
-    """Парсит Авито через Playwright; при капче ждёт пока пользователь решит и нажмёт Готово."""
-    try:
-        from playwright.async_api import async_playwright
-        from bs4 import BeautifulSoup as _BS
-    except ImportError:
-        return []
-
-    import re as _re, datetime as _dt, random as _rnd
-
-    MONTHS = {"янв":1,"фев":2,"мар":3,"апр":4,"май":5,"мая":5,"июн":6,"июл":7,"авг":8,"сен":9,"окт":10,"ноя":11,"дек":12}
-    HOT = _re.compile(r"(срочно|торг|уступлю|снижу|скидка|дёшево|дешево)", _re.IGNORECASE)
-
-    def _parse_date(text):
-        if not text: return None
-        text = text.strip(); today = _dt.date.today(); low = text.lower()
-        if "сегодня" in low: return today
-        if "вчера" in low: return today - _dt.timedelta(days=1)
-        m = _re.search(r"(\d+)\s+дн", low)
-        if m: return today - _dt.timedelta(days=int(m.group(1)))
-        if _re.search(r"\d+\s+(час|мин)", low): return today
-        m = _re.search(r"(\d{1,2})\s+([а-яё]+)", text, _re.IGNORECASE)
-        if m:
-            mon = MONTHS.get(m.group(2)[:3].lower())
-            if mon:
-                try: return _dt.date(today.year, mon, int(m.group(1)))
-                except ValueError: pass
-        return None
-
-    def _hotness(title, photos, days):
-        score = (5 - min(photos, 5)) * 2.0 + days * 0.3
-        if HOT.search(title): score += 10.0
-        return round(score, 2)
-
-    results = []
-    use_proxy = _xray_proc and _xray_proc.poll() is None
-
-    async with async_playwright() as pw:
-        launch_args = [
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-blink-features=AutomationControlled",
-            "--disable-gpu",
-        ]
-        proxy_cfg = {"server": "socks5://127.0.0.1:10808"} if use_proxy else None
-        browser = await pw.chromium.launch(
-            headless=True,
-            args=launch_args,
-            proxy=proxy_cfg,
-        )
-
-        # Загружаем куки
-        cookies = _load_avito_cookies_for_requests()
-        pw_cookies = [{"name": k, "value": v, "domain": ".avito.ru", "path": "/"} for k, v in cookies.items()] if cookies else []
-
-        context = await browser.new_context(
-            viewport={"width": 1280, "height": 900},
-            locale="ru-RU",
-            timezone_id="Asia/Yekaterinburg",
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        )
-        if pw_cookies:
-            await context.add_cookies(pw_cookies)
-
-        try:
-            for p in range(1, pages + 1):
-                url = f"https://www.avito.ru/ekaterinburg/avtomobili?p={p}&s=104"
-                page = await context.new_page()
-                try:
-                    try:
-                        await page.goto(url, wait_until="domcontentloaded", timeout=40000)
-                    except Exception as e:
-                        if "crash" in str(e).lower() or "Target closed" in str(e):
-                            break
-                        raise
-                    await asyncio.sleep(_rnd.uniform(2, 4))
-
-                    html = await page.content()
-                    is_captcha = (
-                        "captcha" in html.lower()
-                        or "Доступ ограничен" in html
-                        or await page.query_selector("div[class*='captcha']") is not None
-                    )
-
-                    if is_captcha:
-                        try:
-                            await page.close()
-                        except Exception:
-                            pass
-                        # Просим пользователя отправить куки, затем переключаемся на HTTP
-                        got_cookies = await _notify_avito_blocked()
-                        if got_cookies:
-                            http_results = await asyncio.get_event_loop().run_in_executor(
-                                None, lambda: _scrape_avito_http_with_cookies(pages=pages - p + 1)
-                            )
-                            results.extend(http_results)
-                        break
-
-                    soup = _BS(html, "lxml")
-                    cards = soup.select("[data-marker='item']")
-                    for card in cards:
-                        try:
-                            title_el = card.select_one("[itemprop='name']") or card.select_one("h3")
-                            title = title_el.get_text(strip=True) if title_el else ""
-                            link_el = card.select_one("a[href*='/ekaterinburg/']")
-                            href = link_el.get("href", "") if link_el else ""
-                            item_url = ("https://www.avito.ru" + href) if href else ""
-                            price_el = card.select_one("[itemprop='price']") or card.select_one("[class*='price']")
-                            price = ""
-                            if price_el:
-                                price = price_el.get("content") or price_el.get_text(strip=True)
-                            date_el = card.select_one("[data-marker='item-date']") or card.select_one("span[class*='date']")
-                            date_text = date_el.get_text(strip=True) if date_el else ""
-                            date = _parse_date(date_text)
-                            days = max(0, (_dt.date.today() - date).days) if date else 0
-                            photos = len(card.select("img[src*='avito']"))
-                            if title and item_url:
-                                results.append({
-                                    "source": "avito", "title": title, "price": price,
-                                    "url": item_url, "date": str(date) if date else date_text,
-                                    "_photos": photos, "_days_on_site": days,
-                                    "_hot_score": _hotness(title, photos, days), "description": "",
-                                })
-                        except Exception:
-                            pass
-                    await asyncio.sleep(_rnd.uniform(2, 4))
-                except Exception:
-                    pass
-                finally:
-                    try:
-                        await page.close()
-                    except Exception:
-                        pass
-        finally:
-            try:
-                await context.close()
-            except Exception:
-                pass
-            try:
-                await browser.close()
-            except Exception:
-                pass
-
-    return results
-
-
-@dp.callback_query(F.data.startswith("scan|"))
-async def cb_scan(cb: CallbackQuery):
-    source = cb.data.split("|", 1)[1]
-    icons = {"avito": "🟢 Авито", "drom": "🔵 Дром", "all": "📋 Авито + Дром"}
-    await cb.answer()
-    await cb.message.edit_text(f"🔄 Сканирую {icons.get(source)}...\nЭто займёт 3-10 минут.")
-
-    async def do_scan():
-        try:
-            import importlib.util
-            spec = importlib.util.spec_from_file_location("scraper_http", "scraper_http.py")
-            scraper = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(scraper)
-
-            loop = asyncio.get_event_loop()
-            items = []
-
-            if source in ("avito", "all"):
-                # 1. ScraperAPI (резидентный IP, работает с сервера)
-                avito_items = await loop.run_in_executor(None, lambda: _scrape_avito_scraperapi(pages=5))
-                # 2. HTTP с куками (Railway IP — часто блокирует)
-                if not avito_items:
-                    avito_items = await loop.run_in_executor(None, lambda: _scrape_avito_http_with_cookies(pages=5))
-                # 3. Playwright с капчей (последний шанс)
-                if not avito_items:
-                    avito_items = await scrape_avito_playwright_async(pages=5)
-                items.extend(avito_items)
-
-            if source in ("drom", "all"):
-                state_file = Path("scan_state.json")
-                state = json.loads(state_file.read_text()) if state_file.exists() else {}
-                start = state.get("drom_next_page", 1)
-                if start > 150:
-                    start = 1
-                drom_items = await loop.run_in_executor(None, lambda: scraper.scrape_drom_http(pages=20, start_page=start))
-                items.extend(drom_items)
-                state["drom_next_page"] = (start + 20) if drom_items else 1
-                state_file.write_text(json.dumps(state))
-
-            merged, new_count = await loop.run_in_executor(None, lambda: scraper.merge_and_save(items))
-
-            deals = load_deals()
-            suitable = [
-                i for i in merged
-                if not is_dealer(i) and in_price_range(i)
-                and i.get("url") and i.get("url") not in deals
-            ]
-            await bot.send_message(MY_CHAT_ID,
-                f"✅ {icons.get(source)} готово!\n"
-                f"Найдено: {len(items)} | Новых: {new_count}\n"
-                f"Подходящих частников: {len(suitable)}\n\n"
-                f"Нажми /new чтобы посмотреть."
-            )
-        except Exception as e:
-            await bot.send_message(MY_CHAT_ID, f"❌ Ошибка сканирования: {e}")
-
-    asyncio.create_task(do_scan())
-
-
-# ── Кнопки ───────────────────────────────────────────────────
-
-@dp.callback_query(F.data.startswith("send_opener|"))
-async def cb_send_opener(cb: CallbackQuery):
-    url = id_to_url(cb.data.split("|", 1)[1])
-    listings = load_listings()
-    item = next((i for i in listings if i.get("url") == url), None)
-    if not item:
-        await cb.answer("Объявление не найдено")
-        return
-
-    await cb.answer("✉️ Отправляю...")
-
-    loop = asyncio.get_event_loop()
-    success, chat_url = await loop.run_in_executor(None, lambda: send_message_to_seller(item, OPENER))
-
-    deals = load_deals()
-    deals[url] = deals.get(url, {})
-    deals[url].update({
-        "stage": "opener" if success else "error",
-        "title": item.get("title", ""),
-        "source": item.get("source", ""),
-        "listing_url": url,
-        "chat_url": chat_url,
-        "sent": datetime.datetime.now().isoformat(),
-        "updated": datetime.datetime.now().isoformat(),
-    })
-    save_deals(deals)
-
-    src = item.get("source", "")
-    icon = "🟢" if src == "avito" else "🔵" if src == "drom" else "🔴"
-    if success:
-        await cb.message.edit_text(
-            f"✅ {icon} {item.get('title', '')}\n"
-            f"💰 {item.get('price', '—')}\n\n"
-            f"Сообщение отправлено! Жду ответа...",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔗 Открыть чат", url=chat_url if chat_url and chat_url.startswith("http") else url)],
-            ])
-        )
-    else:
-        err = chat_url or "не удалось подключиться к сайту"
-        await cb.message.edit_text(
-            f"❌ {icon} {item.get('title', '')}\n"
-            f"💰 {item.get('price', '—')}\n\n"
-            f"Ошибка: {err[:300]}\n\n"
-            f"Напиши вручную по кнопке:",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔗 Открыть объявление", url=url)],
-                [InlineKeyboardButton(text="🔄 Попробовать ещё раз", callback_data=f"send_opener|{url_to_id(url)}")],
-            ])
-        )
-
-
-@dp.callback_query(F.data.startswith("send_auto|"))
-async def cb_send_auto(cb: CallbackQuery):
-    url = id_to_url(cb.data.split("|", 1)[1])
-    deals = load_deals()
-    deal  = deals.get(url)
-    if not deal:
-        await cb.answer("Сделка не найдена")
-        return
-
-    stage      = deal.get("stage","")
-    next_stage = STAGES.get(stage)
-    if not next_stage or next_stage not in REPLIES:
-        await cb.answer("Нечего отправлять на этой стадии")
-        return
-
-    reply_text = REPLIES[next_stage]
-    listings   = load_listings()
-    item       = next((i for i in listings if i.get("url") == url), None)
-    if not item:
-        item = {"url": url, "source": deal.get("source","avito")}
-
-    await cb.answer("Отправляю...")
-
-    def do_send():
-        chat_url = deal.get("chat_url") or url
-        if deal.get("source") == "avito" and chat_url != url:
-            return send_on_avito(url, reply_text)
-        return send_message_to_seller(item, reply_text)
-
-    loop = asyncio.get_event_loop()
-    success, new_chat_url = await loop.run_in_executor(None, do_send)
-
-    if success:
-        deals[url]["stage"]    = next_stage
-        deals[url]["chat_url"] = new_chat_url or deal.get("chat_url")
-        deals[url]["updated"]  = datetime.datetime.now().isoformat()
-        save_deals(deals)
-        await cb.message.edit_text(
-            cb.message.text + f"\n\n✅ Отправлено ({STAGE_NAMES.get(next_stage,next_stage)})"
-        )
-    else:
-        await cb.message.edit_text(cb.message.text + f"\n\n❌ Ошибка: {new_chat_url}")
-
-
-@dp.callback_query(F.data.startswith("send_custom|"))
-async def cb_send_custom(cb: CallbackQuery):
-    url = id_to_url(cb.data.split("|", 1)[1])
-    waiting_input[cb.from_user.id] = {"action": "custom_text", "deal_key": url}
-    await cb.answer()
-    await cb.message.reply("✏️ Напиши своё сообщение для продавца:")
-
-
-@dp.callback_query(F.data == "captcha_done")
-async def cb_captcha_done(cb: CallbackQuery):
-    info = captcha_wait.get(cb.from_user.id) or captcha_wait.get(MY_CHAT_ID)
-    if info:
-        info["answer"] = "done"
-        info["event"].set()
-    waiting_input.pop(cb.from_user.id, None)
-    await cb.answer("✅ Принято, продолжаю скан!")
-    await cb.message.edit_reply_markup(reply_markup=None)
-
-
-@dp.callback_query(F.data.startswith("skip|"))
-async def cb_skip(cb: CallbackQuery):
-    url = id_to_url(cb.data.split("|", 1)[1])
-    deals = load_deals()
-    if url not in deals:
-        deals[url] = {}
-    deals[url]["stage"]   = "closed"
-    deals[url]["updated"] = datetime.datetime.now().isoformat()
-    save_deals(deals)
-    await cb.answer("Пропущено")
-    await cb.message.edit_text(cb.message.text + "\n\n❌ Пропущено")
-
-
-@dp.callback_query(F.data.startswith("close|"))
-async def cb_close(cb: CallbackQuery):
-    url = id_to_url(cb.data.split("|", 1)[1])
-    deals = load_deals()
-    if url in deals:
-        deals[url]["stage"]   = "closed"
-        deals[url]["updated"] = datetime.datetime.now().isoformat()
-        save_deals(deals)
-    await cb.answer("Закрыто")
-    await cb.message.edit_text(cb.message.text + "\n\n🔒 Закрыт")
-
-
-# ── Обработка свободного текста ──────────────────────────────
-
-async def _load_cookies_to_browser(cookies: list, domain: str):
-    """Загружает cookies в Playwright браузер."""
-    from playwright.async_api import async_playwright
-    IS_SERVER = os.getenv("RAILWAY_ENVIRONMENT") is not None
-    SESSION_DIR.mkdir(exist_ok=True)
-    async with async_playwright() as pw:
-        ctx = await pw.chromium.launch_persistent_context(
-            user_data_dir=str(SESSION_DIR),
-            headless=IS_SERVER,
-            args=["--no-sandbox"],
-        )
-        await ctx.add_cookies(cookies)
-        await ctx.close()
-
-
-@dp.message(F.document, F.chat.id == MY_CHAT_ID)
-async def handle_document(msg: Message):
-    """Принимает listings.json или cookies файл и сохраняет на сервере."""
-    doc = msg.document
-    if not doc.file_name or not doc.file_name.endswith(".json"):
-        await msg.answer("❌ Отправь .json файл")
-        return
-
-    await msg.answer("⏳ Загружаю файл...")
-    try:
-        file = await bot.get_file(doc.file_id)
-        content = await bot.download_file(file.file_path)
-        data = json.loads(content.read())
-
-        fname = doc.file_name.lower()
-
-        # Cookies файл — определяем по имени или по содержимому
-        is_cookie_file = (
-            "cookie" in fname
-            or (isinstance(data, list) and data and "domain" in data[0] and "name" in data[0] and "value" in data[0])
-        )
-        if is_cookie_file:
-            text_repr = json.dumps(data)
-            await _process_cookie_text(msg, text_repr)
-            # Если идёт скан и ждёт куков — автоматически продолжаем
-            info = captcha_wait.get(MY_CHAT_ID)
-            if info and not info["event"].is_set():
-                info["answer"] = "cookies_uploaded"
-                info["event"].set()
-            return
-
-        # Объединяем с существующими
-        existing = {}
-        if Path(LISTINGS_FILE).exists():
-            try:
-                for item in json.loads(Path(LISTINGS_FILE).read_text(encoding="utf-8")):
-                    if item.get("url"):
-                        existing[item["url"]] = item
-            except Exception:
-                pass
-
-        new_count = 0
-        for item in data:
-            if item.get("url") and item["url"] not in existing:
-                new_count += 1
-            if item.get("url"):
-                existing[item["url"]] = item
-
-        merged = sorted(existing.values(), key=lambda x: x.get("_hot_score", 0), reverse=True)
-        Path(LISTINGS_FILE).write_text(
-            json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-
-        deals = load_deals()
-        new_items = [
-            i for i in merged
-            if not is_dealer(i) and in_price_range(i)
-            and i.get("url") and i.get("url") not in deals
-        ]
-
-        await msg.answer(
-            f"✅ Загружено!\n"
-            f"Всего в файле: {len(data)}\n"
-            f"Новых добавлено: {new_count}\n"
-            f"Итого в базе: {len(merged)}\n"
-            f"Подходящих частников: {len(new_items)}\n\n"
-            f"Нажми /new чтобы посмотреть."
-        )
-    except Exception as e:
-        await msg.answer(f"❌ Ошибка: {e}")
-
-
-async def _process_cookie_text(msg: Message, text: str):
-    """Принимает JSON-массив куков из текстового сообщения и загружает в браузер."""
-    import re as _re
-
-    def clean_domain(d: str) -> str:
-        # Убираем markdown: ".[www.avito.ru](https://...)" → ".www.avito.ru"
-        d = _re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', d)
-        return d
-
-    SAMESITE_MAP = {
-        "no_restriction": "None",
-        "unspecified": "None",
-        "lax": "Lax",
-        "strict": "Strict",
-        "none": "None",
-    }
-
-    try:
-        raw = json.loads(text)
-        if not isinstance(raw, list):
-            await msg.answer("❌ Ожидается массив JSON")
-            return
-
-        # Сохраняем оригинальные куки для HTTP запросов
-        Path("avito_cookies_raw.json").write_text(
-            json.dumps(raw, ensure_ascii=False), encoding="utf-8"
-        )
-
-        pw_cookies = []
-        for c in raw:
-            domain = clean_domain(c.get("domain", ""))
-            if not domain:
-                continue
-            cookie = {
-                "name": c["name"],
-                "value": c["value"],
-                "domain": domain,
-                "path": c.get("path", "/"),
-                "secure": c.get("secure", False),
-                "httpOnly": c.get("httpOnly", False),
-                "sameSite": SAMESITE_MAP.get(c.get("sameSite", "").lower(), "None"),
-            }
-            exp = c.get("expirationDate")
-            if exp:
-                cookie["expires"] = int(exp)
-            pw_cookies.append(cookie)
-
-        await msg.answer(f"⏳ Загружаю {len(pw_cookies)} куков в браузер Авито...")
-
-        from playwright.async_api import async_playwright
-        IS_SERVER = os.getenv("RAILWAY_ENVIRONMENT") is not None
-        SESSION_DIR.mkdir(exist_ok=True)
-
-        async with async_playwright() as pw:
-            ctx = await pw.chromium.launch_persistent_context(
-                user_data_dir=str(SESSION_DIR),
-                headless=IS_SERVER,
-                args=["--no-sandbox"],
-            )
-            try:
-                await ctx.add_cookies(pw_cookies)
-                # Проверяем — открываем профиль
-                page = await ctx.new_page()
-                await page.goto("https://www.avito.ru/profile", wait_until="domcontentloaded", timeout=20000)
-                await asyncio.sleep(2)
-                html = await page.content()
-                await page.close()
-                logged_in = "Выйти" in html or "profile" in page.url or "logout" in html
-            finally:
-                await ctx.close()
-
-        if logged_in:
-            await msg.answer("✅ Куки Авито загружены! Авторизация подтверждена.\nТеперь бот может писать продавцам на Авито.")
-        else:
-            await msg.answer("⚠️ Куки загружены, но авторизация не подтверждена (возможно куки устарели).")
-
-    except json.JSONDecodeError as e:
-        await msg.answer(f"❌ Ошибка разбора JSON: {e}")
-    except Exception as e:
-        await msg.answer(f"❌ Ошибка загрузки куков: {e}")
-
-
-@dp.message(F.chat.id == MY_CHAT_ID)
-async def handle_text(msg: Message):
-    if msg.from_user.id not in waiting_input:
-        return
-
-    # Если пользователь прислал JSON с куками прямо в текст
-    if msg.text and msg.text.strip().startswith("[") and '"domain"' in msg.text and '"avito' in msg.text.lower():
-        await _process_cookie_text(msg, msg.text)
-        return
-    if msg.text and msg.text.strip().startswith("[") and '"domain"' in msg.text and '"drom' in msg.text.lower():
-        await _process_cookie_text(msg, msg.text)
-        return
-
-    if msg.from_user.id not in waiting_input:
-        return
-
-    state = waiting_input.pop(msg.from_user.id)
-
-    # Обработка капчи
-    if state.get("action") == "captcha":
-        info = captcha_wait.get(msg.from_user.id) or captcha_wait.get(MY_CHAT_ID)
-        if info:
-            info["answer"] = msg.text.strip()
-            info["event"].set()
-        return
-
-    url      = state["deal_key"]
-    text     = msg.text.strip()
-    deals    = load_deals()
-    deal     = deals.get(url, {})
-    listings = load_listings()
-    item     = next((i for i in listings if i.get("url") == url),
-                    {"url": url, "source": deal.get("source","avito")})
-
-    await msg.answer("⏳ Отправляю...")
-
-    def do_send():
-        return send_message_to_seller(item, text)
-
-    loop = asyncio.get_event_loop()
-    success, chat_url = await loop.run_in_executor(None, do_send)
-
-    if success:
-        deals[url] = deals.get(url, {})
-        deals[url]["chat_url"] = chat_url or deal.get("chat_url")
-        deals[url]["updated"]  = datetime.datetime.now().isoformat()
-        if deals[url].get("stage") == "new":
-            deals[url]["stage"] = "opener"
-        save_deals(deals)
-        await msg.answer("✅ Сообщение отправлено!")
-    else:
-        await msg.answer(f"❌ Ошибка: {chat_url}")
-
-
-# ============================================================
-#  ФОНОВЫЙ СКАНЕР — уведомляет о новых объявлениях
-# ============================================================
-
-async def background_scanner():
-    """Каждые 30 минут сканирует Дром и уведомляет о новых объявлениях."""
-    await asyncio.sleep(30)
-    while True:
-        try:
-            import importlib.util
-            spec = importlib.util.spec_from_file_location("scraper_http", "scraper_http.py")
-            scraper = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(scraper)
-
-            loop = asyncio.get_event_loop()
-
-            # Дром — всегда работает
-            state_file = Path("scan_state.json")
-            state = json.loads(state_file.read_text()) if state_file.exists() else {}
-            start = state.get("drom_bg_page", 1)
-            drom_items = await loop.run_in_executor(
-                None, lambda: scraper.scrape_drom_http(pages=10, start_page=start)
-            )
-            state["drom_bg_page"] = start + 10
-            state_file.write_text(json.dumps(state))
-
-            # Авито — ScraperAPI или HTTP с куками
-            avito_items = await loop.run_in_executor(None, lambda: _scrape_avito_scraperapi(pages=3))
-            if not avito_items:
-                avito_items = await loop.run_in_executor(None, lambda: _scrape_avito_http_with_cookies(pages=3))
-
-            all_items = drom_items + avito_items
-            if all_items:
-                merged, new_count = await loop.run_in_executor(
-                    None, lambda: scraper.merge_and_save(all_items)
-                )
-                deals = load_deals()
-                suitable = [
-                    i for i in merged
-                    if not is_dealer(i) and in_price_range(i)
-                    and i.get("url") and i.get("url") not in deals
-                ]
-                if suitable:
-                    await bot.send_message(
-                        MY_CHAT_ID,
-                        f"🔔 Авто-скан: {new_count} новых объявлений!\n"
-                        f"Подходящих частников: {len(suitable)}\n"
-                        f"Нажми /new чтобы посмотреть."
-                    )
-        except Exception as e:
-            print(f"[background_scanner] {e}")
-        await asyncio.sleep(1800)  # каждые 30 минут
-
-
-# ============================================================
-#  ЗАПУСК
-# ============================================================
-
-_xray_proc = None
-
-def start_xray():
-    global _xray_proc
-    xray_bin = "/usr/local/bin/xray"
-    config = Path("xray_config.json")
-    if not Path(xray_bin).exists() or not config.exists():
-        return
-    try:
-        _xray_proc = subprocess.Popen(
-            [xray_bin, "run", "-c", str(config)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        time.sleep(2)
-        print("✅ xray запущен (socks5://127.0.0.1:10808)")
-    except Exception as e:
-        print(f"⚠️ xray не запустился: {e}")
-
-
 async def main():
-    global SCRAPERAPI_KEY
-    if not SCRAPERAPI_KEY and Path(".scraperapi_key").exists():
-        SCRAPERAPI_KEY = Path(".scraperapi_key").read_text(encoding="utf-8").strip()
-        if SCRAPERAPI_KEY:
-            print(f"✅ ScraperAPI ключ загружен")
-
-    if not BOT_TOKEN:
-        print("❌ Заполни BOT_TOKEN в начале файла control_bot.py")
-        print("   Создай бота через @BotFather в Telegram")
-        return
-    if not MY_CHAT_ID:
-        print("❌ Заполни MY_CHAT_ID (свой Telegram ID)")
-        print("   Узнай через @userinfobot в Telegram")
-        return
-
-    start_xray()
     logging.basicConfig(level=logging.WARNING)
-    print("✅ Бот запущен! Открой Telegram и напиши /start своему боту.")
-    print("   Ctrl+C — остановить\n")
-
-    asyncio.create_task(background_scanner())
+    print("✅ Авто-брокер бот запущен!")
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
