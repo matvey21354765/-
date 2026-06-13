@@ -996,9 +996,67 @@ async def cmd_settings(msg: Message, state: FSMContext):
     await state.set_state(Setup.region)
 
 
+ALL_SOURCES = ["drom", "autoru", "kolesa", "bibika", "avito"]
+SOURCE_NAMES = {
+    "drom":   "🔵 Дром",
+    "autoru": "🟠 Auto.ru",
+    "kolesa": "🟢 Kolesa",
+    "bibika": "🟣 Bibika",
+    "avito":  "🔴 Авито",
+}
+
+
+def sources_keyboard(enabled: list[str]) -> InlineKeyboardMarkup:
+    rows = []
+    for src in ALL_SOURCES:
+        check = "✅" if src in enabled else "☐"
+        rows.append([InlineKeyboardButton(
+            text=f"{check} {SOURCE_NAMES[src]}",
+            callback_data=f"toggle_src|{src}"
+        )])
+    rows.append([
+        InlineKeyboardButton(text="🌐 Все площадки", callback_data="src_all"),
+        InlineKeyboardButton(text="🔍 Искать", callback_data="do_search"),
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 @dp.message(Command("search"))
 async def cmd_search(msg: Message):
-    await do_search_for_user(msg.from_user.id, msg)
+    uid = msg.from_user.id
+    s = load_settings(uid)
+    if not s.get("region"):
+        await msg.answer("Сначала настрой поиск: /start")
+        return
+    enabled = s.get("sources", ALL_SOURCES)
+    await msg.answer("Выбери площадки для поиска:", reply_markup=sources_keyboard(enabled))
+
+
+@dp.callback_query(F.data.startswith("toggle_src|"))
+async def cb_toggle_src(cb: CallbackQuery):
+    src = cb.data.split("|")[1]
+    uid = cb.from_user.id
+    s = load_settings(uid)
+    enabled = list(s.get("sources", ALL_SOURCES))
+    if src in enabled:
+        if len(enabled) > 1:  # оставляем хотя бы одну
+            enabled.remove(src)
+    else:
+        enabled.append(src)
+    s["sources"] = enabled
+    save_settings(uid, s)
+    await cb.answer()
+    await cb.message.edit_reply_markup(reply_markup=sources_keyboard(enabled))
+
+
+@dp.callback_query(F.data == "src_all")
+async def cb_src_all(cb: CallbackQuery):
+    uid = cb.from_user.id
+    s = load_settings(uid)
+    s["sources"] = list(ALL_SOURCES)
+    save_settings(uid, s)
+    await cb.answer("Все площадки включены")
+    await cb.message.edit_reply_markup(reply_markup=sources_keyboard(ALL_SOURCES))
 
 
 @dp.callback_query(F.data == "do_search")
@@ -1218,20 +1276,24 @@ async def do_search_for_user(uid: int, reply_to):
     pmin = s.get("price_min", 0)
     pmax = s.get("price_max", 99_000_000)
     region_name = REGIONS.get(region, region)
+    enabled_sources = s.get("sources", ALL_SOURCES)
 
-    await reply_to.answer(f"🔍 Ищу авто в {region_name} ({pmin:,}–{pmax:,} ₽)...\nЭто займёт ~1 минуту.")
+    src_labels = " ".join(SOURCE_TAGS.get(src, src) for src in enabled_sources)
+    await reply_to.answer(f"🔍 Ищу в {region_name} ({pmin:,}–{pmax:,} ₽)\n{src_labels}")
 
     skipped = load_skipped(uid)
-
     loop = asyncio.get_event_loop()
-    drom_items, autoru_items, kolesa_items, bibika_items, avito_items = await asyncio.gather(
-        loop.run_in_executor(None, lambda: scrape_drom(region, pages=10, price_min=pmin, price_max=pmax)),
-        loop.run_in_executor(None, lambda: scrape_autoru(region, pages=5, price_min=pmin, price_max=pmax)),
-        loop.run_in_executor(None, lambda: scrape_kolesa(region, pages=5, price_min=pmin, price_max=pmax)),
-        loop.run_in_executor(None, lambda: scrape_bibika(region, pages=3, price_min=pmin, price_max=pmax)),
-        loop.run_in_executor(None, lambda: scrape_avito(region, pages=3, price_min=pmin, price_max=pmax)),
-    )
-    items = drom_items + autoru_items + kolesa_items + bibika_items + avito_items
+
+    scraper_map = {
+        "drom":   lambda: scrape_drom(region, pages=10, price_min=pmin, price_max=pmax),
+        "autoru": lambda: scrape_autoru(region, pages=5, price_min=pmin, price_max=pmax),
+        "kolesa": lambda: scrape_kolesa(region, pages=5, price_min=pmin, price_max=pmax),
+        "bibika": lambda: scrape_bibika(region, pages=3, price_min=pmin, price_max=pmax),
+        "avito":  lambda: scrape_avito(region, pages=3, price_min=pmin, price_max=pmax),
+    }
+    tasks = [loop.run_in_executor(None, scraper_map[src]) for src in enabled_sources if src in scraper_map]
+    results = await asyncio.gather(*tasks)
+    items = [item for batch in results for item in batch]
 
     suitable = [
         i for i in items
