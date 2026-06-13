@@ -969,15 +969,21 @@ def _scrape_avito_http_with_cookies(pages: int = 5) -> list[dict]:
                 except ValueError: pass
         return None
 
-    # Прокси варианты: сначала без прокси, потом с прокси
+    # Варианты прокси: без прокси, потом через VLESS
     proxy_options = [{}]
     if _xray_proc and _xray_proc.poll() is None:
         proxy_options.append({"https": "socks5h://127.0.0.1:10808", "http": "socks5h://127.0.0.1:10808"})
 
-    results = []
-    session = _req.Session()
+    # Создаём cloudscraper сессию (имитирует Chrome, обходит антибот)
+    try:
+        import cloudscraper as _cs
+        session = _cs.create_scraper(browser={"browser": "chrome", "platform": "windows", "mobile": False})
+    except Exception:
+        session = _req.Session()
     session.headers.update(headers)
     session.cookies.update(cookies)
+
+    results = []
 
     for p in range(1, pages + 1):
         url = f"https://www.avito.ru/ekaterinburg/avtomobili?p={p}&s=104"
@@ -985,14 +991,16 @@ def _scrape_avito_http_with_cookies(pages: int = 5) -> list[dict]:
             html = None
             for proxies in proxy_options:
                 try:
-                    r = session.get(url, proxies=proxies, timeout=20)
-                    if "captcha" not in r.text.lower() and "Доступ ограничен" not in r.text:
-                        html = r.text
+                    r = session.get(url, proxies=proxies, timeout=25)
+                    body = r.text
+                    if "captcha" not in body.lower() and "Доступ ограничен" not in body and len(body) > 5000:
+                        html = body
                         break
-                except Exception:
-                    continue
+                    print(f"  [Авито] стр.{p} прокси={bool(proxies)}: заблокировано (len={len(body)})")
+                except Exception as ex:
+                    print(f"  [Авито] стр.{p} прокси={bool(proxies)}: {ex}")
             if not html:
-                print(f"  [!] Авито HTTP стр.{p}: блокировка на всех IP")
+                print(f"  [!] Авито HTTP стр.{p}: блокировка на всех вариантах")
                 break
             soup = _BS(html, "lxml")
             cards = soup.select("[data-marker='item']")
@@ -1533,6 +1541,11 @@ async def handle_document(msg: Message):
         if is_cookie_file:
             text_repr = json.dumps(data)
             await _process_cookie_text(msg, text_repr)
+            # Если идёт скан и ждёт куков — автоматически продолжаем
+            info = captcha_wait.get(MY_CHAT_ID)
+            if info and not info["event"].is_set():
+                info["answer"] = "cookies_uploaded"
+                info["event"].set()
             return
 
         # Объединяем с существующими
