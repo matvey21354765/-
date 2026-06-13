@@ -441,6 +441,215 @@ def scrape_autoru(region: str, pages: int = 5, price_min: int = 0, price_max: in
     return results
 
 
+# ── Парсер Kolesa.ru ────────────────────────────────────────────
+
+KOLESA_SLUGS = {
+    "ekaterinburg": "ekaterinburg",
+    "moscow":       "moskva",
+    "spb":          "sankt-peterburg",
+    "novosibirsk":  "novosibirsk",
+    "kazan":        "kazan",
+    "chelyabinsk":  "chelyabinsk",
+    "ufa":          "ufa",
+    "krasnodar":    "krasnodar",
+    "omsk":         "omsk",
+    "tyumen":       "tyumen",
+    "perm":         "perm",
+    "krasnoyarsk":  "krasnoyarsk",
+    "voronezh":     "voronezh",
+    "samara":       "samara",
+    "rostov":       "rostov-na-donu",
+}
+
+
+def scrape_kolesa(region: str, pages: int = 5, price_min: int = 0, price_max: int = 99_000_000) -> list[dict]:
+    slug = KOLESA_SLUGS.get(region, region)
+    try:
+        from bs4 import BeautifulSoup as _BS
+        try:
+            import cloudscraper as _cs
+            session = _cs.create_scraper(browser={"browser": "chrome", "platform": "windows"})
+        except ImportError:
+            import requests as _req
+            session = _req.Session()
+            session.headers.update({
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Accept-Language": "ru-RU,ru;q=0.9",
+            })
+    except ImportError:
+        return []
+
+    results = []
+    today = datetime.date.today()
+
+    for p in range(1, pages + 1):
+        url = f"https://kolesa.ru/cars/"
+        params = {
+            "city": slug,
+            "seller": "private",
+            "page": p,
+        }
+        if price_min > 0:
+            params["price_from"] = price_min
+        if price_max < 99_000_000:
+            params["price_to"] = price_max
+
+        try:
+            r = session.get(url, params=params, timeout=20)
+            if r.status_code != 200:
+                break
+            soup = _BS(r.text, "lxml")
+
+            cards = (
+                soup.select("div.a-list__item")
+                or soup.select("[class*='listing-item']")
+                or soup.select("article[data-id]")
+            )
+            if not cards:
+                break
+
+            for card in cards:
+                try:
+                    link = card.select_one("a.a-el-link") or card.select_one("a[href*='/cars/']")
+                    title = link.get_text(strip=True) if link else ""
+                    href = link.get("href", "") if link else ""
+                    item_url = href if href.startswith("http") else ("https://kolesa.ru" + href)
+
+                    price_el = card.select_one(".a-price__number") or card.select_one("[class*='price']")
+                    price = price_el.get_text(strip=True) if price_el else ""
+
+                    date_el = card.select_one(".a-info__date") or card.select_one("[class*='date']")
+                    date_text = date_el.get_text(strip=True) if date_el else ""
+                    date = parse_ru_date(date_text)
+                    days = max(0, (today - date).days) if date else 0
+
+                    desc_el = card.select_one(".a-descr") or card.select_one("[class*='descr']")
+                    desc = desc_el.get_text(strip=True) if desc_el else ""
+
+                    if title and item_url and "/cars/" in item_url:
+                        item = {
+                            "source": "kolesa",
+                            "title": title,
+                            "price": price,
+                            "url": item_url,
+                            "date": str(date) if date else date_text,
+                            "_photos": 0,
+                            "_days_on_site": days,
+                            "description": desc,
+                            "seller": "",
+                        }
+                        item["_hot_score"] = hot_score(item)
+                        results.append(item)
+                except Exception:
+                    pass
+
+            time.sleep(random.uniform(1, 2))
+        except Exception as e:
+            print(f"  [Kolesa {region}] стр.{p}: {e}")
+            break
+
+    return results
+
+
+# ── Парсер Bibika.ru ─────────────────────────────────────────────
+
+BIBIKA_REGIONS = {
+    "ekaterinburg": "ekaterinburg",
+    "moscow":       "moscow",
+    "spb":          "spb",
+    "novosibirsk":  "novosibirsk",
+    "kazan":        "kazan",
+    "chelyabinsk":  "chelyabinsk",
+    "ufa":          "ufa",
+    "krasnodar":    "krasnodar",
+    "omsk":         "omsk",
+    "tyumen":       "tyumen",
+    "perm":         "perm",
+    "krasnoyarsk":  "krasnoyarsk",
+    "voronezh":     "voronezh",
+    "samara":       "samara",
+    "rostov":       "rostov",
+}
+
+
+def scrape_bibika(region: str, pages: int = 3, price_min: int = 0, price_max: int = 99_000_000) -> list[dict]:
+    slug = BIBIKA_REGIONS.get(region, region)
+    try:
+        from bs4 import BeautifulSoup as _BS
+        try:
+            import cloudscraper as _cs
+            session = _cs.create_scraper(browser={"browser": "chrome", "platform": "windows"})
+        except ImportError:
+            import requests as _req
+            session = _req.Session()
+            session.headers.update({
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Accept-Language": "ru-RU,ru;q=0.9",
+            })
+    except ImportError:
+        return []
+
+    results = []
+    today = datetime.date.today()
+
+    for p in range(1, pages + 1):
+        url = f"https://bibika.ru/auto/{slug}/"
+        params = {"page": p, "seller": "1"}  # seller=1 — частники
+        if price_min > 0:
+            params["price_min"] = price_min
+        if price_max < 99_000_000:
+            params["price_max"] = price_max
+
+        try:
+            r = session.get(url, params=params, timeout=20)
+            if r.status_code != 200:
+                break
+            soup = _BS(r.text, "lxml")
+
+            cards = soup.select(".auto-item") or soup.select("[class*='auto-item']") or soup.select("div[itemtype*='Product']")
+            if not cards:
+                break
+
+            for card in cards:
+                try:
+                    link = card.select_one("a[href*='/auto/']") or card.select_one("h2 a") or card.select_one("h3 a")
+                    title = link.get_text(strip=True) if link else ""
+                    href = link.get("href", "") if link else ""
+                    item_url = href if href.startswith("http") else ("https://bibika.ru" + href)
+
+                    price_el = card.select_one("[class*='price']") or card.select_one("[itemprop='price']")
+                    price = price_el.get("content") or price_el.get_text(strip=True) if price_el else ""
+
+                    date_el = card.select_one("[class*='date']") or card.select_one("time")
+                    date_text = date_el.get_text(strip=True) if date_el else ""
+                    date = parse_ru_date(date_text)
+                    days = max(0, (today - date).days) if date else 0
+
+                    if title and item_url:
+                        item = {
+                            "source": "bibika",
+                            "title": title,
+                            "price": price,
+                            "url": item_url,
+                            "date": str(date) if date else date_text,
+                            "_photos": 0,
+                            "_days_on_site": days,
+                            "description": "",
+                            "seller": "",
+                        }
+                        item["_hot_score"] = hot_score(item)
+                        results.append(item)
+                except Exception:
+                    pass
+
+            time.sleep(random.uniform(1, 2))
+        except Exception as e:
+            print(f"  [Bibika {region}] стр.{p}: {e}")
+            break
+
+    return results
+
+
 # ── FSM состояния ────────────────────────────────────────────────
 
 class Setup(StatesGroup):
@@ -607,16 +816,13 @@ async def do_search_for_user(uid: int, reply_to):
     skipped = load_skipped(uid)
 
     loop = asyncio.get_event_loop()
-    drom_fut = loop.run_in_executor(
-        None,
-        lambda: scrape_drom(region, pages=10, price_min=pmin, price_max=pmax)
+    drom_items, autoru_items, kolesa_items, bibika_items = await asyncio.gather(
+        loop.run_in_executor(None, lambda: scrape_drom(region, pages=10, price_min=pmin, price_max=pmax)),
+        loop.run_in_executor(None, lambda: scrape_autoru(region, pages=5, price_min=pmin, price_max=pmax)),
+        loop.run_in_executor(None, lambda: scrape_kolesa(region, pages=5, price_min=pmin, price_max=pmax)),
+        loop.run_in_executor(None, lambda: scrape_bibika(region, pages=3, price_min=pmin, price_max=pmax)),
     )
-    autoru_fut = loop.run_in_executor(
-        None,
-        lambda: scrape_autoru(region, pages=5, price_min=pmin, price_max=pmax)
-    )
-    drom_items, autoru_items = await asyncio.gather(drom_fut, autoru_fut)
-    items = drom_items + autoru_items
+    items = drom_items + autoru_items + kolesa_items + bibika_items
 
     # Фильтрация
     suitable = [
@@ -651,7 +857,7 @@ async def do_search_for_user(uid: int, reply_to):
         hot_tag = " 🔥" if score >= 15 else " ⭐" if score >= 5 else ""
 
         source = item.get("source", "")
-        source_tag = "🟠 Auto.ru" if source == "autoru" else "🔵 Дром"
+        source_tag = {"autoru": "🟠 Auto.ru", "kolesa": "🟢 Kolesa", "bibika": "🟣 Bibika"}.get(source, "🔵 Дром")
         text = (
             f"{source_tag} {item.get('title', '')}{hot_tag}\n"
             f"💰 {item.get('price', '—')}\n"
@@ -714,10 +920,13 @@ async def cb_more(cb: CallbackQuery):
     skipped = load_skipped(uid)
 
     loop = asyncio.get_event_loop()
-    drom_fut = loop.run_in_executor(None, lambda: scrape_drom(region, pages=10, price_min=pmin, price_max=pmax))
-    autoru_fut = loop.run_in_executor(None, lambda: scrape_autoru(region, pages=5, price_min=pmin, price_max=pmax))
-    drom_items, autoru_items = await asyncio.gather(drom_fut, autoru_fut)
-    items = drom_items + autoru_items
+    drom_items, autoru_items, kolesa_items, bibika_items = await asyncio.gather(
+        loop.run_in_executor(None, lambda: scrape_drom(region, pages=10, price_min=pmin, price_max=pmax)),
+        loop.run_in_executor(None, lambda: scrape_autoru(region, pages=5, price_min=pmin, price_max=pmax)),
+        loop.run_in_executor(None, lambda: scrape_kolesa(region, pages=5, price_min=pmin, price_max=pmax)),
+        loop.run_in_executor(None, lambda: scrape_bibika(region, pages=3, price_min=pmin, price_max=pmax)),
+    )
+    items = drom_items + autoru_items + kolesa_items + bibika_items
     suitable = [
         i for i in items
         if not is_dealer(i)
@@ -739,7 +948,7 @@ async def cb_more(cb: CallbackQuery):
         score = item.get("_hot_score", 0)
         hot_tag = " 🔥" if score >= 15 else " ⭐" if score >= 5 else ""
         source = item.get("source", "")
-        source_tag = "🟠 Auto.ru" if source == "autoru" else "🔵 Дром"
+        source_tag = {"autoru": "🟠 Auto.ru", "kolesa": "🟢 Kolesa", "bibika": "🟣 Bibika"}.get(source, "🔵 Дром")
         text = (
             f"{source_tag} {item.get('title', '')}{hot_tag}\n"
             f"💰 {item.get('price', '—')}\n"
