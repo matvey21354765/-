@@ -1152,10 +1152,11 @@ SOURCE_TAGS = {
     "drom":   "🔵 Дром",
 }
 
+# Кеш результатов поиска: uid -> list[dict]
+_search_cache: dict[int, list[dict]] = {}
 
-async def send_item_card(chat_id: int, item: dict, uid: int):
-    url = item.get("url", "")
-    sid = url_to_id(url)
+
+def _build_caption(item: dict, idx: int, total: int) -> str:
     days = item.get("_days_on_site", 0)
     days_str = "сегодня" if days == 0 else f"{days} дн. назад"
     score = item.get("_hot_score", 0)
@@ -1163,17 +1164,48 @@ async def send_item_card(chat_id: int, item: dict, uid: int):
     source_tag = SOURCE_TAGS.get(item.get("source", ""), "🔵")
 
     caption = (
-        f"{source_tag} {item.get('title', '')}{hot_tag}\n"
+        f"{idx}/{total} {source_tag} {item.get('title', '')}{hot_tag}\n"
         f"💰 {item.get('price', '—')}\n"
         f"📅 {days_str}"
     )
     if item.get("description"):
-        caption += f"\n📝 {item['description'][:200]}"
+        caption += f"\n\n📝 {item['description'][:700]}"
+    return caption
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="🔗 Открыть", url=url),
-        InlineKeyboardButton(text="❌ Скрыть", callback_data=f"hide|{sid}|{uid}"),
-    ]])
+
+def _item_keyboard(url: str, sid: str, uid: int, idx: int, total: int) -> InlineKeyboardMarkup:
+    rows = [[
+        InlineKeyboardButton(text="🔗 Открыть объявление", url=url),
+    ]]
+    nav = []
+    if idx < total:
+        nav.append(InlineKeyboardButton(text=f"➡️ Следующее ({idx+1}/{total})", callback_data=f"page|{uid}|{idx}"))
+    nav.append(InlineKeyboardButton(text="❌ Пропустить", callback_data=f"skip|{sid}|{uid}|{idx}|{total}"))
+    rows.append(nav)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def send_item_at(chat_id: int, uid: int, idx: int):
+    """Отправляет объявление с индексом idx из кеша пользователя."""
+    items = _search_cache.get(uid, [])
+    if not items or idx >= len(items):
+        await bot.send_message(chat_id, "✅ Объявления закончились. Нажми /search для нового поиска.")
+        return
+
+    item = items[idx]
+    total = len(items)
+
+    # Подгружаем фото/описание если ещё нет
+    if not item.get("_enriched"):
+        [enriched] = await enrich_items([item])
+        enriched["_enriched"] = True
+        _search_cache[uid][idx] = enriched
+        item = enriched
+
+    url = item.get("url", "")
+    sid = url_to_id(url)
+    caption = _build_caption(item, idx + 1, total)
+    kb = _item_keyboard(url, sid, uid, idx, total)
 
     photo_url = item.get("_photo_url", "")
     if photo_url:
@@ -1181,8 +1213,7 @@ async def send_item_card(chat_id: int, item: dict, uid: int):
             await bot.send_photo(chat_id, photo=photo_url, caption=caption, reply_markup=kb)
             return
         except Exception:
-            pass  # Если фото не загрузилось — отправим текстом
-
+            pass
     await bot.send_message(chat_id, caption, reply_markup=kb)
 
 
@@ -1211,7 +1242,6 @@ async def do_search_for_user(uid: int, reply_to):
     )
     items = drom_items + autoru_items + kolesa_items + bibika_items + avito_items
 
-    # Фильтрация
     suitable = [
         i for i in items
         if not is_dealer(i)
@@ -1219,8 +1249,6 @@ async def do_search_for_user(uid: int, reply_to):
         and i.get("url")
         and i["url"] not in skipped
     ]
-
-    # Сортировка: сначала с горячими словами, потом по дням
     suitable.sort(key=lambda x: (-x.get("_hot_score", 0), x.get("_days_on_site", 999)))
 
     if not suitable:
@@ -1237,31 +1265,46 @@ async def do_search_for_user(uid: int, reply_to):
         await reply_to.answer("😔 Все найденные объявления уже сняты с продажи. Попробуй позже.")
         return
 
-    await reply_to.answer(
-        f"✅ Найдено {len(suitable)} актуальных объявлений от частников в {region_name}!\n"
-        f"Показываю лучшие (ниже рынка в приоритете):"
-    )
+    _search_cache[uid] = suitable
+    await reply_to.answer(f"✅ Найдено {len(suitable)} объявлений! Листай по одному:")
+    await send_item_at(reply_to.chat.id, uid, 0)
 
-    await reply_to.answer("📸 Загружаю фото и описания...")
-    top10 = await enrich_items(suitable[:10])
 
-    chat_id = reply_to.chat.id
-    for item in top10:
-        await send_item_card(chat_id, item, uid)
+@dp.callback_query(F.data.startswith("page|"))
+async def cb_page(cb: CallbackQuery):
+    _, uid_s, idx_s = cb.data.split("|")
+    uid = int(uid_s)
+    idx = int(idx_s)
+    await cb.answer()
+    # Пометим текущее как просмотренное
+    items = _search_cache.get(uid, [])
+    if items and idx > 0:
+        seen = load_seen(uid)
+        seen.add(items[idx - 1].get("url", ""))
+        save_seen(uid, seen)
+    await send_item_at(cb.message.chat.id, uid, idx)
 
-    if len(suitable) > 10:
-        await reply_to.answer(
-            f"... и ещё {len(suitable) - 10} объявлений.\n\nНажми чтобы показать ещё:",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="➡️ Ещё объявления", callback_data=f"more|{uid}|10")],
-            ])
-        )
 
-    # Сохраняем показанные в seen
-    seen = load_seen(uid)
-    for item in suitable[:10]:
-        seen.add(item.get("url", ""))
-    save_seen(uid, seen)
+@dp.callback_query(F.data.startswith("skip|"))
+async def cb_skip(cb: CallbackQuery):
+    parts = cb.data.split("|")
+    sid = parts[1]
+    uid = int(parts[2])
+    idx = int(parts[3])
+    total = int(parts[4])
+    url = id_to_url(sid)
+
+    skipped = load_skipped(uid)
+    skipped.add(url)
+    save_skipped(uid, skipped)
+    await cb.answer("Пропущено")
+
+    # Удаляем из кеша и переходим к следующему
+    items = _search_cache.get(uid, [])
+    if items and idx < len(items):
+        _search_cache[uid].pop(idx)
+
+    await send_item_at(cb.message.chat.id, uid, idx)
 
 
 @dp.callback_query(F.data.startswith("hide|"))
@@ -1275,58 +1318,6 @@ async def cb_hide(cb: CallbackQuery):
     save_skipped(uid, skipped)
     await cb.answer("Скрыто")
     await cb.message.delete()
-
-
-@dp.callback_query(F.data.startswith("more|"))
-async def cb_more(cb: CallbackQuery):
-    parts = cb.data.split("|")
-    uid = int(parts[1])
-    offset = int(parts[2])
-    await cb.answer()
-
-    s = load_settings(uid)
-    if not s.get("region"):
-        await cb.message.answer("Настрой поиск: /start")
-        return
-
-    region = s["region"]
-    pmin = s.get("price_min", 0)
-    pmax = s.get("price_max", 99_000_000)
-    skipped = load_skipped(uid)
-
-    loop = asyncio.get_event_loop()
-    drom_items, autoru_items, kolesa_items, bibika_items, avito_items = await asyncio.gather(
-        loop.run_in_executor(None, lambda: scrape_drom(region, pages=30, price_min=pmin, price_max=pmax)),
-        loop.run_in_executor(None, lambda: scrape_autoru(region, pages=15, price_min=pmin, price_max=pmax)),
-        loop.run_in_executor(None, lambda: scrape_kolesa(region, pages=15, price_min=pmin, price_max=pmax)),
-        loop.run_in_executor(None, lambda: scrape_bibika(region, pages=10, price_min=pmin, price_max=pmax)),
-        loop.run_in_executor(None, lambda: scrape_avito(region, pages=10, price_min=pmin, price_max=pmax)),
-    )
-    items = drom_items + autoru_items + kolesa_items + bibika_items + avito_items
-    suitable = [
-        i for i in items
-        if not is_dealer(i)
-        and in_price_range(i, pmin, pmax)
-        and i.get("url") and i["url"] not in skipped
-    ]
-    suitable.sort(key=lambda x: (-x.get("_hot_score", 0), x.get("_days_on_site", 999)))
-
-    batch = suitable[offset:offset + 10]
-    if not batch:
-        await cb.message.answer("Больше объявлений нет. Попробуй /search снова завтра.")
-        return
-
-    batch = await enrich_items(batch)
-    for item in batch:
-        await send_item_card(cb.message.chat.id, item, uid)
-
-    if len(suitable) > offset + 10:
-        await cb.message.answer(
-            "Показать ещё?",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="➡️ Ещё", callback_data=f"more|{uid}|{offset+10}")],
-            ])
-        )
 
 
 @dp.message(Command("help"))
