@@ -773,92 +773,143 @@ def _avito_get(session, target_url: str, params: dict):
     full_url = f"{target_url}?{qs}" if qs else target_url
 
     if SCRAPER_API_KEY:
-        # Сначала пробуем без рендера (быстро, 1 кредит)
+        # Пробуем с render=true сразу — Авито требует JS
         r = _req.get("http://api.scraperapi.com", params={
-            "api_key": SCRAPER_API_KEY,
-            "url": full_url,
-            "country_code": "ru",
-        }, timeout=30)
-        # Если карточки нашлись — отлично
-        if r.status_code == 200 and 'data-marker="item"' in r.text:
-            return r
-        # Иначе рендерим JS (5 кредитов, но работает)
-        return _req.get("http://api.scraperapi.com", params={
             "api_key": SCRAPER_API_KEY,
             "url": full_url,
             "render": "true",
             "country_code": "ru",
-        }, timeout=60)
+        }, timeout=90)
+        if r.status_code == 200:
+            return r
+        # Фолбек без рендера
+        r2 = _req.get("http://api.scraperapi.com", params={
+            "api_key": SCRAPER_API_KEY,
+            "url": full_url,
+            "country_code": "ru",
+        }, timeout=30)
+        return r2
 
     return session.get(full_url, timeout=25)
+
+
+def _avito_item_from_json(it: dict, today) -> dict | None:
+    """Преобразует один объект из JSON Авито в dict объявления."""
+    try:
+        title = it.get("title", "")
+        url_path = it.get("urlPath") or it.get("url", "")
+        if not url_path:
+            return None
+        item_url = ("https://www.avito.ru" + url_path) if url_path.startswith("/") else url_path
+        if not title or "avito.ru" not in item_url:
+            return None
+
+        price_info = it.get("priceDetailed") or it.get("price") or {}
+        if isinstance(price_info, dict):
+            price_val = price_info.get("value") or price_info.get("number") or 0
+            price = f"{int(price_val):,} ₽".replace(",", " ") if price_val else ""
+        else:
+            price = str(price_info) if price_info else ""
+
+        images = it.get("images") or it.get("gallery", {}).get("images", []) or []
+        photo_url = ""
+        if images and isinstance(images, list):
+            img = images[0]
+            if isinstance(img, dict):
+                # Берём наибольший доступный размер
+                photo_url = (img.get("864x648") or img.get("640x480") or
+                             img.get("320x240") or img.get("url") or
+                             next(iter(img.values()), ""))
+            elif isinstance(img, str):
+                photo_url = img
+        if photo_url and photo_url.startswith("//"):
+            photo_url = "https:" + photo_url
+
+        desc = it.get("description", "") or ""
+        item = {
+            "source": "avito", "title": title, "price": price,
+            "url": item_url, "date": str(today),
+            "_photos": len(images), "_days_on_site": 0,
+            "description": desc[:300], "seller": "", "_photo_url": photo_url,
+        }
+        item["_hot_score"] = hot_score(item)
+        return item
+    except Exception:
+        return None
+
+
+def _avito_find_items_in_json(obj, depth=0) -> list:
+    """Рекурсивно ищет массив объявлений в JSON Авито."""
+    if depth > 10 or not isinstance(obj, (dict, list)):
+        return []
+    if isinstance(obj, list):
+        # Если список длинный и первый элемент похож на объявление
+        if len(obj) >= 3 and isinstance(obj[0], dict):
+            sample = obj[0]
+            if ("title" in sample or "urlPath" in sample) and ("price" in sample or "priceDetailed" in sample):
+                return obj
+        for x in obj:
+            r = _avito_find_items_in_json(x, depth + 1)
+            if r:
+                return r
+        return []
+    if isinstance(obj, dict):
+        # Прямые пути которые использует Авито
+        for key in ("items", "catalog", "listing", "offers"):
+            val = obj.get(key)
+            if isinstance(val, list) and len(val) >= 3:
+                sample = val[0] if val else {}
+                if isinstance(sample, dict) and ("title" in sample or "urlPath" in sample):
+                    return val
+        for v in obj.values():
+            r = _avito_find_items_in_json(v, depth + 1)
+            if r:
+                return r
+    return []
 
 
 def _parse_avito_items(soup, today, slug: str) -> list[dict]:
     """Парсит объявления Авито из soup: сначала __NEXT_DATA__, потом HTML."""
     results = []
 
-    # 1. __NEXT_DATA__ (Next.js)
+    # 1. __NEXT_DATA__ (Next.js — основной источник данных Авито)
     nd = soup.find("script", {"id": "__NEXT_DATA__"})
     if nd and nd.string:
         try:
             data = json.loads(nd.string)
-            # Путь к листингу может меняться, ищем items рекурсивно
-            def find_items(obj, depth=0):
-                if depth > 8 or not isinstance(obj, (dict, list)):
-                    return []
-                if isinstance(obj, list):
-                    for x in obj:
-                        r = find_items(x, depth + 1)
-                        if r:
-                            return r
-                    return []
-                if isinstance(obj, dict):
-                    if "items" in obj and isinstance(obj["items"], list) and len(obj["items"]) > 3:
-                        # проверим что это объявления (есть title или id)
-                        sample = obj["items"][0] if obj["items"] else {}
-                        if "title" in sample or "id" in sample:
-                            return obj["items"]
-                    for v in obj.values():
-                        r = find_items(v, depth + 1)
-                        if r:
-                            return r
-                return []
-            items_raw = find_items(data)
+            items_raw = _avito_find_items_in_json(data)
             for it in items_raw:
-                try:
-                    title = it.get("title", "")
-                    url_path = it.get("urlPath") or it.get("url", "")
-                    item_url = ("https://www.avito.ru" + url_path) if url_path.startswith("/") else url_path
-                    price_info = it.get("priceDetailed") or it.get("price") or {}
-                    if isinstance(price_info, dict):
-                        price_val = price_info.get("value") or price_info.get("number") or ""
-                        price = f"{int(price_val):,} ₽".replace(",", " ") if price_val else ""
-                    else:
-                        price = str(price_info)
-                    images = it.get("images") or it.get("photos") or []
-                    photo_url = ""
-                    if images and isinstance(images, list):
-                        img = images[0]
-                        if isinstance(img, dict):
-                            photo_url = img.get("864x648") or img.get("640x480") or img.get("url") or list(img.values())[0] if img else ""
-                        elif isinstance(img, str):
-                            photo_url = img
-                    if title and item_url and "avito.ru" in item_url:
-                        item = {
-                            "source": "avito", "title": title, "price": price,
-                            "url": item_url, "date": str(today),
-                            "_photos": len(images), "_days_on_site": 0,
-                            "description": it.get("description", "")[:300],
-                            "seller": "", "_photo_url": photo_url,
-                        }
-                        item["_hot_score"] = hot_score(item)
-                        results.append(item)
-                except Exception:
-                    pass
+                item = _avito_item_from_json(it, today)
+                if item:
+                    results.append(item)
             if results:
                 return results
+            print(f"  [Авито] __NEXT_DATA__ найден, но items не извлечены (len={len(nd.string)})")
         except Exception as e:
             print(f"  [Авито __NEXT_DATA__] ошибка: {e}")
+
+    # 2. Ищем данные в обычных <script> тегах (window.__initialData__ и т.п.)
+    for sc in soup.select("script:not([src])"):
+        sc_text = sc.string or ""
+        if len(sc_text) < 500:
+            continue
+        for var in ("__initialData__", "window.dataLayer", "initialState"):
+            if var not in sc_text:
+                continue
+            idx = sc_text.find("{", sc_text.find(var))
+            if idx == -1:
+                continue
+            try:
+                data = json.loads(sc_text[idx:sc_text.rfind("}") + 1])
+                items_raw = _avito_find_items_in_json(data)
+                for it in items_raw:
+                    item = _avito_item_from_json(it, today)
+                    if item:
+                        results.append(item)
+                if results:
+                    return results
+            except Exception:
+                pass
 
     # 2. HTML карточки [data-marker='item']
     cards = soup.select("[data-marker='item']")
@@ -921,14 +972,11 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
     try:
         import requests as _req
         from bs4 import BeautifulSoup as _BS
-        try:
-            import cloudscraper as _cs
-            session = _cs.create_scraper(browser={"browser": "chrome", "platform": "windows", "mobile": False})
-        except ImportError:
-            session = _req.Session()
+        session = _req.Session()
         session.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "Accept-Language": "ru-RU,ru;q=0.9",
+            "Accept": "text/html,application/xhtml+xml,*/*",
         })
     except ImportError:
         return []
@@ -937,7 +985,8 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
     today = datetime.date.today()
 
     for p in range(1, pages + 1):
-        params: dict = {"p": p, "seller_type": "1"}
+        # Не передаём seller_type — фильтрация дилеров по ключевым словам позже
+        params: dict = {"p": p}
         if price_min > 0:
             params["pmin"] = price_min
         if price_max < 99_000_000:
@@ -946,22 +995,31 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
         url = f"https://www.avito.ru/{slug}/avtomobili"
         try:
             r = _avito_get(session, url, params)
-            if r.status_code == 429 or "captcha" in r.text.lower() or "Доступ ограничен" in r.text:
-                print(f"  [Авито] блок на стр.{p}")
+            status = r.status_code
+            text = r.text
+
+            if status == 429 or "captcha" in text.lower() or "Доступ ограничен" in text:
+                print(f"  [Авито] блок на стр.{p} (HTTP {status})")
                 break
 
-            soup = _BS(r.text, "lxml")
+            has_next = "__NEXT_DATA__" in text
+            has_items = 'data-marker="item"' in text
+            print(f"  [Авито {region}] стр.{p}: HTTP {status}, {len(text)} байт, next_data={has_next}, items={has_items}")
+
+            soup = _BS(text, "lxml")
             batch = _parse_avito_items(soup, today, slug)
             if not batch:
-                print(f"  [Авито {region}] стр.{p}: нет карточек (HTTP {r.status_code})")
-                break
-            results.extend(batch)
+                print(f"  [Авито {region}] стр.{p}: объявления не извлечены")
+                if p == 1:
+                    break  # Нет смысла продолжать
+            else:
+                results.extend(batch)
             time.sleep(random.uniform(2, 3))
         except Exception as e:
             print(f"  [Авито {region}] стр.{p}: {e}")
             break
 
-    print(f"  [Авито] {len(results)} объявлений")
+    print(f"  [Авито] итого {len(results)} объявлений")
     return results
 
 
