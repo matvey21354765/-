@@ -968,6 +968,102 @@ async def cb_do_search(cb: CallbackQuery):
     await do_search_for_user(cb.from_user.id, cb.message)
 
 
+# ── Загрузка деталей объявления ─────────────────────────────────
+
+def _fetch_listing_details(url: str, source: str) -> dict:
+    """Загружает страницу объявления и вытаскивает фото + описание продавца."""
+    try:
+        import requests as _req
+        from bs4 import BeautifulSoup as _BS
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept-Language": "ru-RU,ru;q=0.9",
+        }
+        r = _req.get(url, headers=headers, timeout=15)
+        soup = _BS(r.text, "lxml")
+
+        photo_url = ""
+        description = ""
+
+        if source == "drom":
+            # Первое большое фото в галерее
+            img = (
+                soup.select_one("div[class*='gallery'] img")
+                or soup.select_one("div[class*='photo'] img")
+                or soup.select_one("img[class*='gallery']")
+                or soup.select_one("meta[property='og:image']")
+            )
+            if img:
+                photo_url = img.get("content") or img.get("src") or img.get("data-src", "")
+            # Описание продавца
+            desc_el = (
+                soup.select_one("div[class*='comment']")
+                or soup.select_one("[data-ftid='item_description']")
+                or soup.select_one("div[class*='description']")
+            )
+            if desc_el:
+                description = desc_el.get_text(strip=True)
+
+        elif source == "autoru":
+            # og:image обычно первое фото
+            og = soup.select_one("meta[property='og:image']")
+            if og:
+                photo_url = og.get("content", "")
+            desc_el = soup.select_one("div[class*='description']") or soup.select_one("p[class*='description']")
+            if desc_el:
+                description = desc_el.get_text(strip=True)
+
+        elif source == "avito":
+            og = soup.select_one("meta[property='og:image']")
+            if og:
+                photo_url = og.get("content", "")
+            desc_el = (
+                soup.select_one("div[itemprop='description']")
+                or soup.select_one("[data-marker='item-view/item-description']")
+                or soup.select_one("div[class*='description']")
+            )
+            if desc_el:
+                description = desc_el.get_text(strip=True)
+
+        elif source == "kolesa":
+            og = soup.select_one("meta[property='og:image']")
+            if og:
+                photo_url = og.get("content", "")
+            desc_el = soup.select_one("div[class*='description']") or soup.select_one("p[class*='description']")
+            if desc_el:
+                description = desc_el.get_text(strip=True)
+
+        else:
+            og = soup.select_one("meta[property='og:image']")
+            if og:
+                photo_url = og.get("content", "")
+
+        # Убеждаемся что URL абсолютный
+        if photo_url and not photo_url.startswith("http"):
+            photo_url = "https:" + photo_url if photo_url.startswith("//") else ""
+
+        return {
+            "_photo_url": photo_url,
+            "description": description[:500] if description else "",
+        }
+    except Exception:
+        return {}
+
+
+async def enrich_items(items: list[dict]) -> list[dict]:
+    """Параллельно загружает фото и описание для каждого объявления."""
+    loop = asyncio.get_event_loop()
+    details_list = await asyncio.gather(
+        *[loop.run_in_executor(None, _fetch_listing_details, i["url"], i.get("source", "")) for i in items]
+    )
+    for item, details in zip(items, details_list):
+        if details.get("_photo_url"):
+            item["_photo_url"] = details["_photo_url"]
+        if details.get("description"):
+            item["description"] = details["description"]
+    return items
+
+
 # Фразы которые означают что объявление снято
 _REMOVED_MARKERS = [
     "снято с продажи", "объявление не найдено", "объявление недоступно",
@@ -1103,8 +1199,11 @@ async def do_search_for_user(uid: int, reply_to):
         f"Показываю лучшие (ниже рынка в приоритете):"
     )
 
+    await reply_to.answer("📸 Загружаю фото и описания...")
+    top10 = await enrich_items(suitable[:10])
+
     chat_id = reply_to.chat.id
-    for item in suitable[:10]:
+    for item in top10:
         await send_item_card(chat_id, item, uid)
 
     if len(suitable) > 10:
@@ -1174,6 +1273,7 @@ async def cb_more(cb: CallbackQuery):
         await cb.message.answer("Больше объявлений нет. Попробуй /search снова завтра.")
         return
 
+    batch = await enrich_items(batch)
     for item in batch:
         await send_item_card(cb.message.chat.id, item, uid)
 
