@@ -1156,65 +1156,75 @@ SOURCE_TAGS = {
 _search_cache: dict[int, list[dict]] = {}
 
 
-def _build_caption(item: dict, idx: int, total: int) -> str:
-    days = item.get("_days_on_site", 0)
-    days_str = "сегодня" if days == 0 else f"{days} дн. назад"
-    score = item.get("_hot_score", 0)
-    hot_tag = " 🔥" if score >= 15 else " ⭐" if score >= 5 else ""
-    source_tag = SOURCE_TAGS.get(item.get("source", ""), "🔵")
-
-    caption = (
-        f"{idx}/{total} {source_tag} {item.get('title', '')}{hot_tag}\n"
-        f"💰 {item.get('price', '—')}\n"
-        f"📅 {days_str}"
-    )
-    if item.get("description"):
-        caption += f"\n\n📝 {item['description'][:700]}"
-    return caption
-
-
-def _item_keyboard(url: str, sid: str, uid: int, idx: int, total: int) -> InlineKeyboardMarkup:
-    rows = [[
-        InlineKeyboardButton(text="🔗 Открыть объявление", url=url),
-    ]]
-    nav = []
-    if idx < total:
-        nav.append(InlineKeyboardButton(text=f"➡️ Следующее ({idx+1}/{total})", callback_data=f"page|{uid}|{idx}"))
-    nav.append(InlineKeyboardButton(text="❌ Пропустить", callback_data=f"skip|{sid}|{uid}|{idx}|{total}"))
-    rows.append(nav)
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-async def send_item_at(chat_id: int, uid: int, idx: int):
-    """Отправляет объявление с индексом idx из кеша пользователя."""
+async def send_batch(chat_id: int, uid: int, offset: int):
+    """Отправляет 10 объявлений из кеша начиная с offset."""
     items = _search_cache.get(uid, [])
-    if not items or idx >= len(items):
+    if not items or offset >= len(items):
         await bot.send_message(chat_id, "✅ Объявления закончились. Нажми /search для нового поиска.")
         return
 
-    item = items[idx]
+    batch = items[offset:offset + 10]
+    # Подгружаем фото/описание параллельно для всей партии
+    to_enrich = [i for i in batch if not i.get("_enriched")]
+    if to_enrich:
+        enriched = await enrich_items(to_enrich)
+        ei = 0
+        for i, item in enumerate(batch):
+            if not item.get("_enriched"):
+                enriched[ei]["_enriched"] = True
+                batch[i] = enriched[ei]
+                _search_cache[uid][offset + i] = enriched[ei]
+                ei += 1
+
     total = len(items)
+    for item in batch:
+        url = item.get("url", "")
+        sid = url_to_id(url)
+        days = item.get("_days_on_site", 0)
+        days_str = "сегодня" if days == 0 else f"{days} дн. назад"
+        score = item.get("_hot_score", 0)
+        hot_tag = " 🔥" if score >= 15 else " ⭐" if score >= 5 else ""
+        source_tag = SOURCE_TAGS.get(item.get("source", ""), "🔵")
 
-    # Подгружаем фото/описание если ещё нет
-    if not item.get("_enriched"):
-        [enriched] = await enrich_items([item])
-        enriched["_enriched"] = True
-        _search_cache[uid][idx] = enriched
-        item = enriched
+        caption = (
+            f"{source_tag} {item.get('title', '')}{hot_tag}\n"
+            f"💰 {item.get('price', '—')}\n"
+            f"📅 {days_str}"
+        )
+        if item.get("description"):
+            caption += f"\n\n📝 {item['description'][:500]}"
 
-    url = item.get("url", "")
-    sid = url_to_id(url)
-    caption = _build_caption(item, idx + 1, total)
-    kb = _item_keyboard(url, sid, uid, idx, total)
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="🔗 Открыть", url=url),
+            InlineKeyboardButton(text="❌ Скрыть", callback_data=f"hide|{sid}|{uid}"),
+        ]])
 
-    photo_url = item.get("_photo_url", "")
-    if photo_url:
-        try:
-            await bot.send_photo(chat_id, photo=photo_url, caption=caption, reply_markup=kb)
-            return
-        except Exception:
-            pass
-    await bot.send_message(chat_id, caption, reply_markup=kb)
+        photo_url = item.get("_photo_url", "")
+        if photo_url:
+            try:
+                await bot.send_photo(chat_id, photo=photo_url, caption=caption, reply_markup=kb)
+                continue
+            except Exception:
+                pass
+        await bot.send_message(chat_id, caption, reply_markup=kb)
+
+    next_offset = offset + 10
+    if next_offset < total:
+        await bot.send_message(
+            chat_id,
+            f"Показано {min(next_offset, total)} из {total}. Листай дальше:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text=f"➡️ Ещё 10 объявлений", callback_data=f"page|{uid}|{next_offset}"),
+            ]])
+        )
+    else:
+        await bot.send_message(chat_id, f"✅ Показаны все {total} объявлений. /search — новый поиск.")
+
+    # Сохраняем показанные в seen
+    seen = load_seen(uid)
+    for item in batch:
+        seen.add(item.get("url", ""))
+    save_seen(uid, seen)
 
 
 async def do_search_for_user(uid: int, reply_to):
@@ -1266,45 +1276,17 @@ async def do_search_for_user(uid: int, reply_to):
         return
 
     _search_cache[uid] = suitable
-    await reply_to.answer(f"✅ Найдено {len(suitable)} объявлений! Листай по одному:")
-    await send_item_at(reply_to.chat.id, uid, 0)
+    await reply_to.answer(f"✅ Найдено {len(suitable)} объявлений!\n📸 Загружаю фото и описания первых 10...")
+    await send_batch(reply_to.chat.id, uid, 0)
 
 
 @dp.callback_query(F.data.startswith("page|"))
 async def cb_page(cb: CallbackQuery):
-    _, uid_s, idx_s = cb.data.split("|")
+    _, uid_s, offset_s = cb.data.split("|")
     uid = int(uid_s)
-    idx = int(idx_s)
+    offset = int(offset_s)
     await cb.answer()
-    # Пометим текущее как просмотренное
-    items = _search_cache.get(uid, [])
-    if items and idx > 0:
-        seen = load_seen(uid)
-        seen.add(items[idx - 1].get("url", ""))
-        save_seen(uid, seen)
-    await send_item_at(cb.message.chat.id, uid, idx)
-
-
-@dp.callback_query(F.data.startswith("skip|"))
-async def cb_skip(cb: CallbackQuery):
-    parts = cb.data.split("|")
-    sid = parts[1]
-    uid = int(parts[2])
-    idx = int(parts[3])
-    total = int(parts[4])
-    url = id_to_url(sid)
-
-    skipped = load_skipped(uid)
-    skipped.add(url)
-    save_skipped(uid, skipped)
-    await cb.answer("Пропущено")
-
-    # Удаляем из кеша и переходим к следующему
-    items = _search_cache.get(uid, [])
-    if items and idx < len(items):
-        _search_cache[uid].pop(idx)
-
-    await send_item_at(cb.message.chat.id, uid, idx)
+    await send_batch(cb.message.chat.id, uid, offset)
 
 
 @dp.callback_query(F.data.startswith("hide|"))
