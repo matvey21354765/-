@@ -117,13 +117,22 @@ def scrape():
                 page.goto(url, wait_until="domcontentloaded", timeout=30000)
                 time.sleep(random.uniform(2, 3))
 
-                # Капча?
+                # Капча? Проверяем по реальным признакам блокировки
                 html = page.content()
-                if "captcha" in html.lower() or "Доступ ограничен" in html:
+                title = page.title()
+                is_blocked = (
+                    "Доступ ограничен" in html
+                    or "captcha" in title.lower()
+                    or page.query_selector("div[class*='captcha-wrapper']") is not None
+                    or page.query_selector("iframe[src*='smartcaptcha']") is not None
+                    or "Подтвердите, что вы не робот" in html
+                )
+                if is_blocked:
                     print(f"\n⚠️ Капча на стр.{p}! Реши в открытом браузере, затем нажми Enter...")
                     input()
                     html = page.content()
-                    if "captcha" in html.lower() or "Доступ ограничен" in html:
+                    title = page.title()
+                    if "Доступ ограничен" in html or "captcha" in title.lower() or "Подтвердите" in html:
                         print("Всё ещё заблокировано, останавливаюсь.")
                         break
 
