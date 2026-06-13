@@ -735,40 +735,43 @@ async def cmd_stats(msg: Message):
 
 @dp.message(Command("new"))
 async def cmd_new(msg: Message):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="🟢 Авито",   callback_data="source|avito"),
-            InlineKeyboardButton(text="🔵 Дром",    callback_data="source|drom"),
-            InlineKeyboardButton(text="🔴 Авто.ру", callback_data="source|autoru"),
-        ],
-        [InlineKeyboardButton(text="📋 Все источники", callback_data="source|all")],
-    ])
-    await msg.answer("Выбери источник:", reply_markup=kb)
     listings = load_listings()
     deals = load_deals()
-    new_items = [
-        i for i in listings
-        if not is_dealer(i) and in_price_range(i)
-        and i.get("url") and i.get("url") not in deals
-    ][:10]
 
-    if not new_items:
-        await msg.answer("Новых подходящих объявлений нет.\nЗапусти /scan чтобы обновить.")
+    # Все подходящие объявления — не только новые, сортируем по дням на сайте
+    suitable = [
+        i for i in listings
+        if not is_dealer(i) and in_price_range(i) and i.get("url")
+        and deals.get(i["url"], {}).get("stage") not in ("opener","offer","price_ask","deal","details","photos","active","closed")
+    ]
+    # Сортировка: сначала свежие (0 дней), потом постарше
+    suitable.sort(key=lambda x: x.get("_days_on_site", 999))
+
+    if not suitable:
+        await msg.answer("Нет подходящих объявлений. Нажми /scan чтобы обновить.")
         return
 
-    await msg.answer(f"Нашёл {len(new_items)} новых объявлений:")
-    for item in new_items:
-        url = item.get("url","")
+    await msg.answer(f"📋 Найдено {len(suitable)} объявлений (частники, 500к–1М):\nПоказываю первые 15 — нажми ✉️ чтобы сразу написать")
+
+    for item in suitable[:15]:
+        url = item.get("url", "")
         sid = url_to_id(url)
+        src = item.get("source", "")
+        icon = "🟢" if src == "avito" else "🔵" if src == "drom" else "🔴"
+        days = item.get("_days_on_site", "?")
+        days_str = "сегодня" if days == 0 else f"{days} дн."
+        stage = deals.get(url, {}).get("stage", "")
+        stage_icon = "✅ " if stage == "opener" else ""
+
         text = (
-            f"{'🟢 Авито' if item.get('source')=='avito' else '🔵 Дром' if item.get('source')=='drom' else '🔴 Авто.ру'}\n"
-            f"🚗 {item.get('title','')}\n"
-            f"💰 {item.get('price','—')}\n"
-            f"📅 Дней: {item.get('_days_on_site','?')}"
+            f"{stage_icon}{icon} {item.get('title', '')}\n"
+            f"💰 {item.get('price', '—')}  📅 {days_str}"
         )
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✉️ Написать", callback_data=f"send_opener|{sid}")],
-            [InlineKeyboardButton(text="❌ Пропустить", callback_data=f"skip|{sid}")],
+            [
+                InlineKeyboardButton(text="✉️ Написать", callback_data=f"send_opener|{sid}"),
+                InlineKeyboardButton(text="❌ Пропустить", callback_data=f"skip|{sid}"),
+            ],
             [InlineKeyboardButton(text="🔗 Открыть", url=url)],
         ])
         await msg.answer(text, reply_markup=kb)
@@ -1549,21 +1552,17 @@ async def cb_send_opener(cb: CallbackQuery):
         await cb.answer("Объявление не найдено")
         return
 
-    await cb.answer("Отправляю...")
-    await cb.message.edit_text(cb.message.text + "\n\n⏳ Отправляю сообщение...")
-
-    def do_send():
-        return send_message_to_seller(item, OPENER)
+    await cb.answer("✉️ Отправляю...")
 
     loop = asyncio.get_event_loop()
-    success, chat_url = await loop.run_in_executor(None, do_send)
+    success, chat_url = await loop.run_in_executor(None, lambda: send_message_to_seller(item, OPENER))
 
     deals = load_deals()
     deals[url] = deals.get(url, {})
     deals[url].update({
         "stage": "opener" if success else "error",
-        "title": item.get("title",""),
-        "source": item.get("source",""),
+        "title": item.get("title", ""),
+        "source": item.get("source", ""),
         "listing_url": url,
         "chat_url": chat_url,
         "sent": datetime.datetime.now().isoformat(),
@@ -1571,15 +1570,26 @@ async def cb_send_opener(cb: CallbackQuery):
     })
     save_deals(deals)
 
+    src = item.get("source", "")
+    icon = "🟢" if src == "avito" else "🔵" if src == "drom" else "🔴"
     if success:
         await cb.message.edit_text(
-            cb.message.text.replace("⏳ Отправляю сообщение...", "") +
-            f"\n\n✅ Отправлено! Жду ответа продавца..."
+            f"✅ {icon} {item.get('title', '')}\n"
+            f"💰 {item.get('price', '—')}\n\n"
+            f"Сообщение отправлено! Жду ответа...",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔗 Открыть чат", url=chat_url if chat_url and chat_url.startswith("http") else url)],
+            ])
         )
     else:
         await cb.message.edit_text(
-            cb.message.text.replace("⏳ Отправляю сообщение...", "") +
-            f"\n\n❌ Ошибка: {chat_url}"
+            f"❌ {icon} {item.get('title', '')}\n"
+            f"Ошибка: {chat_url}\n\n"
+            f"[Открыть объявление]({url})",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Попробовать ещё раз", callback_data=f"send_opener|{url_to_id(url)}")],
+            ])
         )
 
 
