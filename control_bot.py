@@ -1077,9 +1077,13 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
     print(f"  [Авито] regex блоков: {len(item_blocks)}")
     seen_urls: set = set()
     for url_path, title, price_val in item_blocks[:80]:
-        # Фильтр: только URL объявлений (не категории, не страницы пользователя)
-        if not re.search(r'-\d{6,}$', url_path):
+        # Пропускаем служебные страницы (не объявления)
+        if not url_path.startswith("/") or len(url_path) < 10:
             continue
+        if any(skip in url_path for skip in ("/profile/", "/user/", "/search?", "/avtomobili?", "/category/")):
+            continue
+        # Обрезаем query params если есть
+        url_path = url_path.split("?")[0]
         item_url = "https://www.avito.ru" + url_path
         if item_url in seen_urls:
             continue
