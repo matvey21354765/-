@@ -2021,8 +2021,11 @@ async def _ensure_photo(item: dict) -> None:
                         photo = candidate
                         break
 
-            # og:image для Авито НЕ используем — там может быть плейсхолдер (цветные круги)
-            # Фото берётся только из JSON данных объявления
+            # 4. og:image — реальное фото объявления для большинства случаев
+            if not photo:
+                og = re.search(r'og:image[^>]*content="([^"]+)"|content="([^"]+)"[^>]*og:image', text)
+                if og:
+                    photo = (og.group(1) or og.group(2) or "").strip()
         if need_desc:
             for dpat in [
                 r'"description"\s*:\s*"([^"]{20,})"',
@@ -2189,21 +2192,41 @@ async def send_batch(chat_id: int, uid: int, offset: int):
 
         photo_url = item.get("_photo_url", "")
         if photo_url:
-            # Скачиваем байты, проверяем размер (< 15 КБ = плейсхолдер), шлём файлом
             try:
                 import requests as _req
                 from aiogram.types import BufferedInputFile
+                import struct
                 resp = _req.get(photo_url, timeout=10, headers={
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                     "Referer": "https://www.avito.ru/",
                 })
-                if resp.status_code == 200 and len(resp.content) > 20_000:
-                    photo_bytes = BufferedInputFile(resp.content, filename="photo.jpg")
-                    await bot.send_photo(chat_id, photo=photo_bytes, caption=caption, reply_markup=kb)
-                    return
-                # Если размер слишком мал — плейсхолдер, не показываем
+                if resp.status_code == 200 and len(resp.content) > 5_000:
+                    data = resp.content
+                    # Определяем размеры JPEG — плейсхолдер квадратный, фото машины горизонтальное
+                    w, h = 0, 0
+                    try:
+                        if data[:2] == b'\xff\xd8':  # JPEG
+                            i = 2
+                            while i < len(data) - 8:
+                                if data[i] != 0xff:
+                                    break
+                                marker = data[i + 1]
+                                if marker in (0xc0, 0xc1, 0xc2):
+                                    h = struct.unpack('>H', data[i+5:i+7])[0]
+                                    w = struct.unpack('>H', data[i+7:i+9])[0]
+                                    break
+                                seg_len = struct.unpack('>H', data[i+2:i+4])[0]
+                                i += seg_len + 2
+                    except Exception:
+                        pass
+                    # Квадратное (w≈h) и размером < 100KB → плейсхолдер, пропускаем
+                    if w > 0 and h > 0 and abs(w - h) < min(w, h) * 0.15 and len(data) < 100_000:
+                        pass  # плейсхолдер
+                    else:
+                        photo_bytes = BufferedInputFile(data, filename="photo.jpg")
+                        await bot.send_photo(chat_id, photo=photo_bytes, caption=caption, reply_markup=kb)
+                        return
             except Exception:
-                # Сеть упала — пробуем по URL напрямую
                 try:
                     await bot.send_photo(chat_id, photo=photo_url, caption=caption, reply_markup=kb)
                     return
