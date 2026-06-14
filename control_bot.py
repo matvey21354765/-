@@ -1410,7 +1410,21 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
             has_items = 'data-marker="item"' in text
             print(f"  [Авито] стр.{p}: {len(text):,}б, items={has_items}, urlPath={has_urlpath}")
             if not has_items and not has_urlpath:
-                return []
+                # Fallback: пробуем без ценового фильтра
+                fallback_url = f"https://www.avito.ru/{slug}/avtomobili" + (f"?p={p}" if p > 1 else "")
+                try:
+                    r2 = _req.get("http://api.scraperapi.com", params={
+                        "api_key": SCRAPER_API_KEY,
+                        "url": fallback_url,
+                        "country_code": "ru",
+                    }, timeout=35)
+                    if r2.status_code == 200 and ('"urlPath"' in r2.text or 'data-marker="item"' in r2.text):
+                        text = r2.text
+                        print(f"  [Авито] fallback без цен стр.{p}: {len(text):,}б")
+                    else:
+                        return []
+                except Exception:
+                    return []
             batch = _parse_avito_html(text, slug, today)
             # Если цены не найдены через JSON — regex по тексту
             if batch and not any(it.get("_price_int", 0) > 0 for it in batch):
@@ -2019,7 +2033,14 @@ async def _ensure_photo(item: dict) -> None:
                         photo = candidate
                         break
 
-            # og:image не используем — там может быть плейсхолдер
+            # 4. og:image — принимаем ТОЛЬКО если URL из img.avito.st (реальное фото)
+            # Плейсхолдер "цветные круги" хранится на другом домене
+            if not photo:
+                og = re.search(r'og:image[^>]*content="([^"]+)"|content="([^"]+)"[^>]*og:image', text)
+                if og:
+                    candidate = (og.group(1) or og.group(2) or "").strip()
+                    if "img.avito.st" in candidate:
+                        photo = candidate
         if need_desc:
             for dpat in [
                 r'"description"\s*:\s*"([^"]{20,})"',
