@@ -1160,15 +1160,18 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
     results = []
 
     for p in range(1, pages + 1):
-        # Строим URL: частники только (owner[]=1), ценовые фильтры
-        qs_parts = ["owner%5B%5D=1"]  # только частные продавцы
+        # Чистый URL без фильтров — только так Авито отдаёт SSR-HTML с данными
+        # owner[]=1 меняет структуру ответа и данные пропадают
+        qs_parts = []
         if p > 1:
             qs_parts.append(f"p={p}")
         if price_min > 0:
             qs_parts.append(f"pmin={price_min}")
         if price_max < 99_000_000:
             qs_parts.append(f"pmax={price_max}")
-        url = f"https://www.avito.ru/{slug}/avtomobili?" + "&".join(qs_parts)
+        url = f"https://www.avito.ru/{slug}/avtomobili"
+        if qs_parts:
+            url += "?" + "&".join(qs_parts)
 
         try:
             r = _req.get("http://api.scraperapi.com", params={
@@ -1184,23 +1187,24 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
             text = r.text
             size = len(text)
             has_items = 'data-marker="item"' in text
-            print(f"  [Авито] стр.{p}: {size:,}б, items={has_items}, url={url[:60]}")
+            has_urlpath = '"urlPath"' in text
+            print(f"  [Авито] стр.{p}: {size:,}б, items={has_items}, urlPath={has_urlpath}, url={url[:60]}")
 
-            # Если ответ маленький или нет карточек — пробуем без ценовых фильтров
-            if not has_items and (price_min > 0 or price_max < 99_000_000):
-                print(f"  [Авито] нет карточек с ценами, пробую только частники без цен...")
+            # Если ответ с ценами маленький — пробуем без ценовых параметров
+            if not has_urlpath and (price_min > 0 or price_max < 99_000_000):
+                print(f"  [Авито] нет данных с ценами, пробую без фильтров...")
                 r2 = _req.get("http://api.scraperapi.com", params={
                     "api_key": SCRAPER_API_KEY,
-                    "url": f"https://www.avito.ru/{slug}/avtomobili?owner%5B%5D=1",
+                    "url": f"https://www.avito.ru/{slug}/avtomobili",
                     "country_code": "ru",
                 }, timeout=40)
-                if r2.status_code == 200:
+                if r2.status_code == 200 and '"urlPath"' in r2.text:
                     text = r2.text
                     has_items = 'data-marker="item"' in text
-                    print(f"  [Авито] fallback частники без цен: {len(text):,}б, items={has_items}")
+                    print(f"  [Авито] fallback без цен: {len(text):,}б, items={has_items}")
 
-            if not has_items:
-                print(f"  [Авито] стр.{p}: нет карточек, стоп")
+            if not has_items and '"urlPath"' not in text:
+                print(f"  [Авито] стр.{p}: нет данных, стоп")
                 break
 
             # Парсим HTML страницы через универсальную функцию
