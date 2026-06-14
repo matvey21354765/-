@@ -120,8 +120,7 @@ DEALER_KEYWORDS = [
     "наш автосалон", "купить в кредит", "тест-драйв",
     "гарантия завода", "официальная гарантия",
     "автомагазин", "автодилер", "car dealer", "автошоу", "автовыставка",
-    "новый автомобиль", "новый авто", "в наличии и под заказ",
-    "звоните", "звони", "менеджер", "отдел продаж", "автосупермаркет",
+    "в наличии и под заказ", "отдел продаж", "автосупермаркет",
 ]
 
 HOT_WORDS = re.compile(
@@ -1012,9 +1011,8 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
             if any(t in seller_type for t in ("company", "shop", "dealer", "pro", "business", "commercial")):
                 return None
             seller_name = seller_obj.get("name") or seller_obj.get("title") or ""
-        # Дополнительная проверка по ключевым словам в названии продавца и заголовке
-        check_text = (title + " " + seller_name).lower()
-        if any(k in check_text for k in DEALER_KEYWORDS):
+        # Дополнительная проверка только по НАЗВАНИЮ ПРОДАВЦА (не заголовку объявления)
+        if seller_name and any(k in seller_name.lower() for k in ("автосалон", "автоцентр", "официальный", "ооо", "зао", "ип ", "дилер", "моторс", "авто групп")):
             return None
 
         price_str, price_int = _avito_price_from_item(it)
