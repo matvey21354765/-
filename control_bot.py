@@ -1975,19 +1975,22 @@ async def _ensure_photo(item: dict) -> None:
     def _extract(text: str) -> tuple[str, str, int]:
         photo, desc, price_int = "", "", 0
         if need_photo:
-            # Ищем CDN URL Авито — с обычными и экранированными слэшами (\/\/)
+            # Широкий поиск: любой CDN URL Авито в любом месте страницы
             for pat in [
-                r'"(?:864x648|1280x960|640x480|432x324)"\s*:\s*"((?:https?:)?(?:\\?/){2}[^"]*\.avito\.st[^"]*\.(?:jpg|jpeg|webp))"',
-                r'"((?:https?:)?(?:\\?/){2}[0-9]+\.img\.avito\.st[^"]*\.(?:jpg|jpeg|webp))"',
-                r'<meta[^>]+property="og:image"[^>]+content="(https://[^"]+)"',
-                r'property="og:image"\s+content="(https://[^"]+)"',
-                r'content="(https://[^"]+\.avito\.st/[^"]+\.(?:jpg|jpeg))"',
+                r'https://[0-9]+\.img\.avito\.st/[^\s"\'<]{10,}\.(?:jpg|jpeg|webp)',
+                r'(?:https:)?//[0-9]+\.img\.avito\.st/[^\s"\'<]{10,}\.(?:jpg|jpeg|webp)',
+                r'"(?:864x648|1280x960|640x480)"\s*:\s*"([^"]*avito[^"]*\.(?:jpg|jpeg|webp))"',
             ]:
                 m = re.search(pat, text)
                 if m:
-                    raw = m.group(1).replace("\\/", "/")
+                    raw = (m.group(1) if m.lastindex else m.group(0)).replace("\\/", "/")
                     photo = ("https:" + raw) if raw.startswith("//") else raw
                     break
+            # og:image как запасной вариант
+            if not photo:
+                og = re.search(r'og:image[^>]*content="([^"]+)"|content="([^"]+)"[^>]*og:image', text)
+                if og:
+                    photo = og.group(1) or og.group(2) or ""
         if need_desc:
             for dpat in [
                 r'"description"\s*:\s*"([^"]{20,})"',
