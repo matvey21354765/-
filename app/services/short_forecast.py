@@ -218,42 +218,56 @@ def _score(df1m: pd.DataFrame, df5m: pd.DataFrame, df15m: pd.DataFrame) -> dict:
     srsi_oversold   = srsi5 <= 20
     srsi_overbought = srsi5 >= 80
 
-    # ── ТРИГГЕР: нужен MACD кросс или StochRSI экстремум ────────────────────
-    cross_up   = m5_std["cross_up"]   or m5_fast["cross_up"]   or m15["cross_up"]
-    cross_down = m5_std["cross_down"] or m5_fast["cross_down"] or m15["cross_down"]
+    # ── ТРИГГЕР: нужен MACD кросс на 5м ИЛИ StochRSI экстремум ─────────────
+    cross_up_5m   = m5_std["cross_up"]   or m5_fast["cross_up"]
+    cross_down_5m = m5_std["cross_down"] or m5_fast["cross_down"]
+    # 15м кросс как дополнительное подтверждение
+    cross_up_15   = m15["cross_up"]
+    cross_down_15 = m15["cross_down"]
 
-    has_trigger_bull = cross_up   or srsi_oversold
-    has_trigger_bear = cross_down or srsi_overbought
+    has_trigger_bull = cross_up_5m or (srsi_oversold and cross_up_15)
+    has_trigger_bear = cross_down_5m or (srsi_overbought and cross_down_15)
 
     if both_bull and not has_trigger_bull:
-        return _flat("Тренд вверх, ждём MACD кросс или перепроданность")
+        return _flat("Тренд вверх, ждём MACD кросс 5м")
     if both_bear and not has_trigger_bear:
-        return _flat("Тренд вниз, ждём MACD кросс или перекупленность")
+        return _flat("Тренд вниз, ждём MACD кросс 5м")
 
-    # ── ГОЛОСА (max ±12) ─────────────────────────────────────────────────────
-    if m5_std["cross_up"]:                                                  macd_vote = 3
+    # ── ГОЛОСА (max ±14) ─────────────────────────────────────────────────────
+    if m5_std["cross_up"]:                                                   macd_vote = 4
     elif m5_std["bullish"] and m5_std["rising"] and m5_std["magnitude"] > 0.05: macd_vote = 2
-    elif m5_std["bullish"]:                                                 macd_vote = 1
-    elif m5_std["cross_down"]:                                              macd_vote = -3
+    elif m5_std["bullish"]:                                                  macd_vote = 1
+    elif m5_std["cross_down"]:                                               macd_vote = -4
     elif not m5_std["bullish"] and m5_std["falling"] and m5_std["magnitude"] > 0.05: macd_vote = -2
-    else:                                                                   macd_vote = -1 if not m5_std["bullish"] else 0
+    else:                                                                    macd_vote = -1 if not m5_std["bullish"] else 0
 
-    if m5_fast["cross_up"]   or (m5_fast["bullish"] and m5_fast["rising"]):      fast_vote = 2
-    elif m5_fast["cross_down"] or (not m5_fast["bullish"] and m5_fast["falling"]): fast_vote = -2
-    else:                                                                          fast_vote = 0
+    if m5_fast["cross_up"]:                                                  fast_vote = 3
+    elif m5_fast["bullish"] and m5_fast["rising"]:                           fast_vote = 1
+    elif m5_fast["cross_down"]:                                              fast_vote = -3
+    elif not m5_fast["bullish"] and m5_fast["falling"]:                      fast_vote = -1
+    else:                                                                    fast_vote = 0
 
-    trend_vote  = 2 if both_bull  else -2  # оба тренда совпадают = ±2
+    # 15м MACD подтверждение
+    m15_vote = 2 if m15["cross_up"] else 1 if m15["bullish"] else -2 if m15["cross_down"] else -1
+
+    trend_vote  = 2 if both_bull  else -2
     candle_vote = 2 if majority_bull else -2 if majority_bear else 0
-    stoch_vote  = 1 if srsi_oversold else -1 if srsi_overbought else 0
+    stoch_vote  = 2 if srsi_oversold else -2 if srsi_overbought else 0
     mom_vote    = 1 if (accel_up or last3_bull) else -1 if (accel_down or last3_bear) else 0
     bb_vote     = 1 if bb5["near_lower"] else -1 if bb5["near_upper"] else 0
+    # RSI дополнительный фильтр
+    rsi_vote    = 1 if rsi5 < 45 else -1 if rsi5 > 55 else 0
 
-    total = macd_vote + fast_vote + trend_vote + candle_vote + stoch_vote + mom_vote + bb_vote
+    total = macd_vote + fast_vote + m15_vote + trend_vote + candle_vote + stoch_vote + mom_vote + bb_vote + rsi_vote
 
-    # ── РЕШЕНИЕ: порог 6/12, строгие RSI границы ────────────────────────────
-    if total >= 5 and both_bull and rsi5 < 70 and not majority_bear:
+    # ── РЕШЕНИЕ: высокий порог для качества ─────────────────────────────────
+    # LONG: нужен кросс 5м + оба тренда + RSI не перекуплен + большинство голосов
+    # SHORT: зеркально
+    if (total >= 8 and both_bull and rsi5 < 65 and not majority_bear
+            and (m5_std["cross_up"] or m5_fast["cross_up"])):
         direction = "UP"
-    elif total <= -5 and both_bear and rsi5 > 30 and not majority_bull:
+    elif (total <= -8 and both_bear and rsi5 > 35 and not majority_bull
+            and (m5_std["cross_down"] or m5_fast["cross_down"])):
         direction = "DOWN"
     else:
         direction = "FLAT"

@@ -29,6 +29,14 @@ async def main():
     await init_db()
     logger.info("✅ Database ready")
 
+    # One-time reset of forecast stats
+    from app.models.database import ForecastLog
+    from sqlalchemy import delete as sa_delete
+    async with AsyncSessionLocal() as db:
+        await db.execute(sa_delete(ForecastLog))
+        await db.commit()
+    logger.info("✅ ForecastLog reset")
+
 
 
 
