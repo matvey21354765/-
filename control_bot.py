@@ -1043,20 +1043,21 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
         return []
 
     results = []
-    session = _req.Session()
 
     for p in range(1, pages + 1):
-        # Без ценовых параметров — с ними Авито отдаёт другой (маленький) ответ без карточек
-        # Фильтрацию по цене делаем в Python после
-        url = f"https://www.avito.ru/{slug}/avtomobili?p={p}"
+        # Страница 1: чистый URL без параметров (с ?p=1 Авито отдаёт урезанный ответ)
+        # Страницы 2+: добавляем ?p=N
+        if p == 1:
+            url = f"https://www.avito.ru/{slug}/avtomobili"
+        else:
+            url = f"https://www.avito.ru/{slug}/avtomobili?p={p}"
 
         try:
             # ScraperAPI БЕЗ render — Авито отдаёт SSR HTML с карточками
-            r = session.get("http://api.scraperapi.com", params={
+            r = _req.get("http://api.scraperapi.com", params={
                 "api_key": SCRAPER_API_KEY,
                 "url": url,
                 "country_code": "ru",
-                "session_number": "1",  # стабильный IP для одной сессии
             }, timeout=40)
 
             if r.status_code != 200:
