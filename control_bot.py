@@ -1960,6 +1960,56 @@ async def enrich_and_filter(items: list[dict], max_check: int = 25) -> list[dict
     return active + rest
 
 
+async def _ensure_photo(item: dict) -> None:
+    """Для объявлений без фото — загружает страницу и вытаскивает первое CDN-фото."""
+    if item.get("_photo_url"):
+        return
+    source = item.get("source", "")
+    url = item.get("url", "")
+    if not url or not SCRAPER_API_KEY:
+        return
+
+    loop = asyncio.get_event_loop()
+
+    def _fetch() -> str:
+        try:
+            import requests as _req
+            if source == "avito":
+                r = _req.get("http://api.scraperapi.com", params={
+                    "api_key": SCRAPER_API_KEY,
+                    "url": url,
+                    "country_code": "ru",
+                }, timeout=30)
+                if r.status_code != 200:
+                    return ""
+                text = r.text
+                for pat in [
+                    r'"(?:864x648|1280x960|640x480)"\s*:\s*"((?:https?:)?//[^"]+\.avito\.st/[^"]+\.(?:jpg|jpeg|webp))"',
+                    r'"((?:https?:)?//[0-9]+\.img\.avito\.st/[^"]+\.(?:jpg|jpeg|webp))"',
+                ]:
+                    m = re.search(pat, text)
+                    if m:
+                        raw = m.group(1).replace("\\/", "/")
+                        return ("https:" + raw) if raw.startswith("//") else raw
+            elif source in ("drom", "autoru"):
+                r = _req.get(url, timeout=15, headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                    "Accept-Language": "ru-RU,ru;q=0.9",
+                })
+                if r.status_code != 200:
+                    return ""
+                m = re.search(r'"(?:1200x900|832x624|1000x750)"\s*:\s*"([^"]+)"', r.text)
+                if m:
+                    return m.group(1).replace("\\/", "/")
+        except Exception:
+            pass
+        return ""
+
+    photo = await loop.run_in_executor(None, _fetch)
+    if photo:
+        item["_photo_url"] = photo
+
+
 SOURCE_TAGS = {
     "autoru": "🟠 Auto.ru",
     "kolesa": "🟢 Kolesa",
@@ -2059,8 +2109,15 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                 pass
         await bot.send_message(chat_id, caption, reply_markup=kb)
 
-    # Отправляем все 10 параллельно
-    await asyncio.gather(*[_send_item(item) for item in batch])
+    # Предзагружаем фото (до 4 одновременно), потом отправляем по очереди
+    sem = asyncio.Semaphore(4)
+    async def _prefetch(it):
+        async with sem:
+            await _ensure_photo(it)
+    await asyncio.gather(*[_prefetch(it) for it in batch])
+    for item in batch:
+        await _send_item(item)
+        await asyncio.sleep(0.2)
 
     next_offset = offset + 10
     if next_offset < total:
