@@ -215,7 +215,7 @@ def is_dealer(item: dict) -> bool:
 def in_price_range(item: dict, price_min: int, price_max: int) -> bool:
     p = item.get("_price_int") or parse_price(item.get("price", ""))
     if not p:
-        return True  # цена неизвестна — pmin/pmax в URL уже отфильтровали
+        return False  # цена неизвестна — пропускаем, чтобы не показывать 3млн+ авто
     return price_min <= p <= price_max
 
 
