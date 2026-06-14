@@ -904,9 +904,11 @@ def _avito_find_items_in_json(obj, depth=0) -> list:
     if depth > 10 or not isinstance(obj, (dict, list)):
         return []
     if isinstance(obj, list):
-        if len(obj) >= 3 and isinstance(obj[0], dict):
+        if len(obj) >= 2 and isinstance(obj[0], dict):
             sample = obj[0]
-            if ("title" in sample or "urlPath" in sample) and ("price" in sample or "priceDetailed" in sample):
+            url_fields = {"title", "urlPath", "url", "name"}
+            price_fields = {"price", "priceDetailed", "priceInfo"}
+            if (url_fields & sample.keys()) and (price_fields & sample.keys() or "id" in sample):
                 return obj
         for x in obj:
             r = _avito_find_items_in_json(x, depth + 1)
@@ -914,11 +916,11 @@ def _avito_find_items_in_json(obj, depth=0) -> list:
                 return r
         return []
     if isinstance(obj, dict):
-        for key in ("items", "catalog", "listing", "offers", "data"):
+        for key in ("items", "catalog", "listing", "offers", "data", "list", "ads", "cars"):
             val = obj.get(key)
-            if isinstance(val, list) and len(val) >= 3:
+            if isinstance(val, list) and len(val) >= 2:
                 sample = val[0] if val else {}
-                if isinstance(sample, dict) and ("title" in sample or "urlPath" in sample):
+                if isinstance(sample, dict) and {"title", "urlPath", "url", "name", "id"} & sample.keys():
                     return val
         for v in obj.values():
             r = _avito_find_items_in_json(v, depth + 1)
@@ -1057,19 +1059,43 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
     if results:
         return results
 
-    # 3. Последний шанс: извлекаем ссылки на объявления из HTML (href-паттерн)
-    urls = _avito_extract_links(text, slug)
-    print(f"  [Авито] href-ссылки: {len(urls)}")
-    for item_url in urls[:50]:
+    # 3. Regex по "urlPath" + "title" + "value" прямо в тексте скриптов
+    # Это работало раньше — находило 50 объявлений в 4.5MB HTML
+    item_blocks = re.findall(
+        r'"urlPath"\s*:\s*"(/[^"]+)"(?:[^}]|\}(?!\}))*?"title"\s*:\s*"([^"]{5,100})"(?:[^}]|\}(?!\}))*?"value"\s*:\s*(\d{4,8})',
+        text
+    )
+    if not item_blocks:
+        # Без цены
+        simple = re.findall(
+            r'"urlPath"\s*:\s*"(/[^"]{10,})"[^"]{0,400}"title"\s*:\s*"([^"]{5,100})"',
+            text
+        )
+        item_blocks = [(u, t, "0") for u, t in simple]
+
+    print(f"  [Авито] regex блоков: {len(item_blocks)}")
+    seen_urls: set = set()
+    for url_path, title, price_val in item_blocks[:80]:
+        # Фильтр: только URL объявлений (не категории, не страницы пользователя)
+        if not re.search(r'-\d{6,}$', url_path):
+            continue
+        item_url = "https://www.avito.ru" + url_path
+        if item_url in seen_urls:
+            continue
+        seen_urls.add(item_url)
+        price_int = int(price_val) if price_val != "0" else 0
+        price = f"{price_int:,} ₽".replace(",", " ") if price_int else ""
         item = {
-            "source": "avito", "title": "Авто на Авито", "price": "",
+            "source": "avito", "title": title, "price": price,
             "url": item_url, "date": str(today),
             "_photos": 0, "_days_on_site": 0,
             "description": "", "seller": "", "_photo_url": "",
+            "_price_int": price_int,
         }
         item["_hot_score"] = hot_score(item)
         results.append(item)
 
+    print(f"  [Авито] regex итого: {len(results)}")
     return results
 
 
