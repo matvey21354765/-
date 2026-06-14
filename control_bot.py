@@ -2201,27 +2201,9 @@ async def do_search_for_user(uid: int, reply_to):
             deduped.append(i)
     items = deduped
 
-    def _budget_ok(item: dict) -> bool:
-        """Фильтр: машины без цены пропускаем только если год соответствует бюджету."""
-        pi = item.get("_price_int", 0)
-        if pi > 0:
-            return True  # цена известна — пусть in_price_range решает
-        year_m = re.search(r'\b(20\d{2})\b', item.get("title", ""))
-        if not year_m:
-            return True  # год неизвестен, пропускаем
-        year = int(year_m.group(1))
-        # При бюджете < 500к: только машины до 2015 года без цены пропускаем
-        if pmax < 500_000 and year >= 2015:
-            return False
-        # При бюджете < 1.5М: машины 2022+ без цены = скорее всего дилер
-        if pmax < 1_500_000 and year >= 2022:
-            return False
-        return True
-
     suitable = [
         i for i in items
         if not is_dealer(i)
-        and _budget_ok(i)
         and in_price_range(i, pmin, pmax)
         and i.get("url")
         and i["url"] not in skipped
