@@ -1025,76 +1025,127 @@ def _scrape_avito_direct(slug: str, pages: int, price_min: int, price_max: int, 
 
 
 def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int = 99_000_000) -> list[dict]:
+    """
+    Использует ScraperAPI БЕЗ render — Авито отдаёт SSR-HTML с data-marker='item' карточками.
+    render=true требует premium аккаунта ScraperAPI и возвращает 500.
+    """
     slug = AVITO_SLUGS.get(region, region)
     today = datetime.date.today()
 
-    # 1. Прямой запрос (иногда работает с мобильным UA)
-    direct = _scrape_avito_direct(slug, 1, price_min, price_max, today)
-    if direct and len(direct) >= 5:
-        print(f"  [Авито прямой] {len(direct)} объявлений")
-        # Берём больше страниц
-        for p in range(2, pages + 1):
-            try:
-                import requests as _req
-                session = _req.Session()
-                session.headers.update({
-                    "User-Agent": "Mozilla/5.0 (Linux; Android 12; SM-G991B) AppleWebKit/537.36 Mobile Safari/537.36",
-                    "Accept-Language": "ru-RU,ru;q=0.9",
-                })
-                url = f"https://www.avito.ru/{slug}/avtomobili"
-                params: dict = {"p": p}
-                if price_min > 0:
-                    params["pmin"] = price_min
-                if price_max < 99_000_000:
-                    params["pmax"] = price_max
-                r = session.get(url, params=params, timeout=20)
-                batch = _parse_avito_html(r.text, slug, today)
-                if not batch:
-                    break
-                direct.extend(batch)
-                time.sleep(random.uniform(1, 2))
-            except Exception:
-                break
-        print(f"  [Авито прямой итого] {len(direct)} объявлений")
-        return direct
+    if not SCRAPER_API_KEY:
+        print("  [Авито] нет SCRAPER_API_KEY")
+        return []
 
-    # 2. ScraperAPI с render=true + wait=5000
-    if SCRAPER_API_KEY:
-        results = []
-        for p in range(1, pages + 1):
-            url = f"https://www.avito.ru/{slug}/avtomobili?p={p}"
-            if price_min > 0:
-                url += f"&pmin={price_min}"
-            if price_max < 99_000_000:
-                url += f"&pmax={price_max}"
+    try:
+        import requests as _req
+        from bs4 import BeautifulSoup as _BS
+    except ImportError:
+        return []
 
-            r = _avito_scraperapi(url)
-            if r is None or r.status_code != 200:
-                print(f"  [Авито ScraperAPI] стр.{p}: HTTP {r.status_code if r else 'err'}")
+    results = []
+    session = _req.Session()
+
+    for p in range(1, pages + 1):
+        url = f"https://www.avito.ru/{slug}/avtomobili?p={p}"
+        if price_min > 0:
+            url += f"&pmin={price_min}"
+        if price_max < 99_000_000:
+            url += f"&pmax={price_max}"
+
+        try:
+            # ScraperAPI БЕЗ render — работает, возвращает SSR HTML с карточками
+            r = session.get("http://api.scraperapi.com", params={
+                "api_key": SCRAPER_API_KEY,
+                "url": url,
+                "country_code": "ru",
+            }, timeout=40)
+
+            if r.status_code != 200:
+                print(f"  [Авито] стр.{p}: HTTP {r.status_code}")
                 break
 
-            status = r.status_code
             text = r.text
             has_items = 'data-marker="item"' in text
-            has_nd = "__NEXT_DATA__" in text
-            print(f"  [Авито ScraperAPI] стр.{p}: HTTP {status} {len(text)}б, items={has_items} next={has_nd}")
-            # Выводим кусок HTML для диагностики на первой странице
-            if p == 1:
-                snippet = text[:300].replace("\n", " ")
-                print(f"  [Авито HTML начало]: {snippet}")
+            print(f"  [Авито] стр.{p}: {len(text):,}б, items={has_items}")
 
-            batch = _parse_avito_html(text, slug, today)
-            if not batch:
+            if not has_items:
+                print(f"  [Авито] стр.{p}: нет карточек, стоп")
                 break
-            results.extend(batch)
-            time.sleep(random.uniform(2, 3))
 
-        if results:
-            print(f"  [Авито ScraperAPI итого] {len(results)} объявлений")
-            return results
+            soup = _BS(text, "lxml")
+            cards = soup.select("[data-marker='item']")
+            print(f"  [Авито] стр.{p}: найдено {len(cards)} карточек")
 
-    print(f"  [Авито] 0 объявлений — все методы исчерпаны")
-    return []
+            for card in cards:
+                try:
+                    # Ссылка на объявление
+                    link = (
+                        card.select_one("a[data-marker='item-title']")
+                        or card.select_one(f"a[href*='/{slug}/']")
+                        or card.select_one("a[href*='/avtomobili/']")
+                        or card.select_one("a[href]")
+                    )
+                    href = link.get("href", "") if link else ""
+                    item_url = ("https://www.avito.ru" + href) if href.startswith("/") else href
+                    if not item_url or "avito.ru" not in item_url:
+                        continue
+
+                    # Заголовок
+                    title_el = (
+                        card.select_one("[data-marker='item-title']")
+                        or card.select_one("[itemprop='name']")
+                        or card.select_one("h3")
+                        or card.select_one("h2")
+                        or (link if link else None)
+                    )
+                    title = title_el.get_text(strip=True) if title_el else ""
+                    if not title:
+                        continue
+
+                    # Цена
+                    price_el = (
+                        card.select_one("[itemprop='price']")
+                        or card.select_one("[data-marker='item-price']")
+                        or card.select_one("meta[itemprop='price']")
+                        or card.select_one("[class*='price']")
+                    )
+                    price = ""
+                    if price_el:
+                        price = price_el.get("content") or price_el.get_text(strip=True)
+                        price = re.sub(r"[^\d\s₽]", "", price).strip()
+
+                    # Фото
+                    img_el = card.select_one("img[src]") or card.select_one("img[data-src]")
+                    photo_url = ""
+                    if img_el:
+                        src = img_el.get("src") or img_el.get("data-src") or ""
+                        if src.startswith("http") and "avito" in src:
+                            photo_url = src
+
+                    # Дата
+                    date_el = card.select_one("[data-marker='item-date']") or card.select_one("time")
+                    date_text = date_el.get_text(strip=True) if date_el else ""
+                    date_obj = parse_ru_date(date_text)
+                    days = max(0, (today - date_obj).days) if date_obj else 0
+
+                    item = {
+                        "source": "avito", "title": title, "price": price,
+                        "url": item_url, "date": str(date_obj) if date_obj else str(today),
+                        "_photos": 1 if photo_url else 0, "_days_on_site": days,
+                        "description": "", "seller": "", "_photo_url": photo_url,
+                    }
+                    item["_hot_score"] = hot_score(item)
+                    results.append(item)
+                except Exception:
+                    pass
+
+            time.sleep(random.uniform(1.5, 2.5))
+        except Exception as e:
+            print(f"  [Авито] стр.{p}: {e}")
+            break
+
+    print(f"  [Авито] итого {len(results)} объявлений")
+    return results
 
 
 
