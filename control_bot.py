@@ -1387,9 +1387,11 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
             qs_parts.append(f"pmax={price_max}")
         if sort_by_date:
             qs_parts.append("s=104")   # Авито: сортировка по дате (новые сверху)
-        qs_parts.append("cd=1")  # только частные объявления
+        # cd=1 (только частные) часто ломает SSR-структуру через ScraperAPI, убрано
+        # Дилеры фильтруются позже через is_dealer() по ключевым словам
         url = f"https://www.avito.ru/{slug}/avtomobili"
-        url += "?" + "&".join(qs_parts)
+        if qs_parts:
+            url += "?" + "&".join(qs_parts)
 
         try:
             r = _req.get("http://api.scraperapi.com", params={
