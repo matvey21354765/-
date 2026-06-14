@@ -2202,7 +2202,6 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                 })
                 if resp.status_code == 200 and len(resp.content) > 5_000:
                     data = resp.content
-                    # Определяем размеры JPEG — плейсхолдер квадратный, фото машины горизонтальное
                     w, h = 0, 0
                     try:
                         if data[:2] == b'\xff\xd8':  # JPEG
@@ -2217,21 +2216,33 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                                     break
                                 seg_len = struct.unpack('>H', data[i+2:i+4])[0]
                                 i += seg_len + 2
+                        elif data[:8] == b'\x89PNG\r\n\x1a\n':  # PNG
+                            w = struct.unpack('>I', data[16:20])[0]
+                            h = struct.unpack('>I', data[20:24])[0]
+                        elif data[:4] == b'RIFF' and data[8:12] == b'WEBP':  # WebP
+                            # VP8 chunk: width/height в байтах 26-29
+                            if data[12:16] == b'VP8 ':
+                                w = (struct.unpack('<H', data[26:28])[0]) & 0x3fff
+                                h = (struct.unpack('<H', data[28:30])[0]) & 0x3fff
                     except Exception:
                         pass
-                    # Квадратное (w≈h) и размером < 100KB → плейсхолдер, пропускаем
-                    if w > 0 and h > 0 and abs(w - h) < min(w, h) * 0.15 and len(data) < 100_000:
-                        pass  # плейсхолдер
-                    else:
+                    # Плейсхолдер — квадратное изображение (w ≈ h)
+                    # Реальное фото машины — горизонтальное (w > h)
+                    if w > 0 and h > 0:
+                        is_placeholder = w <= h * 1.1  # квадратное или вертикальное
+                        if is_placeholder:
+                            pass  # не отправляем
+                        else:
+                            photo_bytes = BufferedInputFile(data, filename="photo.jpg")
+                            await bot.send_photo(chat_id, photo=photo_bytes, caption=caption, reply_markup=kb)
+                            return
+                    elif len(data) > 80_000:
+                        # Не смогли определить размеры, но файл большой → скорее всего реальное фото
                         photo_bytes = BufferedInputFile(data, filename="photo.jpg")
                         await bot.send_photo(chat_id, photo=photo_bytes, caption=caption, reply_markup=kb)
                         return
             except Exception:
-                try:
-                    await bot.send_photo(chat_id, photo=photo_url, caption=caption, reply_markup=kb)
-                    return
-                except Exception:
-                    pass
+                pass
         await bot.send_message(chat_id, caption, reply_markup=kb)
 
     # Предзагружаем фото/цену/описание (до 8 одновременно, 22 сек на каждое)
