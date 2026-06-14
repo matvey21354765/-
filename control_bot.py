@@ -212,12 +212,12 @@ def is_dealer(item: dict) -> bool:
     ).lower()
     if any(k in text for k in DEALER_KEYWORDS):
         return True
-    # Новые машины (год >= текущего - 1) без цены — практически всегда дилер
+    # Машины 2023+ без цены — практически всегда дилер
     title_raw = item.get("title", "")
     year_m = re.search(r'\b(20\d{2})\b', title_raw)
-    if year_m and int(year_m.group(1)) >= datetime.date.today().year - 1:
+    if year_m and int(year_m.group(1)) >= 2023:
         price_int = item.get("_price_int") or parse_price(item.get("price", "")) or 0
-        if price_int == 0:  # только если цена совсем не извлечена
+        if price_int == 0:
             return True
     return False
 
@@ -2184,6 +2184,16 @@ async def do_search_for_user(uid: int, reply_to):
     dealer_count = sum(1 for i in items if is_dealer(i))
     price_count = sum(1 for i in items if not is_dealer(i) and not in_price_range(i, pmin, pmax))
     print(f"  [поиск] всего={len(items)}, дилеров={dealer_count}, вне бюджета={price_count}")
+    # Дедупликация по URL
+    seen_u: set[str] = set()
+    deduped: list[dict] = []
+    for i in items:
+        u = i.get("url", "")
+        if u and u not in seen_u:
+            seen_u.add(u)
+            deduped.append(i)
+    items = deduped
+
     suitable = [
         i for i in items
         if not is_dealer(i)
