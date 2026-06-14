@@ -1272,7 +1272,7 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
             price_map[upath] = v
         # Ищем фото CDN Авито — могут быть //img.avito.st/... (без схемы) или https://...
         img_m = re.search(
-            r'"(?:864x648|640x480|320x240|url)"\s*:\s*"((?:https?:)?//[^"]{10,}(?:avito|img)[^"]{5,}\.(?:jpg|jpeg|webp|png))"',
+            r'"(?:864x648|640x480|320x240|url)"\s*:\s*"((?:https?:)?(?:\\?/){2}[^"]{10,}(?:avito|img)[^"]{5,}\.(?:jpg|jpeg|webp|png))"',
             window
         )
         if img_m:
@@ -1975,10 +1975,12 @@ async def _ensure_photo(item: dict) -> None:
     def _extract(text: str) -> tuple[str, str, int]:
         photo, desc, price_int = "", "", 0
         if need_photo:
+            # Ищем CDN URL Авито — с обычными и экранированными слэшами (\/\/)
             for pat in [
-                r'"(?:864x648|1280x960|640x480|432x324)"\s*:\s*"((?:https?:)?//[^"]+\.avito\.st/[^"]+\.(?:jpg|jpeg|webp))"',
-                r'"((?:https?:)?//[0-9]+\.img\.avito\.st/[^"]+\.(?:jpg|jpeg|webp))"',
+                r'"(?:864x648|1280x960|640x480|432x324)"\s*:\s*"((?:https?:)?(?:\\?/){2}[^"]*\.avito\.st[^"]*\.(?:jpg|jpeg|webp))"',
+                r'"((?:https?:)?(?:\\?/){2}[0-9]+\.img\.avito\.st[^"]*\.(?:jpg|jpeg|webp))"',
                 r'<meta[^>]+property="og:image"[^>]+content="(https://[^"]+)"',
+                r'property="og:image"\s+content="(https://[^"]+)"',
                 r'content="(https://[^"]+\.avito\.st/[^"]+\.(?:jpg|jpeg))"',
             ]:
                 m = re.search(pat, text)
