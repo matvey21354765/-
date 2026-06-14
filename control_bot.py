@@ -967,6 +967,100 @@ def _parse_avito_items(soup, today, slug: str) -> list[dict]:
     return results
 
 
+def _scrape_avito_mobile(slug: str, pages: int, price_min: int, price_max: int, today) -> list[dict]:
+    """Парсит мобильную версию Авито (m.avito.ru) — проще, меньше защиты от ботов."""
+    try:
+        import requests as _req
+        from bs4 import BeautifulSoup as _BS
+    except ImportError:
+        return []
+
+    results = []
+    session = _req.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.91 Mobile Safari/537.36",
+        "Accept-Language": "ru-RU,ru;q=0.9",
+        "Accept": "text/html,*/*",
+    })
+
+    for p in range(1, pages + 1):
+        params: dict = {"p": p}
+        if price_min > 0:
+            params["pmin"] = price_min
+        if price_max < 99_000_000:
+            params["pmax"] = price_max
+
+        url = f"https://m.avito.ru/{slug}/avtomobili"
+        try:
+            r = session.get(url, params=params, timeout=20)
+            if r.status_code != 200:
+                break
+            soup = _BS(r.text, "lxml")
+
+            # Мобильная версия: карточки в article или div с классами
+            cards = (
+                soup.select("article[class*='item']")
+                or soup.select("div[data-marker='item']")
+                or soup.select("div[class*='item-list']")
+                or soup.select("li[data-item-id]")
+            )
+
+            # Попробуем __NEXT_DATA__ — мобильный Авито тоже его использует
+            nd = soup.find("script", {"id": "__NEXT_DATA__"})
+            if nd and nd.string:
+                try:
+                    data = json.loads(nd.string)
+                    items_raw = _avito_find_items_in_json(data)
+                    for it in items_raw:
+                        item = _avito_item_from_json(it, today)
+                        if item:
+                            results.append(item)
+                    if results:
+                        break
+                except Exception:
+                    pass
+
+            if not cards:
+                break
+
+            for card in cards:
+                try:
+                    link = card.select_one("a[href*='/avtomobili/']") or card.select_one("a[href*='/transport/']") or card.select_one("a[href]")
+                    title_el = card.select_one("h3") or card.select_one("h2") or card.select_one("[class*='title']")
+                    title = title_el.get_text(strip=True) if title_el else (link.get_text(strip=True) if link else "")
+                    href = link.get("href", "") if link else ""
+                    item_url = ("https://www.avito.ru" + href) if href.startswith("/") else href
+
+                    price_el = card.select_one("[class*='price']") or card.select_one("[itemprop='price']")
+                    price = price_el.get("content") or price_el.get_text(strip=True) if price_el else ""
+
+                    img_el = card.select_one("img[src]") or card.select_one("img[data-src]")
+                    photo_url = ""
+                    if img_el:
+                        src = img_el.get("src") or img_el.get("data-src") or ""
+                        if src.startswith("http"):
+                            photo_url = src
+
+                    if title and item_url and "avito.ru" in item_url:
+                        item = {
+                            "source": "avito", "title": title, "price": price,
+                            "url": item_url, "date": str(today),
+                            "_photos": 0, "_days_on_site": 0,
+                            "description": "", "seller": "", "_photo_url": photo_url,
+                        }
+                        item["_hot_score"] = hot_score(item)
+                        results.append(item)
+                except Exception:
+                    pass
+
+            time.sleep(random.uniform(1, 2))
+        except Exception as e:
+            print(f"  [Авито mobile {slug}] стр.{p}: {e}")
+            break
+
+    return results
+
+
 def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int = 99_000_000) -> list[dict]:
     slug = AVITO_SLUGS.get(region, region)
     try:
@@ -984,8 +1078,14 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
     results = []
     today = datetime.date.today()
 
+    # Сначала пробуем мобильную версию (проще парсится, меньше защиты)
+    mobile_results = _scrape_avito_mobile(slug, min(pages, 3), price_min, price_max, today)
+    if mobile_results:
+        print(f"  [Авито mobile] {len(mobile_results)} объявлений")
+        return mobile_results
+
+    # Фолбек: ScraperAPI + десктоп
     for p in range(1, pages + 1):
-        # Не передаём seller_type — фильтрация дилеров по ключевым словам позже
         params: dict = {"p": p}
         if price_min > 0:
             params["pmin"] = price_min
@@ -1011,7 +1111,7 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
             if not batch:
                 print(f"  [Авито {region}] стр.{p}: объявления не извлечены")
                 if p == 1:
-                    break  # Нет смысла продолжать
+                    break
             else:
                 results.extend(batch)
             time.sleep(random.uniform(2, 3))
