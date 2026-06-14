@@ -1972,71 +1972,49 @@ async def _ensure_photo(item: dict) -> None:
         "Accept-Encoding": "gzip, deflate, br",
     }
 
-    def _is_real_photo(u: str) -> bool:
-        """Отсеиваем плейсхолдеры Авито (цветные круги, логотипы)."""
-        if not u:
-            return False
-        # Настоящие фото объявлений содержат /image/ в пути
-        # Плейсхолдеры: /app/, /logo/, /placeholder/, /default/ и т.п.
-        bad = ("/app/", "/logo/", "/placeholder/", "/default/", "/icon/", "/cat/")
-        if any(b in u for b in bad):
-            return False
-        if "img.avito.st" in u and "/image/" not in u:
-            return False
-        return True
-
     def _extract(text: str) -> tuple[str, str, int]:
         photo, desc, price_int = "", "", 0
         if need_photo:
-            # 1. Ищем изображения в структурированных данных __NEXT_DATA__
+            # 1. Парсим __NEXT_DATA__ как JSON и берём item.media.images[0]
             nd = re.search(r'<script[^>]+id="__NEXT_DATA__"[^>]*>(.*?)</script>', text, re.S)
             if nd:
-                nd_text = nd.group(1)
-                # Ищем массив images или photo с URL объявления
-                # Формат: "images":[{"864x648":"//80.img.avito.st/image/1/1.XXX.jpg",...}]
-                img_matches = re.findall(
-                    r'"(?:864x648|1280x960|640x480|432x324)"\s*:\s*"((?:https:)?//[0-9]+\.img\.avito\.st/image/[^\s"\'\\]{5,}\.(?:jpg|jpeg|webp))"',
-                    nd_text
-                )
-                for raw in img_matches:
-                    candidate = raw.replace("\\/", "/")
-                    if not candidate.startswith("http"):
-                        candidate = "https:" + candidate
-                    if _is_real_photo(candidate):
-                        photo = candidate
-                        break
-            # 2. Ищем в JSON вне __NEXT_DATA__ (например, window.__initialData__)
-            if not photo:
-                img_matches2 = re.findall(
-                    r'"(?:864x648|1280x960|640x480|432x324|320x240)"\s*:\s*"((?:https:)?(?:\\?/){2}[0-9]+\.img\.avito\.st/image/[^\s"\'\\]{5,}\.(?:jpg|jpeg|webp))"',
-                    text
-                )
-                for raw in img_matches2:
-                    candidate = raw.replace("\\/", "/")
-                    if not candidate.startswith("http"):
-                        candidate = "https:" + candidate
-                    if _is_real_photo(candidate):
-                        photo = candidate
-                        break
-            # 3. og:image — обычно это реальное фото объявления
-            if not photo:
-                og = re.search(r'og:image[^>]*content="([^"]+)"|content="([^"]+)"[^>]*og:image', text)
-                if og:
-                    candidate = og.group(1) or og.group(2) or ""
-                    if _is_real_photo(candidate):
-                        photo = candidate
-            # 4. Широкий поиск — только пути /image/
-            if not photo:
-                for pat in [
-                    r'https://[0-9]+\.img\.avito\.st/image/[^\s"\'<]{5,}\.(?:jpg|jpeg|webp)',
-                    r'(?:https:)?//[0-9]+\.img\.avito\.st/image/[^\s"\'<]{5,}\.(?:jpg|jpeg|webp)',
-                ]:
-                    m = re.search(pat, text)
-                    if m:
-                        raw = m.group(0).replace("\\/", "/")
-                        candidate = ("https:" + raw) if raw.startswith("//") else raw
-                        if _is_real_photo(candidate):
-                            photo = candidate
+                try:
+                    nd_json = json.loads(nd.group(1))
+                    # Два возможных пути в JSON-структуре Авито
+                    item_d = (
+                        nd_json.get("props", {}).get("pageProps", {})
+                               .get("initialData", {}).get("data", {}).get("item", {})
+                        or nd_json.get("props", {}).get("pageProps", {})
+                               .get("item", {})
+                    )
+                    images = item_d.get("media", {}).get("images", [])
+                    if not images:
+                        # Другой путь: item.images напрямую
+                        images = item_d.get("images", [])
+                    for img_obj in images[:1]:
+                        for size in ("1280x960", "864x648", "640x480", "432x324", "320x240"):
+                            raw = img_obj.get(size, "")
+                            if raw:
+                                raw = raw.replace("\\/", "/")
+                                photo = ("https:" + raw) if raw.startswith("//") else raw
+                                break
+                        if photo:
+                            break
+                except Exception:
+                    pass
+            # 2. Если JSON не дал — regex по __NEXT_DATA__ тексту (избегаем og:image — там может быть плейсхолдер)
+            if not photo and nd:
+                # Ищем конкретно внутри "images":[{...}] — первое вхождение размера
+                imgs_block = re.search(r'"images"\s*:\s*\[(\{[^\]]+)\]', nd.group(1), re.S)
+                if imgs_block:
+                    for size in ("1280x960", "864x648", "640x480", "432x324"):
+                        sm = re.search(
+                            rf'"{size}"\s*:\s*"((?:https:)?(?:\\?/{{2}})[0-9]+\.img\.avito\.st[^"\'\\]+\.(?:jpg|jpeg|webp))"',
+                            imgs_block.group(1)
+                        )
+                        if sm:
+                            raw = sm.group(1).replace("\\/", "/")
+                            photo = ("https:" + raw) if raw.startswith("//") else raw
                             break
         if need_desc:
             for dpat in [
