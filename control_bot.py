@@ -1387,9 +1387,9 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
             qs_parts.append(f"pmax={price_max}")
         if sort_by_date:
             qs_parts.append("s=104")   # Авито: сортировка по дате (новые сверху)
+        qs_parts.append("cd=1")  # только частные объявления
         url = f"https://www.avito.ru/{slug}/avtomobili"
-        if qs_parts:
-            url += "?" + "&".join(qs_parts)
+        url += "?" + "&".join(qs_parts)
 
         try:
             r = _req.get("http://api.scraperapi.com", params={
@@ -2202,13 +2202,20 @@ async def do_search_for_user(uid: int, reply_to):
     items = deduped
 
     def _budget_ok(item: dict) -> bool:
-        """Фильтр: новые машины 2024+ без цены не показываем если бюджет < 1 млн."""
+        """Фильтр: машины без цены пропускаем только если год соответствует бюджету."""
         pi = item.get("_price_int", 0)
         if pi > 0:
             return True  # цена известна — пусть in_price_range решает
         year_m = re.search(r'\b(20\d{2})\b', item.get("title", ""))
-        if year_m and int(year_m.group(1)) >= 2024 and pmax < 1_000_000:
-            return False  # 2024+ без цены при бюджете < 1 млн = дилер
+        if not year_m:
+            return True  # год неизвестен, пропускаем
+        year = int(year_m.group(1))
+        # При бюджете < 500к: только машины до 2015 года без цены пропускаем
+        if pmax < 500_000 and year >= 2015:
+            return False
+        # При бюджете < 1.5М: машины 2022+ без цены = скорее всего дилер
+        if pmax < 1_500_000 and year >= 2022:
+            return False
         return True
 
     suitable = [
