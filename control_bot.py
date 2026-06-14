@@ -124,7 +124,9 @@ DEALER_KEYWORDS = [
 ]
 
 HOT_WORDS = re.compile(
-    r"(срочно|торг|уступлю|снижу|скидка|дёшево|дешево|продам быстро|срочная продажа)",
+    r"(срочно|торг|уступлю|снижу|скидка|дёшево|дешево|продам быстро|срочная продажа"
+    r"|срочно продам|срочно продаю|нужны деньги|уезжаю|переезжаю|не торгуюсь нет"
+    r"|ниже рынка|ниже рыночной|выгодно|хорошая цена|торг при осмотре)",
     re.IGNORECASE,
 )
 
@@ -225,19 +227,66 @@ def in_price_range(item: dict, price_min: int, price_max: int) -> bool:
 
 
 def hot_score(item: dict) -> float:
-    """Оценка привлекательности: ниже рынка = выше."""
-    title = item.get("title", "")
-    photos = item.get("_photos", 0)
+    """Базовая оценка: срочность продажи + давность объявления."""
+    title = item.get("title", "") + " " + item.get("description", "")
     days = item.get("_days_on_site", 0)
     score = 0.0
     if HOT_WORDS.search(title):
-        score += 15.0
-    # Мало фото = меньше уверенности = возможно срочная продажа
-    if photos == 0:
-        score += 3.0
-    # Давно висит = мотивированный продавец
-    score += min(days, 30) * 0.5
+        score += 20.0
+    score += min(days, 30) * 0.3
     return round(score, 2)
+
+
+def _car_group_key(title: str) -> str:
+    """Извлекает марку+модель+год для группировки (напр. 'toyota camry 2018')."""
+    t = title.lower()
+    # Убираем технические характеристики: 1.6 МТ, 156 000 км и т.п.
+    t = re.sub(r'\d+[\.,]\d+\s*(л|at|mt|акп|мкп|амт)', '', t)
+    t = re.sub(r'\d[\d\s]+км', '', t)
+    # Год
+    year_m = re.search(r'\b(20\d{2}|19\d{2})\b', t)
+    year = year_m.group(1) if year_m else ""
+    # Марка+модель — первые 2 слова
+    words = re.sub(r'[^а-яёa-z\s]', ' ', t).split()
+    brand_model = " ".join(words[:2]) if len(words) >= 2 else " ".join(words)
+    return f"{brand_model} {year}".strip()
+
+
+def rank_by_market_price(items: list[dict]) -> list[dict]:
+    """
+    Вычисляет рыночную цену по медиане внутри группы марка+модель+год.
+    Объявления ниже рынка получают высокий _hot_score.
+    """
+    from statistics import median
+
+    # Группируем только те у кого есть цена
+    groups: dict[str, list[int]] = {}
+    for it in items:
+        p = it.get("_price_int", 0)
+        if p > 0:
+            key = _car_group_key(it.get("title", ""))
+            groups.setdefault(key, []).append(p)
+
+    market: dict[str, float] = {k: median(v) for k, v in groups.items() if len(v) >= 2}
+
+    for it in items:
+        p = it.get("_price_int", 0)
+        if p > 0:
+            key = _car_group_key(it.get("title", ""))
+            med = market.get(key, 0)
+            if med > 0:
+                ratio = p / med  # < 1.0 → ниже рынка
+                if ratio < 0.75:
+                    it["_hot_score"] = round(it.get("_hot_score", 0) + 50, 2)
+                    it["_below_market"] = True
+                elif ratio < 0.90:
+                    it["_hot_score"] = round(it.get("_hot_score", 0) + 25, 2)
+                    it["_below_market"] = True
+                elif ratio < 1.0:
+                    it["_hot_score"] = round(it.get("_hot_score", 0) + 10, 2)
+                it["_market_price"] = int(med)
+
+    return items
 
 
 # ── Парсер Дрома ────────────────────────────────────────────────
@@ -1680,9 +1729,14 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         hot_tag = " 🔥" if score >= 15 else " ⭐" if score >= 5 else ""
         source_tag = SOURCE_TAGS.get(item.get("source", ""), "🔵")
 
+        price_line = item.get('price', '—') or '—'
+        if item.get("_below_market") and item.get("_market_price"):
+            market = item["_market_price"]
+            price_line += f"  🔻 рынок ~{market:,} ₽".replace(",", " ")
+
         caption = (
             f"{source_tag} {item.get('title', '')}{hot_tag}\n"
-            f"💰 {item.get('price', '—')}\n"
+            f"💰 {price_line}\n"
             f"📅 {days_str}"
         )
         if item.get("description"):
@@ -1769,7 +1823,8 @@ async def do_search_for_user(uid: int, reply_to):
         and i.get("url")
         and i["url"] not in skipped
     ]
-    suitable.sort(key=lambda x: (-x.get("_hot_score", 0), x.get("_days_on_site", 999)))
+    suitable = rank_by_market_price(suitable)
+    suitable.sort(key=lambda x: (-x.get("_hot_score", 0), x.get("_price_int", 999_999_999)))
 
     if not suitable:
         await reply_to.answer(
