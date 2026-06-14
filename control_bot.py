@@ -219,7 +219,10 @@ def is_dealer(item: dict) -> bool:
 def in_price_range(item: dict, price_min: int, price_max: int) -> bool:
     p = item.get("_price_int") or parse_price(item.get("price", ""))
     if not p:
-        # Цена не найдена — скрываем если задан лимит бюджета (как Дром)
+        # Цена не извлечена: если источник Авито — показываем (Авито сложнее парсить)
+        # Для других источников скрываем когда задан бюджет
+        if item.get("source") == "avito":
+            return True
         if price_max < 5_000_000 or price_min > 0:
             return False
         return True
@@ -1288,18 +1291,31 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
             has_urlpath = '"urlPath"' in text
             print(f"  [Авито] стр.{p}: {size:,}б, items={has_items}, urlPath={has_urlpath}, url={url[:60]}")
 
-            # Если ответ с ценами маленький — пробуем без ценовых параметров
+            # Если ответ с ценами маленький — пробуем premium прокси для цен
             if not has_urlpath and (price_min > 0 or price_max < 99_000_000):
-                print(f"  [Авито] нет данных с ценами, пробую без фильтров...")
-                r2 = _req.get("http://api.scraperapi.com", params={
+                print(f"  [Авито] пробую premium ScraperAPI с ценами...")
+                r_prem = _req.get("http://api.scraperapi.com", params={
                     "api_key": SCRAPER_API_KEY,
-                    "url": f"https://www.avito.ru/{slug}/avtomobili",
+                    "url": url,
                     "country_code": "ru",
-                }, timeout=40)
-                if r2.status_code == 200 and '"urlPath"' in r2.text:
-                    text = r2.text
+                    "premium": "true",
+                }, timeout=60)
+                if r_prem.status_code == 200 and '"urlPath"' in r_prem.text:
+                    text = r_prem.text
                     has_items = 'data-marker="item"' in text
-                    print(f"  [Авито] fallback без цен: {len(text):,}б, items={has_items}")
+                    has_urlpath = True
+                    print(f"  [Авито] premium с ценами: {len(text):,}б, items={has_items}")
+                else:
+                    print(f"  [Авито] premium не помог ({r_prem.status_code}), fallback без цен...")
+                    r2 = _req.get("http://api.scraperapi.com", params={
+                        "api_key": SCRAPER_API_KEY,
+                        "url": f"https://www.avito.ru/{slug}/avtomobili",
+                        "country_code": "ru",
+                    }, timeout=40)
+                    if r2.status_code == 200 and '"urlPath"' in r2.text:
+                        text = r2.text
+                        has_items = 'data-marker="item"' in text
+                        print(f"  [Авито] fallback без цен: {len(text):,}б, items={has_items}")
 
             if not has_items and '"urlPath"' not in text:
                 print(f"  [Авито] стр.{p}: нет данных, стоп")
