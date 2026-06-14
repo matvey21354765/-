@@ -1029,14 +1029,20 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
 
         price_str, price_int = _avito_price_from_item(it)
 
-        images = it.get("images") or it.get("gallery", {}).get("images", []) or []
+        images = (it.get("images") or
+                  it.get("gallery", {}).get("images", []) or
+                  it.get("photos", []) or [])
         photo_url = ""
         if images and isinstance(images, list):
             img = images[0]
             if isinstance(img, dict):
-                photo_url = (img.get("864x648") or img.get("640x480") or
+                # Пробуем все известные ключи CDN Авито по убыванию размера
+                photo_url = (img.get("864x648") or img.get("1280x960") or
+                             img.get("640x480") or img.get("432x324") or
                              img.get("320x240") or img.get("url") or
-                             next(iter(img.values()), ""))
+                             img.get("src") or
+                             next((v for v in img.values() if isinstance(v, str) and "avito" in v), "") or
+                             next((v for v in img.values() if isinstance(v, str)), ""))
             elif isinstance(img, str):
                 photo_url = img
         if photo_url and photo_url.startswith("//"):
@@ -1204,9 +1210,10 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
             # Fallback: regex по сырому тексту карточки
             if not photo_url:
                 card_str = str(card)
-                img_m = re.search(r'https?://[^"\']+(?:avito|cdn)[^"\']+\.(?:jpg|jpeg|webp)', card_str)
+                img_m = re.search(r'((?:https?:)?//[^"\']+(?:img\.avito|avito\.st|cdn-avito)[^"\']+\.(?:jpg|jpeg|webp))', card_str)
                 if img_m:
-                    photo_url = img_m.group(0)
+                    raw = img_m.group(1)
+                    photo_url = ("https:" + raw) if raw.startswith("//") else raw
 
             if title:
                 price_int = parse_price(price)
@@ -1276,18 +1283,20 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
         v = _find_price_in_window(window)
         if v:
             price_map[upath] = v
-        # Ищем фото CDN Авито: images.cdn-avito, static-13.avito, аналоги
+        # Ищем фото CDN Авито — могут быть //img.avito.st/... (без схемы) или https://...
         img_m = re.search(
-            r'"(?:864x648|640x480|320x240|url)"\s*:\s*"(https?://[^"]{20,}(?:avito|cdn)[^"]{5,}\.(?:jpg|jpeg|webp|png))"',
+            r'"(?:864x648|640x480|320x240|url)"\s*:\s*"((?:https?:)?//[^"]{10,}(?:avito|img)[^"]{5,}\.(?:jpg|jpeg|webp|png))"',
             window
         )
         if img_m:
-            photo_map[upath] = img_m.group(1).replace("\\/", "/")
-        elif not img_m:
-            # Более широкий поиск: любой CDN-URL с изображением рядом
-            img_m2 = re.search(r'(https?://[^"\']{10,}(?:avito)[^"\']{5,}\.(?:jpg|jpeg|webp))', window)
+            raw_url = img_m.group(1).replace("\\/", "/")
+            photo_map[upath] = ("https:" + raw_url) if raw_url.startswith("//") else raw_url
+        else:
+            # Более широкий поиск по любому img.avito CDN
+            img_m2 = re.search(r'((?:https?:)?//[^"\']{5,}(?:img\.avito|avito\.st|cdn-avito)[^"\']{5,}\.(?:jpg|jpeg|webp))', window)
             if img_m2:
-                photo_map[upath] = img_m2.group(1)
+                raw_url = img_m2.group(1)
+                photo_map[upath] = ("https:" + raw_url) if raw_url.startswith("//") else raw_url
 
     sample_prices = list(price_map.values())[:5]
     print(f"  [Авито] цен найдено: {len(price_map)}, фото: {len(photo_map)}, примеры: {sample_prices}")
