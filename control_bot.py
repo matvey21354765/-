@@ -2204,6 +2204,7 @@ async def do_search_for_user(uid: int, reply_to):
     suitable = [
         i for i in items
         if not is_dealer(i)
+        and i.get("_price_int", 0) > 0        # только объявления с известной ценой
         and in_price_range(i, pmin, pmax)
         and i.get("url")
         and i["url"] not in skipped
