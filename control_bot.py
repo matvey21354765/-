@@ -1952,11 +1952,12 @@ async def _ensure_photo(item: dict) -> None:
             nd = re.search(r'<script[^>]+id="__NEXT_DATA__"[^>]*>(.*?)</script>', text, re.S)
             nd_text = nd.group(1) if nd else ""
 
+            listing_has_photos = None  # None = неизвестно, True/False = точно знаем
+
             # 1. Парсим __NEXT_DATA__ как JSON — ищем item.media.images[0]
             if nd_text:
                 try:
                     nd_json = json.loads(nd_text)
-                    # Рекурсивно ищем первый объект с ключами размеров изображений
                     def _find_images(obj, depth=0):
                         if depth > 12 or not isinstance(obj, (dict, list)):
                             return []
@@ -1966,7 +1967,6 @@ async def _ensure_photo(item: dict) -> None:
                                 if r:
                                     return r
                         else:
-                            # Если объект сам содержит ключи размеров — это элемент массива images
                             for size in ("1280x960", "864x648", "640x480", "432x324", "320x240"):
                                 if size in obj and "img.avito" in str(obj[size]):
                                     return [obj]
@@ -1976,6 +1976,7 @@ async def _ensure_photo(item: dict) -> None:
                                     return r
                         return []
                     imgs = _find_images(nd_json)
+                    listing_has_photos = len(imgs) > 0
                     for img_obj in imgs[:1]:
                         for size in ("1280x960", "864x648", "640x480", "432x324", "320x240"):
                             raw = str(img_obj.get(size, "")).replace("\\/", "/")
@@ -1989,6 +1990,7 @@ async def _ensure_photo(item: dict) -> None:
             if not photo and nd_text:
                 imgs_block = re.search(r'"images"\s*:\s*\[(\{[^\]]{10,})\]', nd_text, re.S)
                 if imgs_block:
+                    listing_has_photos = True
                     for size in ("1280x960", "864x648", "640x480", "432x324", "320x240"):
                         sm = re.search(
                             r'"' + size + r'"\s*:\s*"((?:https:)?(?:\\?/){2}[0-9]+\.img\.avito\.st[^"\'\\]+\.(?:jpg|jpeg|webp))"',
@@ -1998,6 +2000,9 @@ async def _ensure_photo(item: dict) -> None:
                             raw = sm.group(1).replace("\\/", "/")
                             photo = ("https:" + raw) if raw.startswith("//") else raw
                             break
+                elif nd_text and '"images"' in nd_text:
+                    # "images":[] пустой — нет фото у объявления
+                    listing_has_photos = False
 
             # 3. Широкий regex по всему тексту страницы (fallback)
             if not photo:
@@ -2011,9 +2016,10 @@ async def _ensure_photo(item: dict) -> None:
                         raw = (m.group(1) if m.lastindex else m.group(0)).replace("\\/", "/")
                         photo = ("https:" + raw) if raw.startswith("//") else raw
                         break
-            # 4. og:image — для объявлений с фото это реальное фото машины
-            # Плейсхолдеры (цветные круги ~3KB) отсеет фильтр размера при отправке
-            if not photo:
+
+            # 4. og:image — ТОЛЬКО если знаем что у объявления есть фото
+            # Если listing_has_photos=False — объявление без фото, og:image = плейсхолдер (круги)
+            if not photo and listing_has_photos is not False:
                 og = re.search(r'og:image[^>]*content="([^"]+)"|content="([^"]+)"[^>]*og:image', text)
                 if og:
                     photo = (og.group(1) or og.group(2) or "").strip()
