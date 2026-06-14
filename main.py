@@ -29,17 +29,6 @@ async def main():
     await init_db()
     logger.info("✅ Database ready")
 
-    # One-time reset of forecast stats
-    from app.models.database import ForecastLog
-    from sqlalchemy import delete as sa_delete
-    async with AsyncSessionLocal() as db:
-        await db.execute(sa_delete(ForecastLog))
-        await db.commit()
-    logger.info("✅ ForecastLog reset")
-
-
-
-
     # Seed promo codes — check by known first code
     from app.seeds.promo_list import PROMO_CODES
     first_code = PROMO_CODES[1][0]
