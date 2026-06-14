@@ -215,7 +215,9 @@ def is_dealer(item: dict) -> bool:
 def in_price_range(item: dict, price_min: int, price_max: int) -> bool:
     p = item.get("_price_int") or parse_price(item.get("price", ""))
     if not p:
-        return False  # цена неизвестна — пропускаем, чтобы не показывать 3млн+ авто
+        # Цена неизвестна: пропускаем если источник — fallback без ценового фильтра
+        # Для обычных запросов pmax уже отфильтровал в URL
+        return item.get("_price_filtered", False)
     return price_min <= p <= price_max
 
 
@@ -1409,8 +1411,10 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
             has_urlpath = '"urlPath"' in text
             has_items = 'data-marker="item"' in text
             print(f"  [Авито] стр.{p}: {len(text):,}б, items={has_items}, urlPath={has_urlpath}")
+            price_filtered = has_urlpath or has_items  # был ли фильтр по цене в URL
             if not has_items and not has_urlpath:
-                # Fallback: пробуем без ценового фильтра
+                # Fallback: пробуем без ценового фильтра (элементы будут помечены _price_filtered=False)
+                price_filtered = False
                 fallback_url = f"https://www.avito.ru/{slug}/avtomobili" + (f"?p={p}" if p > 1 else "")
                 try:
                     r2 = _req.get("http://api.scraperapi.com", params={
@@ -1426,23 +1430,37 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
                 except Exception:
                     return []
             batch = _parse_avito_html(text, slug, today)
+            for it in batch:
+                it["_price_filtered"] = price_filtered
             # Если цены не найдены через JSON — regex по тексту
-            if batch and not any(it.get("_price_int", 0) > 0 for it in batch):
-                price_map: dict[str, int] = {}
-                for m in re.finditer(
-                    r'"urlPath"\s*:\s*"(/[^"]+)"[^}]{0,600}?"value"\s*:\s*(\d{4,8})',
-                    text, re.DOTALL
-                ):
-                    url_p, val = m.group(1), int(m.group(2))
-                    if 10_000 < val < 99_000_000:
-                        price_map[url_p] = val
-                for it in batch:
-                    if it.get("_price_int", 0) == 0:
-                        path = it["url"].replace("https://www.avito.ru", "")
-                        if path in price_map:
-                            v = price_map[path]
-                            it["_price_int"] = v
-                            it["price"] = f"{v:,} ₽".replace(",", " ")
+            # Строим карту цен из сырого JSON текста страницы
+            price_map: dict[str, int] = {}
+            # Паттерн 1: urlPath рядом с priceDetailed.value (до 3000 символов)
+            for m in re.finditer(
+                r'"urlPath"\s*:\s*"(/[^"]+)"(?:[^}]{0,3000}?)"value"\s*:\s*(\d{4,9})',
+                text, re.DOTALL
+            ):
+                url_p, val = m.group(1), int(m.group(2))
+                if 10_000 < val < 99_000_000:
+                    price_map[url_p] = val
+            # Паттерн 2: "price":"1 500 000 ₽" как текст (valueText)
+            for m in re.finditer(
+                r'"urlPath"\s*:\s*"(/[^"]+)"(?:[^}]{0,3000}?)"valueText"\s*:\s*"([^"]+)"',
+                text, re.DOTALL
+            ):
+                url_p, price_text = m.group(1), m.group(2)
+                digits = re.sub(r"[^\d]", "", price_text)
+                if digits and 10_000 < int(digits) < 99_000_000:
+                    price_map.setdefault(url_p, int(digits))
+            if price_map:
+                print(f"  [Авито] regex цены: {len(price_map)} найдено")
+            for it in batch:
+                if it.get("_price_int", 0) == 0:
+                    path = it["url"].replace("https://www.avito.ru", "")
+                    if path in price_map:
+                        v = price_map[path]
+                        it["_price_int"] = v
+                        it["price"] = f"{v:,} ₽".replace(",", " ")
             print(f"  [Авито] стр.{p}: {len(batch)} объявлений")
             return batch
         except Exception as e:
