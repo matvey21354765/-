@@ -1000,19 +1000,26 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
 
         # Фильтр дилеров по типу продавца в JSON
         seller_obj = it.get("seller") or it.get("user") or {}
+        seller_name = ""
         if isinstance(seller_obj, dict):
             seller_type = (
                 seller_obj.get("type") or
                 seller_obj.get("accountType") or
-                seller_obj.get("sellerType") or ""
+                seller_obj.get("sellerType") or
+                seller_obj.get("userType") or ""
             ).lower()
-            # company, shop, dealer, pro, business — дилеры
+            # company, shop, dealer, pro, business, 1 (pro account) — дилеры
             if any(t in seller_type for t in ("company", "shop", "dealer", "pro", "business", "commercial")):
                 return None
-        # Доп. проверка по названию продавца
-        seller_name = ""
-        if isinstance(seller_obj, dict):
             seller_name = seller_obj.get("name") or seller_obj.get("title") or ""
+            # Если у продавца много объявлений — скорее всего дилер
+            items_count = seller_obj.get("itemsCount") or seller_obj.get("activeItemsCount") or 0
+            if isinstance(items_count, int) and items_count > 5:
+                return None
+        # Дополнительная проверка по ключевым словам в названии продавца и заголовке
+        check_text = (title + " " + seller_name).lower()
+        if any(k in check_text for k in DEALER_KEYWORDS):
+            return None
 
         price_str, price_int = _avito_price_from_item(it)
 
@@ -1039,7 +1046,11 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
             "source": "avito", "title": title,
             "price": price_str, "url": item_url, "date": str(today),
             "_photos": len(images), "_days_on_site": 0,
-            "description": (it.get("description") or "")[:300],
+            "description": (
+                it.get("description") or
+                it.get("descriptionFull") or
+                it.get("shortDescription") or ""
+            )[:400],
             "seller": seller_name, "_photo_url": photo_url,
             "_price_int": price_int,  # для точной фильтрации по цене
         }
@@ -2213,7 +2224,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                     "Referer": "https://www.avito.ru/",
                 })
-                if resp.status_code == 200 and len(resp.content) > 15_000:
+                if resp.status_code == 200 and len(resp.content) > 4_000:
                     photo_bytes = BufferedInputFile(resp.content, filename="photo.jpg")
                     await bot.send_photo(chat_id, photo=photo_bytes, caption=caption, reply_markup=kb)
                     return
