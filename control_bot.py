@@ -1974,7 +1974,7 @@ async def _ensure_photo(item: dict) -> None:
                     "api_key": SCRAPER_API_KEY,
                     "url": url,
                     "country_code": "ru",
-                }, timeout=6)
+                }, timeout=18)
                 if r.status_code != 200:
                     return photo, desc, price_int
                 text = r.text
@@ -2232,7 +2232,7 @@ async def do_search_for_user(uid: int, reply_to):
         async def _fetch_price(it):
             async with sem_price:
                 try:
-                    await asyncio.wait_for(_ensure_photo(it), timeout=7)
+                    await asyncio.wait_for(_ensure_photo(it), timeout=20)
                 except Exception:
                     pass
         await asyncio.gather(*[_fetch_price(it) for it in no_price[:60]])
