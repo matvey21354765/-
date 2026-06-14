@@ -1742,26 +1742,9 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         return
 
     batch = items[offset:offset + 10]
-    # Подгружаем фото/описание для объявлений из второй страницы и далее
-    to_enrich = [i for i in batch if not i.get("_enriched")]
-    if to_enrich:
-        loop = asyncio.get_event_loop()
-        details_list = await asyncio.gather(
-            *[loop.run_in_executor(None, _fetch_and_check, i["url"], i.get("source", "")) for i in to_enrich]
-        )
-        ei = 0
-        for i, item in enumerate(batch):
-            if not item.get("_enriched"):
-                d = details_list[ei] or {}
-                item["_enriched"] = True
-                if d.get("_photo_url"):
-                    item["_photo_url"] = d["_photo_url"]
-                if d.get("description"):
-                    item["description"] = d["description"]
-                ei += 1
-
     total = len(items)
-    for item in batch:
+
+    async def _send_item(item: dict):
         url = item.get("url", "")
         sid = url_to_id(url)
         days = item.get("_days_on_site", 0)
@@ -1770,7 +1753,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         hot_tag = " 🔥" if score >= 15 else " ⭐" if score >= 5 else ""
         source_tag = SOURCE_TAGS.get(item.get("source", ""), "🔵")
 
-        price_line = item.get('price', '—') or '—'
+        price_line = item.get("price", "—") or "—"
         if item.get("_below_market") and item.get("_market_price"):
             market = item["_market_price"]
             price_line += f"  🔻 рынок ~{market:,} ₽".replace(",", " ")
@@ -1792,10 +1775,13 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         if photo_url:
             try:
                 await bot.send_photo(chat_id, photo=photo_url, caption=caption, reply_markup=kb)
-                continue
+                return
             except Exception:
                 pass
         await bot.send_message(chat_id, caption, reply_markup=kb)
+
+    # Отправляем все 10 параллельно
+    await asyncio.gather(*[_send_item(item) for item in batch])
 
     next_offset = offset + 10
     if next_offset < total:
@@ -1870,13 +1856,6 @@ async def do_search_for_user(uid: int, reply_to):
             f"😔 Не нашёл частников в {region_name} по твоему бюджету.\n\n"
             f"Попробуй расширить диапазон цен: /settings"
         )
-        return
-
-    await reply_to.answer(f"🔎 Проверяю {min(len(suitable), 25)} объявлений и загружаю фото...")
-    suitable = await enrich_and_filter(suitable, max_check=25)
-
-    if not suitable:
-        await reply_to.answer("😔 Все найденные объявления уже сняты с продажи. Попробуй позже.")
         return
 
     _search_cache[uid] = suitable
