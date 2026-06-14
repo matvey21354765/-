@@ -1625,76 +1625,52 @@ async def cmd_test_avito(msg: Message):
 
     await msg.answer(f"🔬 Тестирую Авито для {REGIONS.get(region, region)}...\nURL: {url}")
 
-    def _safe(text: str, n: int = 300) -> str:
-        """Обрезает и экранирует текст для безопасной отправки."""
-        return text[:n].replace("<", "&lt;").replace(">", "&gt;").replace("&", "&amp;")
+    def _stat(r, name: str) -> str:
+        t = r.text
+        has_items = 'data-marker="item"' in t
+        has_nd = '__NEXT_DATA__' in t
+        has_block = "captcha" in t.lower() or "Доступ ограничен" in t or "blocked" in t.lower()
+        links = len(re.findall(rf'href="/{re.escape(slug)}/[a-z0-9_/-]+-\d{{5,}}"', t))
+        return (
+            f"📡 {name}:\n"
+            f"HTTP {r.status_code} | {len(t):,} байт\n"
+            f"data-marker: {'ДА ✅' if has_items else 'нет ❌'}\n"
+            f"__NEXT_DATA__: {'ДА ✅' if has_nd else 'нет ❌'}\n"
+            f"ссылки на авто: {links} шт\n"
+            f"блокировка: {'ДА ⛔' if has_block else 'нет'}"
+        )
 
     try:
-        # Прямой запрос (без ScraperAPI)
         r_direct = _req.get(url, headers={
             "User-Agent": "Mozilla/5.0 (Linux; Android 12; SM-G991B) AppleWebKit/537.36 Mobile Safari/537.36",
             "Accept-Language": "ru-RU,ru;q=0.9",
         }, timeout=15)
-        has_items_direct = 'data-marker="item"' in r_direct.text
-        has_nd_direct = '__NEXT_DATA__' in r_direct.text
-        await msg.answer(
-            f"📡 Прямой запрос:\n"
-            f"• HTTP: {r_direct.status_code}\n"
-            f"• Размер: {len(r_direct.text):,} байт\n"
-            f"• data-marker=item: {'✅' if has_items_direct else '❌'}\n"
-            f"• __NEXT_DATA__: {'✅' if has_nd_direct else '❌'}\n"
-            f"• HTML начало:\n{_safe(r_direct.text)}",
-            parse_mode="HTML"
-        )
+        await msg.answer(_stat(r_direct, "Прямой запрос"))
     except Exception as e:
-        await msg.answer(f"❌ Прямой запрос ошибка: {e}")
+        await msg.answer(f"Прямой запрос ошибка: {str(e)[:200]}")
 
-    if SCRAPER_API_KEY:
-        try:
-            await msg.answer("🔄 Пробую ScraperAPI без render...")
-            r1 = _req.get("http://api.scraperapi.com", params={
-                "api_key": SCRAPER_API_KEY,
-                "url": url,
-                "country_code": "ru",
-            }, timeout=30)
-            has_items1 = 'data-marker="item"' in r1.text
-            has_nd1 = '__NEXT_DATA__' in r1.text
-            await msg.answer(
-                f"📡 ScraperAPI (без render):\n"
-                f"• HTTP: {r1.status_code}\n"
-                f"• Размер: {len(r1.text):,} байт\n"
-                f"• data-marker=item: {'✅' if has_items1 else '❌'}\n"
-                f"• __NEXT_DATA__: {'✅' if has_nd1 else '❌'}\n"
-                f"• HTML начало:\n{_safe(r1.text)}",
-                parse_mode="HTML"
-            )
-        except Exception as e:
-            await msg.answer(f"❌ ScraperAPI без render ошибка: {e}")
+    if not SCRAPER_API_KEY:
+        await msg.answer("SCRAPER_API_KEY не задан!")
+        return
 
-        try:
-            await msg.answer("🔄 Пробую ScraperAPI с render=true + wait=5000 (до 90 сек)...")
-            r2 = _req.get("http://api.scraperapi.com", params={
-                "api_key": SCRAPER_API_KEY,
-                "url": url,
-                "render": "true",
-                "wait": "5000",
-                "country_code": "ru",
-            }, timeout=120)
-            has_items2 = 'data-marker="item"' in r2.text
-            has_nd2 = '__NEXT_DATA__' in r2.text
-            await msg.answer(
-                f"📡 ScraperAPI (render=true):\n"
-                f"• HTTP: {r2.status_code}\n"
-                f"• Размер: {len(r2.text):,} байт\n"
-                f"• data-marker=item: {'✅' if has_items2 else '❌'}\n"
-                f"• __NEXT_DATA__: {'✅' if has_nd2 else '❌'}\n"
-                f"• HTML начало:\n{_safe(r2.text)}",
-                parse_mode="HTML"
-            )
-        except Exception as e:
-            await msg.answer(f"❌ ScraperAPI render ошибка: {e}")
-    else:
-        await msg.answer("⚠️ SCRAPER_API_KEY не задан!")
+    try:
+        await msg.answer("Пробую ScraperAPI без render...")
+        r1 = _req.get("http://api.scraperapi.com", params={
+            "api_key": SCRAPER_API_KEY, "url": url, "country_code": "ru",
+        }, timeout=30)
+        await msg.answer(_stat(r1, "ScraperAPI без render"))
+    except Exception as e:
+        await msg.answer(f"ScraperAPI без render ошибка: {str(e)[:200]}")
+
+    try:
+        await msg.answer("Пробую ScraperAPI render=true + wait=5000 (до 90 сек)...")
+        r2 = _req.get("http://api.scraperapi.com", params={
+            "api_key": SCRAPER_API_KEY, "url": url,
+            "render": "true", "wait": "5000", "country_code": "ru",
+        }, timeout=120)
+        await msg.answer(_stat(r2, "ScraperAPI render=true"))
+    except Exception as e:
+        await msg.answer(f"ScraperAPI render ошибка: {str(e)[:200]}")
 
     await msg.answer("✅ Диагностика завершена. Пришли эти результаты разработчику.")
 
