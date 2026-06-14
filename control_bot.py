@@ -2171,9 +2171,9 @@ async def do_search_for_user(uid: int, reply_to):
     loop = asyncio.get_event_loop()
 
     scraper_map = {
-        "drom":   lambda: scrape_drom(region, pages=6, price_min=pmin, price_max=pmax),
+        "drom":   lambda: scrape_drom(region, pages=8, price_min=pmin, price_max=pmax),
         "autoru": lambda: scrape_autoru(region, pages=4, price_min=pmin, price_max=pmax),
-        "avito":  lambda: scrape_avito(region, pages=3, price_min=pmin, price_max=pmax),
+        "avito":  lambda: scrape_avito(region, pages=5, price_min=pmin, price_max=pmax),
     }
     tasks = [loop.run_in_executor(None, scraper_map[src]) for src in enabled_sources if src in scraper_map]
     results = await asyncio.gather(*tasks)
@@ -2201,9 +2201,20 @@ async def do_search_for_user(uid: int, reply_to):
             deduped.append(i)
     items = deduped
 
+    def _budget_ok(item: dict) -> bool:
+        """Фильтр: новые машины 2024+ без цены не показываем если бюджет < 1 млн."""
+        pi = item.get("_price_int", 0)
+        if pi > 0:
+            return True  # цена известна — пусть in_price_range решает
+        year_m = re.search(r'\b(20\d{2})\b', item.get("title", ""))
+        if year_m and int(year_m.group(1)) >= 2024 and pmax < 1_000_000:
+            return False  # 2024+ без цены при бюджете < 1 млн = дилер
+        return True
+
     suitable = [
         i for i in items
         if not is_dealer(i)
+        and _budget_ok(i)
         and in_price_range(i, pmin, pmax)
         and i.get("url")
         and i["url"] not in skipped
