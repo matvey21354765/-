@@ -419,7 +419,7 @@ def scrape_drom(region: str, pages: int = 15, price_min: int = 0, price_max: int
                 except Exception:
                     pass
 
-            time.sleep(random.uniform(1, 2))
+            time.sleep(0.2)
         except Exception as e:
             print(f"  [Дром {region}] стр.{p}: {e}")
             break
@@ -615,8 +615,8 @@ def scrape_autoru(region: str, pages: int = 5, price_min: int = 0, price_max: in
             try:
                 r3 = _req.get("http://api.scraperapi.com", params={
                     "api_key": SCRAPER_API_KEY, "url": html_url,
-                    "country_code": "ru", "render": "true", "wait": "3000",
-                }, timeout=90)
+                    "country_code": "ru", "render": "true", "wait": "1500",
+                }, timeout=40)
                 print(f"  [Auto.ru] ScraperAPI render стр.{p}: HTTP {r3.status_code}, {len(r3.text):,}б")
                 if r3.status_code == 200 and len(r3.text) > 100_000:
                     batch = _autoru_parse_html(r3.text, today)
@@ -657,7 +657,7 @@ def scrape_autoru(region: str, pages: int = 5, price_min: int = 0, price_max: in
         if not batch:
             break
         results.extend(batch)
-        time.sleep(random.uniform(0.5, 1.5))
+        time.sleep(0.2)
 
     print(f"  [Auto.ru] итого {len(results)} объявлений")
     return results
@@ -779,7 +779,7 @@ def scrape_kolesa(region: str, pages: int = 5, price_min: int = 0, price_max: in
                 except Exception:
                     pass
 
-            time.sleep(random.uniform(1, 2))
+            time.sleep(0.2)
         except Exception as e:
             print(f"  [Kolesa {region}] стр.{p}: {e}")
             break
@@ -893,7 +893,7 @@ def scrape_bibika(region: str, pages: int = 3, price_min: int = 0, price_max: in
                 except Exception:
                     pass
 
-            time.sleep(random.uniform(1, 2))
+            time.sleep(0.2)
         except Exception as e:
             print(f"  [Bibika {region}] стр.{p}: {e}")
             break
@@ -1356,7 +1356,7 @@ def _scrape_avito_direct(slug: str, pages: int, price_min: int, price_max: int, 
             if not batch:
                 break
             results.extend(batch)
-            time.sleep(random.uniform(1.5, 2.5))
+            time.sleep(0.3)
         except Exception as e:
             print(f"  [Авито прямой] стр.{p}: {e}")
             break
@@ -1475,7 +1475,7 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
             if batch:
                 results.extend(batch)
 
-            time.sleep(random.uniform(1.5, 2.5))
+            time.sleep(0.3)
         except Exception as e:
             print(f"  [Авито] стр.{p}: {e}")
             break
@@ -1979,7 +1979,7 @@ async def _ensure_photo(item: dict) -> None:
                     "api_key": SCRAPER_API_KEY,
                     "url": url,
                     "country_code": "ru",
-                }, timeout=30)
+                }, timeout=6)
                 if r.status_code != 200:
                     return ""
                 text = r.text
@@ -1992,7 +1992,7 @@ async def _ensure_photo(item: dict) -> None:
                         raw = m.group(1).replace("\\/", "/")
                         return ("https:" + raw) if raw.startswith("//") else raw
             elif source in ("drom", "autoru"):
-                r = _req.get(url, timeout=15, headers={
+                r = _req.get(url, timeout=6, headers={
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                     "Accept-Language": "ru-RU,ru;q=0.9",
                 })
@@ -2109,15 +2109,18 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                 pass
         await bot.send_message(chat_id, caption, reply_markup=kb)
 
-    # Предзагружаем фото (до 4 одновременно), потом отправляем по очереди
-    sem = asyncio.Semaphore(4)
+    # Предзагружаем фото (до 6 одновременно), потом отправляем по очереди
+    sem = asyncio.Semaphore(6)
     async def _prefetch(it):
         async with sem:
-            await _ensure_photo(it)
+            try:
+                await asyncio.wait_for(_ensure_photo(it), timeout=8)
+            except Exception:
+                pass
     await asyncio.gather(*[_prefetch(it) for it in batch])
     for item in batch:
         await _send_item(item)
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.05)
 
     next_offset = offset + 10
     if next_offset < total:
@@ -2161,9 +2164,9 @@ async def do_search_for_user(uid: int, reply_to):
     loop = asyncio.get_event_loop()
 
     scraper_map = {
-        "drom":   lambda: scrape_drom(region, pages=20, price_min=pmin, price_max=pmax),
-        "autoru": lambda: scrape_autoru(region, pages=10, price_min=pmin, price_max=pmax),
-        "avito":  lambda: scrape_avito(region, pages=5, price_min=pmin, price_max=pmax),
+        "drom":   lambda: scrape_drom(region, pages=6, price_min=pmin, price_max=pmax),
+        "autoru": lambda: scrape_autoru(region, pages=4, price_min=pmin, price_max=pmax),
+        "avito":  lambda: scrape_avito(region, pages=3, price_min=pmin, price_max=pmax),
     }
     tasks = [loop.run_in_executor(None, scraper_map[src]) for src in enabled_sources if src in scraper_map]
     results = await asyncio.gather(*tasks)
