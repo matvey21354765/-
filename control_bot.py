@@ -2019,11 +2019,7 @@ async def _ensure_photo(item: dict) -> None:
                         photo = candidate
                         break
 
-            # 4. og:image — реальное фото объявления для большинства случаев
-            if not photo:
-                og = re.search(r'og:image[^>]*content="([^"]+)"|content="([^"]+)"[^>]*og:image', text)
-                if og:
-                    photo = (og.group(1) or og.group(2) or "").strip()
+            # og:image не используем — там может быть плейсхолдер
         if need_desc:
             for dpat in [
                 r'"description"\s*:\s*"([^"]{20,})"',
@@ -2189,58 +2185,26 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         ])
 
         photo_url = item.get("_photo_url", "")
-        if photo_url:
+        # Отправляем фото только если URL из Авито CDN (img.avito.st) — там нет плейсхолдеров
+        # og:image и прочие URL могут быть плейсхолдерами, их не отправляем
+        if photo_url and ("img.avito.st" in photo_url or "drom.ru" in photo_url or "autoru" in photo_url or "auto.ru" in photo_url):
             try:
-                import requests as _req
-                from aiogram.types import BufferedInputFile
-                import struct
-                resp = _req.get(photo_url, timeout=10, headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                    "Referer": "https://www.avito.ru/",
-                })
-                if resp.status_code == 200 and len(resp.content) > 5_000:
-                    data = resp.content
-                    w, h = 0, 0
-                    try:
-                        if data[:2] == b'\xff\xd8':  # JPEG
-                            i = 2
-                            while i < len(data) - 8:
-                                if data[i] != 0xff:
-                                    break
-                                marker = data[i + 1]
-                                if marker in (0xc0, 0xc1, 0xc2):
-                                    h = struct.unpack('>H', data[i+5:i+7])[0]
-                                    w = struct.unpack('>H', data[i+7:i+9])[0]
-                                    break
-                                seg_len = struct.unpack('>H', data[i+2:i+4])[0]
-                                i += seg_len + 2
-                        elif data[:8] == b'\x89PNG\r\n\x1a\n':  # PNG
-                            w = struct.unpack('>I', data[16:20])[0]
-                            h = struct.unpack('>I', data[20:24])[0]
-                        elif data[:4] == b'RIFF' and data[8:12] == b'WEBP':  # WebP
-                            # VP8 chunk: width/height в байтах 26-29
-                            if data[12:16] == b'VP8 ':
-                                w = (struct.unpack('<H', data[26:28])[0]) & 0x3fff
-                                h = (struct.unpack('<H', data[28:30])[0]) & 0x3fff
-                    except Exception:
-                        pass
-                    # Плейсхолдер — квадратное изображение (w ≈ h)
-                    # Реальное фото машины — горизонтальное (w > h)
-                    if w > 0 and h > 0:
-                        is_placeholder = w <= h * 1.1  # квадратное или вертикальное
-                        if is_placeholder:
-                            pass  # не отправляем
-                        else:
-                            photo_bytes = BufferedInputFile(data, filename="photo.jpg")
-                            await bot.send_photo(chat_id, photo=photo_bytes, caption=caption, reply_markup=kb)
-                            return
-                    elif len(data) > 80_000:
-                        # Не смогли определить размеры, но файл большой → скорее всего реальное фото
-                        photo_bytes = BufferedInputFile(data, filename="photo.jpg")
+                await bot.send_photo(chat_id, photo=photo_url, caption=caption, reply_markup=kb)
+                return
+            except Exception:
+                try:
+                    import requests as _req
+                    from aiogram.types import BufferedInputFile
+                    resp = _req.get(photo_url, timeout=10, headers={
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                        "Referer": "https://www.avito.ru/",
+                    })
+                    if resp.status_code == 200 and len(resp.content) > 5_000:
+                        photo_bytes = BufferedInputFile(resp.content, filename="photo.jpg")
                         await bot.send_photo(chat_id, photo=photo_bytes, caption=caption, reply_markup=kb)
                         return
-            except Exception:
-                pass
+                except Exception:
+                    pass
         await bot.send_message(chat_id, caption, reply_markup=kb)
 
     # Предзагружаем фото/цену/описание (до 8 одновременно, 22 сек на каждое)
