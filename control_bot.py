@@ -1972,25 +1972,72 @@ async def _ensure_photo(item: dict) -> None:
         "Accept-Encoding": "gzip, deflate, br",
     }
 
+    def _is_real_photo(u: str) -> bool:
+        """Отсеиваем плейсхолдеры Авито (цветные круги, логотипы)."""
+        if not u:
+            return False
+        # Настоящие фото объявлений содержат /image/ в пути
+        # Плейсхолдеры: /app/, /logo/, /placeholder/, /default/ и т.п.
+        bad = ("/app/", "/logo/", "/placeholder/", "/default/", "/icon/", "/cat/")
+        if any(b in u for b in bad):
+            return False
+        if "img.avito.st" in u and "/image/" not in u:
+            return False
+        return True
+
     def _extract(text: str) -> tuple[str, str, int]:
         photo, desc, price_int = "", "", 0
         if need_photo:
-            # Широкий поиск: любой CDN URL Авито в любом месте страницы
-            for pat in [
-                r'https://[0-9]+\.img\.avito\.st/[^\s"\'<]{10,}\.(?:jpg|jpeg|webp)',
-                r'(?:https:)?//[0-9]+\.img\.avito\.st/[^\s"\'<]{10,}\.(?:jpg|jpeg|webp)',
-                r'"(?:864x648|1280x960|640x480)"\s*:\s*"([^"]*avito[^"]*\.(?:jpg|jpeg|webp))"',
-            ]:
-                m = re.search(pat, text)
-                if m:
-                    raw = (m.group(1) if m.lastindex else m.group(0)).replace("\\/", "/")
-                    photo = ("https:" + raw) if raw.startswith("//") else raw
-                    break
-            # og:image как запасной вариант
+            # 1. Ищем изображения в структурированных данных __NEXT_DATA__
+            nd = re.search(r'<script[^>]+id="__NEXT_DATA__"[^>]*>(.*?)</script>', text, re.S)
+            if nd:
+                nd_text = nd.group(1)
+                # Ищем массив images или photo с URL объявления
+                # Формат: "images":[{"864x648":"//80.img.avito.st/image/1/1.XXX.jpg",...}]
+                img_matches = re.findall(
+                    r'"(?:864x648|1280x960|640x480|432x324)"\s*:\s*"((?:https:)?//[0-9]+\.img\.avito\.st/image/[^\s"\'\\]{5,}\.(?:jpg|jpeg|webp))"',
+                    nd_text
+                )
+                for raw in img_matches:
+                    candidate = raw.replace("\\/", "/")
+                    if not candidate.startswith("http"):
+                        candidate = "https:" + candidate
+                    if _is_real_photo(candidate):
+                        photo = candidate
+                        break
+            # 2. Ищем в JSON вне __NEXT_DATA__ (например, window.__initialData__)
+            if not photo:
+                img_matches2 = re.findall(
+                    r'"(?:864x648|1280x960|640x480|432x324|320x240)"\s*:\s*"((?:https:)?(?:\\?/){2}[0-9]+\.img\.avito\.st/image/[^\s"\'\\]{5,}\.(?:jpg|jpeg|webp))"',
+                    text
+                )
+                for raw in img_matches2:
+                    candidate = raw.replace("\\/", "/")
+                    if not candidate.startswith("http"):
+                        candidate = "https:" + candidate
+                    if _is_real_photo(candidate):
+                        photo = candidate
+                        break
+            # 3. og:image — обычно это реальное фото объявления
             if not photo:
                 og = re.search(r'og:image[^>]*content="([^"]+)"|content="([^"]+)"[^>]*og:image', text)
                 if og:
-                    photo = og.group(1) or og.group(2) or ""
+                    candidate = og.group(1) or og.group(2) or ""
+                    if _is_real_photo(candidate):
+                        photo = candidate
+            # 4. Широкий поиск — только пути /image/
+            if not photo:
+                for pat in [
+                    r'https://[0-9]+\.img\.avito\.st/image/[^\s"\'<]{5,}\.(?:jpg|jpeg|webp)',
+                    r'(?:https:)?//[0-9]+\.img\.avito\.st/image/[^\s"\'<]{5,}\.(?:jpg|jpeg|webp)',
+                ]:
+                    m = re.search(pat, text)
+                    if m:
+                        raw = m.group(0).replace("\\/", "/")
+                        candidate = ("https:" + raw) if raw.startswith("//") else raw
+                        if _is_real_photo(candidate):
+                            photo = candidate
+                            break
         if need_desc:
             for dpat in [
                 r'"description"\s*:\s*"([^"]{20,})"',
