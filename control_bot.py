@@ -141,7 +141,7 @@ USERS_DIR = Path("users")
 USERS_DIR.mkdir(exist_ok=True)
 
 # Мониторинг новых объявлений
-MONITOR_INTERVAL = 15 * 60   # проверять каждые 15 минут
+MONITOR_INTERVAL = 15 * 60   # проверять каждые 5 минут
 MONITOR_MIN_SAVINGS_PCT = 10  # показывать только если скидка от рынка ≥ 10%
 _monitor_tasks: dict[int, asyncio.Task] = {}   # uid → Task
 
@@ -1192,12 +1192,21 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
             if price_el:
                 price = price_el.get("content") or price_el.get_text(strip=True)
 
-            img_el = card.select_one("img[src]") or card.select_one("img[data-src]")
             photo_url = ""
-            if img_el:
-                src = img_el.get("src") or img_el.get("data-src") or ""
-                if src.startswith("http"):
+            for img_el in card.find_all("img"):
+                src = (img_el.get("src") or img_el.get("data-src") or
+                       img_el.get("data-lazy-src") or img_el.get("data-original") or "")
+                if src.startswith("//"):
+                    src = "https:" + src
+                if src.startswith("http") and len(src) > 20:
                     photo_url = src
+                    break
+            # Fallback: regex по сырому тексту карточки
+            if not photo_url:
+                card_str = str(card)
+                img_m = re.search(r'https?://[^"\']+(?:avito|cdn)[^"\']+\.(?:jpg|jpeg|webp)', card_str)
+                if img_m:
+                    photo_url = img_m.group(0)
 
             if title:
                 price_int = parse_price(price)
@@ -1257,18 +1266,31 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
                         return v
         return 0
 
+    # Карта urlPath → фото (ищем CDN-ссылки рядом с urlPath)
+    photo_map: dict[str, str] = {}
     for m in re.finditer(r'"urlPath"\s*:\s*"(/[^"]{10,})"', text):
         upath = m.group(1).split("?")[0]
-        # Широкое окно: 1000 символов до и 4000 после (цена может быть до urlPath)
         window_start = max(0, m.start() - 1000)
         window_end = min(len(text), m.end() + 4000)
         window = text[window_start:window_end]
         v = _find_price_in_window(window)
         if v:
             price_map[upath] = v
+        # Ищем фото CDN Авито: images.cdn-avito, static-13.avito, аналоги
+        img_m = re.search(
+            r'"(?:864x648|640x480|320x240|url)"\s*:\s*"(https?://[^"]{20,}(?:avito|cdn)[^"]{5,}\.(?:jpg|jpeg|webp|png))"',
+            window
+        )
+        if img_m:
+            photo_map[upath] = img_m.group(1).replace("\\/", "/")
+        elif not img_m:
+            # Более широкий поиск: любой CDN-URL с изображением рядом
+            img_m2 = re.search(r'(https?://[^"\']{10,}(?:avito)[^"\']{5,}\.(?:jpg|jpeg|webp))', window)
+            if img_m2:
+                photo_map[upath] = img_m2.group(1)
 
     sample_prices = list(price_map.values())[:5]
-    print(f"  [Авито] цен найдено: {len(price_map)}, примеры: {sample_prices}")
+    print(f"  [Авито] цен найдено: {len(price_map)}, фото: {len(photo_map)}, примеры: {sample_prices}")
     seen_urls: set = set()
     for url_path, title in url_title_pairs[:80]:
         if not url_path.startswith("/") or len(url_path) < 10:
@@ -1282,11 +1304,12 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
         seen_urls.add(item_url)
         price_int = price_map.get(url_path, 0)
         price = f"{price_int:,} ₽".replace(",", " ") if price_int else ""
+        photo_url = photo_map.get(url_path, "")
         item = {
             "source": "avito", "title": title, "price": price,
             "url": item_url, "date": str(today),
-            "_photos": 0, "_days_on_site": 0,
-            "description": "", "seller": "", "_photo_url": "",
+            "_photos": 1 if photo_url else 0, "_days_on_site": 0,
+            "description": "", "seller": "", "_photo_url": photo_url,
             "_price_int": price_int,
         }
         item["_hot_score"] = hot_score(item)
@@ -1539,7 +1562,7 @@ async def cmd_start(msg: Message, state: FSMContext):
 
 def _notify_keyboard(s: dict) -> InlineKeyboardMarkup:
     enabled = s.get("monitor_enabled", False)
-    interval = s.get("monitor_interval_min", 15)
+    interval = s.get("monitor_interval_min", 5)
     min_pct = s.get("monitor_min_savings_pct", 10)
     toggle_text = "🔕 Выключить мониторинг" if enabled else "🔔 Включить мониторинг"
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -1562,7 +1585,7 @@ async def cb_notify_settings(cb: CallbackQuery):
     s = load_settings(uid)
     enabled = s.get("monitor_enabled", False)
     status = "✅ Включён" if enabled else "❌ Выключен"
-    interval = s.get("monitor_interval_min", 15)
+    interval = s.get("monitor_interval_min", 5)
     min_pct = s.get("monitor_min_savings_pct", 10)
     await cb.message.answer(
         f"🔔 *Настройки уведомлений*\n\n"
@@ -1605,8 +1628,8 @@ async def cb_notify_interval(cb: CallbackQuery):
     await cb.answer()
     uid = cb.from_user.id
     s = load_settings(uid)
-    current = s.get("monitor_interval_min", 15)
-    options = [10, 15, 30, 60]
+    current = s.get("monitor_interval_min", 5)
+    options = [5, 10, 15, 30, 60]
     next_val = options[(options.index(current) + 1) % len(options)] if current in options else 15
     s["monitor_interval_min"] = next_val
     save_settings(uid, s)
@@ -2287,12 +2310,12 @@ async def cmd_help(msg: Message):
 
 
 async def _monitor_loop(uid: int):
-    """Фоновая задача: каждые 15 минут проверяет новые объявления ниже рынка."""
+    """Фоновая задача: каждые 5 минут проверяет новые объявления ниже рынка."""
     print(f"  [монитор] uid={uid} запущен")
     while True:
         try:
             s = load_settings(uid)
-            interval_sec = s.get("monitor_interval_min", 15) * 60
+            interval_sec = s.get("monitor_interval_min", 5) * 60
             await asyncio.sleep(interval_sec)
             s = load_settings(uid)
             if not s.get("monitor_enabled"):
@@ -2449,7 +2472,7 @@ async def cmd_monitor(msg: Message):
         pmax = s.get("price_max", 99_000_000)
         await msg.answer(
             f"✅ *Автомониторинг включён!*\n\n"
-            f"🔔 Буду проверять Авито каждые 15 минут.\n"
+            f"🔔 Буду проверять Авито каждые 5 минут.\n"
             f"Регион: {region_name}\n"
             f"Бюджет: {pmin:,}–{pmax:,} ₽\n"
             f"Показываю только авто на 10%+ ниже рынка.\n\n"
