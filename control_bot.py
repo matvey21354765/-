@@ -2011,6 +2011,12 @@ async def _ensure_photo(item: dict) -> None:
                         raw = (m.group(1) if m.lastindex else m.group(0)).replace("\\/", "/")
                         photo = ("https:" + raw) if raw.startswith("//") else raw
                         break
+            # 4. og:image — для объявлений с фото это реальное фото машины
+            # Плейсхолдеры (цветные круги ~3KB) отсеет фильтр размера при отправке
+            if not photo:
+                og = re.search(r'og:image[^>]*content="([^"]+)"|content="([^"]+)"[^>]*og:image', text)
+                if og:
+                    photo = (og.group(1) or og.group(2) or "").strip()
         if need_desc:
             for dpat in [
                 r'"description"\s*:\s*"([^"]{20,})"',
@@ -2199,12 +2205,12 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                     pass
         await bot.send_message(chat_id, caption, reply_markup=kb)
 
-    # Предзагружаем фото/цену/описание (до 4 одновременно, 25 сек на каждое)
-    sem = asyncio.Semaphore(4)
+    # Предзагружаем фото/цену/описание (до 8 одновременно, 22 сек на каждое)
+    sem = asyncio.Semaphore(8)
     async def _prefetch(it):
         async with sem:
             try:
-                await asyncio.wait_for(_ensure_photo(it), timeout=25)
+                await asyncio.wait_for(_ensure_photo(it), timeout=22)
             except Exception:
                 pass
     await asyncio.gather(*[_prefetch(it) for it in batch])
@@ -2331,11 +2337,11 @@ async def do_search_for_user(uid: int, reply_to):
 
     # Предзагружаем фото+описание для первых 10 объявлений заранее
     first_batch = suitable[:10]
-    sem_pre = asyncio.Semaphore(4)
+    sem_pre = asyncio.Semaphore(8)
     async def _pre(it):
         async with sem_pre:
             try:
-                await asyncio.wait_for(_ensure_photo(it), timeout=25)
+                await asyncio.wait_for(_ensure_photo(it), timeout=22)
             except Exception:
                 pass
     await asyncio.gather(*[_pre(it) for it in first_batch])
