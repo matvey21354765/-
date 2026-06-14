@@ -255,12 +255,11 @@ def _car_group_key(title: str) -> str:
 
 def rank_by_market_price(items: list[dict]) -> list[dict]:
     """
-    Вычисляет рыночную цену по медиане внутри группы марка+модель+год.
-    Объявления ниже рынка получают высокий _hot_score.
+    Вычисляет рыночную цену по медиане внутри группы марка+модель+год (по всем площадкам).
+    Устанавливает _savings_pct: сколько % ниже рынка. Чем больше — тем выгоднее.
     """
     from statistics import median
 
-    # Группируем только те у кого есть цена
     groups: dict[str, list[int]] = {}
     for it in items:
         p = it.get("_price_int", 0)
@@ -276,16 +275,17 @@ def rank_by_market_price(items: list[dict]) -> list[dict]:
             key = _car_group_key(it.get("title", ""))
             med = market.get(key, 0)
             if med > 0:
-                ratio = p / med  # < 1.0 → ниже рынка
-                if ratio < 0.75:
+                savings_pct = round((1 - p / med) * 100, 1)  # положительный = ниже рынка
+                it["_savings_pct"] = savings_pct
+                it["_market_price"] = int(med)
+                if savings_pct >= 25:
                     it["_hot_score"] = round(it.get("_hot_score", 0) + 50, 2)
                     it["_below_market"] = True
-                elif ratio < 0.90:
+                elif savings_pct >= 10:
                     it["_hot_score"] = round(it.get("_hot_score", 0) + 25, 2)
                     it["_below_market"] = True
-                elif ratio < 1.0:
+                elif savings_pct > 0:
                     it["_hot_score"] = round(it.get("_hot_score", 0) + 10, 2)
-                it["_market_price"] = int(med)
 
     return items
 
@@ -1803,7 +1803,8 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         price_line = item.get("price", "—") or "—"
         if item.get("_below_market") and item.get("_market_price"):
             market = item["_market_price"]
-            price_line += f"  🔻 рынок ~{market:,} ₽".replace(",", " ")
+            pct = item.get("_savings_pct", 0)
+            price_line += f"  🔻 рынок ~{market:,} ₽ (-{pct}%)".replace(",", " ")
 
         caption = (
             f"{source_tag} {item.get('title', '')}{hot_tag}\n"
@@ -1896,7 +1897,13 @@ async def do_search_for_user(uid: int, reply_to):
         and i["url"] not in skipped
     ]
     suitable = rank_by_market_price(suitable)
-    suitable.sort(key=lambda x: (-x.get("_hot_score", 0), x.get("_price_int", 999_999_999)))
+    # Сортировка: сначала самые выгодные (максимальная скидка от рынка),
+    # потом по горячим ключевым словам, потом по цене
+    suitable.sort(key=lambda x: (
+        -x.get("_savings_pct", 0),       # скидка от рынка (больше = лучше)
+        -x.get("_hot_score", 0),          # срочность/горячесть
+        x.get("_price_int", 999_999_999)  # цена (дешевле = лучше)
+    ))
 
     if not suitable:
         await reply_to.answer(
