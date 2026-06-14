@@ -1965,66 +1965,92 @@ async def _ensure_photo(item: dict) -> None:
 
     loop = asyncio.get_event_loop()
 
+    _AVITO_HEADERS = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+        "Accept-Language": "ru-RU,ru;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+    }
+
+    def _extract(text: str) -> tuple[str, str, int]:
+        photo, desc, price_int = "", "", 0
+        if need_photo:
+            for pat in [
+                r'"(?:864x648|1280x960|640x480)"\s*:\s*"((?:https?:)?//[^"]+\.avito\.st/[^"]+\.(?:jpg|jpeg|webp))"',
+                r'"((?:https?:)?//[0-9]+\.img\.avito\.st/[^"]+\.(?:jpg|jpeg|webp))"',
+            ]:
+                m = re.search(pat, text)
+                if m:
+                    raw = m.group(1).replace("\\/", "/")
+                    photo = ("https:" + raw) if raw.startswith("//") else raw
+                    break
+        if need_desc:
+            dm = re.search(r'"description"\s*:\s*"([^"]{20,})"', text)
+            if dm:
+                desc = dm.group(1).replace("\\n", " ").replace('\\"', '"')[:400]
+        if need_price:
+            for pat in [
+                r'"priceDetailed"\s*:\s*\{[^}]{0,200}"value"\s*:\s*(\d{4,9})',
+                r'"price"\s*:\s*\{[^}]{0,200}"value"\s*:\s*(\d{4,9})',
+                r'"price"\s*:\s*(\d{5,9})',
+            ]:
+                pm = re.search(pat, text)
+                if pm:
+                    v = int(pm.group(1))
+                    if 10_000 < v < 99_000_000:
+                        price_int = v
+                        break
+        return photo, desc, price_int
+
     def _fetch() -> tuple[str, str, int]:
         photo, desc, price_int = "", "", 0
         try:
             import requests as _req
-            if source == "avito" and SCRAPER_API_KEY:
-                r = _req.get("http://api.scraperapi.com", params={
-                    "api_key": SCRAPER_API_KEY,
-                    "url": url,
-                    "country_code": "ru",
-                }, timeout=18)
-                if r.status_code != 200:
-                    return photo, desc, price_int
-                text = r.text
-                if need_photo:
-                    for pat in [
-                        r'"(?:864x648|1280x960|640x480)"\s*:\s*"((?:https?:)?//[^"]+\.avito\.st/[^"]+\.(?:jpg|jpeg|webp))"',
-                        r'"((?:https?:)?//[0-9]+\.img\.avito\.st/[^"]+\.(?:jpg|jpeg|webp))"',
-                    ]:
-                        m = re.search(pat, text)
-                        if m:
-                            raw = m.group(1).replace("\\/", "/")
-                            photo = ("https:" + raw) if raw.startswith("//") else raw
-                            break
-                if need_desc:
-                    dm = re.search(r'"description"\s*:\s*"([^"]{20,})"', text)
-                    if dm:
-                        desc = dm.group(1).replace("\\n", " ").replace('\\"', '"')[:400]
-                if need_price:
-                    for pat in [
-                        r'"priceDetailed"\s*:\s*\{[^}]{0,200}"value"\s*:\s*(\d{4,9})',
-                        r'"price"\s*:\s*\{[^}]{0,200}"value"\s*:\s*(\d{4,9})',
-                        r'"price"\s*:\s*(\d{5,9})',
-                    ]:
-                        pm = re.search(pat, text)
-                        if pm:
-                            v = int(pm.group(1))
-                            if 10_000 < v < 99_000_000:
-                                price_int = v
-                                break
+            if source == "avito":
+                # Сначала быстрый прямой запрос (без ScraperAPI)
+                try:
+                    r = _req.get(url, timeout=6, headers=_AVITO_HEADERS)
+                    if r.status_code == 200 and '"urlPath"' in r.text:
+                        photo, desc, price_int = _extract(r.text)
+                        if (not need_photo or photo) and (not need_price or price_int):
+                            return photo, desc, price_int
+                except Exception:
+                    pass
+                # Если прямой не дал нужного — ScraperAPI
+                if SCRAPER_API_KEY:
+                    try:
+                        r2 = _req.get("http://api.scraperapi.com", params={
+                            "api_key": SCRAPER_API_KEY,
+                            "url": url,
+                            "country_code": "ru",
+                        }, timeout=18)
+                        if r2.status_code == 200:
+                            p2, d2, pi2 = _extract(r2.text)
+                            if p2: photo = p2
+                            if d2: desc = d2
+                            if pi2: price_int = pi2
+                    except Exception:
+                        pass
             elif source in ("drom", "autoru"):
                 r = _req.get(url, timeout=10, headers={
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                     "Accept-Language": "ru-RU,ru;q=0.9",
                 })
-                if r.status_code != 200:
-                    return photo, desc, price_int
-                if need_photo:
-                    m = re.search(r'"(?:1200x900|832x624|1000x750)"\s*:\s*"([^"]+)"', r.text)
-                    if m:
-                        photo = m.group(1).replace("\\/", "/")
-                if need_desc:
-                    dm = re.search(r'"description"\s*:\s*"([^"]{20,})"', r.text)
-                    if dm:
-                        desc = dm.group(1).replace("\\n", " ")[:400]
-                if need_price:
-                    pm = re.search(r'"price"\s*:\s*(\d{5,9})', r.text)
-                    if pm:
-                        v = int(pm.group(1))
-                        if 10_000 < v < 99_000_000:
-                            price_int = v
+                if r.status_code == 200:
+                    if need_photo:
+                        m = re.search(r'"(?:1200x900|832x624|1000x750)"\s*:\s*"([^"]+)"', r.text)
+                        if m:
+                            photo = m.group(1).replace("\\/", "/")
+                    if need_desc:
+                        dm = re.search(r'"description"\s*:\s*"([^"]{20,})"', r.text)
+                        if dm:
+                            desc = dm.group(1).replace("\\n", " ")[:400]
+                    if need_price:
+                        pm = re.search(r'"price"\s*:\s*(\d{5,9})', r.text)
+                        if pm:
+                            v = int(pm.group(1))
+                            if 10_000 < v < 99_000_000:
+                                price_int = v
         except Exception:
             pass
         return photo, desc, price_int
@@ -2228,14 +2254,14 @@ async def do_search_for_user(uid: int, reply_to):
     # Для объявлений без цены — быстро загружаем цену (параллельно, 5 сек таймаут)
     no_price = [i for i in items if not is_dealer(i) and not i.get("_price_int") and i.get("url") and i["url"] not in skipped]
     if no_price:
-        sem_price = asyncio.Semaphore(8)
+        sem_price = asyncio.Semaphore(20)
         async def _fetch_price(it):
             async with sem_price:
                 try:
-                    await asyncio.wait_for(_ensure_photo(it), timeout=20)
+                    await asyncio.wait_for(_ensure_photo(it), timeout=8)
                 except Exception:
                     pass
-        await asyncio.gather(*[_fetch_price(it) for it in no_price[:60]])
+        await asyncio.gather(*[_fetch_price(it) for it in no_price[:100]])
 
     suitable = [
         i for i in items
