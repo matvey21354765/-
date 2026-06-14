@@ -1073,57 +1073,77 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
                 break
 
             soup = _BS(text, "lxml")
-            cards = soup.select("[data-marker='item']")
-            print(f"  [Авито] стр.{p}: найдено {len(cards)} карточек")
+            # find_all надёжнее CSS селектора для data-marker
+            cards = soup.find_all(attrs={"data-marker": "item"})
+            print(f"  [Авито] стр.{p}: найдено {len(cards)} карточек (find_all)")
+
+            if not cards:
+                # Fallback: regex — ищем href ссылки объявлений прямо в HTML
+                hrefs = re.findall(
+                    rf'href="(/{re.escape(slug)}/[a-z0-9][a-z0-9_-]*-\d{{6,}})"',
+                    text
+                )
+                seen_urls: set = set()
+                for href in hrefs:
+                    item_url = "https://www.avito.ru" + href
+                    if item_url in seen_urls:
+                        continue
+                    seen_urls.add(item_url)
+                    # Ищем заголовок рядом с href в тексте
+                    idx = text.find(f'href="{href}"')
+                    nearby = text[max(0, idx-500):idx+500]
+                    title_m = re.search(r'"title"\s*:\s*"([^"]{5,80})"', nearby)
+                    price_m = re.search(r'"price"\s*:\s*\{[^}]*"value"\s*:\s*(\d+)', nearby)
+                    title = title_m.group(1) if title_m else "Авто на Авито"
+                    price = f"{int(price_m.group(1)):,} ₽".replace(",", " ") if price_m else ""
+                    item = {
+                        "source": "avito", "title": title, "price": price,
+                        "url": item_url, "date": str(today),
+                        "_photos": 0, "_days_on_site": 0,
+                        "description": "", "seller": "", "_photo_url": "",
+                    }
+                    item["_hot_score"] = hot_score(item)
+                    results.append(item)
+                print(f"  [Авито] regex fallback: {len(results)} ссылок")
+                break  # regex fallback — только первая страница
 
             for card in cards:
                 try:
-                    # Ссылка на объявление
                     link = (
-                        card.select_one("a[data-marker='item-title']")
-                        or card.select_one(f"a[href*='/{slug}/']")
-                        or card.select_one("a[href*='/avtomobili/']")
-                        or card.select_one("a[href]")
+                        card.find(attrs={"data-marker": "item-title"})
+                        or card.find("a", href=lambda h: h and f"/{slug}/" in h)
+                        or card.find("a", href=lambda h: h and "/avtomobili/" in h)
+                        or card.find("a", href=True)
                     )
                     href = link.get("href", "") if link else ""
                     item_url = ("https://www.avito.ru" + href) if href.startswith("/") else href
                     if not item_url or "avito.ru" not in item_url:
                         continue
 
-                    # Заголовок
                     title_el = (
-                        card.select_one("[data-marker='item-title']")
-                        or card.select_one("[itemprop='name']")
-                        or card.select_one("h3")
-                        or card.select_one("h2")
-                        or (link if link else None)
+                        card.find(attrs={"data-marker": "item-title"})
+                        or card.find(attrs={"itemprop": "name"})
+                        or card.find("h3") or card.find("h2")
                     )
                     title = title_el.get_text(strip=True) if title_el else ""
+                    if not title and link:
+                        title = link.get_text(strip=True)
                     if not title:
                         continue
 
-                    # Цена
                     price_el = (
-                        card.select_one("[itemprop='price']")
-                        or card.select_one("[data-marker='item-price']")
-                        or card.select_one("meta[itemprop='price']")
-                        or card.select_one("[class*='price']")
+                        card.find(attrs={"itemprop": "price"})
+                        or card.find(attrs={"data-marker": "item-price"})
+                        or card.find("meta", attrs={"itemprop": "price"})
                     )
                     price = ""
                     if price_el:
                         price = price_el.get("content") or price_el.get_text(strip=True)
-                        price = re.sub(r"[^\d\s₽]", "", price).strip()
 
-                    # Фото
-                    img_el = card.select_one("img[src]") or card.select_one("img[data-src]")
-                    photo_url = ""
-                    if img_el:
-                        src = img_el.get("src") or img_el.get("data-src") or ""
-                        if src.startswith("http") and "avito" in src:
-                            photo_url = src
+                    img_el = card.find("img", src=lambda s: s and s.startswith("http"))
+                    photo_url = img_el.get("src", "") if img_el else ""
 
-                    # Дата
-                    date_el = card.select_one("[data-marker='item-date']") or card.select_one("time")
+                    date_el = card.find(attrs={"data-marker": "item-date"}) or card.find("time")
                     date_text = date_el.get_text(strip=True) if date_el else ""
                     date_obj = parse_ru_date(date_text)
                     days = max(0, (today - date_obj).days) if date_obj else 0
