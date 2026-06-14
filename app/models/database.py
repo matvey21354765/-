@@ -37,9 +37,6 @@ class User(Base):
         if self.is_subscribed and self.subscription_ends_at:
             if self.subscription_ends_at.replace(tzinfo=timezone.utc) > now:
                 return True
-        if self.trial_ends_at:
-            if self.trial_ends_at.replace(tzinfo=timezone.utc) > now:
-                return True
         return False
 
     def trial_days_left(self) -> int:

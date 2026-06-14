@@ -39,11 +39,9 @@ async def cmd_start(msg: Message, state: FSMContext):
         msg.from_user.id, msg.from_user.username, msg.from_user.first_name)
 
     name = user.first_name or "трейдер"
-    ends = user.trial_ends_at.strftime("%d.%m.%Y") if user.trial_ends_at else "—"
     text = (
         f"👋 Привет, <b>{name}</b>!\n\n"
         f"🤖 <b>PredictBot</b> — сигналы LONG/SHORT для BTC, ETH, SOL\n\n"
-        f"🎁 <b>Бесплатный доступ</b> до {ends}\n\n"
         f"Нажми кнопку ниже ↓"
     )
     await msg.answer(text, reply_markup=start_kb(), parse_mode="HTML")
@@ -51,17 +49,12 @@ async def cmd_start(msg: Message, state: FSMContext):
 
 @router.callback_query(F.data == "check_sub")
 async def cb_check_sub(call: CallbackQuery):
-    from app.middlewares.access import _live_check, _sub_kb
-    ok = await _live_check(call.bot, call.from_user.id)
-    if ok:
-        user = await get_user(call.from_user.id)
-        notif = getattr(user, "notifications_enabled", False) if user else False
-        await call.message.edit_text(
-            "📡 <b>PredictBot</b> — выберите действие:",
-            reply_markup=main_menu(notif), parse_mode="HTML"
-        )
-    else:
-        await call.answer("❌ Ты ещё не подписан на все каналы", show_alert=True)
+    user = await get_user(call.from_user.id)
+    notif = getattr(user, "notifications_enabled", False) if user else False
+    await call.message.edit_text(
+        "📡 <b>PredictBot</b> — выберите действие:",
+        reply_markup=main_menu(notif), parse_mode="HTML"
+    )
     await call.answer()
 
 
@@ -299,8 +292,6 @@ async def cb_subscription(call: CallbackQuery):
     user = await get_user(call.from_user.id)
     if user and user.is_subscribed and user.subscription_ends_at:
         status = f"✅ Активна до <b>{user.subscription_ends_at.strftime('%d.%m.%Y')}</b>"
-    elif user and user.trial_active():
-        status = f"⏳ Пробный период: <b>{user.trial_days_left()} дн.</b>"
     else:
         status = "❌ Нет доступа"
     text = (
