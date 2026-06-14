@@ -1377,10 +1377,7 @@ async def fsm_price_max(msg: Message, state: FSMContext):
 
 @dp.message(Command("settings"))
 async def cmd_settings(msg: Message, state: FSMContext):
-    await cb_change_settings.__wrapped__(
-        type("cb", (), {"answer": lambda *a, **kw: None, "message": msg, "from_user": msg.from_user})(),
-        state
-    )
+    await state.clear()
     await msg.answer("📍 Выбери город:", reply_markup=region_keyboard())
     await state.set_state(Setup.region)
 
