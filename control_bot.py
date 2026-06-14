@@ -212,10 +212,10 @@ def is_dealer(item: dict) -> bool:
     ).lower()
     if any(k in text for k in DEALER_KEYWORDS):
         return True
-    # Новые машины (год >= текущего) без цены — практически всегда дилер
+    # Новые машины (год >= текущего - 1) без цены — практически всегда дилер
     title_raw = item.get("title", "")
     year_m = re.search(r'\b(20\d{2})\b', title_raw)
-    if year_m and int(year_m.group(1)) >= datetime.date.today().year:
+    if year_m and int(year_m.group(1)) >= datetime.date.today().year - 1:
         price_int = item.get("_price_int") or parse_price(item.get("price", "")) or 0
         if price_int == 0:  # только если цена совсем не извлечена
             return True
