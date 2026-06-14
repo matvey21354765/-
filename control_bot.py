@@ -2312,7 +2312,14 @@ async def do_search_for_user(uid: int, reply_to):
             deduped.append(i)
     items = deduped
 
-    # Для объявлений без цены — быстро загружаем цену (параллельно, 5 сек таймаут)
+    # Для объявлений без _price_int — парсим из текстового поля price
+    for it in items:
+        if not it.get("_price_int") and it.get("price"):
+            p = parse_price(it["price"])
+            if p and 10_000 < p < 99_000_000:
+                it["_price_int"] = p
+
+    # Для объявлений где цена всё ещё неизвестна — быстро загружаем (параллельно, 8 сек)
     no_price = [i for i in items if not is_dealer(i) and not i.get("_price_int") and i.get("url") and i["url"] not in skipped]
     if no_price:
         sem_price = asyncio.Semaphore(20)
@@ -2327,7 +2334,6 @@ async def do_search_for_user(uid: int, reply_to):
     suitable = [
         i for i in items
         if not is_dealer(i)
-        and i.get("_price_int", 0) > 0
         and in_price_range(i, pmin, pmax)
         and i.get("url")
         and i["url"] not in skipped
