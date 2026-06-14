@@ -1625,6 +1625,10 @@ async def cmd_test_avito(msg: Message):
 
     await msg.answer(f"🔬 Тестирую Авито для {REGIONS.get(region, region)}...\nURL: {url}")
 
+    def _safe(text: str, n: int = 300) -> str:
+        """Обрезает и экранирует текст для безопасной отправки."""
+        return text[:n].replace("<", "&lt;").replace(">", "&gt;").replace("&", "&amp;")
+
     try:
         # Прямой запрос (без ScraperAPI)
         r_direct = _req.get(url, headers={
@@ -1639,8 +1643,8 @@ async def cmd_test_avito(msg: Message):
             f"• Размер: {len(r_direct.text):,} байт\n"
             f"• data-marker=item: {'✅' if has_items_direct else '❌'}\n"
             f"• __NEXT_DATA__: {'✅' if has_nd_direct else '❌'}\n"
-            f"• Первые 200 символов:\n`{r_direct.text[:200]}`",
-            parse_mode="Markdown"
+            f"• HTML начало:\n{_safe(r_direct.text)}",
+            parse_mode="HTML"
         )
     except Exception as e:
         await msg.answer(f"❌ Прямой запрос ошибка: {e}")
@@ -1661,8 +1665,8 @@ async def cmd_test_avito(msg: Message):
                 f"• Размер: {len(r1.text):,} байт\n"
                 f"• data-marker=item: {'✅' if has_items1 else '❌'}\n"
                 f"• __NEXT_DATA__: {'✅' if has_nd1 else '❌'}\n"
-                f"• Первые 300 символов:\n`{r1.text[:300]}`",
-                parse_mode="Markdown"
+                f"• HTML начало:\n{_safe(r1.text)}",
+                parse_mode="HTML"
             )
         except Exception as e:
             await msg.answer(f"❌ ScraperAPI без render ошибка: {e}")
@@ -1684,8 +1688,8 @@ async def cmd_test_avito(msg: Message):
                 f"• Размер: {len(r2.text):,} байт\n"
                 f"• data-marker=item: {'✅' if has_items2 else '❌'}\n"
                 f"• __NEXT_DATA__: {'✅' if has_nd2 else '❌'}\n"
-                f"• Первые 300 символов:\n`{r2.text[:300]}`",
-                parse_mode="Markdown"
+                f"• HTML начало:\n{_safe(r2.text)}",
+                parse_mode="HTML"
             )
         except Exception as e:
             await msg.answer(f"❌ ScraperAPI render ошибка: {e}")
