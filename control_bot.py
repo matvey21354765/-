@@ -204,6 +204,13 @@ def is_dealer(item: dict) -> bool:
     ).lower()
     if any(k in text for k in DEALER_KEYWORDS):
         return True
+    # Новые машины (год >= текущего) без цены — практически всегда дилер
+    title_raw = item.get("title", "")
+    year_m = re.search(r'\b(20\d{2})\b', title_raw)
+    if year_m and int(year_m.group(1)) >= datetime.date.today().year:
+        price_int = item.get("_price_int") or parse_price(item.get("price", "")) or 0
+        if price_int == 0:  # только если цена совсем не извлечена
+            return True
     return False
 
 
@@ -1059,36 +1066,51 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
     if results:
         return results
 
-    # 3. Regex по "urlPath" + "title" + "value" прямо в тексте скриптов
+    # 3. Regex по "urlPath" + "title" прямо в тексте скриптов
     has_urlpath = '"urlPath"' in text
     print(f"  [Авито] в тексте: urlPath={has_urlpath}, размер={len(text):,}")
-    item_blocks = re.findall(
-        r'"urlPath"\s*:\s*"(/[^"]+)"[^}]{0,600}?"title"\s*:\s*"([^"]{5,100})"[^}]{0,400}?"value"\s*:\s*(\d{4,8})',
+    # Извлекаем urlPath + title (не пересекаем границу объекта [^}])
+    url_title_pairs = re.findall(
+        r'"urlPath"\s*:\s*"(/[^"]{10,})"[^}]{0,600}"title"\s*:\s*"([^"]{5,100})"',
         text
     )
-    if not item_blocks:
-        # Без цены — [^}] не пересекает границу объекта JSON
-        simple = re.findall(
-            r'"urlPath"\s*:\s*"(/[^"]{10,})"[^}]{0,500}"title"\s*:\s*"([^"]{5,100})"',
-            text
-        )
-        item_blocks = [(u, t, "0") for u, t in simple]
+    if not url_title_pairs:
+        # Попробуем title → urlPath (порядок может быть обратным)
+        url_title_pairs = [
+            (u, t) for t, u in re.findall(
+                r'"title"\s*:\s*"([^"]{5,100})"[^}]{0,600}"urlPath"\s*:\s*"(/[^"]{10,})"',
+                text
+            )
+        ]
+    print(f"  [Авито] url+title пар: {len(url_title_pairs)}")
 
-    print(f"  [Авито] regex блоков: {len(item_blocks)}")
+    # Строим карту urlPath → цена отдельным проходом (value может быть до или после urlPath)
+    # Ищем: "urlPath":"/..." и в окрестности ±3000 символов ищем "value": NNNNN
+    price_map: dict[str, int] = {}
+    for m in re.finditer(r'"urlPath"\s*:\s*"(/[^"]{10,})"', text):
+        upath = m.group(1).split("?")[0]
+        window_start = max(0, m.start() - 500)
+        window_end = min(len(text), m.end() + 2000)
+        window = text[window_start:window_end]
+        vm = re.search(r'"value"\s*:\s*(\d{4,8})', window)
+        if vm:
+            v = int(vm.group(1))
+            if 10_000 < v < 99_000_000:
+                price_map[upath] = v
+
+    print(f"  [Авито] цен найдено: {len(price_map)}")
     seen_urls: set = set()
-    for url_path, title, price_val in item_blocks[:80]:
-        # Пропускаем служебные страницы (не объявления)
+    for url_path, title in url_title_pairs[:80]:
         if not url_path.startswith("/") or len(url_path) < 10:
             continue
         if any(skip in url_path for skip in ("/profile/", "/user/", "/search?", "/avtomobili?", "/category/")):
             continue
-        # Обрезаем query params если есть
         url_path = url_path.split("?")[0]
         item_url = "https://www.avito.ru" + url_path
         if item_url in seen_urls:
             continue
         seen_urls.add(item_url)
-        price_int = int(price_val) if price_val != "0" else 0
+        price_int = price_map.get(url_path, 0)
         price = f"{price_int:,} ₽".replace(",", " ") if price_int else ""
         item = {
             "source": "avito", "title": title, "price": price,
