@@ -2084,28 +2084,30 @@ async def _ensure_photo(item: dict) -> None:
         try:
             import requests as _req
             if source == "avito":
-                # Сначала быстрый прямой запрос (без ScraperAPI)
-                try:
-                    r = _req.get(url, timeout=6, headers=_AVITO_HEADERS)
-                    if r.status_code == 200 and '"urlPath"' in r.text:
-                        photo, desc, price_int = _extract(r.text)
-                        if (not need_photo or photo) and (not need_price or price_int):
-                            return photo, desc, price_int
-                except Exception:
-                    pass
-                # Если прямой не дал нужного — ScraperAPI
+                # Сначала ScraperAPI — он точно вернёт полную страницу с __NEXT_DATA__
                 if SCRAPER_API_KEY:
                     try:
                         r2 = _req.get("http://api.scraperapi.com", params={
                             "api_key": SCRAPER_API_KEY,
                             "url": url,
                             "country_code": "ru",
-                        }, timeout=18)
-                        if r2.status_code == 200:
+                        }, timeout=25)
+                        if r2.status_code == 200 and '__NEXT_DATA__' in r2.text:
                             p2, d2, pi2 = _extract(r2.text)
                             if p2: photo = p2
                             if d2: desc = d2
                             if pi2: price_int = pi2
+                    except Exception:
+                        pass
+                # Запасной прямой запрос если ScraperAPI не дал результата
+                if (need_photo and not photo) or (need_desc and not desc):
+                    try:
+                        r = _req.get(url, timeout=8, headers=_AVITO_HEADERS)
+                        if r.status_code == 200 and '__NEXT_DATA__' in r.text:
+                            p3, d3, pi3 = _extract(r.text)
+                            if p3 and not photo: photo = p3
+                            if d3 and not desc: desc = d3
+                            if pi3 and not price_int: price_int = pi3
                     except Exception:
                         pass
             elif source in ("drom", "autoru"):
