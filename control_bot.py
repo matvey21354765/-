@@ -225,11 +225,7 @@ def is_dealer(item: dict) -> bool:
 def in_price_range(item: dict, price_min: int, price_max: int) -> bool:
     p = item.get("_price_int") or parse_price(item.get("price", ""))
     if not p:
-        # Авито — скрываем если цена неизвестна и задан бюджет
-        if item.get("source") == "avito" and (price_max < 5_000_000 or price_min > 0):
-            return False
-        # Остальные площадки — показываем (цена фильтруется URL-параметрами)
-        return True
+        return True  # цена неизвестна — pmin/pmax в URL уже отфильтровали
     return price_min <= p <= price_max
 
 
