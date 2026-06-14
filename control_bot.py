@@ -215,7 +215,8 @@ def is_dealer(item: dict) -> bool:
 def in_price_range(item: dict, price_min: int, price_max: int) -> bool:
     p = item.get("_price_int") or parse_price(item.get("price", ""))
     if not p:
-        return False  # без цены не показываем
+        # Для Авито: если запрос был с ценовым фильтром в URL — доверяем Авито
+        return bool(item.get("_avito_price_filtered"))
     return price_min <= p <= price_max
 
 
@@ -966,23 +967,40 @@ def _avito_extract_links(text: str, slug: str) -> list[str]:
 
 def _avito_price_from_item(it: dict) -> tuple[str, int]:
     """Извлекает цену из объекта Авито. Возвращает (строка, число)."""
-    # Пробуем все возможные пути к цене
-    for key in ("priceDetailed", "price", "priceInfo"):
+    def _find_price_in_obj(obj, depth=0):
+        if depth > 5 or not isinstance(obj, dict):
+            return "", 0
+        # Прямое числовое значение
+        for val_key in ("value", "number", "amount", "price", "sum"):
+            v = obj.get(val_key)
+            if v and isinstance(v, (int, float)) and 10_000 < v < 99_000_000:
+                text_v = obj.get("valueText") or obj.get("text") or f"{int(v):,} ₽".replace(",", " ")
+                return str(text_v), int(v)
+        # Текстовое значение цены
+        for text_key in ("valueText", "text", "label", "displayValue"):
+            t = obj.get(text_key)
+            if t and isinstance(t, str):
+                digits = re.sub(r"[^\d]", "", t)
+                if digits and 10_000 < int(digits) < 99_000_000:
+                    return t, int(digits)
+        # Рекурсия в под-объекты
+        for k, v in obj.items():
+            if isinstance(v, dict):
+                r_str, r_int = _find_price_in_obj(v, depth + 1)
+                if r_int:
+                    return r_str, r_int
+        return "", 0
+
+    for key in ("priceDetailed", "price", "priceInfo", "priceMicro"):
         info = it.get(key)
         if not info:
             continue
-        if isinstance(info, (int, float)) and info > 0:
+        if isinstance(info, (int, float)) and 10_000 < info < 99_000_000:
             return f"{int(info):,} ₽".replace(",", " "), int(info)
         if isinstance(info, dict):
-            for val_key in ("value", "number", "amount", "price"):
-                v = info.get(val_key)
-                if v and isinstance(v, (int, float)) and v > 0:
-                    return f"{int(v):,} ₽".replace(",", " "), int(v)
-            # Попробуем text поле
-            text = info.get("valueText") or info.get("text") or ""
-            digits = re.sub(r"[^\d]", "", str(text))
-            if digits and len(digits) >= 4:
-                return text, int(digits)
+            r_str, r_int = _find_price_in_obj(info)
+            if r_int:
+                return r_str, r_int
     return "", 0
 
 
@@ -1396,6 +1414,7 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
 
     def _fetch_page(p: int) -> list[dict]:
         url = _build_url(p)
+        url_has_price_filter = price_max < 99_000_000 or price_min > 0
         try:
             r = _req.get("http://api.scraperapi.com", params={
                 "api_key": SCRAPER_API_KEY,
@@ -1409,6 +1428,7 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
             has_urlpath = '"urlPath"' in text
             has_items = 'data-marker="item"' in text
             print(f"  [Авито] стр.{p}: {len(text):,}б, items={has_items}, urlPath={has_urlpath}")
+            from_fallback = False
             if not has_items and not has_urlpath:
                 fallback_url = f"https://www.avito.ru/{slug}/avtomobili" + (f"?p={p}" if p > 1 else "")
                 try:
@@ -1419,12 +1439,17 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
                     }, timeout=35)
                     if r2.status_code == 200 and ('"urlPath"' in r2.text or 'data-marker="item"' in r2.text):
                         text = r2.text
+                        from_fallback = True
+                        url_has_price_filter = False
                         print(f"  [Авито] fallback без цен стр.{p}: {len(text):,}б")
                     else:
                         return []
                 except Exception:
                     return []
             batch = _parse_avito_html(text, slug, today)
+            # Помечаем: пришли ли из URL с ценовым фильтром Авито
+            for it in batch:
+                it["_avito_price_filtered"] = url_has_price_filter and not from_fallback
             # Строим карту цен из сырого текста страницы (для элементов без цены из JSON)
             price_map: dict[str, int] = {}
             for m in re.finditer(r'"urlPath"\s*:\s*"(/[^"]+)"', text):
