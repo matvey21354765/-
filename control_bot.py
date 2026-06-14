@@ -491,88 +491,135 @@ def _autoru_parse_offers(data: dict, today) -> list[dict]:
     return results
 
 
+def _autoru_parse_html(text: str, today) -> list[dict]:
+    """Извлекает объявления из HTML Auto.ru (window.__INITIAL_STATE__ или __NEXT_DATA__)."""
+    results = []
+    # Ищем window.__INITIAL_STATE__ = {...}
+    for marker in ("window.__INITIAL_STATE__=", "window.__INITIAL_STATE__ ="):
+        idx = text.find(marker)
+        if idx == -1:
+            continue
+        brace_start = text.find("{", idx)
+        if brace_start == -1:
+            continue
+        script_end = text.find("</script>", brace_start)
+        json_str = text[brace_start:script_end].rstrip("; \n\r") if script_end != -1 else text[brace_start:brace_start+500_000]
+        try:
+            data = json.loads(json_str)
+            results = _autoru_parse_offers(data, today)
+            if results:
+                return results
+        except Exception:
+            pass
+
+    # Попробуем __NEXT_DATA__
+    nd_start = text.find('"offers":[')
+    if nd_start != -1:
+        # Regex: ищем urlPath + price из JSON Auto.ru
+        for m in re.finditer(r'"url"\s*:\s*"(https://auto\.ru/[^"]+)"[^}]{0,300}"price"\s*:\s*(\d+)', text):
+            item_url, price_val = m.group(1), int(m.group(2))
+            if price_val < 10_000:
+                continue
+            title_m = re.search(r'"name"\s*:\s*"([^"]{5,80})"', text[max(0, m.start()-500):m.start()])
+            title = title_m.group(1) if title_m else "Авто на Auto.ru"
+            price_str = f"{price_val:,} ₽".replace(",", " ")
+            item = {
+                "source": "autoru", "title": title, "price": price_str,
+                "url": item_url, "date": str(today),
+                "_photos": 0, "_days_on_site": 0,
+                "description": "", "seller": "", "_photo_url": "",
+                "_price_int": price_val,
+            }
+            item["_hot_score"] = hot_score(item)
+            results.append(item)
+
+    return results
+
+
 def scrape_autoru(region: str, pages: int = 5, price_min: int = 0, price_max: int = 99_000_000) -> list[dict]:
     slug = AUTORU_SLUGS.get(region, region)
     geo_ids = AUTORU_GEO_IDS.get(region, [])
     try:
         import requests as _req
-        from bs4 import BeautifulSoup as _BS
     except ImportError:
         return []
 
     results = []
     today = datetime.date.today()
-    session = _req.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept-Language": "ru-RU,ru;q=0.9",
-        "Accept": "application/json,text/html,*/*",
-        "Referer": "https://auto.ru/",
-        "x-client-app": "autoru-frontend-application",
-        "x-requested-with": "fetch",
-    })
 
-    # Сначала пробуем JSON API (быстро и надёжно)
-    api_url = "https://auto.ru/-/ajax/desktop/listing/"
     for p in range(1, pages + 1):
-        body: dict = {
-            "category": "cars",
-            "section": "used",
-            "seller_type": ["PRIVATE"],
-            "page": p,
-            "page_size": 37,
-            "sort": "fresh_relevance_1-desc",
-        }
-        if geo_ids:
-            body["geo_id"] = geo_ids
+        url = f"https://auto.ru/{slug}/cars/used/?seller_group=PRIVATE&page={p}"
         if price_min > 0:
-            body["price_from"] = price_min
+            url += f"&price_from={price_min}"
         if price_max < 99_000_000:
-            body["price_to"] = price_max
-        try:
-            r = session.post(api_url, json=body, timeout=20)
-            if r.status_code == 200:
-                try:
-                    data = r.json()
-                    batch = _autoru_parse_offers(data, today)
-                    if batch:
-                        results.extend(batch)
-                        time.sleep(random.uniform(0.5, 1))
-                        continue
-                except Exception:
-                    pass
-            # Fallback: ScraperAPI + HTML
-            if SCRAPER_API_KEY:
-                url = f"https://auto.ru/{slug}/cars/used/?seller_group=PRIVATE&page={p}"
-                if price_min > 0:
-                    url += f"&price_from={price_min}"
-                if price_max < 99_000_000:
-                    url += f"&price_to={price_max}"
-                r2 = _req.get("http://api.scraperapi.com", params={
+            url += f"&price_to={price_max}"
+
+        text = ""
+        # Пробуем ScraperAPI
+        if SCRAPER_API_KEY:
+            try:
+                r = _req.get("http://api.scraperapi.com", params={
                     "api_key": SCRAPER_API_KEY, "url": url, "country_code": "ru",
-                }, timeout=30)
+                }, timeout=40)
+                if r.status_code == 200:
+                    text = r.text
+            except Exception as e:
+                print(f"  [Auto.ru] ScraperAPI стр.{p}: {e}")
+
+        # Fallback: прямой запрос
+        if not text:
+            try:
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                    "Accept-Language": "ru-RU,ru;q=0.9",
+                    "Referer": "https://auto.ru/",
+                }
+                r2 = _req.get(url, headers=headers, timeout=20)
                 if r2.status_code == 200:
-                    # Ищем __INITIAL_STATE__ в HTML
                     text = r2.text
-                    idx = text.find("window.__INITIAL_STATE__")
-                    if idx != -1:
-                        brace_start = text.find("{", idx)
-                        if brace_start != -1:
-                            # Найдём конец объекта по скрипт-тегу
-                            script_end = text.find("</script>", brace_start)
-                            json_str = text[brace_start:script_end].rstrip("; \n\r")
-                            try:
-                                data = json.loads(json_str)
-                                batch = _autoru_parse_offers(data, today)
-                                results.extend(batch)
-                            except Exception:
-                                pass
-            break
-        except Exception as e:
-            print(f"  [Auto.ru {region}] стр.{p}: {e}")
+            except Exception as e:
+                print(f"  [Auto.ru] прямой стр.{p}: {e}")
+
+        if not text:
             break
 
-    print(f"  [Auto.ru] {len(results)} объявлений")
+        # Извлекаем __INITIAL_STATE__ из HTML
+        batch = _autoru_parse_html(text, today)
+        print(f"  [Auto.ru] стр.{p}: {len(batch)} объявлений ({len(text):,}б)")
+        if not batch:
+            # Попробуем AJAX API как запасной вариант
+            try:
+                session = _req.Session()
+                session.headers.update({
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                    "x-client-app": "autoru-frontend-application",
+                    "x-requested-with": "fetch",
+                    "Referer": "https://auto.ru/",
+                })
+                body: dict = {
+                    "category": "cars", "section": "used",
+                    "seller_type": ["PRIVATE"], "page": p, "page_size": 37,
+                    "sort": "fresh_relevance_1-desc",
+                }
+                if geo_ids:
+                    body["geo_id"] = geo_ids
+                if price_min > 0:
+                    body["price_from"] = price_min
+                if price_max < 99_000_000:
+                    body["price_to"] = price_max
+                ra = session.post("https://auto.ru/-/ajax/desktop/listing/", json=body, timeout=20)
+                if ra.status_code == 200:
+                    batch = _autoru_parse_offers(ra.json(), today)
+                    print(f"  [Auto.ru] AJAX стр.{p}: {len(batch)} объявлений")
+            except Exception as e:
+                print(f"  [Auto.ru] AJAX стр.{p}: {e}")
+
+        if not batch:
+            break
+        results.extend(batch)
+        time.sleep(random.uniform(0.5, 1.5))
+
+    print(f"  [Auto.ru] итого {len(results)} объявлений")
     return results
 
 
