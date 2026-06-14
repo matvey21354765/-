@@ -1613,7 +1613,87 @@ async def cb_hide(cb: CallbackQuery):
     await cb.message.delete()
 
 
-@dp.message(Command("help"))
+@dp.message(Command("test_avito"))
+async def cmd_test_avito(msg: Message):
+    """Диагностика Авито — присылает что именно возвращает ScraperAPI."""
+    import requests as _req
+    uid = msg.from_user.id
+    s = load_settings(uid)
+    region = s.get("region", "chelyabinsk")
+    slug = AVITO_SLUGS.get(region, region)
+    url = f"https://www.avito.ru/{slug}/avtomobili"
+
+    await msg.answer(f"🔬 Тестирую Авито для {REGIONS.get(region, region)}...\nURL: {url}")
+
+    try:
+        # Прямой запрос (без ScraperAPI)
+        r_direct = _req.get(url, headers={
+            "User-Agent": "Mozilla/5.0 (Linux; Android 12; SM-G991B) AppleWebKit/537.36 Mobile Safari/537.36",
+            "Accept-Language": "ru-RU,ru;q=0.9",
+        }, timeout=15)
+        has_items_direct = 'data-marker="item"' in r_direct.text
+        has_nd_direct = '__NEXT_DATA__' in r_direct.text
+        await msg.answer(
+            f"📡 Прямой запрос:\n"
+            f"• HTTP: {r_direct.status_code}\n"
+            f"• Размер: {len(r_direct.text):,} байт\n"
+            f"• data-marker=item: {'✅' if has_items_direct else '❌'}\n"
+            f"• __NEXT_DATA__: {'✅' if has_nd_direct else '❌'}\n"
+            f"• Первые 200 символов:\n`{r_direct.text[:200]}`",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        await msg.answer(f"❌ Прямой запрос ошибка: {e}")
+
+    if SCRAPER_API_KEY:
+        try:
+            await msg.answer("🔄 Пробую ScraperAPI без render...")
+            r1 = _req.get("http://api.scraperapi.com", params={
+                "api_key": SCRAPER_API_KEY,
+                "url": url,
+                "country_code": "ru",
+            }, timeout=30)
+            has_items1 = 'data-marker="item"' in r1.text
+            has_nd1 = '__NEXT_DATA__' in r1.text
+            await msg.answer(
+                f"📡 ScraperAPI (без render):\n"
+                f"• HTTP: {r1.status_code}\n"
+                f"• Размер: {len(r1.text):,} байт\n"
+                f"• data-marker=item: {'✅' if has_items1 else '❌'}\n"
+                f"• __NEXT_DATA__: {'✅' if has_nd1 else '❌'}\n"
+                f"• Первые 300 символов:\n`{r1.text[:300]}`",
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            await msg.answer(f"❌ ScraperAPI без render ошибка: {e}")
+
+        try:
+            await msg.answer("🔄 Пробую ScraperAPI с render=true + wait=5000 (до 90 сек)...")
+            r2 = _req.get("http://api.scraperapi.com", params={
+                "api_key": SCRAPER_API_KEY,
+                "url": url,
+                "render": "true",
+                "wait": "5000",
+                "country_code": "ru",
+            }, timeout=120)
+            has_items2 = 'data-marker="item"' in r2.text
+            has_nd2 = '__NEXT_DATA__' in r2.text
+            await msg.answer(
+                f"📡 ScraperAPI (render=true):\n"
+                f"• HTTP: {r2.status_code}\n"
+                f"• Размер: {len(r2.text):,} байт\n"
+                f"• data-marker=item: {'✅' if has_items2 else '❌'}\n"
+                f"• __NEXT_DATA__: {'✅' if has_nd2 else '❌'}\n"
+                f"• Первые 300 символов:\n`{r2.text[:300]}`",
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            await msg.answer(f"❌ ScraperAPI render ошибка: {e}")
+    else:
+        await msg.answer("⚠️ SCRAPER_API_KEY не задан!")
+
+    await msg.answer("✅ Диагностика завершена. Пришли эти результаты разработчику.")
+
 async def cmd_help(msg: Message):
     await msg.answer(
         "🤖 *Авто-брокер — поиск авто ниже рынка*\n\n"
