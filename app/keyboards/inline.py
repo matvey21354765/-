@@ -17,8 +17,6 @@ def main_menu(notifications: bool = False) -> InlineKeyboardMarkup:
         [Btn(text="₿ BTC", callback_data="sig_BTC"),
          Btn(text="Ξ ETH", callback_data="sig_ETH"),
          Btn(text="◎ SOL", callback_data="sig_SOL")],
-        [Btn(text="📊 Статистика", callback_data="stats_menu"),
-         Btn(text="📋 История", callback_data="hist_ALL_0")],
         [Btn(text="🎯 Polymarket Pro", callback_data="poly_pro"),
          Btn(text="🏆 Точность", callback_data="leaderboard")],
         [Btn(text="📈 Гайд по фьючам", callback_data="futures_guide")],
