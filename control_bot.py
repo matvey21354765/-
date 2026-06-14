@@ -600,26 +600,39 @@ def scrape_autoru(region: str, pages: int = 5, price_min: int = 0, price_max: in
             body["price_to"] = price_max
 
         batch = []
-        html_url = f"https://auto.ru/{slug}/cars/used/?seller_group=PRIVATE&page={p}"
+        html_url = f"https://auto.ru/{slug}/cars/used/?seller_group=PRIVATE&page={p}&sort=fresh_relevance_1-desc"
         if price_min > 0:
             html_url += f"&price_from={price_min}"
         if price_max < 99_000_000:
             html_url += f"&price_to={price_max}"
 
-        # Метод 1: ScraperAPI → HTML + парсинг __INITIAL_STATE__
+        # Метод 1: ScraperAPI render=true — JS выполняется, __INITIAL_STATE__ заполняется
         if not batch and SCRAPER_API_KEY:
             try:
                 r3 = _req.get("http://api.scraperapi.com", params={
-                    "api_key": SCRAPER_API_KEY, "url": html_url, "country_code": "ru",
-                    "premium": "true",
-                }, timeout=60)
-                print(f"  [Auto.ru] ScraperAPI HTML стр.{p}: HTTP {r3.status_code}, {len(r3.text):,}б")
-                if r3.status_code == 200 and len(r3.text) > 50_000:
+                    "api_key": SCRAPER_API_KEY, "url": html_url,
+                    "country_code": "ru", "render": "true", "wait": "3000",
+                }, timeout=90)
+                print(f"  [Auto.ru] ScraperAPI render стр.{p}: HTTP {r3.status_code}, {len(r3.text):,}б")
+                if r3.status_code == 200 and len(r3.text) > 100_000:
                     batch = _autoru_parse_html(r3.text, today)
+            except Exception as e:
+                print(f"  [Auto.ru] ScraperAPI render: {e}")
+
+        # Метод 2: ScraperAPI без render (быстрее)
+        if not batch and SCRAPER_API_KEY:
+            try:
+                r4 = _req.get("http://api.scraperapi.com", params={
+                    "api_key": SCRAPER_API_KEY, "url": html_url,
+                    "country_code": "ru", "premium": "true",
+                }, timeout=60)
+                print(f"  [Auto.ru] ScraperAPI HTML стр.{p}: HTTP {r4.status_code}, {len(r4.text):,}б")
+                if r4.status_code == 200 and len(r4.text) > 50_000:
+                    batch = _autoru_parse_html(r4.text, today)
             except Exception as e:
                 print(f"  [Auto.ru] ScraperAPI HTML: {e}")
 
-        # Метод 2: ScraperAPI → AJAX (POST proxied)
+        # Метод 3: ScraperAPI → AJAX POST
         if not batch and SCRAPER_API_KEY:
             try:
                 r = _req.post(
@@ -632,19 +645,9 @@ def scrape_autoru(region: str, pages: int = 5, price_min: int = 0, price_max: in
                     try:
                         batch = _autoru_parse_offers(r.json(), today)
                     except Exception:
-                        pass
+                        batch = _autoru_parse_html(r.text, today)
             except Exception as e:
                 print(f"  [Auto.ru] ScraperAPI AJAX: {e}")
-
-        # Метод 3: Прямой GET HTML страницы
-        if not batch:
-            try:
-                r4 = _req.get(html_url, headers=headers_ajax, timeout=20)
-                print(f"  [Auto.ru] прямой HTML стр.{p}: HTTP {r4.status_code}, {len(r4.text):,}б")
-                if r4.status_code == 200 and len(r4.text) > 50_000:
-                    batch = _autoru_parse_html(r4.text, today)
-            except Exception as e:
-                print(f"  [Auto.ru] прямой HTML: {e}")
 
         print(f"  [Auto.ru] стр.{p}: итого {len(batch)} объявлений")
         if not batch:
@@ -1325,7 +1328,7 @@ def _scrape_avito_direct(slug: str, pages: int, price_min: int, price_max: int, 
     return results
 
 
-def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int = 99_000_000) -> list[dict]:
+def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int = 99_000_000, sort_by_date: bool = False) -> list[dict]:
     """
     Использует ScraperAPI БЕЗ render — Авито отдаёт SSR-HTML с data-marker='item' карточками.
     render=true требует premium аккаунта ScraperAPI и возвращает 500.
@@ -1355,6 +1358,8 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
             qs_parts.append(f"pmin={price_min}")
         if price_max < 99_000_000:
             qs_parts.append(f"pmax={price_max}")
+        if sort_by_date:
+            qs_parts.append("s=104")   # Авито: сортировка по дате (новые сверху)
         url = f"https://www.avito.ru/{slug}/avtomobili"
         if qs_parts:
             url += "?" + "&".join(qs_parts)
@@ -1990,9 +1995,21 @@ async def send_batch(chat_id: int, uid: int, offset: int):
 
         photo_url = item.get("_photo_url", "")
         if photo_url:
+            # Пробуем отправить по URL напрямую
             try:
                 await bot.send_photo(chat_id, photo=photo_url, caption=caption, reply_markup=kb)
                 return
+            except Exception:
+                pass
+            # Если не вышло — скачиваем байты и шлём файлом
+            try:
+                import requests as _req
+                from aiogram.types import BufferedInputFile
+                resp = _req.get(photo_url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+                if resp.status_code == 200 and len(resp.content) > 2000:
+                    photo_bytes = BufferedInputFile(resp.content, filename="photo.jpg")
+                    await bot.send_photo(chat_id, photo=photo_bytes, caption=caption, reply_markup=kb)
+                    return
             except Exception:
                 pass
         await bot.send_message(chat_id, caption, reply_markup=kb)
@@ -2266,9 +2283,9 @@ async def _monitor_loop(uid: int):
             pmax = s.get("price_max", 99_000_000)
 
             loop = asyncio.get_event_loop()
-            # Только Avito — самый быстрый источник новых объявлений
+            # Только Avito — сортируем по дате (новые сверху), 2 страницы
             raw = await loop.run_in_executor(
-                None, lambda: scrape_avito(region, pages=2, price_min=pmin, price_max=pmax)
+                None, lambda: scrape_avito(region, pages=2, price_min=pmin, price_max=pmax, sort_by_date=True)
             )
 
             seen = load_seen(uid)
@@ -2334,13 +2351,25 @@ async def _monitor_loop(uid: int):
                     ],
                 ])
                 photo_url = it.get("_photo_url", "")
+                sent = False
                 if photo_url:
                     try:
                         await bot.send_photo(uid, photo=photo_url, caption=caption, reply_markup=kb)
-                        continue
+                        sent = True
                     except Exception:
                         pass
-                await bot.send_message(uid, caption, reply_markup=kb)
+                    if not sent:
+                        try:
+                            import requests as _req
+                            from aiogram.types import BufferedInputFile
+                            resp = _req.get(photo_url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+                            if resp.status_code == 200 and len(resp.content) > 2000:
+                                await bot.send_photo(uid, photo=BufferedInputFile(resp.content, "photo.jpg"), caption=caption, reply_markup=kb)
+                                sent = True
+                        except Exception:
+                            pass
+                if not sent:
+                    await bot.send_message(uid, caption, reply_markup=kb)
 
             # Обновляем seen
             seen.update(it["url"] for it in new_below)
