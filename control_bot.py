@@ -1060,15 +1060,16 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
         return results
 
     # 3. Regex по "urlPath" + "title" + "value" прямо в тексте скриптов
-    # Это работало раньше — находило 50 объявлений в 4.5MB HTML
+    has_urlpath = '"urlPath"' in text
+    print(f"  [Авито] в тексте: urlPath={has_urlpath}, размер={len(text):,}")
     item_blocks = re.findall(
-        r'"urlPath"\s*:\s*"(/[^"]+)"(?:[^}]|\}(?!\}))*?"title"\s*:\s*"([^"]{5,100})"(?:[^}]|\}(?!\}))*?"value"\s*:\s*(\d{4,8})',
+        r'"urlPath"\s*:\s*"(/[^"]+)"[^}]{0,600}?"title"\s*:\s*"([^"]{5,100})"[^}]{0,400}?"value"\s*:\s*(\d{4,8})',
         text
     )
     if not item_blocks:
-        # Без цены
+        # Без цены — [^}] не пересекает границу объекта JSON
         simple = re.findall(
-            r'"urlPath"\s*:\s*"(/[^"]{10,})"[^"]{0,400}"title"\s*:\s*"([^"]{5,100})"',
+            r'"urlPath"\s*:\s*"(/[^"]{10,})"[^}]{0,500}"title"\s*:\s*"([^"]{5,100})"',
             text
         )
         item_blocks = [(u, t, "0") for u, t in simple]
@@ -1710,6 +1711,9 @@ async def do_search_for_user(uid: int, reply_to):
     if stat_parts:
         await reply_to.answer("📊 " + " | ".join(stat_parts))
 
+    dealer_count = sum(1 for i in items if is_dealer(i))
+    price_count = sum(1 for i in items if not is_dealer(i) and not in_price_range(i, pmin, pmax))
+    print(f"  [поиск] всего={len(items)}, дилеров={dealer_count}, вне бюджета={price_count}")
     suitable = [
         i for i in items
         if not is_dealer(i)
