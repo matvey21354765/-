@@ -1377,14 +1377,11 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
     try:
         import requests as _req
         from bs4 import BeautifulSoup as _BS
+        from concurrent.futures import ThreadPoolExecutor, as_completed
     except ImportError:
         return []
 
-    results = []
-
-    for p in range(1, pages + 1):
-        # Чистый URL без фильтров — только так Авито отдаёт SSR-HTML с данными
-        # owner[]=1 меняет структуру ответа и данные пропадают
+    def _build_url(p: int) -> str:
         qs_parts = []
         if p > 1:
             qs_parts.append(f"p={p}")
@@ -1393,68 +1390,32 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
         if price_max < 99_000_000:
             qs_parts.append(f"pmax={price_max}")
         if sort_by_date:
-            qs_parts.append("s=104")   # Авито: сортировка по дате (новые сверху)
-        # cd=1 (только частные) часто ломает SSR-структуру через ScraperAPI, убрано
-        # Дилеры фильтруются позже через is_dealer() по ключевым словам
-        url = f"https://www.avito.ru/{slug}/avtomobili"
+            qs_parts.append("s=104")
+        u = f"https://www.avito.ru/{slug}/avtomobili"
         if qs_parts:
-            url += "?" + "&".join(qs_parts)
+            u += "?" + "&".join(qs_parts)
+        return u
 
+    def _fetch_page(p: int) -> list[dict]:
+        url = _build_url(p)
         try:
             r = _req.get("http://api.scraperapi.com", params={
                 "api_key": SCRAPER_API_KEY,
                 "url": url,
                 "country_code": "ru",
-            }, timeout=40)
-
+            }, timeout=35)
             if r.status_code != 200:
                 print(f"  [Авито] стр.{p}: HTTP {r.status_code}")
-                break
-
+                return []
             text = r.text
-            size = len(text)
-            has_items = 'data-marker="item"' in text
             has_urlpath = '"urlPath"' in text
-            print(f"  [Авито] стр.{p}: {size:,}б, items={has_items}, urlPath={has_urlpath}, url={url[:60]}")
-
-            # Если ответ с ценами маленький — пробуем premium прокси для цен
-            if not has_urlpath and (price_min > 0 or price_max < 99_000_000):
-                print(f"  [Авито] пробую premium ScraperAPI с ценами...")
-                r_prem = _req.get("http://api.scraperapi.com", params={
-                    "api_key": SCRAPER_API_KEY,
-                    "url": url,
-                    "country_code": "ru",
-                    "premium": "true",
-                }, timeout=60)
-                if r_prem.status_code == 200 and '"urlPath"' in r_prem.text:
-                    text = r_prem.text
-                    has_items = 'data-marker="item"' in text
-                    has_urlpath = True
-                    print(f"  [Авито] premium с ценами: {len(text):,}б, items={has_items}")
-                else:
-                    print(f"  [Авито] premium не помог ({r_prem.status_code}), fallback без цен...")
-                    r2 = _req.get("http://api.scraperapi.com", params={
-                        "api_key": SCRAPER_API_KEY,
-                        "url": f"https://www.avito.ru/{slug}/avtomobili",
-                        "country_code": "ru",
-                    }, timeout=40)
-                    if r2.status_code == 200 and '"urlPath"' in r2.text:
-                        text = r2.text
-                        has_items = 'data-marker="item"' in text
-                        print(f"  [Авито] fallback без цен: {len(text):,}б, items={has_items}")
-
-            if not has_items and '"urlPath"' not in text:
-                print(f"  [Авито] стр.{p}: нет данных, стоп")
-                break
-
-            # Парсим HTML страницы через универсальную функцию
+            has_items = 'data-marker="item"' in text
+            print(f"  [Авито] стр.{p}: {len(text):,}б, items={has_items}, urlPath={has_urlpath}")
+            if not has_items and not has_urlpath:
+                return []
             batch = _parse_avito_html(text, slug, today)
-            print(f"  [Авито] стр.{p}: распаршено {len(batch)} объявлений")
-
-            # Если цены не найдены через JSON — пробуем regex по сырому тексту
-            has_prices = any(it.get("_price_int", 0) > 0 for it in batch)
-            if batch and not has_prices:
-                # Строим карту urlPath → цена из regex по тексту
+            # Если цены не найдены через JSON — regex по тексту
+            if batch and not any(it.get("_price_int", 0) > 0 for it in batch):
                 price_map: dict[str, int] = {}
                 for m in re.finditer(
                     r'"urlPath"\s*:\s*"(/[^"]+)"[^}]{0,600}?"value"\s*:\s*(\d{4,8})',
@@ -1463,7 +1424,6 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
                     url_p, val = m.group(1), int(m.group(2))
                     if 10_000 < val < 99_000_000:
                         price_map[url_p] = val
-                print(f"  [Авито] regex цены: {len(price_map)} найдено")
                 for it in batch:
                     if it.get("_price_int", 0) == 0:
                         path = it["url"].replace("https://www.avito.ru", "")
@@ -1471,14 +1431,19 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
                             v = price_map[path]
                             it["_price_int"] = v
                             it["price"] = f"{v:,} ₽".replace(",", " ")
-
-            if batch:
-                results.extend(batch)
-
-            time.sleep(0.3)
+            print(f"  [Авито] стр.{p}: {len(batch)} объявлений")
+            return batch
         except Exception as e:
             print(f"  [Авито] стр.{p}: {e}")
-            break
+            return []
+
+    # Параллельно запрашиваем все страницы (3 потока одновременно)
+    results = []
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        futs = {ex.submit(_fetch_page, p): p for p in range(1, pages + 1)}
+        for fut in as_completed(futs):
+            results.extend(fut.result())
+
 
     print(f"  [Авито] итого {len(results)} объявлений")
     return results
