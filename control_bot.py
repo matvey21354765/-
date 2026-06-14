@@ -1012,10 +1012,6 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
             if any(t in seller_type for t in ("company", "shop", "dealer", "pro", "business", "commercial")):
                 return None
             seller_name = seller_obj.get("name") or seller_obj.get("title") or ""
-            # Если у продавца много объявлений — скорее всего дилер
-            items_count = seller_obj.get("itemsCount") or seller_obj.get("activeItemsCount") or 0
-            if isinstance(items_count, int) and items_count > 5:
-                return None
         # Дополнительная проверка по ключевым словам в названии продавца и заголовке
         check_text = (title + " " + seller_name).lower()
         if any(k in check_text for k in DEALER_KEYWORDS):
