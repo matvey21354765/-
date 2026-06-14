@@ -2018,7 +2018,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
             price_line += f"  🔻 рынок ~{market:,} ₽ (-{pct}%)".replace(",", " ")
 
         caption = (
-            f"{source_tag} {item.get('title', '')}{hot_tag}\n"
+            f"{item.get('title', '')}{hot_tag}\n"
             f"💰 {price_line}\n"
             f"📅 {days_str}"
         )
