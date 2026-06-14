@@ -1500,7 +1500,7 @@ async def cmd_settings(msg: Message, state: FSMContext):
     await state.set_state(Setup.region)
 
 
-ALL_SOURCES = ["drom", "autoru", "kolesa", "bibika", "avito"]
+ALL_SOURCES = ["drom", "autoru", "avito"]
 SOURCE_NAMES = {
     "drom":   "🔵 Дром",
     "autoru": "🟠 Auto.ru",
@@ -1817,8 +1817,6 @@ async def do_search_for_user(uid: int, reply_to):
     scraper_map = {
         "drom":   lambda: scrape_drom(region, pages=20, price_min=pmin, price_max=pmax),
         "autoru": lambda: scrape_autoru(region, pages=10, price_min=pmin, price_max=pmax),
-        "kolesa": lambda: scrape_kolesa(region, pages=10, price_min=pmin, price_max=pmax),
-        "bibika": lambda: scrape_bibika(region, pages=5, price_min=pmin, price_max=pmax),
         "avito":  lambda: scrape_avito(region, pages=5, price_min=pmin, price_max=pmax),
     }
     tasks = [loop.run_in_executor(None, scraper_map[src]) for src in enabled_sources if src in scraper_map]
