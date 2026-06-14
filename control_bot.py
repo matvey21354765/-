@@ -219,8 +219,11 @@ def is_dealer(item: dict) -> bool:
 def in_price_range(item: dict, price_min: int, price_max: int) -> bool:
     p = item.get("_price_int") or parse_price(item.get("price", ""))
     if not p:
-        # Цена неизвестна — скрываем если задан бюджет (нельзя проверить)
-        return price_max >= 5_000_000 and price_min == 0
+        # Авито — скрываем если цена неизвестна и задан бюджет
+        if item.get("source") == "avito" and (price_max < 5_000_000 or price_min > 0):
+            return False
+        # Остальные площадки — показываем (цена фильтруется URL-параметрами)
+        return True
     return price_min <= p <= price_max
 
 
@@ -388,6 +391,7 @@ def scrape_drom(region: str, pages: int = 15, price_min: int = 0, price_max: int
                             photo_url = src
 
                     if title and item_url:
+                        price_int = parse_price(price) or 0
                         item = {
                             "source": "drom",
                             "title": title,
@@ -399,6 +403,7 @@ def scrape_drom(region: str, pages: int = 15, price_min: int = 0, price_max: int
                             "description": desc,
                             "seller": seller,
                             "_photo_url": photo_url,
+                            "_price_int": price_int,
                         }
                         item["_hot_score"] = hot_score(item)
                         results.append(item)
@@ -674,11 +679,13 @@ def scrape_kolesa(region: str, pages: int = 5, price_min: int = 0, price_max: in
                             photo_url = src
 
                     if title and item_url and "kolesa.ru" in item_url:
+                        price_int = parse_price(price) or 0
                         item = {
                             "source": "kolesa", "title": title, "price": price,
                             "url": item_url, "date": str(date_obj) if date_obj else date_text,
                             "_photos": 0, "_days_on_site": days,
                             "description": desc, "seller": "", "_photo_url": photo_url,
+                            "_price_int": price_int,
                         }
                         item["_hot_score"] = hot_score(item)
                         results.append(item)
@@ -786,11 +793,13 @@ def scrape_bibika(region: str, pages: int = 3, price_min: int = 0, price_max: in
                     desc = desc_el.get_text(strip=True)[:300] if desc_el else ""
 
                     if title and item_url and "bibika.ru" in item_url:
+                        price_int = parse_price(price) or 0
                         item = {
                             "source": "bibika", "title": title, "price": price,
                             "url": item_url, "date": str(date) if date else date_text,
                             "_photos": 0, "_days_on_site": days,
                             "description": desc, "seller": "", "_photo_url": "",
+                            "_price_int": price_int,
                         }
                         item["_hot_score"] = hot_score(item)
                         results.append(item)
