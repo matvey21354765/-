@@ -219,13 +219,8 @@ def is_dealer(item: dict) -> bool:
 def in_price_range(item: dict, price_min: int, price_max: int) -> bool:
     p = item.get("_price_int") or parse_price(item.get("price", ""))
     if not p:
-        # Цена не извлечена: если источник Авито — показываем (Авито сложнее парсить)
-        # Для других источников скрываем когда задан бюджет
-        if item.get("source") == "avito":
-            return True
-        if price_max < 5_000_000 or price_min > 0:
-            return False
-        return True
+        # Цена неизвестна — скрываем если задан бюджет (нельзя проверить)
+        return price_max >= 5_000_000 and price_min == 0
     return price_min <= p <= price_max
 
 
@@ -1139,37 +1134,38 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
         ]
     print(f"  [Авито] url+title пар: {len(url_title_pairs)}")
 
-    # Строим карту urlPath → цена: ищем ценовые поля рядом с каждым urlPath
+    # Строим карту urlPath → цена: ищем ценовые поля в широком окне вокруг urlPath
     price_map: dict[str, int] = {}
+
+    def _find_price_in_window(window: str) -> int:
+        """Пробует все известные форматы цены Авито. Возвращает 0 если не нашёл."""
+        patterns = [
+            r'"priceDetailed"\s*:\s*\{[^}]{0,100}"value"\s*:\s*(\d{5,8})',
+            r'"price"\s*:\s*\{[^}]{0,100}"value"\s*:\s*(\d{5,8})',
+            r'"priceInfo"\s*:\s*\{[^}]{0,100}"value"\s*:\s*(\d{5,8})',
+            r'"price"\s*:\s*(\d{5,8})',       # цена как прямое число
+            r'"valueText"\s*:\s*"([\d \s]+)\s*[₽р]"',  # "1 200 000 ₽"
+            r'"valueText"\s*:\s*"(\d[\d\s]+)"',
+        ]
+        for pat in patterns:
+            pm = re.search(pat, window)
+            if pm:
+                raw = re.sub(r'\D', '', pm.group(1))
+                if raw:
+                    v = int(raw)
+                    if 10_000 < v < 99_000_000:
+                        return v
+        return 0
+
     for m in re.finditer(r'"urlPath"\s*:\s*"(/[^"]{10,})"', text):
         upath = m.group(1).split("?")[0]
-        window_start = max(0, m.start() - 300)
-        window_end = min(len(text), m.end() + 3000)
+        # Широкое окно: 1000 символов до и 4000 после (цена может быть до urlPath)
+        window_start = max(0, m.start() - 1000)
+        window_end = min(len(text), m.end() + 4000)
         window = text[window_start:window_end]
-        # Ищем явные ценовые поля (не просто "value" которое может быть чем угодно)
-        pm = (
-            re.search(r'"priceDetailed"\s*:\s*\{[^}]*"value"\s*:\s*(\d{5,8})', window) or
-            re.search(r'"price"\s*:\s*\{[^}]*"value"\s*:\s*(\d{5,8})', window) or
-            re.search(r'"priceInfo"\s*:\s*\{[^}]*"value"\s*:\s*(\d{5,8})', window) or
-            re.search(r'"valueText"\s*:\s*"(\d[\d\s]+)\s*[₽р]"', window)
-        )
-        if pm:
-            raw = re.sub(r'\D', '', pm.group(1))
-            v = int(raw) if raw else 0
-            if 10_000 < v < 99_000_000:
-                price_map[upath] = v
-
-    # Если специфичные поля не нашли — пробуем "valueText" с рублями по всему тексту
-    if not price_map:
-        for m in re.finditer(r'"urlPath"\s*:\s*"(/[^"]{10,})"', text):
-            upath = m.group(1).split("?")[0]
-            window = text[m.start():min(len(text), m.end() + 4000)]
-            vm = re.search(r'"valueText"\s*:\s*"([\d\s]+\s*[₽р])"', window)
-            if vm:
-                raw = re.sub(r'\D', '', vm.group(1))
-                v = int(raw) if raw else 0
-                if 10_000 < v < 99_000_000:
-                    price_map[upath] = v
+        v = _find_price_in_window(window)
+        if v:
+            price_map[upath] = v
 
     sample_prices = list(price_map.values())[:5]
     print(f"  [Авито] цен найдено: {len(price_map)}, примеры: {sample_prices}")
