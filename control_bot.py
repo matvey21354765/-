@@ -1714,9 +1714,29 @@ SOURCE_TAGS = {
 _search_cache: dict[int, list[dict]] = {}
 
 
+def _save_cache(uid: int, items: list[dict]):
+    try:
+        f = user_dir(uid) / "last_search.json"
+        f.write_text(json.dumps(items, ensure_ascii=False, default=str), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _load_cache(uid: int) -> list[dict]:
+    try:
+        f = user_dir(uid) / "last_search.json"
+        if f.exists():
+            return json.loads(f.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return []
+
+
 async def send_batch(chat_id: int, uid: int, offset: int):
     """Отправляет 10 объявлений из кеша начиная с offset."""
-    items = _search_cache.get(uid, [])
+    items = _search_cache.get(uid) or _load_cache(uid)
+    if items:
+        _search_cache[uid] = items  # восстанавливаем в память после перезапуска
     if not items or offset >= len(items):
         await bot.send_message(chat_id, "✅ Объявления закончились. Нажми /search для нового поиска.")
         return
@@ -1860,6 +1880,7 @@ async def do_search_for_user(uid: int, reply_to):
         return
 
     _search_cache[uid] = suitable
+    _save_cache(uid, suitable)
     await reply_to.answer(f"✅ Найдено {len(suitable)} актуальных объявлений!")
     await send_batch(reply_to.chat.id, uid, 0)
 
