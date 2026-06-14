@@ -2310,130 +2310,172 @@ async def cmd_help(msg: Message):
 
 
 async def _monitor_loop(uid: int):
-    """Фоновая задача: каждые 5 минут проверяет новые объявления ниже рынка."""
-    print(f"  [монитор] uid={uid} запущен")
+    """Фоновая задача одного пользователя — делегирует в глобальный монитор."""
+    # Просто держим флаг, глобальный монитор сам опрашивает всех активных
     while True:
+        await asyncio.sleep(3600)
+
+
+# ── Глобальный монитор — один цикл на всех пользователей ─────────
+GLOBAL_POLL_SEC = 120   # опрос каждые 2 минуты
+
+async def _send_monitor_item(uid: int, it: dict):
+    """Отправляет одно объявление пользователю из монитора."""
+    url = it.get("url", "")
+    sid = url_to_id(url)
+    pct = it.get("_savings_pct", 0)
+    market = it.get("_market_price", 0)
+    price_line = it.get("price", "—") or "—"
+    if market:
+        price_line += f"  🔻 рынок ~{market:,} ₽ (-{pct}%)".replace(",", " ")
+    caption = (
+        f"🔔 {it.get('title', '')}\n"
+        f"💰 {price_line}\n"
+        f"📅 только что на Авито"
+    )
+    if it.get("description"):
+        caption += f"\n📝 {it['description'][:250]}"
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🔗 Открыть", url=url),
+            InlineKeyboardButton(text="⭐ Сохранить", callback_data=f"fav|{sid}|{uid}"),
+        ],
+        [
+            InlineKeyboardButton(text="❌ Скрыть", callback_data=f"hide|{sid}|{uid}"),
+        ],
+    ])
+    photo_url = it.get("_photo_url", "")
+    sent = False
+    if photo_url:
         try:
-            s = load_settings(uid)
-            interval_sec = s.get("monitor_interval_min", 5) * 60
-            await asyncio.sleep(interval_sec)
-            s = load_settings(uid)
-            if not s.get("monitor_enabled"):
-                print(f"  [монитор] uid={uid} отключён, выходим")
-                break
+            await bot.send_photo(uid, photo=photo_url, caption=caption, reply_markup=kb)
+            sent = True
+        except Exception:
+            pass
+        if not sent:
+            try:
+                import requests as _req
+                from aiogram.types import BufferedInputFile
+                resp = _req.get(photo_url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+                if resp.status_code == 200 and len(resp.content) > 2000:
+                    await bot.send_photo(uid, photo=BufferedInputFile(resp.content, "photo.jpg"), caption=caption, reply_markup=kb)
+                    sent = True
+            except Exception:
+                pass
+    if not sent:
+        await bot.send_message(uid, caption, reply_markup=kb)
 
-            region = s.get("region")
-            if not region:
+
+async def _global_monitor_loop():
+    """Единый глобальный цикл — раз в 2 минуты опрашивает Авито для всех активных пользователей."""
+    print("  [глоб.монитор] запущен")
+    loop = asyncio.get_event_loop()
+    while True:
+        await asyncio.sleep(GLOBAL_POLL_SEC)
+        try:
+            # Собираем всех пользователей с включённым мониторингом
+            if not USERS_DIR.exists():
                 continue
-            pmin = s.get("price_min", 0)
-            pmax = s.get("price_max", 99_000_000)
+            active_users: list[dict] = []
+            for user_path in USERS_DIR.iterdir():
+                if not (user_path.is_dir() and user_path.name.isdigit()):
+                    continue
+                try:
+                    sf = user_path / "settings.json"
+                    if not sf.exists():
+                        continue
+                    s = json.loads(sf.read_text(encoding="utf-8"))
+                    if s.get("monitor_enabled") and s.get("region"):
+                        active_users.append({"uid": int(user_path.name), **s})
+                except Exception:
+                    pass
 
-            loop = asyncio.get_event_loop()
-            # Только Avito — сортируем по дате (новые сверху), 2 страницы
-            raw = await loop.run_in_executor(
-                None, lambda: scrape_avito(region, pages=2, price_min=pmin, price_max=pmax, sort_by_date=True)
-            )
-
-            seen = load_seen(uid)
-            skipped = load_skipped(uid)
-            new_items = [
-                it for it in raw
-                if it.get("url")
-                and it["url"] not in seen
-                and it["url"] not in skipped
-                and not is_dealer(it)
-                and in_price_range(it, pmin, pmax)
-            ]
-            if not new_items:
-                continue
-
-            # Считаем рыночную цену по пулу + сохранённому кешу
-            cached = _search_cache.get(uid) or _load_cache(uid)
-            pool = cached + new_items
-            pool = rank_by_market_price(pool)
-
-            # Берём только новые элементы с реальной экономией
-            new_below = [
-                it for it in pool
-                if it.get("url") in {x["url"] for x in new_items}
-                and it.get("_below_market")
-                and (it.get("_savings_pct", 0) >= s.get("monitor_min_savings_pct", MONITOR_MIN_SAVINGS_PCT))
-            ]
-            # Сортируем по размеру скидки
-            new_below.sort(key=lambda x: -x.get("_savings_pct", 0))
-
-            if not new_below:
+            if not active_users:
                 continue
 
-            region_name = REGIONS.get(region, region)
-            await bot.send_message(
-                uid,
-                f"🔔 *Новые выгодные авто в {region_name}* — {len(new_below)} шт.!\n"
-                f"Цены ниже рынка на {MONITOR_MIN_SAVINGS_PCT}%+",
-                parse_mode="Markdown",
-            )
-            for it in new_below[:5]:
-                url = it.get("url", "")
-                sid = url_to_id(url)
-                pct = it.get("_savings_pct", 0)
-                market = it.get("_market_price", 0)
-                price_line = it.get("price", "—") or "—"
-                if market:
-                    price_line += f"  🔻 рынок ~{market:,} ₽ (-{pct}%)".replace(",", " ")
-                caption = (
-                    f"🟢 {it.get('title', '')}\n"
-                    f"💰 {price_line}\n"
-                    f"📅 только что"
-                )
-                if it.get("description"):
-                    caption += f"\n\n📝 {it['description'][:300]}"
-                kb = InlineKeyboardMarkup(inline_keyboard=[
-                    [
-                        InlineKeyboardButton(text="🔗 Открыть", url=url),
-                        InlineKeyboardButton(text="⭐ Сохранить", callback_data=f"fav|{sid}|{uid}"),
-                    ],
-                    [
-                        InlineKeyboardButton(text="❌ Скрыть", callback_data=f"hide|{sid}|{uid}"),
-                    ],
-                ])
-                photo_url = it.get("_photo_url", "")
-                sent = False
-                if photo_url:
-                    try:
-                        await bot.send_photo(uid, photo=photo_url, caption=caption, reply_markup=kb)
-                        sent = True
-                    except Exception:
-                        pass
-                    if not sent:
-                        try:
-                            import requests as _req
-                            from aiogram.types import BufferedInputFile
-                            resp = _req.get(photo_url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
-                            if resp.status_code == 200 and len(resp.content) > 2000:
-                                await bot.send_photo(uid, photo=BufferedInputFile(resp.content, "photo.jpg"), caption=caption, reply_markup=kb)
-                                sent = True
-                        except Exception:
-                            pass
-                if not sent:
-                    await bot.send_message(uid, caption, reply_markup=kb)
+            # Группируем по региону — один запрос на регион
+            by_region: dict[str, list[dict]] = {}
+            for u in active_users:
+                by_region.setdefault(u["region"], []).append(u)
 
-            # Обновляем seen
-            seen.update(it["url"] for it in new_below)
-            save_seen(uid, seen)
+            for region, users in by_region.items():
+                try:
+                    # Скрапим Авито по дате (новые сверху), 1 страница — достаточно для свежих
+                    raw = await loop.run_in_executor(
+                        None,
+                        lambda r=region: scrape_avito(r, pages=1, sort_by_date=True)
+                    )
+                    if not raw:
+                        continue
 
-        except asyncio.CancelledError:
-            print(f"  [монитор] uid={uid} остановлен")
-            break
+                    # Для каждого пользователя фильтруем индивидуально
+                    for u in users:
+                        uid = u["uid"]
+                        pmin = u.get("price_min", 0)
+                        pmax = u.get("price_max", 99_000_000)
+                        min_pct = u.get("monitor_min_savings_pct", MONITOR_MIN_SAVINGS_PCT)
+
+                        seen = load_seen(uid)
+                        skipped = load_skipped(uid)
+
+                        new_items = [
+                            it for it in raw
+                            if it.get("url")
+                            and it["url"] not in seen
+                            and it["url"] not in skipped
+                            and not is_dealer(it)
+                            and in_price_range(it, pmin, pmax)
+                        ]
+                        if not new_items:
+                            continue
+
+                        # Считаем рыночную цену
+                        cached = _search_cache.get(uid) or _load_cache(uid)
+                        pool = rank_by_market_price(cached + new_items)
+                        new_urls = {x["url"] for x in new_items}
+
+                        new_below = sorted(
+                            [it for it in pool
+                             if it.get("url") in new_urls
+                             and it.get("_below_market")
+                             and it.get("_savings_pct", 0) >= min_pct],
+                            key=lambda x: -x.get("_savings_pct", 0)
+                        )
+                        if not new_below:
+                            # Обновляем seen даже без выгодных — чтобы не дублировать
+                            seen.update(it["url"] for it in new_items)
+                            save_seen(uid, seen)
+                            continue
+
+                        region_name = REGIONS.get(region, region)
+                        print(f"  [монитор] uid={uid} регион={region_name}: {len(new_below)} новых выгодных")
+
+                        # Шапка-уведомление
+                        await bot.send_message(
+                            uid,
+                            f"🔔 *{region_name}* — {len(new_below)} новых авто ниже рынка!",
+                            parse_mode="Markdown",
+                        )
+                        # Шлём каждое объявление (максимум 5)
+                        for it in new_below[:5]:
+                            await _send_monitor_item(uid, it)
+                            await asyncio.sleep(0.3)
+
+                        seen.update(it["url"] for it in new_items)
+                        save_seen(uid, seen)
+
+                except Exception as e:
+                    print(f"  [глоб.монитор] регион={region}: {e}")
+
         except Exception as e:
-            print(f"  [монитор] uid={uid} ошибка: {e}")
-            await asyncio.sleep(60)
+            print(f"  [глоб.монитор] ошибка цикла: {e}")
 
 
 def _start_monitor(uid: int):
-    if uid in _monitor_tasks and not _monitor_tasks[uid].done():
-        return  # уже запущен
-    task = asyncio.get_event_loop().create_task(_monitor_loop(uid))
-    _monitor_tasks[uid] = task
+    # Глобальный монитор уже запущен в main(), здесь просто сохраняем задачу-заглушку
+    if uid not in _monitor_tasks or _monitor_tasks[uid].done():
+        task = asyncio.get_event_loop().create_task(_monitor_loop(uid))
+        _monitor_tasks[uid] = task
 
 
 def _stop_monitor(uid: int):
@@ -2472,7 +2514,7 @@ async def cmd_monitor(msg: Message):
         pmax = s.get("price_max", 99_000_000)
         await msg.answer(
             f"✅ *Автомониторинг включён!*\n\n"
-            f"🔔 Буду проверять Авито каждые 5 минут.\n"
+            f"🔔 Буду проверять Авито каждые 2 минуты.\n"
             f"Регион: {region_name}\n"
             f"Бюджет: {pmin:,}–{pmax:,} ₽\n"
             f"Показываю только авто на 10%+ ниже рынка.\n\n"
@@ -2485,20 +2527,9 @@ async def main():
     logging.basicConfig(level=logging.WARNING)
     print("✅ Авто-брокер бот запущен!")
 
-    # Восстанавливаем мониторинг для пользователей, у которых он был включён
-    if USERS_DIR.exists():
-        for user_path in USERS_DIR.iterdir():
-            if user_path.is_dir() and user_path.name.isdigit():
-                try:
-                    sf = user_path / "settings.json"
-                    if sf.exists():
-                        s = json.loads(sf.read_text(encoding="utf-8"))
-                        if s.get("monitor_enabled"):
-                            uid = int(user_path.name)
-                            asyncio.get_event_loop().create_task(_monitor_loop(uid))
-                            print(f"  [монитор] восстановлен для uid={uid}")
-                except Exception:
-                    pass
+    # Единый глобальный монитор — опрашивает всех активных пользователей каждые 2 минуты
+    asyncio.get_event_loop().create_task(_global_monitor_loop())
+    print(f"  [монитор] глобальный цикл запущен (интервал {GLOBAL_POLL_SEC}с)")
 
     await dp.start_polling(bot)
 
