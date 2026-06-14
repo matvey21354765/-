@@ -210,8 +210,7 @@ def is_dealer(item: dict) -> bool:
 def in_price_range(item: dict, price_min: int, price_max: int) -> bool:
     p = item.get("_price_int") or parse_price(item.get("price", ""))
     if not p:
-        # Цена неизвестна: показываем только если пользователь не ограничивал бюджет
-        return price_max >= 5_000_000
+        return True  # цена неизвестна — показываем (Авито уже фильтрует по pmin/pmax в URL)
     return price_min <= p <= price_max
 
 
@@ -954,6 +953,53 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
         except Exception as e:
             print(f"  [Авито] __NEXT_DATA__ ошибка: {e}")
 
+    # 1b. Любой <script> тег с "items":[ или "catalog":[
+    if not results:
+        for sc in soup.find_all("script"):
+            sc_text = sc.string or ""
+            if len(sc_text) < 500:
+                continue
+            for marker in ('"items":[{', '"catalog":[{', '"listing":[{', '"offers":[{'):
+                if marker not in sc_text:
+                    continue
+                idx = sc_text.find(marker) + len(marker) - 2  # позиция [
+                chunk = sc_text[idx:]
+                depth = 0
+                end = 0
+                in_str = False
+                esc = False
+                for i, ch in enumerate(chunk):
+                    if esc:
+                        esc = False
+                        continue
+                    if ch == '\\' and in_str:
+                        esc = True
+                        continue
+                    if ch == '"':
+                        in_str = not in_str
+                        continue
+                    if not in_str:
+                        if ch == '[':
+                            depth += 1
+                        elif ch == ']':
+                            depth -= 1
+                            if depth == 0:
+                                end = i + 1
+                                break
+                if end:
+                    try:
+                        arr = json.loads(chunk[:end])
+                        if isinstance(arr, list) and len(arr) >= 2:
+                            for it in arr:
+                                item = _avito_item_from_json(it, today)
+                                if item:
+                                    results.append(item)
+                    except Exception:
+                        pass
+            if results:
+                print(f"  [Авито] script-JSON: {len(results)} объявлений")
+                return results
+
     # 2. HTML карточки с data-marker="item"
     cards = soup.select("[data-marker='item']")
     print(f"  [Авито] HTML cards={len(cards)}")
@@ -1114,15 +1160,15 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
             has_items = 'data-marker="item"' in text
             print(f"  [Авито] стр.{p}: {size:,}б, items={has_items}, url={url[:60]}")
 
-            # Если ответ маленький (< 800KB) — фильтры сломали URL, пробуем без цен
-            if size < 800_000 and not has_items and (price_min > 0 or price_max < 99_000_000):
-                print(f"  [Авито] малый ответ с ценами, пробую только частники без цен...")
+            # Если ответ маленький или нет карточек — пробуем без ценовых фильтров
+            if not has_items and (price_min > 0 or price_max < 99_000_000):
+                print(f"  [Авито] нет карточек с ценами, пробую только частники без цен...")
                 r2 = _req.get("http://api.scraperapi.com", params={
                     "api_key": SCRAPER_API_KEY,
                     "url": f"https://www.avito.ru/{slug}/avtomobili?owner%5B%5D=1",
                     "country_code": "ru",
                 }, timeout=40)
-                if r2.status_code == 200 and len(r2.text) > 800_000:
+                if r2.status_code == 200:
                     text = r2.text
                     has_items = 'data-marker="item"' in text
                     print(f"  [Авито] fallback частники без цен: {len(text):,}б, items={has_items}")
