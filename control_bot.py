@@ -2033,14 +2033,11 @@ async def _ensure_photo(item: dict) -> None:
                         photo = candidate
                         break
 
-            # 4. og:image — принимаем ТОЛЬКО если URL из img.avito.st (реальное фото)
-            # Плейсхолдер "цветные круги" хранится на другом домене
+            # 4. og:image — первое фото объявления (для без фото будут круги — это нормально)
             if not photo:
                 og = re.search(r'og:image[^>]*content="([^"]+)"|content="([^"]+)"[^>]*og:image', text)
                 if og:
-                    candidate = (og.group(1) or og.group(2) or "").strip()
-                    if "img.avito.st" in candidate:
-                        photo = candidate
+                    photo = (og.group(1) or og.group(2) or "").strip()
         if need_desc:
             for dpat in [
                 r'"description"\s*:\s*"([^"]{20,})"',
@@ -2206,9 +2203,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         ])
 
         photo_url = item.get("_photo_url", "")
-        # Отправляем фото только если URL из Авито CDN (img.avito.st) — там нет плейсхолдеров
-        # og:image и прочие URL могут быть плейсхолдерами, их не отправляем
-        if photo_url and ("img.avito.st" in photo_url or "drom.ru" in photo_url or "autoru" in photo_url or "auto.ru" in photo_url):
+        if photo_url:
             try:
                 await bot.send_photo(chat_id, photo=photo_url, caption=caption, reply_markup=kb)
                 return
@@ -2220,7 +2215,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                         "Referer": "https://www.avito.ru/",
                     })
-                    if resp.status_code == 200 and len(resp.content) > 5_000:
+                    if resp.status_code == 200 and len(resp.content) > 3_000:
                         photo_bytes = BufferedInputFile(resp.content, filename="photo.jpg")
                         await bot.send_photo(chat_id, photo=photo_bytes, caption=caption, reply_markup=kb)
                         return
