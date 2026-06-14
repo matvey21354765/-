@@ -483,11 +483,13 @@ def _autoru_parse_offers(data: dict, today) -> list[dict]:
                 parts = [x for x in [tech.get("engine_type",""), f"{tech.get('power','')} л.с." if tech.get("power") else "", tech.get("transmission","")] if x]
                 desc = ", ".join(parts)
             if title and item_url:
+                price_int = int(price_val) if price_val else 0
                 item = {
                     "source": "autoru", "title": title, "price": price_str,
                     "url": item_url, "date": str(today - datetime.timedelta(days=days)),
                     "_photos": len(photos_list), "_days_on_site": days,
                     "description": desc, "seller": "", "_photo_url": photo_url,
+                    "_price_int": price_int,
                 }
                 item["_hot_score"] = hot_score(item)
                 results.append(item)
@@ -497,9 +499,10 @@ def _autoru_parse_offers(data: dict, today) -> list[dict]:
 
 
 def _autoru_parse_html(text: str, today) -> list[dict]:
-    """Извлекает объявления из HTML Auto.ru (window.__INITIAL_STATE__ или __NEXT_DATA__)."""
+    """Извлекает объявления из HTML Auto.ru (__INITIAL_STATE__ или regex)."""
     results = []
-    # Ищем window.__INITIAL_STATE__ = {...}
+
+    # Метод 1: window.__INITIAL_STATE__
     for marker in ("window.__INITIAL_STATE__=", "window.__INITIAL_STATE__ ="):
         idx = text.find(marker)
         if idx == -1:
@@ -508,36 +511,54 @@ def _autoru_parse_html(text: str, today) -> list[dict]:
         if brace_start == -1:
             continue
         script_end = text.find("</script>", brace_start)
-        json_str = text[brace_start:script_end].rstrip("; \n\r") if script_end != -1 else text[brace_start:brace_start+500_000]
+        json_str = text[brace_start:script_end].rstrip("; \n\r") if script_end != -1 else text[brace_start:brace_start + 800_000]
         try:
             data = json.loads(json_str)
-            results = _autoru_parse_offers(data, today)
-            if results:
-                return results
-        except Exception:
-            pass
+            found = _autoru_parse_offers(data, today)
+            if found:
+                print(f"  [Auto.ru] __INITIAL_STATE__: {len(found)} объявлений")
+                return found
+        except Exception as e:
+            print(f"  [Auto.ru] __INITIAL_STATE__ json error: {e}")
 
-    # Попробуем __NEXT_DATA__
-    nd_start = text.find('"offers":[')
-    if nd_start != -1:
-        # Regex: ищем urlPath + price из JSON Auto.ru
-        for m in re.finditer(r'"url"\s*:\s*"(https://auto\.ru/[^"]+)"[^}]{0,300}"price"\s*:\s*(\d+)', text):
-            item_url, price_val = m.group(1), int(m.group(2))
-            if price_val < 10_000:
-                continue
-            title_m = re.search(r'"name"\s*:\s*"([^"]{5,80})"', text[max(0, m.start()-500):m.start()])
-            title = title_m.group(1) if title_m else "Авто на Auto.ru"
-            price_str = f"{price_val:,} ₽".replace(",", " ")
-            item = {
-                "source": "autoru", "title": title, "price": price_str,
-                "url": item_url, "date": str(today),
-                "_photos": 0, "_days_on_site": 0,
-                "description": "", "seller": "", "_photo_url": "",
-                "_price_int": price_val,
-            }
-            item["_hot_score"] = hot_score(item)
-            results.append(item)
+    # Метод 2: regex по паттернам Auto.ru в сыром HTML/JSON
+    # Auto.ru URLs: https://auto.ru/cars/used/sale/brand/model/id/
+    seen_urls: set[str] = set()
+    for m in re.finditer(
+        r'"url"\s*:\s*"(https://auto\.ru/cars/[^"]{10,120})"'
+        r'.*?"price"\s*:\s*(\d{4,9})',
+        text, re.DOTALL
+    ):
+        item_url = m.group(1)
+        price_val = int(m.group(2))
+        if item_url in seen_urls or price_val < 10_000:
+            continue
+        seen_urls.add(item_url)
+        # Ищем марку/модель/год в блоке вокруг этого матча
+        ctx_start = max(0, m.start() - 800)
+        ctx = text[ctx_start:m.end()]
+        mark_m = re.search(r'"mark_info"\s*:\s*\{[^}]*"name"\s*:\s*"([^"]+)"', ctx)
+        model_m = re.search(r'"model_info"\s*:\s*\{[^}]*"name"\s*:\s*"([^"]+)"', ctx)
+        year_m = re.search(r'"year"\s*:\s*(\d{4})', ctx)
+        mark = mark_m.group(1) if mark_m else ""
+        model = model_m.group(1) if model_m else ""
+        year = year_m.group(1) if year_m else ""
+        title = f"{mark} {model} {year}".strip() or "Авто на Auto.ru"
+        price_str = f"{price_val:,} ₽".replace(",", " ")
+        photo_m = re.search(r'"1200x900"\s*:\s*"([^"]+)"', ctx)
+        photo_url = photo_m.group(1).replace("\\/", "/") if photo_m else ""
+        item = {
+            "source": "autoru", "title": title, "price": price_str,
+            "url": item_url, "date": str(today),
+            "_photos": 1 if photo_url else 0, "_days_on_site": 0,
+            "description": "", "seller": "", "_photo_url": photo_url,
+            "_price_int": price_val,
+        }
+        item["_hot_score"] = hot_score(item)
+        results.append(item)
 
+    if results:
+        print(f"  [Auto.ru] regex HTML: {len(results)} объявлений")
     return results
 
 
@@ -579,46 +600,51 @@ def scrape_autoru(region: str, pages: int = 5, price_min: int = 0, price_max: in
             body["price_to"] = price_max
 
         batch = []
-        # Пробуем ScraperAPI → AJAX API
-        if SCRAPER_API_KEY:
+        html_url = f"https://auto.ru/{slug}/cars/used/?seller_group=PRIVATE&page={p}"
+        if price_min > 0:
+            html_url += f"&price_from={price_min}"
+        if price_max < 99_000_000:
+            html_url += f"&price_to={price_max}"
+
+        # Метод 1: ScraperAPI → HTML + парсинг __INITIAL_STATE__
+        if not batch and SCRAPER_API_KEY:
+            try:
+                r3 = _req.get("http://api.scraperapi.com", params={
+                    "api_key": SCRAPER_API_KEY, "url": html_url, "country_code": "ru",
+                    "premium": "true",
+                }, timeout=60)
+                print(f"  [Auto.ru] ScraperAPI HTML стр.{p}: HTTP {r3.status_code}, {len(r3.text):,}б")
+                if r3.status_code == 200 and len(r3.text) > 50_000:
+                    batch = _autoru_parse_html(r3.text, today)
+            except Exception as e:
+                print(f"  [Auto.ru] ScraperAPI HTML: {e}")
+
+        # Метод 2: ScraperAPI → AJAX (POST proxied)
+        if not batch and SCRAPER_API_KEY:
             try:
                 r = _req.post(
                     "http://api.scraperapi.com/",
                     params={"api_key": SCRAPER_API_KEY, "url": "https://auto.ru/-/ajax/desktop/listing/", "country_code": "ru"},
-                    json=body, headers={"Content-Type": "application/json"}, timeout=40
+                    data=json.dumps(body), headers={"Content-Type": "application/json"}, timeout=40
                 )
                 print(f"  [Auto.ru] ScraperAPI AJAX стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
                 if r.status_code == 200:
-                    batch = _autoru_parse_offers(r.json(), today)
+                    try:
+                        batch = _autoru_parse_offers(r.json(), today)
+                    except Exception:
+                        pass
             except Exception as e:
                 print(f"  [Auto.ru] ScraperAPI AJAX: {e}")
 
-        # Прямой AJAX запрос
+        # Метод 3: Прямой GET HTML страницы
         if not batch:
             try:
-                r2 = _req.post("https://auto.ru/-/ajax/desktop/listing/", json=body, headers=headers_ajax, timeout=20)
-                print(f"  [Auto.ru] прямой AJAX стр.{p}: HTTP {r2.status_code}, {len(r2.text):,}б")
-                if r2.status_code == 200:
-                    batch = _autoru_parse_offers(r2.json(), today)
+                r4 = _req.get(html_url, headers=headers_ajax, timeout=20)
+                print(f"  [Auto.ru] прямой HTML стр.{p}: HTTP {r4.status_code}, {len(r4.text):,}б")
+                if r4.status_code == 200 and len(r4.text) > 50_000:
+                    batch = _autoru_parse_html(r4.text, today)
             except Exception as e:
-                print(f"  [Auto.ru] прямой AJAX: {e}")
-
-        # ScraperAPI → HTML страница + парсинг __INITIAL_STATE__
-        if not batch and SCRAPER_API_KEY:
-            try:
-                html_url = f"https://auto.ru/{slug}/cars/used/?seller_group=PRIVATE&page={p}"
-                if price_min > 0:
-                    html_url += f"&price_from={price_min}"
-                if price_max < 99_000_000:
-                    html_url += f"&price_to={price_max}"
-                r3 = _req.get("http://api.scraperapi.com", params={
-                    "api_key": SCRAPER_API_KEY, "url": html_url, "country_code": "ru",
-                }, timeout=40)
-                print(f"  [Auto.ru] ScraperAPI HTML стр.{p}: HTTP {r3.status_code}, {len(r3.text):,}б")
-                if r3.status_code == 200:
-                    batch = _autoru_parse_html(r3.text, today)
-            except Exception as e:
-                print(f"  [Auto.ru] ScraperAPI HTML: {e}")
+                print(f"  [Auto.ru] прямой HTML: {e}")
 
         print(f"  [Auto.ru] стр.{p}: итого {len(batch)} объявлений")
         if not batch:
@@ -1479,6 +1505,7 @@ async def cmd_start(msg: Message, state: FSMContext):
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔍 Найти авто", callback_data="do_search")],
                 [InlineKeyboardButton(text="⚙️ Изменить настройки", callback_data="change_settings")],
+                [InlineKeyboardButton(text="🔔 Уведомления", callback_data="notify_settings")],
             ])
         )
     else:
@@ -1488,6 +1515,133 @@ async def cmd_start(msg: Message, state: FSMContext):
         )
         await msg.answer("📍 Выбери город:", reply_markup=region_keyboard())
         await state.set_state(Setup.region)
+
+
+def _notify_keyboard(s: dict) -> InlineKeyboardMarkup:
+    enabled = s.get("monitor_enabled", False)
+    interval = s.get("monitor_interval_min", 15)
+    min_pct = s.get("monitor_min_savings_pct", 10)
+    toggle_text = "🔕 Выключить мониторинг" if enabled else "🔔 Включить мониторинг"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=toggle_text, callback_data="notify_toggle")],
+        [
+            InlineKeyboardButton(text=f"⏱ Каждые {interval} мин", callback_data="notify_interval"),
+        ],
+        [
+            InlineKeyboardButton(text=f"📉 Скидка от {min_pct}%", callback_data="notify_pct"),
+        ],
+        [InlineKeyboardButton(text="⭐ Моё избранное", callback_data="notify_favs")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="notify_back")],
+    ])
+
+
+@dp.callback_query(F.data == "notify_settings")
+async def cb_notify_settings(cb: CallbackQuery):
+    await cb.answer()
+    uid = cb.from_user.id
+    s = load_settings(uid)
+    enabled = s.get("monitor_enabled", False)
+    status = "✅ Включён" if enabled else "❌ Выключен"
+    interval = s.get("monitor_interval_min", 15)
+    min_pct = s.get("monitor_min_savings_pct", 10)
+    await cb.message.answer(
+        f"🔔 *Настройки уведомлений*\n\n"
+        f"Статус: {status}\n"
+        f"Интервал проверки: каждые {interval} мин\n"
+        f"Минимальная скидка: {min_pct}% ниже рынка\n\n"
+        f"Бот проверяет Авито и присылает уведомление когда появляются выгодные авто.",
+        parse_mode="Markdown",
+        reply_markup=_notify_keyboard(s),
+    )
+
+
+@dp.callback_query(F.data == "notify_toggle")
+async def cb_notify_toggle(cb: CallbackQuery):
+    await cb.answer()
+    uid = cb.from_user.id
+    s = load_settings(uid)
+    enabled = not s.get("monitor_enabled", False)
+    s["monitor_enabled"] = enabled
+    save_settings(uid, s)
+    if enabled:
+        _start_monitor(uid)
+        region_name = REGIONS.get(s.get("region", ""), s.get("region", ""))
+        await cb.message.answer(
+            f"✅ *Мониторинг включён!*\n\nБуду присылать новые авто в {region_name} ниже рынка.\n"
+            f"Интервал: каждые {s.get('monitor_interval_min', 15)} мин.",
+            parse_mode="Markdown",
+            reply_markup=_notify_keyboard(s),
+        )
+    else:
+        _stop_monitor(uid)
+        await cb.message.answer(
+            "🔕 Мониторинг выключен.",
+            reply_markup=_notify_keyboard(s),
+        )
+
+
+@dp.callback_query(F.data == "notify_interval")
+async def cb_notify_interval(cb: CallbackQuery):
+    await cb.answer()
+    uid = cb.from_user.id
+    s = load_settings(uid)
+    current = s.get("monitor_interval_min", 15)
+    options = [10, 15, 30, 60]
+    next_val = options[(options.index(current) + 1) % len(options)] if current in options else 15
+    s["monitor_interval_min"] = next_val
+    save_settings(uid, s)
+    if s.get("monitor_enabled"):
+        _stop_monitor(uid)
+        _start_monitor(uid)
+    await cb.message.edit_reply_markup(reply_markup=_notify_keyboard(s))
+
+
+@dp.callback_query(F.data == "notify_pct")
+async def cb_notify_pct(cb: CallbackQuery):
+    await cb.answer()
+    uid = cb.from_user.id
+    s = load_settings(uid)
+    current = s.get("monitor_min_savings_pct", 10)
+    options = [5, 10, 15, 20, 25]
+    next_val = options[(options.index(current) + 1) % len(options)] if current in options else 10
+    s["monitor_min_savings_pct"] = next_val
+    save_settings(uid, s)
+    await cb.message.edit_reply_markup(reply_markup=_notify_keyboard(s))
+
+
+@dp.callback_query(F.data == "notify_favs")
+async def cb_notify_favs(cb: CallbackQuery):
+    await cb.answer()
+    uid = cb.from_user.id
+    fav_file = user_dir(uid) / "favorites.json"
+    if not fav_file.exists():
+        await cb.message.answer("⭐ У тебя пока нет сохранённых объявлений.")
+        return
+    favs = json.loads(fav_file.read_text(encoding="utf-8"))
+    if not favs:
+        await cb.message.answer("⭐ Список избранного пуст.")
+        return
+    lines = [f"• {it.get('title','')} — {it.get('price','?')}\n  {it.get('url','')}" for it in favs[-10:]]
+    await cb.message.answer(f"⭐ *Избранное* ({len(favs)} шт.):\n\n" + "\n\n".join(lines), parse_mode="Markdown")
+
+
+@dp.callback_query(F.data == "notify_back")
+async def cb_notify_back(cb: CallbackQuery):
+    await cb.answer()
+    uid = cb.from_user.id
+    s = load_settings(uid)
+    region = s.get("region", "")
+    region_name = REGIONS.get(region, region)
+    pmin = s.get("price_min", 0)
+    pmax = s.get("price_max", 99_000_000)
+    await cb.message.answer(
+        f"👋 Твои настройки:\n📍 {region_name}\n💰 {pmin:,}–{pmax:,} ₽",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔍 Найти авто", callback_data="do_search")],
+            [InlineKeyboardButton(text="⚙️ Изменить настройки", callback_data="change_settings")],
+            [InlineKeyboardButton(text="🔔 Уведомления", callback_data="notify_settings")],
+        ])
+    )
 
 
 @dp.callback_query(F.data == "change_settings")
@@ -2097,7 +2251,9 @@ async def _monitor_loop(uid: int):
     print(f"  [монитор] uid={uid} запущен")
     while True:
         try:
-            await asyncio.sleep(MONITOR_INTERVAL)
+            s = load_settings(uid)
+            interval_sec = s.get("monitor_interval_min", 15) * 60
+            await asyncio.sleep(interval_sec)
             s = load_settings(uid)
             if not s.get("monitor_enabled"):
                 print(f"  [монитор] uid={uid} отключён, выходим")
@@ -2138,7 +2294,7 @@ async def _monitor_loop(uid: int):
                 it for it in pool
                 if it.get("url") in {x["url"] for x in new_items}
                 and it.get("_below_market")
-                and (it.get("_savings_pct", 0) >= MONITOR_MIN_SAVINGS_PCT)
+                and (it.get("_savings_pct", 0) >= s.get("monitor_min_savings_pct", MONITOR_MIN_SAVINGS_PCT))
             ]
             # Сортируем по размеру скидки
             new_below.sort(key=lambda x: -x.get("_savings_pct", 0))
