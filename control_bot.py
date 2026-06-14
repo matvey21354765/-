@@ -2014,15 +2014,15 @@ async def _ensure_photo(item: dict) -> None:
                     m = re.search(pat, text)
                     if m:
                         raw = (m.group(1) if m.lastindex else m.group(0)).replace("\\/", "/")
-                        photo = ("https:" + raw) if raw.startswith("//") else raw
+                        candidate = ("https:" + raw) if raw.startswith("//") else raw
+                        # Пропускаем плейсхолдеры: /stub/, /no-photo, /placeholder
+                        if any(x in candidate.lower() for x in ("/stub", "/no-photo", "/placeholder", "noimage", "no_photo", "default")):
+                            continue
+                        photo = candidate
                         break
 
-            # 4. og:image — ТОЛЬКО если знаем что у объявления есть фото
-            # Если listing_has_photos=False — объявление без фото, og:image = плейсхолдер (круги)
-            if not photo and listing_has_photos is not False:
-                og = re.search(r'og:image[^>]*content="([^"]+)"|content="([^"]+)"[^>]*og:image', text)
-                if og:
-                    photo = (og.group(1) or og.group(2) or "").strip()
+            # og:image для Авито НЕ используем — там может быть плейсхолдер (цветные круги)
+            # Фото берётся только из JSON данных объявления
         if need_desc:
             for dpat in [
                 r'"description"\s*:\s*"([^"]{20,})"',
@@ -2197,7 +2197,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                     "Referer": "https://www.avito.ru/",
                 })
-                if resp.status_code == 200 and len(resp.content) > 4_000:
+                if resp.status_code == 200 and len(resp.content) > 20_000:
                     photo_bytes = BufferedInputFile(resp.content, filename="photo.jpg")
                     await bot.send_photo(chat_id, photo=photo_bytes, caption=caption, reply_markup=kb)
                     return
