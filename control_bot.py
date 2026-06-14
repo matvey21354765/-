@@ -1952,10 +1952,11 @@ async def enrich_and_filter(items: list[dict], max_check: int = 25) -> list[dict
 
 
 async def _ensure_photo(item: dict) -> None:
-    """Для объявлений без фото/описания — загружает страницу и вытаскивает данные."""
+    """Для объявлений без фото/описания/цены — загружает страницу и вытаскивает данные."""
     need_photo = not item.get("_photo_url")
     need_desc = not item.get("description")
-    if not need_photo and not need_desc:
+    need_price = not item.get("_price_int")
+    if not need_photo and not need_desc and not need_price:
         return
     source = item.get("source", "")
     url = item.get("url", "")
@@ -1964,8 +1965,8 @@ async def _ensure_photo(item: dict) -> None:
 
     loop = asyncio.get_event_loop()
 
-    def _fetch() -> tuple[str, str]:
-        photo, desc = "", ""
+    def _fetch() -> tuple[str, str, int]:
+        photo, desc, price_int = "", "", 0
         try:
             import requests as _req
             if source == "avito" and SCRAPER_API_KEY:
@@ -1975,7 +1976,7 @@ async def _ensure_photo(item: dict) -> None:
                     "country_code": "ru",
                 }, timeout=12)
                 if r.status_code != 200:
-                    return photo, desc
+                    return photo, desc, price_int
                 text = r.text
                 if need_photo:
                     for pat in [
@@ -1991,13 +1992,25 @@ async def _ensure_photo(item: dict) -> None:
                     dm = re.search(r'"description"\s*:\s*"([^"]{20,})"', text)
                     if dm:
                         desc = dm.group(1).replace("\\n", " ").replace('\\"', '"')[:400]
+                if need_price:
+                    for pat in [
+                        r'"priceDetailed"\s*:\s*\{[^}]{0,200}"value"\s*:\s*(\d{4,9})',
+                        r'"price"\s*:\s*\{[^}]{0,200}"value"\s*:\s*(\d{4,9})',
+                        r'"price"\s*:\s*(\d{5,9})',
+                    ]:
+                        pm = re.search(pat, text)
+                        if pm:
+                            v = int(pm.group(1))
+                            if 10_000 < v < 99_000_000:
+                                price_int = v
+                                break
             elif source in ("drom", "autoru"):
                 r = _req.get(url, timeout=10, headers={
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                     "Accept-Language": "ru-RU,ru;q=0.9",
                 })
                 if r.status_code != 200:
-                    return photo, desc
+                    return photo, desc, price_int
                 if need_photo:
                     m = re.search(r'"(?:1200x900|832x624|1000x750)"\s*:\s*"([^"]+)"', r.text)
                     if m:
@@ -2006,15 +2019,24 @@ async def _ensure_photo(item: dict) -> None:
                     dm = re.search(r'"description"\s*:\s*"([^"]{20,})"', r.text)
                     if dm:
                         desc = dm.group(1).replace("\\n", " ")[:400]
+                if need_price:
+                    pm = re.search(r'"price"\s*:\s*(\d{5,9})', r.text)
+                    if pm:
+                        v = int(pm.group(1))
+                        if 10_000 < v < 99_000_000:
+                            price_int = v
         except Exception:
             pass
-        return photo, desc
+        return photo, desc, price_int
 
-    photo, desc = await loop.run_in_executor(None, _fetch)
+    photo, desc, price_int = await loop.run_in_executor(None, _fetch)
     if photo:
         item["_photo_url"] = photo
     if desc and not item.get("description"):
         item["description"] = desc
+    if price_int and not item.get("_price_int"):
+        item["_price_int"] = price_int
+        item["price"] = f"{price_int:,} ₽".replace(",", " ")
 
 
 SOURCE_TAGS = {
@@ -2116,15 +2138,17 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                 pass
         await bot.send_message(chat_id, caption, reply_markup=kb)
 
-    # Предзагружаем фото (до 6 одновременно), потом отправляем по очереди
+    # Предзагружаем фото/цену/описание (до 6 одновременно)
     sem = asyncio.Semaphore(6)
     async def _prefetch(it):
         async with sem:
             try:
-                await asyncio.wait_for(_ensure_photo(it), timeout=8)
+                await asyncio.wait_for(_ensure_photo(it), timeout=12)
             except Exception:
                 pass
     await asyncio.gather(*[_prefetch(it) for it in batch])
+    # Пересчитываем рыночное сравнение после загрузки цен
+    batch = rank_by_market_price(batch)
     for item in batch:
         await _send_item(item)
         await asyncio.sleep(0.05)
@@ -2204,7 +2228,6 @@ async def do_search_for_user(uid: int, reply_to):
     suitable = [
         i for i in items
         if not is_dealer(i)
-        and i.get("_price_int", 0) > 0        # только объявления с известной ценой
         and in_price_range(i, pmin, pmax)
         and i.get("url")
         and i["url"] not in skipped
