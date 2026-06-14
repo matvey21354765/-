@@ -1072,30 +1072,73 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
                 print(f"  [Авито] стр.{p}: нет карточек, стоп")
                 break
 
+            # data-marker="item" есть в JS-коде внутри <script>, не как HTML-атрибут
+            # Извлекаем данные из JSON в скрипт-тегах
             soup = _BS(text, "lxml")
-            # find_all надёжнее CSS селектора для data-marker
-            cards = soup.find_all(attrs={"data-marker": "item"})
-            print(f"  [Авито] стр.{p}: найдено {len(cards)} карточек (find_all)")
+            batch_from_json: list[dict] = []
 
-            if not cards:
-                # Fallback: regex — ищем href ссылки объявлений прямо в HTML
-                hrefs = re.findall(
-                    rf'href="(/{re.escape(slug)}/[a-z0-9][a-z0-9_-]*-\d{{6,}})"',
-                    text
+            for sc in soup.find_all("script"):
+                sc_text = sc.string or ""
+                if not sc_text or len(sc_text) < 200:
+                    continue
+                # Ищем JSON с массивом items/catalog
+                for marker in ('"items":[', '"catalog":[', '"listing":[', '"offers":['):
+                    if marker not in sc_text:
+                        continue
+                    # Попробуем найти массив items и распарсить
+                    idx = sc_text.find(marker) + len(marker) - 1
+                    try:
+                        # Берём кусок начиная с [ и пробуем json.loads
+                        chunk = sc_text[idx:]
+                        # Ищем конец массива — ищем ] с учётом вложенности
+                        depth = 0
+                        end = 0
+                        for i, ch in enumerate(chunk):
+                            if ch == '[': depth += 1
+                            elif ch == ']':
+                                depth -= 1
+                                if depth == 0:
+                                    end = i + 1
+                                    break
+                        arr = json.loads(chunk[:end])
+                        if isinstance(arr, list) and arr:
+                            items_raw = _avito_find_items_in_json({"items": arr})
+                            for it in (items_raw or arr[:50]):
+                                item = _avito_item_from_json(it, today)
+                                if item:
+                                    batch_from_json.append(item)
+                    except Exception:
+                        pass
+                if batch_from_json:
+                    break
+
+            if batch_from_json:
+                print(f"  [Авито] стр.{p}: {len(batch_from_json)} из JSON скрипта")
+                results.extend(batch_from_json)
+            else:
+                # Последний шанс: регулярки для поиска URL + цены прямо в тексте
+                # URL объявлений Авито: /city/...-XXXXXXXXX (7+ цифр в конце)
+                url_matches = re.findall(r'"urlPath"\s*:\s*"(/[^"]+)"', text)
+                title_prices = re.findall(
+                    r'"title"\s*:\s*"([^"]{5,80})"[^}]{0,200}"value"\s*:\s*(\d+)', text
                 )
+                print(f"  [Авито] regex: {len(url_matches)} URL, {len(title_prices)} title+price")
+
                 seen_urls: set = set()
-                for href in hrefs:
-                    item_url = "https://www.avito.ru" + href
+                tp_iter = iter(title_prices)
+                for url_path in url_matches[:50]:
+                    if not url_path.startswith(f"/{slug}/"):
+                        continue
+                    item_url = "https://www.avito.ru" + url_path
                     if item_url in seen_urls:
                         continue
                     seen_urls.add(item_url)
-                    # Ищем заголовок рядом с href в тексте
-                    idx = text.find(f'href="{href}"')
-                    nearby = text[max(0, idx-500):idx+500]
-                    title_m = re.search(r'"title"\s*:\s*"([^"]{5,80})"', nearby)
-                    price_m = re.search(r'"price"\s*:\s*\{[^}]*"value"\s*:\s*(\d+)', nearby)
-                    title = title_m.group(1) if title_m else "Авто на Авито"
-                    price = f"{int(price_m.group(1)):,} ₽".replace(",", " ") if price_m else ""
+                    try:
+                        tp = next(tp_iter)
+                        title, price_val = tp[0], tp[1]
+                        price = f"{int(price_val):,} ₽".replace(",", " ")
+                    except StopIteration:
+                        title, price = "Авто на Авито", ""
                     item = {
                         "source": "avito", "title": title, "price": price,
                         "url": item_url, "date": str(today),
@@ -1104,60 +1147,9 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
                     }
                     item["_hot_score"] = hot_score(item)
                     results.append(item)
-                print(f"  [Авито] regex fallback: {len(results)} ссылок")
-                break  # regex fallback — только первая страница
-
-            for card in cards:
-                try:
-                    link = (
-                        card.find(attrs={"data-marker": "item-title"})
-                        or card.find("a", href=lambda h: h and f"/{slug}/" in h)
-                        or card.find("a", href=lambda h: h and "/avtomobili/" in h)
-                        or card.find("a", href=True)
-                    )
-                    href = link.get("href", "") if link else ""
-                    item_url = ("https://www.avito.ru" + href) if href.startswith("/") else href
-                    if not item_url or "avito.ru" not in item_url:
-                        continue
-
-                    title_el = (
-                        card.find(attrs={"data-marker": "item-title"})
-                        or card.find(attrs={"itemprop": "name"})
-                        or card.find("h3") or card.find("h2")
-                    )
-                    title = title_el.get_text(strip=True) if title_el else ""
-                    if not title and link:
-                        title = link.get_text(strip=True)
-                    if not title:
-                        continue
-
-                    price_el = (
-                        card.find(attrs={"itemprop": "price"})
-                        or card.find(attrs={"data-marker": "item-price"})
-                        or card.find("meta", attrs={"itemprop": "price"})
-                    )
-                    price = ""
-                    if price_el:
-                        price = price_el.get("content") or price_el.get_text(strip=True)
-
-                    img_el = card.find("img", src=lambda s: s and s.startswith("http"))
-                    photo_url = img_el.get("src", "") if img_el else ""
-
-                    date_el = card.find(attrs={"data-marker": "item-date"}) or card.find("time")
-                    date_text = date_el.get_text(strip=True) if date_el else ""
-                    date_obj = parse_ru_date(date_text)
-                    days = max(0, (today - date_obj).days) if date_obj else 0
-
-                    item = {
-                        "source": "avito", "title": title, "price": price,
-                        "url": item_url, "date": str(date_obj) if date_obj else str(today),
-                        "_photos": 1 if photo_url else 0, "_days_on_site": days,
-                        "description": "", "seller": "", "_photo_url": photo_url,
-                    }
-                    item["_hot_score"] = hot_score(item)
-                    results.append(item)
-                except Exception:
-                    pass
+                print(f"  [Авито] regex fallback итого: {len(results)}")
+                if results:
+                    break  # только первая страница для regex
 
             time.sleep(random.uniform(1.5, 2.5))
         except Exception as e:
