@@ -1976,8 +1976,10 @@ async def _ensure_photo(item: dict) -> None:
         photo, desc, price_int = "", "", 0
         if need_photo:
             for pat in [
-                r'"(?:864x648|1280x960|640x480)"\s*:\s*"((?:https?:)?//[^"]+\.avito\.st/[^"]+\.(?:jpg|jpeg|webp))"',
+                r'"(?:864x648|1280x960|640x480|432x324)"\s*:\s*"((?:https?:)?//[^"]+\.avito\.st/[^"]+\.(?:jpg|jpeg|webp))"',
                 r'"((?:https?:)?//[0-9]+\.img\.avito\.st/[^"]+\.(?:jpg|jpeg|webp))"',
+                r'<meta[^>]+property="og:image"[^>]+content="(https://[^"]+)"',
+                r'content="(https://[^"]+\.avito\.st/[^"]+\.(?:jpg|jpeg))"',
             ]:
                 m = re.search(pat, text)
                 if m:
@@ -1985,9 +1987,14 @@ async def _ensure_photo(item: dict) -> None:
                     photo = ("https:" + raw) if raw.startswith("//") else raw
                     break
         if need_desc:
-            dm = re.search(r'"description"\s*:\s*"([^"]{20,})"', text)
-            if dm:
-                desc = dm.group(1).replace("\\n", " ").replace('\\"', '"')[:400]
+            for dpat in [
+                r'"description"\s*:\s*"([^"]{20,})"',
+                r'<meta[^>]+name="description"[^>]+content="([^"]{20,})"',
+            ]:
+                dm = re.search(dpat, text)
+                if dm:
+                    desc = dm.group(1).replace("\\n", " ").replace('\\"', '"')[:400]
+                    break
         if need_price:
             for pat in [
                 r'"priceDetailed"\s*:\s*\{[^}]{0,200}"value"\s*:\s*(\d{4,9})',
@@ -2155,7 +2162,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
             try:
                 import requests as _req
                 from aiogram.types import BufferedInputFile
-                resp = _req.get(photo_url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+                resp = _req.get(photo_url, timeout=10, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Referer": "https://www.avito.ru/"})
                 if resp.status_code == 200 and len(resp.content) > 2000:
                     photo_bytes = BufferedInputFile(resp.content, filename="photo.jpg")
                     await bot.send_photo(chat_id, photo=photo_bytes, caption=caption, reply_markup=kb)
@@ -2512,7 +2519,7 @@ async def _send_monitor_item(uid: int, it: dict):
             try:
                 import requests as _req
                 from aiogram.types import BufferedInputFile
-                resp = _req.get(photo_url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+                resp = _req.get(photo_url, timeout=10, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Referer": "https://www.avito.ru/"})
                 if resp.status_code == 200 and len(resp.content) > 2000:
                     await bot.send_photo(uid, photo=BufferedInputFile(resp.content, "photo.jpg"), caption=caption, reply_markup=kb)
                     sent = True
