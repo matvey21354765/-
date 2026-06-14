@@ -18,6 +18,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
     Message, CallbackQuery,
     InlineKeyboardMarkup, InlineKeyboardButton,
+    ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
 )
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -388,12 +389,19 @@ def scrape_drom(region: str, pages: int = 15, price_min: int = 0, price_max: int
                     pm = re.search(r"\d+", photos_str)
                     photos = int(pm.group()) if pm else 0
 
-                    img_el = card.select_one("img[data-src]") or card.select_one("img[src]")
                     photo_url = ""
-                    if img_el:
-                        src = img_el.get("data-src") or img_el.get("src", "")
-                        if src and src.startswith("http") and "drom" in src:
+                    for img_el in card.find_all("img"):
+                        src = (img_el.get("data-src") or img_el.get("data-lazy-src") or
+                               img_el.get("data-original") or img_el.get("src") or "")
+                        if src and src.startswith("http") and len(src) > 20:
                             photo_url = src
+                            break
+                    # Также ищем в data-атрибутах карточки (Drom хранит фото в JSON)
+                    if not photo_url:
+                        card_str = str(card)
+                        img_m = re.search(r'https?://[^"\']+(?:static|photo)[^"\']+\.(?:jpg|jpeg|webp)', card_str)
+                        if img_m:
+                            photo_url = img_m.group(0)
 
                     if title and item_url:
                         price_int = parse_price(price) or 0
@@ -1482,6 +1490,16 @@ def id_to_url(sid: str) -> str:
     return _id_to_url.get(sid, sid)
 
 
+MAIN_KEYBOARD = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="🔍 Найти авто"), KeyboardButton(text="🔔 Уведомления")],
+        [KeyboardButton(text="⭐ Избранное"),  KeyboardButton(text="⚙️ Настройки")],
+    ],
+    resize_keyboard=True,
+    persistent=True,
+)
+
+
 def region_keyboard():
     rows = []
     items = list(REGIONS.items())
@@ -1501,22 +1519,19 @@ async def cmd_start(msg: Message, state: FSMContext):
         region_name = REGIONS.get(s["region"], s["region"])
         pmin = s.get("price_min", 0)
         pmax = s.get("price_max", 99_000_000)
+        mon = "🟢" if s.get("monitor_enabled") else "🔴"
         await msg.answer(
             f"👋 Привет! Твои настройки:\n"
             f"📍 Регион: {region_name}\n"
-            f"💰 Бюджет: {pmin:,} – {pmax:,} ₽\n\n"
-            f"/search — найти объявления\n"
-            f"/settings — изменить настройки",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔍 Найти авто", callback_data="do_search")],
-                [InlineKeyboardButton(text="⚙️ Изменить настройки", callback_data="change_settings")],
-                [InlineKeyboardButton(text="🔔 Уведомления", callback_data="notify_settings")],
-            ])
+            f"💰 Бюджет: {pmin:,} – {pmax:,} ₽\n"
+            f"🔔 Мониторинг: {mon}",
+            reply_markup=MAIN_KEYBOARD,
         )
     else:
         await msg.answer(
             "👋 Привет! Я ищу автомобили от частных лиц по цене ниже рынка.\n\n"
-            "Для начала выбери регион поиска:"
+            "Для начала выбери регион поиска:",
+            reply_markup=MAIN_KEYBOARD,
         )
         await msg.answer("📍 Выбери город:", reply_markup=region_keyboard())
         await state.set_state(Setup.region)
@@ -1707,6 +1722,7 @@ async def fsm_price_max(msg: Message, state: FSMContext):
 
 
 @dp.message(Command("settings"))
+@dp.message(F.text == "⚙️ Настройки")
 async def cmd_settings(msg: Message, state: FSMContext):
     await state.clear()
     await msg.answer("📍 Выбери город:", reply_markup=region_keyboard())
@@ -1747,6 +1763,7 @@ def _get_enabled_sources(s: dict) -> list[str]:
 
 
 @dp.message(Command("search"))
+@dp.message(F.text == "🔍 Найти авто")
 async def cmd_search(msg: Message):
     uid = msg.from_user.id
     s = load_settings(uid)
@@ -2021,13 +2038,17 @@ async def send_batch(chat_id: int, uid: int, offset: int):
     if next_offset < total:
         await bot.send_message(
             chat_id,
-            f"Показано {min(next_offset, total)} из {total}. Листай дальше:",
+            f"Показано {min(next_offset, total)} из {total}:",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text=f"➡️ Ещё 10 объявлений", callback_data=f"page|{uid}|{next_offset}"),
+                InlineKeyboardButton(text=f"➡️ Ещё {min(10, total - next_offset)} объявлений", callback_data=f"page|{uid}|{next_offset}"),
             ]])
         )
     else:
-        await bot.send_message(chat_id, f"✅ Показаны все {total} объявлений. /search — новый поиск.")
+        await bot.send_message(
+            chat_id,
+            f"✅ Показаны все {total} объявлений.",
+            reply_markup=MAIN_KEYBOARD,
+        )
 
     # Сохраняем показанные в seen
     seen = load_seen(uid)
@@ -2094,7 +2115,8 @@ async def do_search_for_user(uid: int, reply_to):
     if not suitable:
         await reply_to.answer(
             f"😔 Не нашёл частников в {region_name} по твоему бюджету.\n\n"
-            f"Попробуй расширить диапазон цен: /settings"
+            f"Попробуй расширить диапазон цен: /settings",
+            reply_markup=MAIN_KEYBOARD,
         )
         return
 
@@ -2170,6 +2192,7 @@ async def cb_similar(cb: CallbackQuery):
 
 
 @dp.message(Command("favorites"))
+@dp.message(F.text == "⭐ Избранное")
 async def cmd_favorites(msg: Message):
     uid = msg.from_user.id
     fav_file = user_dir(uid) / "favorites.json"
@@ -2397,6 +2420,7 @@ def _stop_monitor(uid: int):
 
 
 @dp.message(Command("monitor"))
+@dp.message(F.text == "🔔 Уведомления")
 async def cmd_monitor(msg: Message):
     """Включить/выключить автомониторинг новых объявлений ниже рынка."""
     uid = msg.from_user.id
