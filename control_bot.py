@@ -1975,47 +1975,68 @@ async def _ensure_photo(item: dict) -> None:
     def _extract(text: str) -> tuple[str, str, int]:
         photo, desc, price_int = "", "", 0
         if need_photo:
-            # 1. Парсим __NEXT_DATA__ как JSON и берём item.media.images[0]
             nd = re.search(r'<script[^>]+id="__NEXT_DATA__"[^>]*>(.*?)</script>', text, re.S)
-            if nd:
+            nd_text = nd.group(1) if nd else ""
+
+            # 1. Парсим __NEXT_DATA__ как JSON — ищем item.media.images[0]
+            if nd_text:
                 try:
-                    nd_json = json.loads(nd.group(1))
-                    # Два возможных пути в JSON-структуре Авито
-                    item_d = (
-                        nd_json.get("props", {}).get("pageProps", {})
-                               .get("initialData", {}).get("data", {}).get("item", {})
-                        or nd_json.get("props", {}).get("pageProps", {})
-                               .get("item", {})
-                    )
-                    images = item_d.get("media", {}).get("images", [])
-                    if not images:
-                        # Другой путь: item.images напрямую
-                        images = item_d.get("images", [])
-                    for img_obj in images[:1]:
+                    nd_json = json.loads(nd_text)
+                    # Рекурсивно ищем первый объект с ключами размеров изображений
+                    def _find_images(obj, depth=0):
+                        if depth > 12 or not isinstance(obj, (dict, list)):
+                            return []
+                        if isinstance(obj, list):
+                            for el in obj:
+                                r = _find_images(el, depth+1)
+                                if r:
+                                    return r
+                        else:
+                            # Если объект сам содержит ключи размеров — это элемент массива images
+                            for size in ("1280x960", "864x648", "640x480", "432x324", "320x240"):
+                                if size in obj and "img.avito" in str(obj[size]):
+                                    return [obj]
+                            for v in obj.values():
+                                r = _find_images(v, depth+1)
+                                if r:
+                                    return r
+                        return []
+                    imgs = _find_images(nd_json)
+                    for img_obj in imgs[:1]:
                         for size in ("1280x960", "864x648", "640x480", "432x324", "320x240"):
-                            raw = img_obj.get(size, "")
-                            if raw:
-                                raw = raw.replace("\\/", "/")
+                            raw = str(img_obj.get(size, "")).replace("\\/", "/")
+                            if raw and "avito" in raw:
                                 photo = ("https:" + raw) if raw.startswith("//") else raw
                                 break
-                        if photo:
-                            break
                 except Exception:
                     pass
-            # 2. Если JSON не дал — regex по __NEXT_DATA__ тексту (избегаем og:image — там может быть плейсхолдер)
-            if not photo and nd:
-                # Ищем конкретно внутри "images":[{...}] — первое вхождение размера
-                imgs_block = re.search(r'"images"\s*:\s*\[(\{[^\]]+)\]', nd.group(1), re.S)
+
+            # 2. Regex по тексту __NEXT_DATA__ — ищем внутри "images":[{...}]
+            if not photo and nd_text:
+                imgs_block = re.search(r'"images"\s*:\s*\[(\{[^\]]{10,})\]', nd_text, re.S)
                 if imgs_block:
-                    for size in ("1280x960", "864x648", "640x480", "432x324"):
+                    for size in ("1280x960", "864x648", "640x480", "432x324", "320x240"):
                         sm = re.search(
-                            rf'"{size}"\s*:\s*"((?:https:)?(?:\\?/{{2}})[0-9]+\.img\.avito\.st[^"\'\\]+\.(?:jpg|jpeg|webp))"',
+                            r'"' + size + r'"\s*:\s*"((?:https:)?(?:\\?/){2}[0-9]+\.img\.avito\.st[^"\'\\]+\.(?:jpg|jpeg|webp))"',
                             imgs_block.group(1)
                         )
                         if sm:
                             raw = sm.group(1).replace("\\/", "/")
                             photo = ("https:" + raw) if raw.startswith("//") else raw
                             break
+
+            # 3. Широкий regex по всему тексту страницы (fallback)
+            if not photo:
+                for pat in [
+                    r'"(?:1280x960|864x648|640x480|432x324)"\s*:\s*"((?:https:)?(?:\\?/){2}[0-9]+\.img\.avito\.st[^"\'\\]{5,}\.(?:jpg|jpeg|webp))"',
+                    r'https://[0-9]+\.img\.avito\.st[^\s"\'<]{5,}\.(?:jpg|jpeg|webp)',
+                    r'(?:https:)?//[0-9]+\.img\.avito\.st[^\s"\'<]{5,}\.(?:jpg|jpeg|webp)',
+                ]:
+                    m = re.search(pat, text)
+                    if m:
+                        raw = (m.group(1) if m.lastindex else m.group(0)).replace("\\/", "/")
+                        photo = ("https:" + raw) if raw.startswith("//") else raw
+                        break
         if need_desc:
             for dpat in [
                 r'"description"\s*:\s*"([^"]{20,})"',
@@ -2182,23 +2203,26 @@ async def send_batch(chat_id: int, uid: int, offset: int):
 
         photo_url = item.get("_photo_url", "")
         if photo_url:
-            # Пробуем отправить по URL напрямую
-            try:
-                await bot.send_photo(chat_id, photo=photo_url, caption=caption, reply_markup=kb)
-                return
-            except Exception:
-                pass
-            # Если не вышло — скачиваем байты и шлём файлом
+            # Скачиваем байты, проверяем размер (< 15 КБ = плейсхолдер), шлём файлом
             try:
                 import requests as _req
                 from aiogram.types import BufferedInputFile
-                resp = _req.get(photo_url, timeout=10, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Referer": "https://www.avito.ru/"})
-                if resp.status_code == 200 and len(resp.content) > 2000:
+                resp = _req.get(photo_url, timeout=10, headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                    "Referer": "https://www.avito.ru/",
+                })
+                if resp.status_code == 200 and len(resp.content) > 15_000:
                     photo_bytes = BufferedInputFile(resp.content, filename="photo.jpg")
                     await bot.send_photo(chat_id, photo=photo_bytes, caption=caption, reply_markup=kb)
                     return
+                # Если размер слишком мал — плейсхолдер, не показываем
             except Exception:
-                pass
+                # Сеть упала — пробуем по URL напрямую
+                try:
+                    await bot.send_photo(chat_id, photo=photo_url, caption=caption, reply_markup=kb)
+                    return
+                except Exception:
+                    pass
         await bot.send_message(chat_id, caption, reply_markup=kb)
 
     # Предзагружаем фото/цену/описание (до 4 одновременно, 25 сек на каждое)
