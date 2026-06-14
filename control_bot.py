@@ -1045,15 +1045,24 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
     results = []
 
     for p in range(1, pages + 1):
-        # Страница 1: чистый URL без параметров (с ?p=1 Авито отдаёт урезанный ответ)
-        # Страницы 2+: добавляем ?p=N
+        # Строим URL: страница 1 без ?p=, только ценовые фильтры
         if p == 1:
             url = f"https://www.avito.ru/{slug}/avtomobili"
+            qs_parts = []
+            if price_min > 0:
+                qs_parts.append(f"pmin={price_min}")
+            if price_max < 99_000_000:
+                qs_parts.append(f"pmax={price_max}")
+            if qs_parts:
+                url += "?" + "&".join(qs_parts)
         else:
             url = f"https://www.avito.ru/{slug}/avtomobili?p={p}"
+            if price_min > 0:
+                url += f"&pmin={price_min}"
+            if price_max < 99_000_000:
+                url += f"&pmax={price_max}"
 
         try:
-            # ScraperAPI БЕЗ render — Авито отдаёт SSR HTML с карточками
             r = _req.get("http://api.scraperapi.com", params={
                 "api_key": SCRAPER_API_KEY,
                 "url": url,
@@ -1065,8 +1074,22 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
                 break
 
             text = r.text
+            size = len(text)
             has_items = 'data-marker="item"' in text
-            print(f"  [Авито] стр.{p}: {len(text):,}б, items={has_items}")
+            print(f"  [Авито] стр.{p}: {size:,}б, items={has_items}, url={url[:60]}")
+
+            # Если ответ маленький (< 800KB) — цены сломали URL, пробуем без них
+            if size < 800_000 and not has_items and p == 1 and (price_min > 0 or price_max < 99_000_000):
+                print(f"  [Авито] малый ответ с ценами, пробую без фильтров...")
+                r2 = _req.get("http://api.scraperapi.com", params={
+                    "api_key": SCRAPER_API_KEY,
+                    "url": f"https://www.avito.ru/{slug}/avtomobili",
+                    "country_code": "ru",
+                }, timeout=40)
+                if r2.status_code == 200 and len(r2.text) > 800_000:
+                    text = r2.text
+                    has_items = 'data-marker="item"' in text
+                    print(f"  [Авито] fallback без фильтров: {len(text):,}б, items={has_items}")
 
             if not has_items:
                 print(f"  [Авито] стр.{p}: нет карточек, стоп")
@@ -1124,21 +1147,36 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
                 )
                 print(f"  [Авито] regex: {len(url_matches)} URL, {len(title_prices)} title+price")
 
+                # Ищем блоки данных объявлений: urlPath + title + value рядом
+                item_blocks = re.findall(
+                    r'"urlPath"\s*:\s*"(/[^"]+)"[^}]{0,500}?"title"\s*:\s*"([^"]{5,80})"[^}]{0,300}?"value"\s*:\s*(\d+)',
+                    text
+                )
+                # Fallback: только urlPath и title
+                if not item_blocks:
+                    simple = re.findall(
+                        r'"urlPath"\s*:\s*"(/[^"]+)"[^}]{0,300}?"title"\s*:\s*"([^"]{5,80})"',
+                        text
+                    )
+                    item_blocks = [(u, t, "0") for u, t in simple]
+
+                print(f"  [Авито] regex блоков: {len(item_blocks)}")
                 seen_urls: set = set()
-                tp_iter = iter(title_prices)
-                for url_path in url_matches[:50]:
+                for url_path, title, price_val in item_blocks[:80]:
                     if not url_path.startswith(f"/{slug}/"):
                         continue
                     item_url = "https://www.avito.ru" + url_path
                     if item_url in seen_urls:
                         continue
                     seen_urls.add(item_url)
-                    try:
-                        tp = next(tp_iter)
-                        title, price_val = tp[0], tp[1]
-                        price = f"{int(price_val):,} ₽".replace(",", " ")
-                    except StopIteration:
-                        title, price = "Авто на Авито", ""
+                    price = f"{int(price_val):,} ₽".replace(",", " ") if price_val != "0" else ""
+                    # Пропускаем если цена задана и выходит за диапазон
+                    if price_val != "0":
+                        p_int = int(price_val)
+                        if price_max < 99_000_000 and p_int > price_max:
+                            continue
+                        if price_min > 0 and p_int < price_min:
+                            continue
                     item = {
                         "source": "avito", "title": title, "price": price,
                         "url": item_url, "date": str(today),
