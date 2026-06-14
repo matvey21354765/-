@@ -133,6 +133,8 @@ def _macd(closes: pd.Series, fast: int = 12, slow: int = 26, sig: int = 9) -> di
         "falling":    h0 < h1 < h2,
         "bullish":    h0 > 0,
         "magnitude":  mag,
+        "macd_val":   float(macd.iloc[-1]),
+        "signal_val": float(signal.iloc[-1]),
     }
 
 
@@ -327,6 +329,11 @@ def _score(df1m: pd.DataFrame, df5m: pd.DataFrame, df15m: pd.DataFrame) -> dict:
         "signals": sigs[:3], **levels,
         "tv_buy": tv_buy, "tv_sell": tv_sell, "tv_neutral": tv_neutral,
         "tv_verdict": tv_verdict,
+        # raw oscillator values for free display
+        "rsi": rsi5, "macd": m5_std.get("macd_val", 0.0),
+        "macd_signal": m5_std.get("signal_val", 0.0),
+        "adx": adx5, "bb_pos": bb5.get("pct_b", 0.5),
+        "stoch": srsi5,
     }
 
 
@@ -472,8 +479,7 @@ def format_forecast(f: dict) -> str:
 
 
 def format_forecast_free(f: dict) -> str:
-    """Free version — shows indicator summary only, hides direction/SL/TP."""
-    import html as _html
+    """Free version — raw oscillator data, user decides direction."""
     coin  = f["coin"]
     price = f.get("price", 0.0)
     now   = datetime.now(timezone.utc).strftime("%H:%M UTC")
@@ -481,39 +487,62 @@ def format_forecast_free(f: dict) -> str:
     tv_buy     = f.get("tv_buy", 0)
     tv_sell    = f.get("tv_sell", 0)
     tv_neutral = f.get("tv_neutral", 0)
-    tv_verdict = f.get("tv_verdict", "Нейтрально")
     total_ind  = tv_buy + tv_sell + tv_neutral
-
-    if tv_buy > tv_sell:
-        verdict_emoji = "🟢"
-        direction_hint = f"📈 Больше сигналов на рост ({tv_buy}/{total_ind})"
-    elif tv_sell > tv_buy:
-        verdict_emoji = "🔴"
-        direction_hint = f"📉 Больше сигналов на падение ({tv_sell}/{total_ind})"
-    else:
-        verdict_emoji = "⚪"
-        direction_hint = f"⚪ Смешанные сигналы — нет чёткого направления"
 
     def _p(v: float) -> str:
         return f"${v:,.2f}" if v >= 1000 else f"${v:.4f}" if v >= 1 else f"${v:.6f}"
 
-    direction = f.get("direction", "FLAT")
-    sigs = f.get("signals", [])
-    clean_sigs = [s for s in sigs[:2] if not s.startswith("Скор ")]
-    if not clean_sigs:
-        clean_sigs = ["Подробный анализ — по подписке"]
-    sigs_text = "\n".join(f"  • {_html.escape(s)}" for s in clean_sigs)
+    # Raw oscillator values
+    rsi    = f.get("rsi", 0.0)
+    macd   = f.get("macd", 0.0)
+    macd_s = f.get("macd_signal", 0.0)
+    adx    = f.get("adx", 0.0)
+    bb_pos = f.get("bb_pos", 0.0)   # 0=нижняя граница, 1=верхняя
+    stoch  = f.get("stoch", 0.0)
+
+    # RSI zone
+    if rsi >= 70:
+        rsi_zone = "🔴 Перекупленность"
+    elif rsi <= 30:
+        rsi_zone = "🟢 Перепроданность"
+    else:
+        rsi_zone = "⚪ Нейтральная зона"
+
+    # MACD signal
+    macd_hint = "🟢 Бычье пересечение" if macd > macd_s else "🔴 Медвежье пересечение"
+
+    # Bollinger Band position
+    bb_pct = round(bb_pos * 100)
+    if bb_pos >= 0.8:
+        bb_hint = "🔴 У верхней границы"
+    elif bb_pos <= 0.2:
+        bb_hint = "🟢 У нижней границы"
+    else:
+        bb_hint = "⚪ Середина канала"
+
+    # ADX trend strength
+    if adx >= 25:
+        adx_hint = f"💪 Сильный тренд ({adx:.1f})"
+    elif adx >= 17:
+        adx_hint = f"〰️ Слабый тренд ({adx:.1f})"
+    else:
+        adx_hint = f"😴 Боковик ({adx:.1f})"
 
     return (
-        f"📊 <b>{coin}/USDT — Анализ индикаторов</b>  ·  {now}\n"
+        f"📊 <b>{coin}/USDT — Осциллятор</b>  ·  {now}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"💵 Цена: <b>{_p(price)}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"📈 <b>Сводка ({total_ind} индикаторов)</b>\n"
-        f"  🟢 Покупать: <b>{tv_buy}</b>  ⚪ Нейтр: <b>{tv_neutral}</b>  🔴 Продавать: <b>{tv_sell}</b>\n"
+        f"<b>Индикаторы ({total_ind} шт):</b>\n"
+        f"  🟢 Покупка: <b>{tv_buy}</b>  ⚪ Нейтр: <b>{tv_neutral}</b>  🔴 Продажа: <b>{tv_sell}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"<b>Сигналы:</b>\n{sigs_text}\n"
+        f"<b>Осцилляторы:</b>\n"
+        f"  RSI: <b>{rsi:.1f}</b>  — {rsi_zone}\n"
+        f"  MACD: <b>{macd:.4f}</b>  — {macd_hint}\n"
+        f"  Stoch RSI: <b>{stoch:.1f}</b>\n"
+        f"  ADX: {adx_hint}\n"
+        f"  Bollinger: <b>{bb_pct}%</b>  — {bb_hint}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"🔒 <b>Направление, вход, SL и TP</b> — по подписке\n"
-        f"👇 Нажми кнопку ниже чтобы открыть полный сигнал"
+        f"🔒 <b>Точный сигнал LONG/SHORT + вход + SL/TP</b>\n"
+        f"👇 Доступны по подписке"
     )

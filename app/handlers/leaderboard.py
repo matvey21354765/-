@@ -1,6 +1,7 @@
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton as Btn
 import logging
+import asyncio
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -34,9 +35,9 @@ async def cb_lb_period(call: CallbackQuery):
 async def _show(call: CallbackQuery, days: int):
     await call.answer()
     try:
-        from app.services.leaderboard import get_stats, format_leaderboard
-        stats = await get_stats(days)
-        text = format_leaderboard(stats)
+        from app.services.leaderboard import get_stats, format_leaderboard, get_recent_signals
+        stats, recent = await asyncio.gather(get_stats(days), get_recent_signals(8))
+        text = format_leaderboard(stats, recent)
     except Exception as e:
         logger.error(f"Leaderboard error: {e}")
         text = "❌ Ошибка загрузки статистики"

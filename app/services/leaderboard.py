@@ -121,7 +121,25 @@ async def get_stats(days: int = 7) -> dict:
         return {"days": days, "total": 0, "wins": 0, "acc": 0, "coins": {}}
 
 
-def format_leaderboard(stats: dict) -> str:
+async def get_recent_signals(limit: int = 10) -> list:
+    """Return last N resolved forecasts with entry/exit prices."""
+    try:
+        from app.models.database import AsyncSessionLocal, ForecastLog
+        from sqlalchemy import desc
+        async with AsyncSessionLocal() as db:
+            res = await db.execute(
+                select(ForecastLog)
+                .where(ForecastLog.correct.isnot(None))
+                .order_by(desc(ForecastLog.resolved_at))
+                .limit(limit)
+            )
+            return res.scalars().all()
+    except Exception as e:
+        logger.warning(f"get_recent_signals error: {e}")
+        return []
+
+
+def format_leaderboard(stats: dict, recent: list = None) -> str:
     days = stats["days"]
     total = stats["total"]
     wins  = stats["wins"]
@@ -140,18 +158,30 @@ def format_leaderboard(stats: dict) -> str:
     )
     for i, (coin, d) in enumerate(sorted_coins):
         m = medal[i] if i < 3 else "  "
-        coin_lines.append(f"{m} <b>{coin}</b>: <b>{d['acc']}%</b>  <i>({d['wins']}/{d['total']})</i>")
+        coin_lines.append(f"{m} <b>{coin}</b>: <b>{d['acc']}%</b>  ({d['wins']}/{d['total']})")
 
     coins_text = "\n".join(coin_lines) if coin_lines else "  Нет данных"
 
+    recent_lines = []
+    if recent:
+        for r in recent[:8]:
+            icon = "✅" if r.correct else "❌"
+            arrow = "↑" if r.direction == "UP" else "↓"
+            entry = f"${r.price_entry:,.1f}" if r.price_entry >= 1000 else f"${r.price_entry:.4f}"
+            exit_ = f"${r.price_exit:,.1f}" if r.price_exit and r.price_exit >= 1000 else (f"${r.price_exit:.4f}" if r.price_exit else "—")
+            recent_lines.append(f"{icon} <b>{r.coin}</b> {arrow}  {entry} → {exit_}")
+    recent_text = "\n".join(recent_lines) if recent_lines else "  Ещё нет данных"
+
     return (
-        f"🏆 <b>Лидерборд точности</b>\n"
+        f"🏆 <b>Точность прогнозов 3–5м</b>\n"
         f"📅 За последние {days} дней\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 Общая точность: <b>{acc}%</b>  <code>{bar}</code>\n"
-        f"✅ Верных: <b>{wins}</b> из <b>{total}</b> прогнозов\n"
+        f"📊 Точность: <b>{acc}%</b>  <code>{bar}</code>\n"
+        f"✅ Верных: <b>{wins}</b> из <b>{total}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"<b>По монетам:</b>\n{coins_text}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"<b>Последние сигналы:</b>\n{recent_text}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"<i>Результат считается через 5 минут после прогноза</i>"
     )
