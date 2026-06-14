@@ -1974,7 +1974,7 @@ async def _ensure_photo(item: dict) -> None:
                     "api_key": SCRAPER_API_KEY,
                     "url": url,
                     "country_code": "ru",
-                }, timeout=12)
+                }, timeout=22)
                 if r.status_code != 200:
                     return photo, desc, price_int
                 text = r.text
@@ -2138,12 +2138,12 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                 pass
         await bot.send_message(chat_id, caption, reply_markup=kb)
 
-    # Предзагружаем фото/цену/описание (до 6 одновременно)
-    sem = asyncio.Semaphore(6)
+    # Предзагружаем фото/цену/описание (до 4 одновременно, 25 сек на каждое)
+    sem = asyncio.Semaphore(4)
     async def _prefetch(it):
         async with sem:
             try:
-                await asyncio.wait_for(_ensure_photo(it), timeout=12)
+                await asyncio.wait_for(_ensure_photo(it), timeout=25)
             except Exception:
                 pass
     await asyncio.gather(*[_prefetch(it) for it in batch])
@@ -2248,6 +2248,17 @@ async def do_search_for_user(uid: int, reply_to):
             reply_markup=MAIN_KEYBOARD,
         )
         return
+
+    # Предзагружаем фото+описание для первых 10 объявлений заранее
+    first_batch = suitable[:10]
+    sem_pre = asyncio.Semaphore(4)
+    async def _pre(it):
+        async with sem_pre:
+            try:
+                await asyncio.wait_for(_ensure_photo(it), timeout=25)
+            except Exception:
+                pass
+    await asyncio.gather(*[_pre(it) for it in first_batch])
 
     _search_cache[uid] = suitable
     _save_cache(uid, suitable)
