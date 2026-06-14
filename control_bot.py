@@ -212,10 +212,10 @@ def is_dealer(item: dict) -> bool:
     ).lower()
     if any(k in text for k in DEALER_KEYWORDS):
         return True
-    # Машины 2023+ без цены — практически всегда дилер
+    # Машины текущего года без цены — дилер
     title_raw = item.get("title", "")
     year_m = re.search(r'\b(20\d{2})\b', title_raw)
-    if year_m and int(year_m.group(1)) >= 2023:
+    if year_m and int(year_m.group(1)) >= datetime.date.today().year:
         price_int = item.get("_price_int") or parse_price(item.get("price", "")) or 0
         if price_int == 0:
             return True
@@ -1961,53 +1961,69 @@ async def enrich_and_filter(items: list[dict], max_check: int = 25) -> list[dict
 
 
 async def _ensure_photo(item: dict) -> None:
-    """Для объявлений без фото — загружает страницу и вытаскивает первое CDN-фото."""
-    if item.get("_photo_url"):
+    """Для объявлений без фото/описания — загружает страницу и вытаскивает данные."""
+    need_photo = not item.get("_photo_url")
+    need_desc = not item.get("description")
+    if not need_photo and not need_desc:
         return
     source = item.get("source", "")
     url = item.get("url", "")
-    if not url or not SCRAPER_API_KEY:
+    if not url:
         return
 
     loop = asyncio.get_event_loop()
 
-    def _fetch() -> str:
+    def _fetch() -> tuple[str, str]:
+        photo, desc = "", ""
         try:
             import requests as _req
-            if source == "avito":
+            if source == "avito" and SCRAPER_API_KEY:
                 r = _req.get("http://api.scraperapi.com", params={
                     "api_key": SCRAPER_API_KEY,
                     "url": url,
                     "country_code": "ru",
-                }, timeout=6)
+                }, timeout=12)
                 if r.status_code != 200:
-                    return ""
+                    return photo, desc
                 text = r.text
-                for pat in [
-                    r'"(?:864x648|1280x960|640x480)"\s*:\s*"((?:https?:)?//[^"]+\.avito\.st/[^"]+\.(?:jpg|jpeg|webp))"',
-                    r'"((?:https?:)?//[0-9]+\.img\.avito\.st/[^"]+\.(?:jpg|jpeg|webp))"',
-                ]:
-                    m = re.search(pat, text)
-                    if m:
-                        raw = m.group(1).replace("\\/", "/")
-                        return ("https:" + raw) if raw.startswith("//") else raw
+                if need_photo:
+                    for pat in [
+                        r'"(?:864x648|1280x960|640x480)"\s*:\s*"((?:https?:)?//[^"]+\.avito\.st/[^"]+\.(?:jpg|jpeg|webp))"',
+                        r'"((?:https?:)?//[0-9]+\.img\.avito\.st/[^"]+\.(?:jpg|jpeg|webp))"',
+                    ]:
+                        m = re.search(pat, text)
+                        if m:
+                            raw = m.group(1).replace("\\/", "/")
+                            photo = ("https:" + raw) if raw.startswith("//") else raw
+                            break
+                if need_desc:
+                    dm = re.search(r'"description"\s*:\s*"([^"]{20,})"', text)
+                    if dm:
+                        desc = dm.group(1).replace("\\n", " ").replace('\\"', '"')[:400]
             elif source in ("drom", "autoru"):
-                r = _req.get(url, timeout=6, headers={
+                r = _req.get(url, timeout=10, headers={
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                     "Accept-Language": "ru-RU,ru;q=0.9",
                 })
                 if r.status_code != 200:
-                    return ""
-                m = re.search(r'"(?:1200x900|832x624|1000x750)"\s*:\s*"([^"]+)"', r.text)
-                if m:
-                    return m.group(1).replace("\\/", "/")
+                    return photo, desc
+                if need_photo:
+                    m = re.search(r'"(?:1200x900|832x624|1000x750)"\s*:\s*"([^"]+)"', r.text)
+                    if m:
+                        photo = m.group(1).replace("\\/", "/")
+                if need_desc:
+                    dm = re.search(r'"description"\s*:\s*"([^"]{20,})"', r.text)
+                    if dm:
+                        desc = dm.group(1).replace("\\n", " ")[:400]
         except Exception:
             pass
-        return ""
+        return photo, desc
 
-    photo = await loop.run_in_executor(None, _fetch)
+    photo, desc = await loop.run_in_executor(None, _fetch)
     if photo:
         item["_photo_url"] = photo
+    if desc and not item.get("description"):
+        item["description"] = desc
 
 
 SOURCE_TAGS = {
