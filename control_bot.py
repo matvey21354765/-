@@ -204,22 +204,14 @@ def is_dealer(item: dict) -> bool:
     ).lower()
     if any(k in text for k in DEALER_KEYWORDS):
         return True
-    # Новые машины (год >= текущий) при бюджете < 500к — явно дилер
-    title = item.get("title", "")
-    current_year = datetime.date.today().year
-    year_m = re.search(r'\b(20\d{2})\b', title)
-    if year_m and int(year_m.group(1)) >= current_year:
-        price_int = item.get("_price_int") or parse_price(item.get("price", "")) or 0
-        if price_int == 0 or price_int > 500_000:
-            return True
     return False
 
 
 def in_price_range(item: dict, price_min: int, price_max: int) -> bool:
     p = item.get("_price_int") or parse_price(item.get("price", ""))
     if not p:
-        # Цена неизвестна: если задан лимит — скрываем (лучше пропустить, чем показать дорогое)
-        return price_max >= 99_000_000
+        # Цена неизвестна: показываем только если пользователь не ограничивал бюджет
+        return price_max >= 5_000_000
     return price_min <= p <= price_max
 
 
@@ -1003,11 +995,13 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
                     photo_url = src
 
             if title:
+                price_int = parse_price(price)
                 item = {
                     "source": "avito", "title": title, "price": price,
                     "url": item_url, "date": str(today),
                     "_photos": 0, "_days_on_site": 0,
                     "description": "", "seller": "", "_photo_url": photo_url,
+                    "_price_int": price_int,
                 }
                 item["_hot_score"] = hot_score(item)
                 results.append(item)
@@ -1094,22 +1088,15 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
     results = []
 
     for p in range(1, pages + 1):
-        # Строим URL: страница 1 без ?p=, только ценовые фильтры
-        if p == 1:
-            url = f"https://www.avito.ru/{slug}/avtomobili"
-            qs_parts = []
-            if price_min > 0:
-                qs_parts.append(f"pmin={price_min}")
-            if price_max < 99_000_000:
-                qs_parts.append(f"pmax={price_max}")
-            if qs_parts:
-                url += "?" + "&".join(qs_parts)
-        else:
-            url = f"https://www.avito.ru/{slug}/avtomobili?p={p}"
-            if price_min > 0:
-                url += f"&pmin={price_min}"
-            if price_max < 99_000_000:
-                url += f"&pmax={price_max}"
+        # Строим URL: частники только (owner[]=1), ценовые фильтры
+        qs_parts = ["owner%5B%5D=1"]  # только частные продавцы
+        if p > 1:
+            qs_parts.append(f"p={p}")
+        if price_min > 0:
+            qs_parts.append(f"pmin={price_min}")
+        if price_max < 99_000_000:
+            qs_parts.append(f"pmax={price_max}")
+        url = f"https://www.avito.ru/{slug}/avtomobili?" + "&".join(qs_parts)
 
         try:
             r = _req.get("http://api.scraperapi.com", params={
@@ -1127,119 +1114,50 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
             has_items = 'data-marker="item"' in text
             print(f"  [Авито] стр.{p}: {size:,}б, items={has_items}, url={url[:60]}")
 
-            # Если ответ маленький (< 800KB) — цены сломали URL, пробуем без них
-            if size < 800_000 and not has_items and p == 1 and (price_min > 0 or price_max < 99_000_000):
-                print(f"  [Авито] малый ответ с ценами, пробую без фильтров...")
+            # Если ответ маленький (< 800KB) — фильтры сломали URL, пробуем без цен
+            if size < 800_000 and not has_items and (price_min > 0 or price_max < 99_000_000):
+                print(f"  [Авито] малый ответ с ценами, пробую только частники без цен...")
                 r2 = _req.get("http://api.scraperapi.com", params={
                     "api_key": SCRAPER_API_KEY,
-                    "url": f"https://www.avito.ru/{slug}/avtomobili",
+                    "url": f"https://www.avito.ru/{slug}/avtomobili?owner%5B%5D=1",
                     "country_code": "ru",
                 }, timeout=40)
                 if r2.status_code == 200 and len(r2.text) > 800_000:
                     text = r2.text
                     has_items = 'data-marker="item"' in text
-                    print(f"  [Авито] fallback без фильтров: {len(text):,}б, items={has_items}")
+                    print(f"  [Авито] fallback частники без цен: {len(text):,}б, items={has_items}")
 
             if not has_items:
                 print(f"  [Авито] стр.{p}: нет карточек, стоп")
                 break
 
-            # data-marker="item" есть в JS-коде внутри <script>, не как HTML-атрибут
-            # Извлекаем данные из JSON в скрипт-тегах
-            soup = _BS(text, "lxml")
-            batch_from_json: list[dict] = []
+            # Парсим HTML страницы через универсальную функцию
+            batch = _parse_avito_html(text, slug, today)
+            print(f"  [Авито] стр.{p}: распаршено {len(batch)} объявлений")
 
-            for sc in soup.find_all("script"):
-                sc_text = sc.string or ""
-                if not sc_text or len(sc_text) < 200:
-                    continue
-                # Ищем JSON с массивом items/catalog
-                for marker in ('"items":[', '"catalog":[', '"listing":[', '"offers":['):
-                    if marker not in sc_text:
-                        continue
-                    # Попробуем найти массив items и распарсить
-                    idx = sc_text.find(marker) + len(marker) - 1
-                    try:
-                        # Берём кусок начиная с [ и пробуем json.loads
-                        chunk = sc_text[idx:]
-                        # Ищем конец массива — ищем ] с учётом вложенности
-                        depth = 0
-                        end = 0
-                        for i, ch in enumerate(chunk):
-                            if ch == '[': depth += 1
-                            elif ch == ']':
-                                depth -= 1
-                                if depth == 0:
-                                    end = i + 1
-                                    break
-                        arr = json.loads(chunk[:end])
-                        if isinstance(arr, list) and arr:
-                            items_raw = _avito_find_items_in_json({"items": arr})
-                            for it in (items_raw or arr[:50]):
-                                item = _avito_item_from_json(it, today)
-                                if item:
-                                    batch_from_json.append(item)
-                    except Exception:
-                        pass
-                if batch_from_json:
-                    break
+            # Если цены не найдены через JSON — пробуем regex по сырому тексту
+            has_prices = any(it.get("_price_int", 0) > 0 for it in batch)
+            if batch and not has_prices:
+                # Строим карту urlPath → цена из regex по тексту
+                price_map: dict[str, int] = {}
+                for m in re.finditer(
+                    r'"urlPath"\s*:\s*"(/[^"]+)"[^}]{0,600}?"value"\s*:\s*(\d{4,8})',
+                    text, re.DOTALL
+                ):
+                    url_p, val = m.group(1), int(m.group(2))
+                    if 10_000 < val < 99_000_000:
+                        price_map[url_p] = val
+                print(f"  [Авито] regex цены: {len(price_map)} найдено")
+                for it in batch:
+                    if it.get("_price_int", 0) == 0:
+                        path = it["url"].replace("https://www.avito.ru", "")
+                        if path in price_map:
+                            v = price_map[path]
+                            it["_price_int"] = v
+                            it["price"] = f"{v:,} ₽".replace(",", " ")
 
-            if batch_from_json:
-                print(f"  [Авито] стр.{p}: {len(batch_from_json)} из JSON скрипта")
-                results.extend(batch_from_json)
-            else:
-                # Последний шанс: регулярки для поиска URL + цены прямо в тексте
-                # URL объявлений Авито: /city/...-XXXXXXXXX (7+ цифр в конце)
-                url_matches = re.findall(r'"urlPath"\s*:\s*"(/[^"]+)"', text)
-                title_prices = re.findall(
-                    r'"title"\s*:\s*"([^"]{5,80})"[^}]{0,200}"value"\s*:\s*(\d+)', text
-                )
-                print(f"  [Авито] regex: {len(url_matches)} URL, {len(title_prices)} title+price")
-
-                # Ищем блоки данных объявлений: urlPath + title + value рядом
-                item_blocks = re.findall(
-                    r'"urlPath"\s*:\s*"(/[^"]+)"[^}]{0,500}?"title"\s*:\s*"([^"]{5,80})"[^}]{0,300}?"value"\s*:\s*(\d+)',
-                    text
-                )
-                # Fallback: только urlPath и title
-                if not item_blocks:
-                    simple = re.findall(
-                        r'"urlPath"\s*:\s*"(/[^"]+)"[^}]{0,300}?"title"\s*:\s*"([^"]{5,80})"',
-                        text
-                    )
-                    item_blocks = [(u, t, "0") for u, t in simple]
-
-                print(f"  [Авито] regex блоков: {len(item_blocks)}")
-                seen_urls: set = set()
-                for url_path, title, price_val in item_blocks[:80]:
-                    if not url_path.startswith(f"/{slug}/"):
-                        continue
-                    item_url = "https://www.avito.ru" + url_path
-                    if item_url in seen_urls:
-                        continue
-                    seen_urls.add(item_url)
-                    price = f"{int(price_val):,} ₽".replace(",", " ") if price_val != "0" else ""
-                    # Фильтр по цене
-                    if price_val != "0":
-                        p_int = int(price_val)
-                        if price_max < 99_000_000 and p_int > price_max:
-                            continue
-                        if price_min > 0 and p_int < price_min:
-                            continue
-                    # Пропускаем дилеров по ключевым словам в заголовке
-                    if any(kw in title.lower() for kw in ("автосалон", "дилер", "официальный", "трейд", "выкуп")):
-                        continue
-                    item = {
-                        "source": "avito", "title": title, "price": price,
-                        "url": item_url, "date": str(today),
-                        "_photos": 0, "_days_on_site": 0,
-                        "description": "", "seller": "", "_photo_url": "",
-                    }
-                    item["_hot_score"] = hot_score(item)
-                    results.append(item)
-                print(f"  [Авито] regex fallback итого: {len(results)}")
-                if results:
-                    break  # только первая страница для regex
+            if batch:
+                results.extend(batch)
 
             time.sleep(random.uniform(1.5, 2.5))
         except Exception as e:
