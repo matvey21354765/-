@@ -745,6 +745,7 @@ def scrape_bibika(region: str, pages: int = 3, price_min: int = 0, price_max: in
 
 # ── Парсер Авито ────────────────────────────────────────────────
 
+# Слаги для Авито — городской слаг для URL
 AVITO_SLUGS = {
     "ekaterinburg": "ekaterinburg",
     "moscow":       "moskva",
@@ -761,6 +762,25 @@ AVITO_SLUGS = {
     "voronezh":     "voronezh",
     "samara":       "samara",
     "rostov":       "rostov-na-donu",
+}
+
+# ID локаций для Авито API
+AVITO_LOCATION_IDS = {
+    "ekaterinburg": 621940,
+    "moscow":       637640,
+    "spb":          638582,
+    "novosibirsk":  661122,
+    "kazan":        621133,
+    "chelyabinsk":  1282,
+    "ufa":          1281,
+    "krasnodar":    13579,
+    "omsk":         665066,
+    "tyumen":       641900,
+    "perm":         656049,
+    "krasnoyarsk":  641901,
+    "voronezh":     621890,
+    "samara":       621540,
+    "rostov":       621900,
 }
 
 
@@ -967,6 +987,104 @@ def _parse_avito_items(soup, today, slug: str) -> list[dict]:
     return results
 
 
+def _scrape_avito_api(location_id: int, pages: int, price_min: int, price_max: int, today) -> list[dict]:
+    """Запрашивает Авито через мобильный JSON API — возвращает чистый JSON без JS."""
+    try:
+        import requests as _req
+    except ImportError:
+        return []
+
+    # Публичный ключ Авито мобильного API
+    API_KEY = "af0deccbgcgidddjgnvljitntccdduijhdinfgjgfjir"
+    # categoryId=9 — Автомобили; owner[]=private — частники
+    results = []
+    session = _req.Session()
+    session.headers.update({
+        "User-Agent": "Avito/10.0 (Android 11; Mobile)",
+        "Accept": "application/json",
+        "x-auth-token": API_KEY,
+    })
+
+    for p in range(1, pages + 1):
+        params: dict = {
+            "key": API_KEY,
+            "locationId": location_id,
+            "categoryId": 9,
+            "page": p,
+            "per_page": 25,
+            "sort": "date",
+            "withImagesOnly": 0,
+            "display": "list",
+        }
+        if price_min > 0:
+            params["pmin"] = price_min
+        if price_max < 99_000_000:
+            params["pmax"] = price_max
+        # Частники
+        params["owner[]"] = "private"
+
+        try:
+            r = session.get("https://m.avito.ru/api/9/items", params=params, timeout=20)
+            if r.status_code != 200:
+                print(f"  [Авито API] HTTP {r.status_code}")
+                break
+            data = r.json()
+            raw_items = data.get("result", {}).get("items", [])
+            if not raw_items:
+                print(f"  [Авито API] стр.{p}: пусто, ключи={list(data.keys())}")
+                break
+
+            for it in raw_items:
+                try:
+                    # Авито API вложенность: item -> content
+                    content = it.get("data") or it.get("content") or it
+                    title = content.get("title", "")
+                    url_path = content.get("url", "")
+                    item_url = ("https://www.avito.ru" + url_path) if url_path.startswith("/") else url_path
+                    if not title or not item_url or "avito.ru" not in item_url:
+                        continue
+
+                    price_obj = content.get("price") or {}
+                    if isinstance(price_obj, dict):
+                        price_val = price_obj.get("value", 0) or 0
+                        price = f"{int(price_val):,} ₽".replace(",", " ") if price_val else ""
+                    else:
+                        price = str(price_obj) if price_obj else ""
+
+                    images = content.get("images") or []
+                    photo_url = ""
+                    if images and isinstance(images, list):
+                        img = images[0]
+                        if isinstance(img, dict):
+                            photo_url = (img.get("864x648") or img.get("640x480") or
+                                         img.get("320x240") or img.get("url") or
+                                         next(iter(img.values()), ""))
+                        elif isinstance(img, str):
+                            photo_url = img
+                    if photo_url and photo_url.startswith("//"):
+                        photo_url = "https:" + photo_url
+
+                    item = {
+                        "source": "avito", "title": title, "price": price,
+                        "url": item_url, "date": str(today),
+                        "_photos": len(images), "_days_on_site": 0,
+                        "description": content.get("description", "")[:300],
+                        "seller": "", "_photo_url": photo_url,
+                    }
+                    item["_hot_score"] = hot_score(item)
+                    results.append(item)
+                except Exception:
+                    pass
+
+            time.sleep(random.uniform(0.5, 1))
+        except Exception as e:
+            print(f"  [Авито API] стр.{p}: {e}")
+            break
+
+    print(f"  [Авито API] {len(results)} объявлений")
+    return results
+
+
 def _scrape_avito_mobile(slug: str, pages: int, price_min: int, price_max: int, today) -> list[dict]:
     """Парсит мобильную версию Авито (m.avito.ru) — проще, меньше защиты от ботов."""
     try:
@@ -1063,6 +1181,22 @@ def _scrape_avito_mobile(slug: str, pages: int, price_min: int, price_max: int, 
 
 def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int = 99_000_000) -> list[dict]:
     slug = AVITO_SLUGS.get(region, region)
+    location_id = AVITO_LOCATION_IDS.get(region, 0)
+    today = datetime.date.today()
+
+    # 1. Мобильный JSON API — самый надёжный вариант
+    if location_id:
+        api_results = _scrape_avito_api(location_id, pages, price_min, price_max, today)
+        if api_results:
+            return api_results
+
+    # 2. Мобильный сайт (m.avito.ru) — проще парсится
+    mobile_results = _scrape_avito_mobile(slug, min(pages, 3), price_min, price_max, today)
+    if mobile_results:
+        print(f"  [Авито mobile] {len(mobile_results)} объявлений")
+        return mobile_results
+
+    # 3. ScraperAPI + десктоп (последний вариант)
     try:
         import requests as _req
         from bs4 import BeautifulSoup as _BS
@@ -1070,21 +1204,11 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
         session.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "Accept-Language": "ru-RU,ru;q=0.9",
-            "Accept": "text/html,application/xhtml+xml,*/*",
         })
     except ImportError:
         return []
 
     results = []
-    today = datetime.date.today()
-
-    # Сначала пробуем мобильную версию (проще парсится, меньше защиты)
-    mobile_results = _scrape_avito_mobile(slug, min(pages, 3), price_min, price_max, today)
-    if mobile_results:
-        print(f"  [Авито mobile] {len(mobile_results)} объявлений")
-        return mobile_results
-
-    # Фолбек: ScraperAPI + десктоп
     for p in range(1, pages + 1):
         params: dict = {"p": p}
         if price_min > 0:
@@ -1109,7 +1233,6 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
             soup = _BS(text, "lxml")
             batch = _parse_avito_items(soup, today, slug)
             if not batch:
-                print(f"  [Авито {region}] стр.{p}: объявления не извлечены")
                 if p == 1:
                     break
             else:
@@ -1119,7 +1242,7 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
             print(f"  [Авито {region}] стр.{p}: {e}")
             break
 
-    print(f"  [Авито] итого {len(results)} объявлений")
+    print(f"  [Авито ScraperAPI] итого {len(results)} объявлений")
     return results
 
 
