@@ -202,9 +202,10 @@ def is_dealer(item: dict) -> bool:
 
 
 def in_price_range(item: dict, price_min: int, price_max: int) -> bool:
-    p = parse_price(item.get("price", ""))
-    if p is None:
-        return True
+    # Используем _price_int если уже извлечён (Авито)
+    p = item.get("_price_int") or parse_price(item.get("price", ""))
+    if not p:
+        return True  # цена неизвестна — пропускаем
     return price_min <= p <= price_max
 
 
@@ -815,8 +816,30 @@ def _avito_extract_links(text: str, slug: str) -> list[str]:
     return result
 
 
+def _avito_price_from_item(it: dict) -> tuple[str, int]:
+    """Извлекает цену из объекта Авито. Возвращает (строка, число)."""
+    # Пробуем все возможные пути к цене
+    for key in ("priceDetailed", "price", "priceInfo"):
+        info = it.get(key)
+        if not info:
+            continue
+        if isinstance(info, (int, float)) and info > 0:
+            return f"{int(info):,} ₽".replace(",", " "), int(info)
+        if isinstance(info, dict):
+            for val_key in ("value", "number", "amount", "price"):
+                v = info.get(val_key)
+                if v and isinstance(v, (int, float)) and v > 0:
+                    return f"{int(v):,} ₽".replace(",", " "), int(v)
+            # Попробуем text поле
+            text = info.get("valueText") or info.get("text") or ""
+            digits = re.sub(r"[^\d]", "", str(text))
+            if digits and len(digits) >= 4:
+                return text, int(digits)
+    return "", 0
+
+
 def _avito_item_from_json(it: dict, today) -> dict | None:
-    """Преобразует один объект из JSON Авито в dict объявления."""
+    """Преобразует объект Авито JSON в dict объявления. Возвращает None для дилеров."""
     try:
         title = it.get("title", "")
         url_path = it.get("urlPath") or it.get("url", "")
@@ -826,12 +849,23 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
         if not title or "avito.ru" not in item_url:
             return None
 
-        price_info = it.get("priceDetailed") or it.get("price") or {}
-        if isinstance(price_info, dict):
-            price_val = price_info.get("value") or price_info.get("number") or 0
-            price = f"{int(price_val):,} ₽".replace(",", " ") if price_val else ""
-        else:
-            price = str(price_info) if price_info else ""
+        # Фильтр дилеров по типу продавца в JSON
+        seller_obj = it.get("seller") or it.get("user") or {}
+        if isinstance(seller_obj, dict):
+            seller_type = (
+                seller_obj.get("type") or
+                seller_obj.get("accountType") or
+                seller_obj.get("sellerType") or ""
+            ).lower()
+            # company, shop, dealer, pro, business — дилеры
+            if any(t in seller_type for t in ("company", "shop", "dealer", "pro", "business", "commercial")):
+                return None
+        # Доп. проверка по названию продавца
+        seller_name = ""
+        if isinstance(seller_obj, dict):
+            seller_name = seller_obj.get("name") or seller_obj.get("title") or ""
+
+        price_str, price_int = _avito_price_from_item(it)
 
         images = it.get("images") or it.get("gallery", {}).get("images", []) or []
         photo_url = ""
@@ -848,10 +882,11 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
 
         item = {
             "source": "avito", "title": title,
-            "price": price, "url": item_url, "date": str(today),
+            "price": price_str, "url": item_url, "date": str(today),
             "_photos": len(images), "_days_on_site": 0,
             "description": (it.get("description") or "")[:300],
-            "seller": "", "_photo_url": photo_url,
+            "seller": seller_name, "_photo_url": photo_url,
+            "_price_int": price_int,  # для точной фильтрации по цене
         }
         item["_hot_score"] = hot_score(item)
         return item
@@ -1170,13 +1205,16 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
                         continue
                     seen_urls.add(item_url)
                     price = f"{int(price_val):,} ₽".replace(",", " ") if price_val != "0" else ""
-                    # Пропускаем если цена задана и выходит за диапазон
+                    # Фильтр по цене
                     if price_val != "0":
                         p_int = int(price_val)
                         if price_max < 99_000_000 and p_int > price_max:
                             continue
                         if price_min > 0 and p_int < price_min:
                             continue
+                    # Пропускаем дилеров по ключевым словам в заголовке
+                    if any(kw in title.lower() for kw in ("автосалон", "дилер", "официальный", "трейд", "выкуп")):
+                        continue
                     item = {
                         "source": "avito", "title": title, "price": price,
                         "url": item_url, "date": str(today),
