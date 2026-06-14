@@ -139,6 +139,11 @@ MONTHS = {
 USERS_DIR = Path("users")
 USERS_DIR.mkdir(exist_ok=True)
 
+# Мониторинг новых объявлений
+MONITOR_INTERVAL = 15 * 60   # проверять каждые 15 минут
+MONITOR_MIN_SAVINGS_PCT = 10  # показывать только если скидка от рынка ≥ 10%
+_monitor_tasks: dict[int, asyncio.Task] = {}   # uid → Task
+
 
 def user_dir(uid: int) -> Path:
     d = USERS_DIR / str(uid)
@@ -2077,6 +2082,8 @@ async def cmd_help(msg: Message):
         "Команды:\n"
         "/start — начало работы\n"
         "/search — найти авто по твоим настройкам\n"
+        "/monitor — авто-мониторинг новых авто ниже рынка (вкл/выкл)\n"
+        "/favorites — сохранённые объявления\n"
         "/settings — изменить регион и бюджет\n"
         "/help — помощь\n\n"
         "🔥 — объявления с признаками срочной продажи (торг, срочно, уступлю)\n"
@@ -2085,9 +2092,182 @@ async def cmd_help(msg: Message):
     )
 
 
+async def _monitor_loop(uid: int):
+    """Фоновая задача: каждые 15 минут проверяет новые объявления ниже рынка."""
+    print(f"  [монитор] uid={uid} запущен")
+    while True:
+        try:
+            await asyncio.sleep(MONITOR_INTERVAL)
+            s = load_settings(uid)
+            if not s.get("monitor_enabled"):
+                print(f"  [монитор] uid={uid} отключён, выходим")
+                break
+
+            region = s.get("region")
+            if not region:
+                continue
+            pmin = s.get("price_min", 0)
+            pmax = s.get("price_max", 99_000_000)
+
+            loop = asyncio.get_event_loop()
+            # Только Avito — самый быстрый источник новых объявлений
+            raw = await loop.run_in_executor(
+                None, lambda: scrape_avito(region, pages=2, price_min=pmin, price_max=pmax)
+            )
+
+            seen = load_seen(uid)
+            skipped = load_skipped(uid)
+            new_items = [
+                it for it in raw
+                if it.get("url")
+                and it["url"] not in seen
+                and it["url"] not in skipped
+                and not is_dealer(it)
+                and in_price_range(it, pmin, pmax)
+            ]
+            if not new_items:
+                continue
+
+            # Считаем рыночную цену по пулу + сохранённому кешу
+            cached = _search_cache.get(uid) or _load_cache(uid)
+            pool = cached + new_items
+            pool = rank_by_market_price(pool)
+
+            # Берём только новые элементы с реальной экономией
+            new_below = [
+                it for it in pool
+                if it.get("url") in {x["url"] for x in new_items}
+                and it.get("_below_market")
+                and (it.get("_savings_pct", 0) >= MONITOR_MIN_SAVINGS_PCT)
+            ]
+            # Сортируем по размеру скидки
+            new_below.sort(key=lambda x: -x.get("_savings_pct", 0))
+
+            if not new_below:
+                continue
+
+            region_name = REGIONS.get(region, region)
+            await bot.send_message(
+                uid,
+                f"🔔 *Новые выгодные авто в {region_name}* — {len(new_below)} шт.!\n"
+                f"Цены ниже рынка на {MONITOR_MIN_SAVINGS_PCT}%+",
+                parse_mode="Markdown",
+            )
+            for it in new_below[:5]:
+                url = it.get("url", "")
+                sid = url_to_id(url)
+                pct = it.get("_savings_pct", 0)
+                market = it.get("_market_price", 0)
+                price_line = it.get("price", "—") or "—"
+                if market:
+                    price_line += f"  🔻 рынок ~{market:,} ₽ (-{pct}%)".replace(",", " ")
+                caption = (
+                    f"🟢 {it.get('title', '')}\n"
+                    f"💰 {price_line}\n"
+                    f"📅 только что"
+                )
+                if it.get("description"):
+                    caption += f"\n\n📝 {it['description'][:300]}"
+                kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [
+                        InlineKeyboardButton(text="🔗 Открыть", url=url),
+                        InlineKeyboardButton(text="⭐ Сохранить", callback_data=f"fav|{sid}|{uid}"),
+                    ],
+                    [
+                        InlineKeyboardButton(text="❌ Скрыть", callback_data=f"hide|{sid}|{uid}"),
+                    ],
+                ])
+                photo_url = it.get("_photo_url", "")
+                if photo_url:
+                    try:
+                        await bot.send_photo(uid, photo=photo_url, caption=caption, reply_markup=kb)
+                        continue
+                    except Exception:
+                        pass
+                await bot.send_message(uid, caption, reply_markup=kb)
+
+            # Обновляем seen
+            seen.update(it["url"] for it in new_below)
+            save_seen(uid, seen)
+
+        except asyncio.CancelledError:
+            print(f"  [монитор] uid={uid} остановлен")
+            break
+        except Exception as e:
+            print(f"  [монитор] uid={uid} ошибка: {e}")
+            await asyncio.sleep(60)
+
+
+def _start_monitor(uid: int):
+    if uid in _monitor_tasks and not _monitor_tasks[uid].done():
+        return  # уже запущен
+    task = asyncio.get_event_loop().create_task(_monitor_loop(uid))
+    _monitor_tasks[uid] = task
+
+
+def _stop_monitor(uid: int):
+    task = _monitor_tasks.pop(uid, None)
+    if task and not task.done():
+        task.cancel()
+
+
+@dp.message(Command("monitor"))
+async def cmd_monitor(msg: Message):
+    """Включить/выключить автомониторинг новых объявлений ниже рынка."""
+    uid = msg.from_user.id
+    s = load_settings(uid)
+    if not s.get("region"):
+        await msg.answer("Сначала настрой регион и бюджет: /start")
+        return
+
+    enabled = s.get("monitor_enabled", False)
+    if enabled:
+        # Выключаем
+        s["monitor_enabled"] = False
+        save_settings(uid, s)
+        _stop_monitor(uid)
+        await msg.answer(
+            "🔕 Автомониторинг выключен.\n\n"
+            "Напиши /monitor чтобы снова включить."
+        )
+    else:
+        # Включаем
+        s["monitor_enabled"] = True
+        save_settings(uid, s)
+        _start_monitor(uid)
+        region_name = REGIONS.get(s["region"], s["region"])
+        pmin = s.get("price_min", 0)
+        pmax = s.get("price_max", 99_000_000)
+        await msg.answer(
+            f"✅ *Автомониторинг включён!*\n\n"
+            f"🔔 Буду проверять Авито каждые 15 минут.\n"
+            f"Регион: {region_name}\n"
+            f"Бюджет: {pmin:,}–{pmax:,} ₽\n"
+            f"Показываю только авто на 10%+ ниже рынка.\n\n"
+            f"Напиши /monitor снова чтобы выключить.",
+            parse_mode="Markdown",
+        )
+
+
 async def main():
     logging.basicConfig(level=logging.WARNING)
     print("✅ Авто-брокер бот запущен!")
+
+    # Восстанавливаем мониторинг для пользователей, у которых он был включён
+    if USERS_DIR.exists():
+        for user_path in USERS_DIR.iterdir():
+            if user_path.is_dir() and user_path.name.isdigit():
+                try:
+                    sf = user_path / "settings.json"
+                    if sf.exists():
+                        s = json.loads(sf.read_text(encoding="utf-8"))
+                        if s.get("monitor_enabled"):
+                            uid = int(user_path.name)
+                            asyncio.get_event_loop().create_task(_monitor_loop(uid))
+                            print(f"  [монитор] восстановлен для uid={uid}")
+                except Exception:
+                    pass
+
     await dp.start_polling(bot)
 
 
