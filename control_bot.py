@@ -547,73 +547,75 @@ def scrape_autoru(region: str, pages: int = 5, price_min: int = 0, price_max: in
     results = []
     today = datetime.date.today()
 
-    for p in range(1, pages + 1):
-        url = f"https://auto.ru/{slug}/cars/used/?seller_group=PRIVATE&page={p}"
-        if price_min > 0:
-            url += f"&price_from={price_min}"
-        if price_max < 99_000_000:
-            url += f"&price_to={price_max}"
+    # Метод 1: AJAX API Auto.ru (наиболее надёжный, возвращает JSON)
+    headers_ajax = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "application/json,*/*",
+        "Accept-Language": "ru-RU,ru;q=0.9",
+        "Content-Type": "application/json",
+        "Origin": "https://auto.ru",
+        "Referer": f"https://auto.ru/{slug}/cars/used/",
+        "x-client-app": "autoru-frontend-application",
+        "x-page-request-id": "ajax",
+    }
 
-        text = ""
-        # Пробуем ScraperAPI
+    for p in range(1, pages + 1):
+        body: dict = {
+            "category": "cars", "section": "used",
+            "seller_type": ["PRIVATE"], "page": p, "page_size": 37,
+            "sort": "fresh_relevance_1-desc",
+            "output_type": "list",
+        }
+        if geo_ids:
+            body["geo_id"] = geo_ids
+        if price_min > 0:
+            body["price_from"] = price_min
+        if price_max < 99_000_000:
+            body["price_to"] = price_max
+
+        batch = []
+        # Пробуем ScraperAPI → AJAX API
         if SCRAPER_API_KEY:
             try:
-                r = _req.get("http://api.scraperapi.com", params={
-                    "api_key": SCRAPER_API_KEY, "url": url, "country_code": "ru",
-                }, timeout=40)
+                r = _req.post(
+                    "http://api.scraperapi.com/",
+                    params={"api_key": SCRAPER_API_KEY, "url": "https://auto.ru/-/ajax/desktop/listing/", "country_code": "ru"},
+                    json=body, headers={"Content-Type": "application/json"}, timeout=40
+                )
+                print(f"  [Auto.ru] ScraperAPI AJAX стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
                 if r.status_code == 200:
-                    text = r.text
+                    batch = _autoru_parse_offers(r.json(), today)
             except Exception as e:
-                print(f"  [Auto.ru] ScraperAPI стр.{p}: {e}")
+                print(f"  [Auto.ru] ScraperAPI AJAX: {e}")
 
-        # Fallback: прямой запрос
-        if not text:
-            try:
-                headers = {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                    "Accept-Language": "ru-RU,ru;q=0.9",
-                    "Referer": "https://auto.ru/",
-                }
-                r2 = _req.get(url, headers=headers, timeout=20)
-                if r2.status_code == 200:
-                    text = r2.text
-            except Exception as e:
-                print(f"  [Auto.ru] прямой стр.{p}: {e}")
-
-        if not text:
-            break
-
-        # Извлекаем __INITIAL_STATE__ из HTML
-        batch = _autoru_parse_html(text, today)
-        print(f"  [Auto.ru] стр.{p}: {len(batch)} объявлений ({len(text):,}б)")
+        # Прямой AJAX запрос
         if not batch:
-            # Попробуем AJAX API как запасной вариант
             try:
-                session = _req.Session()
-                session.headers.update({
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                    "x-client-app": "autoru-frontend-application",
-                    "x-requested-with": "fetch",
-                    "Referer": "https://auto.ru/",
-                })
-                body: dict = {
-                    "category": "cars", "section": "used",
-                    "seller_type": ["PRIVATE"], "page": p, "page_size": 37,
-                    "sort": "fresh_relevance_1-desc",
-                }
-                if geo_ids:
-                    body["geo_id"] = geo_ids
-                if price_min > 0:
-                    body["price_from"] = price_min
-                if price_max < 99_000_000:
-                    body["price_to"] = price_max
-                ra = session.post("https://auto.ru/-/ajax/desktop/listing/", json=body, timeout=20)
-                if ra.status_code == 200:
-                    batch = _autoru_parse_offers(ra.json(), today)
-                    print(f"  [Auto.ru] AJAX стр.{p}: {len(batch)} объявлений")
+                r2 = _req.post("https://auto.ru/-/ajax/desktop/listing/", json=body, headers=headers_ajax, timeout=20)
+                print(f"  [Auto.ru] прямой AJAX стр.{p}: HTTP {r2.status_code}, {len(r2.text):,}б")
+                if r2.status_code == 200:
+                    batch = _autoru_parse_offers(r2.json(), today)
             except Exception as e:
-                print(f"  [Auto.ru] AJAX стр.{p}: {e}")
+                print(f"  [Auto.ru] прямой AJAX: {e}")
 
+        # ScraperAPI → HTML страница + парсинг __INITIAL_STATE__
+        if not batch and SCRAPER_API_KEY:
+            try:
+                html_url = f"https://auto.ru/{slug}/cars/used/?seller_group=PRIVATE&page={p}"
+                if price_min > 0:
+                    html_url += f"&price_from={price_min}"
+                if price_max < 99_000_000:
+                    html_url += f"&price_to={price_max}"
+                r3 = _req.get("http://api.scraperapi.com", params={
+                    "api_key": SCRAPER_API_KEY, "url": html_url, "country_code": "ru",
+                }, timeout=40)
+                print(f"  [Auto.ru] ScraperAPI HTML стр.{p}: HTTP {r3.status_code}, {len(r3.text):,}б")
+                if r3.status_code == 200:
+                    batch = _autoru_parse_html(r3.text, today)
+            except Exception as e:
+                print(f"  [Auto.ru] ScraperAPI HTML: {e}")
+
+        print(f"  [Auto.ru] стр.{p}: итого {len(batch)} объявлений")
         if not batch:
             break
         results.extend(batch)
@@ -1814,10 +1816,18 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         if item.get("description"):
             caption += f"\n\n📝 {item['description'][:500]}"
 
-        kb = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="🔗 Открыть", url=url),
-            InlineKeyboardButton(text="❌ Скрыть", callback_data=f"hide|{sid}|{uid}"),
-        ]])
+        source = item.get("source", "")
+        phone_hint = "📞 Позвонить" if source in ("avito", "drom") else "📞 Контакт"
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🔗 Открыть", url=url),
+                InlineKeyboardButton(text="⭐ Сохранить", callback_data=f"fav|{sid}|{uid}"),
+            ],
+            [
+                InlineKeyboardButton(text="❌ Скрыть", callback_data=f"hide|{sid}|{uid}"),
+                InlineKeyboardButton(text="📋 Похожие", callback_data=f"sim|{sid}|{uid}"),
+            ],
+        ])
 
         photo_url = item.get("_photo_url", "")
         if photo_url:
@@ -1938,6 +1948,66 @@ async def cb_hide(cb: CallbackQuery):
     save_skipped(uid, skipped)
     await cb.answer("Скрыто")
     await cb.message.delete()
+
+
+@dp.callback_query(F.data.startswith("fav|"))
+async def cb_fav(cb: CallbackQuery):
+    parts = cb.data.split("|")
+    sid = parts[1]
+    uid = int(parts[2]) if len(parts) > 2 else cb.from_user.id
+    # Сохраняем в избранное (файл favorites.json)
+    fav_file = user_dir(uid) / "favorites.json"
+    favs = json.loads(fav_file.read_text(encoding="utf-8")) if fav_file.exists() else []
+    url = id_to_url(sid)
+    items = _search_cache.get(uid) or _load_cache(uid)
+    item = next((it for it in items if it.get("url") == url), None)
+    if item and url not in [f.get("url") for f in favs]:
+        favs.append(item)
+        fav_file.write_text(json.dumps(favs, ensure_ascii=False, default=str), encoding="utf-8")
+        await cb.answer("⭐ Добавлено в избранное!")
+    else:
+        await cb.answer("Уже в избранном")
+
+
+@dp.callback_query(F.data.startswith("sim|"))
+async def cb_similar(cb: CallbackQuery):
+    parts = cb.data.split("|")
+    sid = parts[1]
+    uid = int(parts[2]) if len(parts) > 2 else cb.from_user.id
+    url = id_to_url(sid)
+    items = _search_cache.get(uid) or _load_cache(uid)
+    item = next((it for it in items if it.get("url") == url), None)
+    if not item:
+        await cb.answer("Объявление не найдено")
+        return
+    key = _car_group_key(item.get("title", ""))
+    similar = [it for it in items if _car_group_key(it.get("title", "")) == key and it.get("url") != url]
+    if not similar:
+        await cb.answer("Похожих объявлений не найдено")
+        return
+    await cb.answer(f"Найдено похожих: {len(similar)}")
+    lines = []
+    for it in similar[:5]:
+        lines.append(f"• {it.get('title','')} — {it.get('price','?')} [{it.get('source','')}]")
+        lines.append(f"  {it.get('url','')}")
+    await cb.message.answer("🔍 Похожие объявления:\n\n" + "\n".join(lines))
+
+
+@dp.message(Command("favorites"))
+async def cmd_favorites(msg: Message):
+    uid = msg.from_user.id
+    fav_file = user_dir(uid) / "favorites.json"
+    if not fav_file.exists():
+        await msg.answer("⭐ У тебя пока нет сохранённых объявлений.")
+        return
+    favs = json.loads(fav_file.read_text(encoding="utf-8"))
+    if not favs:
+        await msg.answer("⭐ Список избранного пуст.")
+        return
+    lines = []
+    for it in favs[-20:]:
+        lines.append(f"• {it.get('title','')} — {it.get('price','?')}\n  {it.get('url','')}")
+    await msg.answer(f"⭐ Избранное ({len(favs)} шт.):\n\n" + "\n\n".join(lines[-10:]))
 
 
 @dp.message(Command("test_avito"))
