@@ -1048,13 +1048,14 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
 
         def _find_avito_photo_in_obj(obj, depth=0) -> str:
             """Рекурсивно ищет первый URL фото Авито в любом месте JSON объекта."""
-            if depth > 8 or not obj:
+            if depth > 10 or obj is None:
                 return ""
             if isinstance(obj, str):
-                if "img.avito.st" in obj and obj.startswith("//"):
-                    return "https:" + obj
-                if "img.avito.st" in obj and obj.startswith("http"):
-                    return obj
+                if "img.avito.st" in obj and len(obj) > 10:
+                    raw = obj.replace("\\/", "/")
+                    url_c = ("https:" + raw) if raw.startswith("//") else raw
+                    if not any(x in url_c.lower() for x in ("/stub", "noimage", "placeholder")):
+                        return url_c
                 return ""
             if isinstance(obj, list):
                 for el in obj:
@@ -1063,20 +1064,28 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
                         return r
                 return ""
             if isinstance(obj, dict):
-                # Сначала ищем по известным ключам размеров
-                for size in ("864x648", "1280x960", "640x480", "432x324", "320x240"):
-                    v = obj.get(size, "")
-                    if v and "avito" in str(v):
-                        raw = str(v).replace("\\/", "/")
-                        return ("https:" + raw) if raw.startswith("//") else raw
-                # Потом рекурсия в под-объекты
+                # Ищем по всем известным ключам размеров фото Авито
+                for size in ("1208x906", "864x648", "1280x960", "640x480",
+                             "432x324", "320x240", "100x75", "originalSize"):
+                    v = obj.get(size)
+                    if isinstance(v, str) and "avito" in v:
+                        raw = v.replace("\\/", "/")
+                        url_c = ("https:" + raw) if raw.startswith("//") else raw
+                        if not any(x in url_c.lower() for x in ("/stub", "noimage")):
+                            return url_c
+                # Рекурсия в приоритетные ключи
                 for k in ("images", "photos", "gallery", "media", "image", "photo", "preview"):
                     if k in obj:
                         r = _find_avito_photo_in_obj(obj[k], depth + 1)
                         if r:
                             return r
+                # Полный обход всех значений (включая строки!)
                 for v in obj.values():
-                    if isinstance(v, (dict, list)):
+                    if isinstance(v, str):
+                        r = _find_avito_photo_in_obj(v, depth + 1)
+                        if r:
+                            return r
+                    elif isinstance(v, (dict, list)):
                         r = _find_avito_photo_in_obj(v, depth + 1)
                         if r:
                             return r
@@ -1086,18 +1095,21 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
         if not photo_url:
             photo_url = ""
 
+        _desc_raw = (
+            it.get("description") or
+            it.get("descriptionFull") or
+            it.get("shortDescription") or
+            (it.get("item", {}).get("description") if isinstance(it.get("item"), dict) else "") or ""
+        )
+        _images_list = it.get("images") or it.get("photos") or it.get("gallery") or []
         item = {
             "source": "avito", "title": title,
             "price": price_str, "url": item_url, "date": str(today),
-            "_photos": len(images), "_days_on_site": 0,
-            "description": (
-                it.get("description") or
-                it.get("descriptionFull") or
-                it.get("shortDescription") or
-                it.get("item", {}).get("description") if isinstance(it.get("item"), dict) else "" or ""
-            )[:400],
+            "_photos": len(_images_list) if isinstance(_images_list, list) else 0,
+            "_days_on_site": 0,
+            "description": _desc_raw[:400],
             "seller": seller_name, "_photo_url": photo_url,
-            "_price_int": price_int,  # для точной фильтрации по цене
+            "_price_int": price_int,
         }
         item["_hot_score"] = hot_score(item)
         return item
