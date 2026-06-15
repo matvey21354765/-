@@ -1446,37 +1446,54 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
     def _fetch_page(p: int) -> list[dict]:
         url = _build_url(p)
         url_has_price_filter = price_max < 99_000_000 or price_min > 0
-        try:
-            r = _req.get("http://api.scraperapi.com", params={
-                "api_key": SCRAPER_API_KEY,
-                "url": url,
-                "country_code": "ru",
-            }, timeout=35)
-            if r.status_code != 200:
-                print(f"  [Авито] стр.{p}: HTTP {r.status_code}")
-                return []
-            text = r.text
-            has_urlpath = '"urlPath"' in text
-            has_items = 'data-marker="item"' in text
-            print(f"  [Авито] стр.{p}: {len(text):,}б, items={has_items}, urlPath={has_urlpath}")
-            from_fallback = False
-            if not has_items and not has_urlpath:
-                fallback_url = f"https://www.avito.ru/{slug}/avtomobili" + (f"?p={p}" if p > 1 else "")
+
+        _HEADERS = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+            "Accept-Language": "ru-RU,ru;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Referer": "https://www.avito.ru/",
+        }
+
+        def _try_fetch(fetch_url: str) -> str | None:
+            """Пробуем: ScraperAPI → прямой запрос."""
+            # 1. ScraperAPI
+            if SCRAPER_API_KEY:
                 try:
-                    r2 = _req.get("http://api.scraperapi.com", params={
+                    r = _req.get("http://api.scraperapi.com", params={
                         "api_key": SCRAPER_API_KEY,
-                        "url": fallback_url,
+                        "url": fetch_url,
                         "country_code": "ru",
                     }, timeout=35)
-                    if r2.status_code == 200 and ('"urlPath"' in r2.text or 'data-marker="item"' in r2.text):
-                        text = r2.text
-                        from_fallback = True
-                        url_has_price_filter = False
-                        print(f"  [Авито] fallback без цен стр.{p}: {len(text):,}б")
-                    else:
-                        return []
+                    if r.status_code == 200 and ('"urlPath"' in r.text or 'data-marker="item"' in r.text):
+                        return r.text
                 except Exception:
+                    pass
+            # 2. Прямой запрос (работает если нет блокировки)
+            try:
+                r2 = _req.get(fetch_url, timeout=12, headers=_HEADERS)
+                if r2.status_code == 200 and ('"urlPath"' in r2.text or 'data-marker="item"' in r2.text):
+                    return r2.text
+            except Exception:
+                pass
+            return None
+
+        try:
+            text = _try_fetch(url)
+            from_fallback = False
+
+            if not text:
+                # Fallback URL без ценового фильтра
+                fallback_url = f"https://www.avito.ru/{slug}/avtomobili" + (f"?p={p}" if p > 1 else "")
+                text = _try_fetch(fallback_url)
+                if not text:
+                    print(f"  [Авито] стр.{p}: нет данных")
                     return []
+                from_fallback = True
+                url_has_price_filter = False
+                print(f"  [Авито] стр.{p}: fallback URL, {len(text):,}б")
+            else:
+                print(f"  [Авито] стр.{p}: {len(text):,}б")
             batch = _parse_avito_html(text, slug, today)
             # Помечаем: пришли ли из URL с ценовым фильтром Авито
             for it in batch:
