@@ -1035,24 +1035,45 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
 
         price_str, price_int = _avito_price_from_item(it)
 
-        images = (it.get("images") or
-                  it.get("gallery", {}).get("images", []) or
-                  it.get("photos", []) or [])
-        photo_url = ""
-        if images and isinstance(images, list):
-            img = images[0]
-            if isinstance(img, dict):
-                # Пробуем все известные ключи CDN Авито по убыванию размера
-                photo_url = (img.get("864x648") or img.get("1280x960") or
-                             img.get("640x480") or img.get("432x324") or
-                             img.get("320x240") or img.get("url") or
-                             img.get("src") or
-                             next((v for v in img.values() if isinstance(v, str) and "avito" in v), "") or
-                             next((v for v in img.values() if isinstance(v, str)), ""))
-            elif isinstance(img, str):
-                photo_url = img
-        if photo_url and photo_url.startswith("//"):
-            photo_url = "https:" + photo_url
+        def _find_avito_photo_in_obj(obj, depth=0) -> str:
+            """Рекурсивно ищет первый URL фото Авито в любом месте JSON объекта."""
+            if depth > 8 or not obj:
+                return ""
+            if isinstance(obj, str):
+                if "img.avito.st" in obj and obj.startswith("//"):
+                    return "https:" + obj
+                if "img.avito.st" in obj and obj.startswith("http"):
+                    return obj
+                return ""
+            if isinstance(obj, list):
+                for el in obj:
+                    r = _find_avito_photo_in_obj(el, depth + 1)
+                    if r:
+                        return r
+                return ""
+            if isinstance(obj, dict):
+                # Сначала ищем по известным ключам размеров
+                for size in ("864x648", "1280x960", "640x480", "432x324", "320x240"):
+                    v = obj.get(size, "")
+                    if v and "avito" in str(v):
+                        raw = str(v).replace("\\/", "/")
+                        return ("https:" + raw) if raw.startswith("//") else raw
+                # Потом рекурсия в под-объекты
+                for k in ("images", "photos", "gallery", "media", "image", "photo", "preview"):
+                    if k in obj:
+                        r = _find_avito_photo_in_obj(obj[k], depth + 1)
+                        if r:
+                            return r
+                for v in obj.values():
+                    if isinstance(v, (dict, list)):
+                        r = _find_avito_photo_in_obj(v, depth + 1)
+                        if r:
+                            return r
+            return ""
+
+        photo_url = _find_avito_photo_in_obj(it)
+        if not photo_url:
+            photo_url = ""
 
         item = {
             "source": "avito", "title": title,
@@ -1061,7 +1082,8 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
             "description": (
                 it.get("description") or
                 it.get("descriptionFull") or
-                it.get("shortDescription") or ""
+                it.get("shortDescription") or
+                it.get("item", {}).get("description") if isinstance(it.get("item"), dict) else "" or ""
             )[:400],
             "seller": seller_name, "_photo_url": photo_url,
             "_price_int": price_int,  # для точной фильтрации по цене
@@ -1994,93 +2016,109 @@ async def _ensure_photo(item: dict) -> None:
 
     def _extract(text: str) -> tuple[str, str, int]:
         photo, desc, price_int = "", "", 0
+
+        # Извлекаем __NEXT_DATA__ один раз
+        nd_m = re.search(r'<script[^>]+id="__NEXT_DATA__"[^>]*>(.*?)</script>', text, re.S)
+        nd_text = nd_m.group(1) if nd_m else ""
+        nd_json = None
+        if nd_text:
+            try:
+                nd_json = json.loads(nd_text)
+            except Exception:
+                pass
+
         if need_photo:
-            nd = re.search(r'<script[^>]+id="__NEXT_DATA__"[^>]*>(.*?)</script>', text, re.S)
-            nd_text = nd.group(1) if nd else ""
-
-            listing_has_photos = None  # None = неизвестно, True/False = точно знаем
-
-            # 1. Парсим __NEXT_DATA__ как JSON — ищем item.media.images[0]
-            if nd_text:
-                try:
-                    nd_json = json.loads(nd_text)
-                    def _find_images(obj, depth=0):
-                        if depth > 12 or not isinstance(obj, (dict, list)):
-                            return []
-                        if isinstance(obj, list):
-                            for el in obj:
-                                r = _find_images(el, depth+1)
+            # 1. Парсим __NEXT_DATA__ JSON — рекурсивно ищем объекты с ключами размеров фото
+            if nd_json:
+                def _find_photo_url(obj, depth=0) -> str:
+                    if depth > 15 or not obj:
+                        return ""
+                    if isinstance(obj, str):
+                        if "img.avito.st" in obj:
+                            raw = obj.replace("\\/", "/")
+                            return ("https:" + raw) if raw.startswith("//") else raw
+                        return ""
+                    if isinstance(obj, list):
+                        for el in obj:
+                            r = _find_photo_url(el, depth + 1)
+                            if r:
+                                return r
+                        return ""
+                    if isinstance(obj, dict):
+                        for size in ("864x648", "1280x960", "640x480", "432x324", "320x240"):
+                            v = obj.get(size, "")
+                            if v and "avito" in str(v):
+                                raw = str(v).replace("\\/", "/")
+                                return ("https:" + raw) if raw.startswith("//") else raw
+                        for k in ("images", "photos", "gallery", "media", "image", "photo",
+                                  "item", "initialData", "data", "props", "pageProps"):
+                            if k in obj:
+                                r = _find_photo_url(obj[k], depth + 1)
                                 if r:
                                     return r
-                        else:
-                            for size in ("1280x960", "864x648", "640x480", "432x324", "320x240"):
-                                if size in obj and "img.avito" in str(obj[size]):
-                                    return [obj]
-                            for v in obj.values():
-                                r = _find_images(v, depth+1)
+                        for v in obj.values():
+                            if isinstance(v, (dict, list)):
+                                r = _find_photo_url(v, depth + 1)
                                 if r:
                                     return r
-                        return []
-                    imgs = _find_images(nd_json)
-                    listing_has_photos = len(imgs) > 0
-                    for img_obj in imgs[:1]:
-                        for size in ("1280x960", "864x648", "640x480", "432x324", "320x240"):
-                            raw = str(img_obj.get(size, "")).replace("\\/", "/")
-                            if raw and "avito" in raw:
-                                photo = ("https:" + raw) if raw.startswith("//") else raw
-                                break
-                except Exception:
-                    pass
+                    return ""
+                photo = _find_photo_url(nd_json)
 
-            # 2. Regex по тексту __NEXT_DATA__ — ищем внутри "images":[{...}]
-            if not photo and nd_text:
-                imgs_block = re.search(r'"images"\s*:\s*\[(\{[^\]]{10,})\]', nd_text, re.S)
-                if imgs_block:
-                    listing_has_photos = True
-                    for size in ("1280x960", "864x648", "640x480", "432x324", "320x240"):
-                        sm = re.search(
-                            r'"' + size + r'"\s*:\s*"((?:https:)?(?:\\?/){2}[0-9]+\.img\.avito\.st[^"\'\\]+\.(?:jpg|jpeg|webp))"',
-                            imgs_block.group(1)
-                        )
-                        if sm:
-                            raw = sm.group(1).replace("\\/", "/")
-                            photo = ("https:" + raw) if raw.startswith("//") else raw
-                            break
-                elif nd_text and '"images"' in nd_text:
-                    # "images":[] пустой — нет фото у объявления
-                    listing_has_photos = False
-
-            # 3. Широкий regex по всему тексту страницы (fallback)
+            # 2. Широкий regex по тексту страницы (если JSON не дал результата)
             if not photo:
                 for pat in [
-                    r'"(?:1280x960|864x648|640x480|432x324)"\s*:\s*"((?:https:)?(?:\\?/){2}[0-9]+\.img\.avito\.st[^"\'\\]{5,}\.(?:jpg|jpeg|webp))"',
-                    r'https://[0-9]+\.img\.avito\.st[^\s"\'<]{5,}\.(?:jpg|jpeg|webp)',
-                    r'(?:https:)?//[0-9]+\.img\.avito\.st[^\s"\'<]{5,}\.(?:jpg|jpeg|webp)',
+                    r'"(?:864x648|1280x960|640x480|432x324|320x240)"\s*:\s*"((?:https:)?(?:\\?/){2}[0-9]+\.img\.avito\.st[^"\'\\]{5,}\.(?:jpg|jpeg|webp|png))"',
+                    r'(https://[0-9]+\.img\.avito\.st[^\s"\'<\\]{5,}\.(?:jpg|jpeg|webp|png))',
+                    r'((?:https:)?//[0-9]+\.img\.avito\.st[^\s"\'<\\]{5,}\.(?:jpg|jpeg|webp|png))',
                 ]:
                     m = re.search(pat, text)
                     if m:
-                        raw = (m.group(1) if m.lastindex else m.group(0)).replace("\\/", "/")
+                        raw = m.group(1).replace("\\/", "/")
                         candidate = ("https:" + raw) if raw.startswith("//") else raw
-                        # Пропускаем плейсхолдеры: /stub/, /no-photo, /placeholder
-                        if any(x in candidate.lower() for x in ("/stub", "/no-photo", "/placeholder", "noimage", "no_photo", "default")):
-                            continue
-                        photo = candidate
-                        break
+                        if not any(x in candidate.lower() for x in ("/stub", "/no-photo", "/placeholder", "noimage", "no_photo")):
+                            photo = candidate
+                            break
 
-            # 4. og:image — первое фото объявления (для без фото будут круги — это нормально)
+            # 3. og:image как последний fallback
             if not photo:
                 og = re.search(r'og:image[^>]*content="([^"]+)"|content="([^"]+)"[^>]*og:image', text)
                 if og:
                     photo = (og.group(1) or og.group(2) or "").strip()
+
         if need_desc:
-            for dpat in [
-                r'"description"\s*:\s*"([^"]{20,})"',
-                r'<meta[^>]+name="description"[^>]+content="([^"]{20,})"',
-            ]:
-                dm = re.search(dpat, text)
-                if dm:
-                    desc = dm.group(1).replace("\\n", " ").replace('\\"', '"')[:400]
-                    break
+            # Ищем описание в __NEXT_DATA__ JSON
+            if nd_json:
+                def _find_desc(obj, depth=0) -> str:
+                    if depth > 10 or not isinstance(obj, (dict, list)):
+                        return ""
+                    if isinstance(obj, list):
+                        for el in obj:
+                            r = _find_desc(el, depth + 1)
+                            if r:
+                                return r
+                        return ""
+                    for k in ("description", "descriptionFull", "shortDescription"):
+                        v = obj.get(k, "")
+                        if isinstance(v, str) and len(v) > 30 and not v.startswith("http"):
+                            return v[:400]
+                    for k in ("item", "initialData", "data", "props", "pageProps"):
+                        if k in obj:
+                            r = _find_desc(obj[k], depth + 1)
+                            if r:
+                                return r
+                    return ""
+                desc = _find_desc(nd_json)
+
+            if not desc:
+                for dpat in [
+                    r'"descriptionFull"\s*:\s*"([^"]{30,})"',
+                    r'"description"\s*:\s*"([^"]{30,})"',
+                    r'<meta[^>]+name="description"[^>]+content="([^"]{20,})"',
+                ]:
+                    dm = re.search(dpat, text)
+                    if dm:
+                        desc = dm.group(1).replace("\\n", " ").replace('\\"', '"')[:400]
+                        break
         if need_price:
             for pat in [
                 r'"priceDetailed"\s*:\s*\{[^}]{0,200}"value"\s*:\s*(\d{4,9})',
