@@ -1096,14 +1096,16 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
 
 def _avito_find_items_in_json(obj, depth=0) -> list:
     """Рекурсивно ищет массив объявлений в JSON Авито."""
-    if depth > 10 or not isinstance(obj, (dict, list)):
+    if depth > 15 or not isinstance(obj, (dict, list)):
         return []
     if isinstance(obj, list):
-        if len(obj) >= 2 and isinstance(obj[0], dict):
+        if len(obj) >= 1 and isinstance(obj[0], dict):
             sample = obj[0]
-            url_fields = {"title", "urlPath", "url", "name"}
-            price_fields = {"price", "priceDetailed", "priceInfo"}
-            if (url_fields & sample.keys()) and (price_fields & sample.keys() or "id" in sample):
+            # Достаточно: есть urlPath или url + хоть какой-то ценовой или id ключ
+            has_url = bool({"urlPath", "url"} & sample.keys())
+            has_price_or_id = bool({"price", "priceDetailed", "priceInfo", "id", "itemId"} & sample.keys())
+            has_title = bool({"title", "name"} & sample.keys())
+            if has_url and (has_title or has_price_or_id):
                 return obj
         for x in obj:
             r = _avito_find_items_in_json(x, depth + 1)
@@ -1111,12 +1113,19 @@ def _avito_find_items_in_json(obj, depth=0) -> list:
                 return r
         return []
     if isinstance(obj, dict):
-        for key in ("items", "catalog", "listing", "offers", "data", "list", "ads", "cars"):
+        # Проверяем приоритетные ключи
+        for key in ("items", "catalog", "listing", "offers", "data", "list", "ads", "cars",
+                    "mainPage", "search", "results", "snippets", "adverts"):
             val = obj.get(key)
-            if isinstance(val, list) and len(val) >= 2:
+            if isinstance(val, list) and len(val) >= 1:
                 sample = val[0] if val else {}
-                if isinstance(sample, dict) and {"title", "urlPath", "url", "name", "id"} & sample.keys():
-                    return val
+                if isinstance(sample, dict) and (
+                    {"urlPath", "url"} & sample.keys() or
+                    {"title", "name", "id"} & sample.keys()
+                ):
+                    # Убеждаемся что это объявления, а не что-то другое
+                    if any(k in sample for k in ("urlPath", "priceDetailed", "price", "images")):
+                        return val
         for v in obj.values():
             r = _avito_find_items_in_json(v, depth + 1)
             if r:
@@ -1512,6 +1521,47 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
         for fut in as_completed(futs):
             results.extend(fut.result())
 
+    # Глобальный fallback: если 0 результатов — пробуем без ценового фильтра (1 страница)
+    if not results and (price_min > 0 or price_max < 99_000_000):
+        print(f"  [Авито] 0 результатов с ценовым фильтром — пробуем без фильтра")
+        try:
+            import requests as _req_fb
+            fallback_url = f"https://www.avito.ru/{slug}/avtomobili?s=104"
+            r_fb = _req_fb.get("http://api.scraperapi.com", params={
+                "api_key": SCRAPER_API_KEY,
+                "url": fallback_url,
+                "country_code": "ru",
+            }, timeout=35)
+            if r_fb.status_code == 200 and ('"urlPath"' in r_fb.text or 'data-marker="item"' in r_fb.text):
+                batch_fb = _parse_avito_html(r_fb.text, slug, today)
+                # Строим карту цен
+                price_map_fb: dict[str, int] = {}
+                for m in re.finditer(r'"urlPath"\s*:\s*"(/[^"]+)"', r_fb.text):
+                    url_p = m.group(1)
+                    chunk = r_fb.text[m.end():m.end() + 2000]
+                    pm = re.search(r'"value"\s*:\s*(\d{4,9})', chunk)
+                    if pm:
+                        val = int(pm.group(1))
+                        if 10_000 < val < 99_000_000:
+                            price_map_fb[url_p] = val
+                            continue
+                    pm2 = re.search(r'"valueText"\s*:\s*"([^"]+)"', chunk)
+                    if pm2:
+                        digits = re.sub(r"[^\d]", "", pm2.group(1))
+                        if digits and 10_000 < int(digits) < 99_000_000:
+                            price_map_fb[url_p] = int(digits)
+                for it in batch_fb:
+                    if it.get("_price_int", 0) == 0:
+                        path = it["url"].replace("https://www.avito.ru", "")
+                        if path in price_map_fb:
+                            v = price_map_fb[path]
+                            it["_price_int"] = v
+                            it["price"] = f"{v:,} ₽".replace(",", " ")
+                    it["_avito_price_filtered"] = False
+                results = batch_fb
+                print(f"  [Авито] fallback: {len(results)} объявлений")
+        except Exception as e:
+            print(f"  [Авито] fallback ошибка: {e}")
 
     print(f"  [Авито] итого {len(results)} объявлений")
     return results
