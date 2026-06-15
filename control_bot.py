@@ -215,11 +215,9 @@ def is_dealer(item: dict) -> bool:
 def in_price_range(item: dict, price_min: int, price_max: int) -> bool:
     p = item.get("_price_int") or parse_price(item.get("price", ""))
     if p:
-        # Цена известна — строго проверяем диапазон
         return price_min <= p <= price_max
-    # Цена неизвестна: для Авито показываем (доверяем поиску Авито)
-    # Для других площадок — тоже показываем, если цена неизвестна
-    return item.get("source") in ("avito", "drom", "autoru", "kolesa", "bibika") or bool(item.get("_avito_price_filtered"))
+    # Цена неизвестна — доверяем только если Авито сам фильтровал по URL
+    return bool(item.get("_avito_price_filtered"))
 
 
 def hot_score(item: dict) -> float:
@@ -1492,14 +1490,16 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
             desc_map: dict[str, str] = {}
             title_map: dict[str, str] = {}
 
-            url_matches = list(re.finditer(r'"urlPath"\s*:\s*"(/[^"]+)"', text))
-            for i, m in enumerate(url_matches):
+            # Только urlPath-и объявлений этого города (формат /{slug}/avtomobili/...)
+            listing_pat = re.compile(
+                r'"urlPath"\s*:\s*"(/' + re.escape(slug) + r'/[a-z0-9_/-]+-\d{5,})"'
+            )
+            slug_matches = list(listing_pat.finditer(text))
+            for i, m in enumerate(slug_matches):
                 url_p = m.group(1)
-                if not url_p.startswith(f"/{slug}/"):
-                    continue
-                # Берём диапазон от предыдущего urlPath до следующего
-                seg_start = url_matches[i - 1].end() if i > 0 else max(0, m.start() - 5000)
-                seg_end = url_matches[i + 1].start() if i < len(url_matches) - 1 else min(len(text), m.end() + 5000)
+                # Сегмент: от конца предыдущего совпадения до начала следующего
+                seg_start = slug_matches[i - 1].end() if i > 0 else max(0, m.start() - 6000)
+                seg_end = slug_matches[i + 1].start() if i < len(slug_matches) - 1 else min(len(text), m.end() + 6000)
                 seg = text[seg_start:seg_end]
 
                 # Цена — в порядке надёжности
@@ -1570,8 +1570,6 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
             # Если _parse_avito_html не нашёл объявлений — строим их из regex-карт
             if not batch and (price_map or image_map or title_map):
                 for url_p, title in title_map.items():
-                    if not url_p.startswith(f"/{slug}/"):
-                        continue
                     item_url = "https://www.avito.ru" + url_p
                     price_int = price_map.get(url_p, 0)
                     price_str = f"{price_int:,} ₽".replace(",", " ") if price_int else ""
