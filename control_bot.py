@@ -1482,33 +1482,71 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
             # Помечаем: пришли ли из URL с ценовым фильтром Авито
             for it in batch:
                 it["_avito_price_filtered"] = url_has_price_filter and not from_fallback
-            # Строим карту цен из сырого текста страницы (для элементов без цены из JSON)
+
+            # Строим карты: цена, фото, описание — из сырого текста страницы
             price_map: dict[str, int] = {}
+            image_map: dict[str, str] = {}
+            desc_map: dict[str, str] = {}
+
             for m in re.finditer(r'"urlPath"\s*:\s*"(/[^"]+)"', text):
                 url_p = m.group(1)
-                # Берём 2000 символов после urlPath и ищем значение цены
                 start = m.end()
-                chunk = text[start:start + 2000]
-                pm = re.search(r'"value"\s*:\s*(\d{4,9})', chunk)
-                if pm:
-                    val = int(pm.group(1))
-                    if 10_000 < val < 99_000_000:
-                        price_map[url_p] = val
-                        continue
-                pm2 = re.search(r'"valueText"\s*:\s*"([^"]+)"', chunk)
-                if pm2:
-                    digits = re.sub(r"[^\d]", "", pm2.group(1))
-                    if digits and 10_000 < int(digits) < 99_000_000:
-                        price_map[url_p] = int(digits)
+                chunk = text[start:start + 3000]
+
+                # Цена
+                if url_p not in price_map:
+                    pm = re.search(r'"value"\s*:\s*(\d{4,9})', chunk)
+                    if pm:
+                        val = int(pm.group(1))
+                        if 10_000 < val < 99_000_000:
+                            price_map[url_p] = val
+                    if url_p not in price_map:
+                        pm2 = re.search(r'"valueText"\s*:\s*"([^"]+)"', chunk)
+                        if pm2:
+                            digits = re.sub(r"[^\d]", "", pm2.group(1))
+                            if digits and 10_000 < int(digits) < 99_000_000:
+                                price_map[url_p] = int(digits)
+
+                # Фото — ищем первый URL img.avito.st в чанке
+                if url_p not in image_map:
+                    img_m = re.search(
+                        r'"(?:864x648|1280x960|640x480|432x324|320x240)"\s*:\s*"((?:https:)?(?:\\?/){2}[0-9]+\.img\.avito\.st[^"\\]{10,}\.(?:jpg|jpeg|webp|png))"',
+                        chunk
+                    )
+                    if img_m:
+                        raw = img_m.group(1).replace("\\/", "/")
+                        image_map[url_p] = ("https:" + raw) if raw.startswith("//") else raw
+                    else:
+                        # Шире — любой avito CDN URL
+                        img_m2 = re.search(
+                            r'"((?:https:)?(?:\\?/){2}[0-9]+\.img\.avito\.st[^"\\]{10,}\.(?:jpg|jpeg|webp|png))"',
+                            chunk
+                        )
+                        if img_m2:
+                            raw = img_m2.group(1).replace("\\/", "/")
+                            image_map[url_p] = ("https:" + raw) if raw.startswith("//") else raw
+
+                # Описание
+                if url_p not in desc_map:
+                    dm = re.search(r'"description"\s*:\s*"([^"]{25,})"', chunk)
+                    if dm:
+                        d = dm.group(1).replace("\\n", " ").replace('\\"', '"').strip()
+                        if len(d) > 20 and not d.startswith("http"):
+                            desc_map[url_p] = d[:350]
+
             if price_map:
-                print(f"  [Авито] regex цены: {len(price_map)} найдено")
+                print(f"  [Авито] regex цены: {len(price_map)}, фото: {len(image_map)}, описания: {len(desc_map)}")
+
             for it in batch:
-                if it.get("_price_int", 0) == 0:
-                    path = it["url"].replace("https://www.avito.ru", "")
-                    if path in price_map:
-                        v = price_map[path]
-                        it["_price_int"] = v
-                        it["price"] = f"{v:,} ₽".replace(",", " ")
+                path = it["url"].replace("https://www.avito.ru", "")
+                if it.get("_price_int", 0) == 0 and path in price_map:
+                    v = price_map[path]
+                    it["_price_int"] = v
+                    it["price"] = f"{v:,} ₽".replace(",", " ")
+                if not it.get("_photo_url") and path in image_map:
+                    it["_photo_url"] = image_map[path]
+                if not it.get("description") and path in desc_map:
+                    it["description"] = desc_map[path]
             print(f"  [Авито] стр.{p}: {len(batch)} объявлений")
             return batch
         except Exception as e:
@@ -1535,29 +1573,46 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
             }, timeout=35)
             if r_fb.status_code == 200 and ('"urlPath"' in r_fb.text or 'data-marker="item"' in r_fb.text):
                 batch_fb = _parse_avito_html(r_fb.text, slug, today)
-                # Строим карту цен
+                fb_text = r_fb.text
                 price_map_fb: dict[str, int] = {}
-                for m in re.finditer(r'"urlPath"\s*:\s*"(/[^"]+)"', r_fb.text):
+                image_map_fb: dict[str, str] = {}
+                desc_map_fb: dict[str, str] = {}
+                for m in re.finditer(r'"urlPath"\s*:\s*"(/[^"]+)"', fb_text):
                     url_p = m.group(1)
-                    chunk = r_fb.text[m.end():m.end() + 2000]
+                    chunk = fb_text[m.end():m.end() + 3000]
                     pm = re.search(r'"value"\s*:\s*(\d{4,9})', chunk)
                     if pm:
                         val = int(pm.group(1))
                         if 10_000 < val < 99_000_000:
                             price_map_fb[url_p] = val
-                            continue
-                    pm2 = re.search(r'"valueText"\s*:\s*"([^"]+)"', chunk)
-                    if pm2:
-                        digits = re.sub(r"[^\d]", "", pm2.group(1))
-                        if digits and 10_000 < int(digits) < 99_000_000:
-                            price_map_fb[url_p] = int(digits)
+                    elif True:
+                        pm2 = re.search(r'"valueText"\s*:\s*"([^"]+)"', chunk)
+                        if pm2:
+                            digits = re.sub(r"[^\d]", "", pm2.group(1))
+                            if digits and 10_000 < int(digits) < 99_000_000:
+                                price_map_fb[url_p] = int(digits)
+                    img_m = re.search(
+                        r'"(?:864x648|1280x960|640x480|432x324|320x240)"\s*:\s*"((?:https:)?(?:\\?/){2}[0-9]+\.img\.avito\.st[^"\\]{10,}\.(?:jpg|jpeg|webp|png))"',
+                        chunk
+                    )
+                    if img_m:
+                        raw = img_m.group(1).replace("\\/", "/")
+                        image_map_fb[url_p] = ("https:" + raw) if raw.startswith("//") else raw
+                    dm = re.search(r'"description"\s*:\s*"([^"]{25,})"', chunk)
+                    if dm:
+                        d = dm.group(1).replace("\\n", " ").replace('\\"', '"').strip()
+                        if len(d) > 20 and not d.startswith("http"):
+                            desc_map_fb[url_p] = d[:350]
                 for it in batch_fb:
-                    if it.get("_price_int", 0) == 0:
-                        path = it["url"].replace("https://www.avito.ru", "")
-                        if path in price_map_fb:
-                            v = price_map_fb[path]
-                            it["_price_int"] = v
-                            it["price"] = f"{v:,} ₽".replace(",", " ")
+                    path = it["url"].replace("https://www.avito.ru", "")
+                    if it.get("_price_int", 0) == 0 and path in price_map_fb:
+                        v = price_map_fb[path]
+                        it["_price_int"] = v
+                        it["price"] = f"{v:,} ₽".replace(",", " ")
+                    if not it.get("_photo_url") and path in image_map_fb:
+                        it["_photo_url"] = image_map_fb[path]
+                    if not it.get("description") and path in desc_map_fb:
+                        it["description"] = desc_map_fb[path]
                     it["_avito_price_filtered"] = False
                 results = batch_fb
                 print(f"  [Авито] fallback: {len(results)} объявлений")
