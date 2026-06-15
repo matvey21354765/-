@@ -214,10 +214,11 @@ def is_dealer(item: dict) -> bool:
 
 def in_price_range(item: dict, price_min: int, price_max: int) -> bool:
     p = item.get("_price_int") or parse_price(item.get("price", ""))
-    if not p:
-        # Для Авито: если запрос был с ценовым фильтром в URL — доверяем Авито
-        return bool(item.get("_avito_price_filtered"))
-    return price_min <= p <= price_max
+    if p:
+        # Цена известна — строго проверяем диапазон
+        return price_min <= p <= price_max
+    # Цена неизвестна — доверяем только Авито с серверным ценовым фильтром
+    return bool(item.get("_avito_price_filtered"))
 
 
 def hot_score(item: dict) -> float:
