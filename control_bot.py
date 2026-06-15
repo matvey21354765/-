@@ -1046,6 +1046,13 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
 
         price_str, price_int = _avito_price_from_item(it)
 
+        mileage = 0
+        for param in (it.get("params") or it.get("parameters") or []):
+            if isinstance(param, dict):
+                if param.get("type") == "mileage" or "пробег" in str(param.get("title","")).lower():
+                    try: mileage = int(re.sub(r"[^\d]", "", str(param.get("value","") or param.get("valueText",""))))
+                    except: pass
+
         def _find_avito_photo_in_obj(obj, depth=0) -> str:
             """Рекурсивно ищет первый URL фото Авито в любом месте JSON объекта."""
             if depth > 10 or obj is None:
@@ -1110,6 +1117,7 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
             "description": _desc_raw[:400],
             "seller": seller_name, "_photo_url": photo_url,
             "_price_int": price_int,
+            "mileage": mileage,
         }
         item["_hot_score"] = hot_score(item)
         return item
@@ -1570,20 +1578,17 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
                     if 10_000 < val < 99_000_000:
                         all_prices.append((pm.start(), val))
 
-                # Все фото — img.avito.st — максимально широкий поиск
+                # Все фото — img.avito.st (расширенный поиск без требования расширения)
                 all_images: list[tuple[int, str]] = []
                 seen_imgs: set[str] = set()
-                for im in re.finditer(
-                    r'(?:https:)?(?:\\?/){2}[0-9]+\.img\.avito\.st[^"\'\\<\s,\]}{]{5,}', text
-                ):
-                    raw = im.group(0).replace("\\/", "/")
-                    url_img = ("https:" + raw) if raw.startswith("//") else raw
+                for im in re.finditer(r'(?:https:)?(?:\\?/){2}[0-9]+\.img\.avito\.st[^"\'\\<\s,\]}{]{5,}', text):
+                    raw_url = im.group(0).replace("\\/", "/")
+                    url_img = ("https:" + raw_url) if raw_url.startswith("//") else raw_url
                     if any(x in url_img.lower() for x in ("/stub", "placeholder", "noimage")):
                         continue
-                    if url_img in seen_imgs:
-                        continue
-                    seen_imgs.add(url_img)
-                    all_images.append((im.start(), url_img))
+                    if url_img not in seen_imgs:
+                        seen_imgs.add(url_img)
+                        all_images.append((im.start(), url_img))
 
                 # Все описания
                 all_descs: list[tuple[int, str]] = []
@@ -1613,6 +1618,16 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
                             best_d = d
                             best = paths[i]
                     return best
+
+                # Пробег — mileage в params
+                mileage_map: dict[str, int] = {}
+                # "mileage" or "km" in params array
+                for mm in re.finditer(r'"mileage"\s*:\s*(\d{3,7})', text):
+                    val = int(mm.group(1))
+                    if 1000 < val < 9_000_000:
+                        path = _nearest_path(mm.start(), max_dist=5000)
+                        if path and path not in mileage_map:
+                            mileage_map[path] = val
 
                 for pos, price in all_prices:
                     path = _nearest_path(pos, max_dist=6000)
@@ -1657,6 +1672,8 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
                     it["_photo_url"] = image_map[path]
                 if not it.get("description") and path in desc_map:
                     it["description"] = desc_map[path]
+                if not it.get("mileage") and path in mileage_map:
+                    it["mileage"] = mileage_map[path]
 
             # Если _parse_avito_html не нашёл объявлений — строим их из regex-карт
             if not batch and (price_map or image_map or title_map):
