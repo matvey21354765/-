@@ -217,8 +217,9 @@ def in_price_range(item: dict, price_min: int, price_max: int) -> bool:
     if p:
         # Цена известна — строго проверяем диапазон
         return price_min <= p <= price_max
-    # Цена неизвестна — доверяем только Авито с серверным ценовым фильтром
-    return bool(item.get("_avito_price_filtered"))
+    # Цена неизвестна: для Авито показываем (доверяем поиску Авито)
+    # Для других площадок — тоже показываем, если цена неизвестна
+    return item.get("source") in ("avito", "drom", "autoru", "kolesa", "bibika") or bool(item.get("_avito_price_filtered"))
 
 
 def hot_score(item: dict) -> float:
@@ -1501,25 +1502,28 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
                 seg_end = url_matches[i + 1].start() if i < len(url_matches) - 1 else min(len(text), m.end() + 5000)
                 seg = text[seg_start:seg_end]
 
-                # Цена — ищем priceDetailed.value или valueText
+                # Цена — в порядке надёжности
                 if url_p not in price_map:
-                    pm = re.search(r'"priceDetailed"[^}]{0,300}"value"\s*:\s*(\d{5,9})', seg)
-                    if not pm:
-                        pm = re.search(r'"valueText"\s*:\s*"([0-9][^"]{1,20}₽[^"]{0,10})"', seg)
-                        if pm:
-                            digits = re.sub(r"[^\d]", "", pm.group(1))
-                            if digits and 10_000 < int(digits) < 99_000_000:
-                                price_map[url_p] = int(digits)
-                        else:
-                            pm2 = re.search(r'"value"\s*:\s*(\d{5,9})', seg)
-                            if pm2:
-                                val = int(pm2.group(1))
-                                if 10_000 < val < 99_000_000:
-                                    price_map[url_p] = val
-                    else:
-                        val = int(pm.group(1))
-                        if 10_000 < val < 99_000_000:
-                            price_map[url_p] = val
+                    # 1. valueText — "60 000 ₽" — самый надёжный вариант
+                    vt = re.search(r'"valueText"\s*:\s*"([\d][^"]{0,25})"', seg)
+                    if vt:
+                        digits = re.sub(r"[^\d]", "", vt.group(1))
+                        if digits and 10_000 < int(digits) < 99_000_000:
+                            price_map[url_p] = int(digits)
+                    # 2. priceDetailed.value (любое число 5+ цифр)
+                    if url_p not in price_map:
+                        pd_m = re.search(r'"priceDetailed"\s*:\s*\{[^{]{0,500}"value"\s*:\s*(\d{5,9})', seg)
+                        if pd_m:
+                            val = int(pd_m.group(1))
+                            if 10_000 < val < 99_000_000:
+                                price_map[url_p] = val
+                    # 3. Любой "value": NNNNN где N — 5+ цифр (цена)
+                    if url_p not in price_map:
+                        for vm in re.finditer(r'"value"\s*:\s*(\d{5,9})', seg):
+                            val = int(vm.group(1))
+                            if 10_000 < val < 99_000_000:
+                                price_map[url_p] = val
+                                break
 
                 # Фото — ищем img.avito.st в сегменте
                 if url_p not in image_map:
