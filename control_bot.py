@@ -998,6 +998,12 @@ def _avito_price_from_item(it: dict) -> tuple[str, int]:
         if isinstance(info, (int, float)) and 10_000 < info < 99_000_000:
             return f"{int(info):,} ₽".replace(",", " "), int(info)
         if isinstance(info, dict):
+            # Сначала ищем valueText — самый надёжный источник цены
+            vt = info.get("valueText") or info.get("text") or ""
+            if vt and isinstance(vt, str):
+                digits = re.sub(r"[^\d]", "", vt)
+                if digits and 10_000 < int(digits) < 99_000_000:
+                    return vt, int(digits)
             r_str, r_int = _find_price_in_obj(info)
             if r_int:
                 return r_str, r_int
@@ -1495,6 +1501,20 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
             else:
                 print(f"  [Авито] стр.{p}: {len(text):,}б")
             batch = _parse_avito_html(text, slug, today)
+
+            # Если price-filtered URL вернул страницу но 0 items (CAPTCHA/пустая) — пробуем fallback
+            if not batch and not from_fallback:
+                fallback_url = f"https://www.avito.ru/{slug}/avtomobili" + (f"?p={p}" if p > 1 else "")
+                text2 = _try_fetch(fallback_url)
+                if text2:
+                    batch2 = _parse_avito_html(text2, slug, today)
+                    if batch2:
+                        text = text2
+                        batch = batch2
+                        from_fallback = True
+                        url_has_price_filter = False
+                        print(f"  [Авито] стр.{p}: fallback дал {len(batch)} объявлений")
+
             # Помечаем: пришли ли из URL с ценовым фильтром Авито
             for it in batch:
                 it["_avito_price_filtered"] = url_has_price_filter and not from_fallback
@@ -1521,29 +1541,41 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
                 seg_end = slug_matches[i + 1].start() if i < len(slug_matches) - 1 else min(len(text), m.end() + 6000)
                 seg = text[seg_start:seg_end]
 
-                # Цена — только надёжные источники
+                # Цена — ищем несколькими методами
                 if url_p not in price_map:
-                    # 1. valueText — "60 000 ₽" или "60 000 ₽" — содержит символ рубля
+                    # 1. valueText с символом рубля — самый надёжный
                     vt = re.search(r'"valueText"\s*:\s*"([\d][\d\s.,]{1,15}(?:₽|руб|\\u20bd))"', seg)
-                    if not vt:
-                        # Fallback: любой valueText рядом с priceDetailed
-                        pd_pos = seg.find('"priceDetailed"')
-                        if pd_pos >= 0:
-                            vt = re.search(r'"valueText"\s*:\s*"([\d][\d\s.,]{1,20})"', seg[pd_pos:pd_pos+500])
                     if vt:
                         digits = re.sub(r"[^\d]", "", vt.group(1))
                         if digits and 10_000 < int(digits) < 99_000_000:
                             price_map[url_p] = int(digits)
-                    # 2. priceDetailed объект — value строго внутри этого объекта
+                    # 2. priceDetailed → valueText (любой формат)
                     if url_p not in price_map:
-                        pd_start = seg.find('"priceDetailed"')
-                        if pd_start >= 0:
-                            pd_chunk = seg[pd_start:pd_start + 300]
+                        pd_pos = seg.find('"priceDetailed"')
+                        if pd_pos >= 0:
+                            pd_chunk = seg[pd_pos:pd_pos + 500]
+                            vt2 = re.search(r'"valueText"\s*:\s*"([\d][\d\s.,]{1,20})"', pd_chunk)
+                            if vt2:
+                                digits = re.sub(r"[^\d]", "", vt2.group(1))
+                                if digits and 10_000 < int(digits) < 99_000_000:
+                                    price_map[url_p] = int(digits)
+                    # 3. priceDetailed → value (число строго в priceDetailed блоке)
+                    if url_p not in price_map:
+                        pd_pos = seg.find('"priceDetailed"')
+                        if pd_pos >= 0:
+                            pd_chunk = seg[pd_pos:pd_pos + 300]
                             pd_m = re.search(r'"value"\s*:\s*(\d{4,9})', pd_chunk)
                             if pd_m:
                                 val = int(pd_m.group(1))
                                 if 10_000 < val < 99_000_000:
                                     price_map[url_p] = val
+                    # 4. "price":NNNNN — прямое число-цена в сегменте
+                    if url_p not in price_map:
+                        pm4 = re.search(r'"price"\s*:\s*(\d{5,8})\b', seg)
+                        if pm4:
+                            val = int(pm4.group(1))
+                            if 10_000 < val < 99_000_000:
+                                price_map[url_p] = val
 
                 # Фото — ищем img.avito.st в сегменте (изображения идут ДО urlPath в JSON)
                 if url_p not in image_map:
