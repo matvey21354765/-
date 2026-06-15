@@ -2571,20 +2571,28 @@ async def do_search_for_user(uid: int, reply_to):
         and i["url"] not in skipped
     ]
     suitable = rank_by_market_price(suitable)
-    # Сортировка: сначала самые выгодные (максимальная скидка от рынка),
-    # потом по горячим ключевым словам, потом по цене
     suitable.sort(key=lambda x: (
-        -x.get("_savings_pct", 0),       # скидка от рынка (больше = лучше)
-        -x.get("_hot_score", 0),          # срочность/горячесть
-        x.get("_price_int", 999_999_999)  # цена (дешевле = лучше)
+        -x.get("_savings_pct", 0),
+        -x.get("_hot_score", 0),
+        x.get("_price_int", 999_999_999)
     ))
 
     if not suitable:
+        dealer_c = sum(1 for i in items if is_dealer(i))
+        price_filtered_c = sum(1 for i in items if not is_dealer(i) and not in_price_range(i, pmin, pmax))
+        no_price_c = sum(1 for i in items if not is_dealer(i) and not i.get("_price_int") and not i.get("_avito_price_filtered"))
+        wrong_price_c = sum(1 for i in items if not is_dealer(i) and i.get("_price_int", 0) > pmax)
+        sample_prices = [i.get("_price_int", 0) for i in items[:5] if not is_dealer(i)]
+        sample_flags = [i.get("_avito_price_filtered", False) for i in items[:5] if not is_dealer(i)]
         await reply_to.answer(
-            f"😔 Не нашёл частников в {region_name} по твоему бюджету.\n\n"
-            f"Попробуй расширить диапазон цен: /settings",
+            f"😔 Не нашёл в {region_name} ({pmin:,}–{pmax:,} ₽)\n\n"
+            f"📊 Debug: всего={len(items)}, дилеры={dealer_c}, вне бюджета={price_filtered_c}\n"
+            f"Без цены и фильтра={no_price_c}, цена>{pmax}={wrong_price_c}\n"
+            f"Цены первых 5: {sample_prices}\n"
+            f"price_filtered: {sample_flags}",
             reply_markup=MAIN_KEYBOARD,
         )
+        return
         return
 
     # Предзагружаем фото+описание для первых 10 объявлений заранее
