@@ -1483,56 +1483,71 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
             for it in batch:
                 it["_avito_price_filtered"] = url_has_price_filter and not from_fallback
 
-            # Строим карты: цена, фото, описание — из сырого текста страницы
+            # Строим карты: цена, фото, описание
+            # Ключ: для каждого urlPath берём диапазон между ПРЕДЫДУЩИМ и СЛЕДУЮЩИМ urlPath
+            # чтобы захватить данные которые идут ДО urlPath в JSON (например images)
             price_map: dict[str, int] = {}
             image_map: dict[str, str] = {}
             desc_map: dict[str, str] = {}
+            title_map: dict[str, str] = {}
 
-            for m in re.finditer(r'"urlPath"\s*:\s*"(/[^"]+)"', text):
+            url_matches = list(re.finditer(r'"urlPath"\s*:\s*"(/[^"]+)"', text))
+            for i, m in enumerate(url_matches):
                 url_p = m.group(1)
-                start = m.end()
-                chunk = text[start:start + 3000]
+                if not url_p.startswith(f"/{slug}/"):
+                    continue
+                # Берём диапазон от предыдущего urlPath до следующего
+                seg_start = url_matches[i - 1].end() if i > 0 else max(0, m.start() - 5000)
+                seg_end = url_matches[i + 1].start() if i < len(url_matches) - 1 else min(len(text), m.end() + 5000)
+                seg = text[seg_start:seg_end]
 
-                # Цена
+                # Цена — ищем priceDetailed.value или valueText
                 if url_p not in price_map:
-                    pm = re.search(r'"value"\s*:\s*(\d{4,9})', chunk)
-                    if pm:
+                    pm = re.search(r'"priceDetailed"[^}]{0,300}"value"\s*:\s*(\d{5,9})', seg)
+                    if not pm:
+                        pm = re.search(r'"valueText"\s*:\s*"([0-9][^"]{1,20}₽[^"]{0,10})"', seg)
+                        if pm:
+                            digits = re.sub(r"[^\d]", "", pm.group(1))
+                            if digits and 10_000 < int(digits) < 99_000_000:
+                                price_map[url_p] = int(digits)
+                        else:
+                            pm2 = re.search(r'"value"\s*:\s*(\d{5,9})', seg)
+                            if pm2:
+                                val = int(pm2.group(1))
+                                if 10_000 < val < 99_000_000:
+                                    price_map[url_p] = val
+                    else:
                         val = int(pm.group(1))
                         if 10_000 < val < 99_000_000:
                             price_map[url_p] = val
-                    if url_p not in price_map:
-                        pm2 = re.search(r'"valueText"\s*:\s*"([^"]+)"', chunk)
-                        if pm2:
-                            digits = re.sub(r"[^\d]", "", pm2.group(1))
-                            if digits and 10_000 < int(digits) < 99_000_000:
-                                price_map[url_p] = int(digits)
 
-                # Фото — ищем первый URL img.avito.st в чанке
+                # Фото — ищем img.avito.st в сегменте
                 if url_p not in image_map:
-                    img_m = re.search(
+                    for img_pat in [
                         r'"(?:864x648|1280x960|640x480|432x324|320x240)"\s*:\s*"((?:https:)?(?:\\?/){2}[0-9]+\.img\.avito\.st[^"\\]{10,}\.(?:jpg|jpeg|webp|png))"',
-                        chunk
-                    )
-                    if img_m:
-                        raw = img_m.group(1).replace("\\/", "/")
-                        image_map[url_p] = ("https:" + raw) if raw.startswith("//") else raw
-                    else:
-                        # Шире — любой avito CDN URL
-                        img_m2 = re.search(
-                            r'"((?:https:)?(?:\\?/){2}[0-9]+\.img\.avito\.st[^"\\]{10,}\.(?:jpg|jpeg|webp|png))"',
-                            chunk
-                        )
-                        if img_m2:
-                            raw = img_m2.group(1).replace("\\/", "/")
-                            image_map[url_p] = ("https:" + raw) if raw.startswith("//") else raw
+                        r'"((?:https:)?(?:\\?/){2}[0-9]+\.img\.avito\.st[^"\\]{10,}\.(?:jpg|jpeg|webp|png))"',
+                    ]:
+                        img_m = re.search(img_pat, seg)
+                        if img_m:
+                            raw = img_m.group(1).replace("\\/", "/")
+                            candidate = ("https:" + raw) if raw.startswith("//") else raw
+                            if not any(x in candidate.lower() for x in ("/stub", "placeholder", "noimage")):
+                                image_map[url_p] = candidate
+                                break
 
                 # Описание
                 if url_p not in desc_map:
-                    dm = re.search(r'"description"\s*:\s*"([^"]{25,})"', chunk)
+                    dm = re.search(r'"description"\s*:\s*"([^"]{30,})"', seg)
                     if dm:
                         d = dm.group(1).replace("\\n", " ").replace('\\"', '"').strip()
                         if len(d) > 20 and not d.startswith("http"):
                             desc_map[url_p] = d[:350]
+
+                # Заголовок (для fallback)
+                if url_p not in title_map:
+                    tm2 = re.search(r'"title"\s*:\s*"([^"]{5,120})"', seg)
+                    if tm2:
+                        title_map[url_p] = tm2.group(1).replace('\\"', '"')
 
             if price_map or image_map:
                 print(f"  [Авито] regex: цены={len(price_map)}, фото={len(image_map)}, описания={len(desc_map)}, items={len(batch)}")
@@ -1549,14 +1564,7 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
                     it["description"] = desc_map[path]
 
             # Если _parse_avito_html не нашёл объявлений — строим их из regex-карт
-            if not batch and (price_map or image_map):
-                title_map: dict[str, str] = {}
-                for m2 in re.finditer(r'"urlPath"\s*:\s*"(/[^"]+)"', text):
-                    url_p = m2.group(1)
-                    chunk2 = text[m2.end():m2.end() + 1000]
-                    tm = re.search(r'"title"\s*:\s*"([^"]{5,120})"', chunk2)
-                    if tm:
-                        title_map[url_p] = tm.group(1).replace('\\"', '"')
+            if not batch and (price_map or image_map or title_map):
                 for url_p, title in title_map.items():
                     if not url_p.startswith(f"/{slug}/"):
                         continue
