@@ -219,9 +219,8 @@ def in_price_range(item: dict, price_min: int, price_max: int) -> bool:
     # Цена неизвестна — доверяем если Авито сам фильтровал по URL
     if item.get("_avito_price_filtered"):
         return True
-    # Для Авито: если объявление прошло через scraper но цена не распознана —
-    # включаем его (цена будет уточнена при _ensure_photo)
-    if item.get("source") == "avito":
+    # Авито без цены: пропускаем на этом этапе, цена будет проверена после _ensure_photo
+    if item.get("source") == "avito" and not item.get("_no_price_skip"):
         return True
     return False
 
@@ -1559,17 +1558,23 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
                     if 10_000 < val < 99_000_000:
                         all_prices.append((pm.start(), val))
 
-                # Все фото — img.avito.st
+                # Все фото — img.avito.st (расширенный поиск без требования расширения)
                 all_images: list[tuple[int, str]] = []  # (позиция, url)
+                seen_imgs: set[str] = set()
                 for pat in [
-                    r'"(?:864x648|1280x960|640x480|432x324|320x240)"\s*:\s*"((?:https:)?(?:\\?/){2}[0-9]+\.img\.avito\.st[^"\\]{5,}\.(?:jpg|jpeg|webp|png))"',
-                    r'"((?:https:)?(?:\\?/){2}[0-9]+\.img\.avito\.st[^"\\]{5,}\.(?:jpg|jpeg|webp|png))"',
+                    r'"(?:864x648|1280x960|640x480|432x324|320x240)"\s*:\s*"((?:https:)?(?:\\?/){2}[0-9]+\.img\.avito\.st[^"\\]{5,})"',
+                    r'"((?:https:)?(?:\\?/){2}[0-9]+\.img\.avito\.st[^"\\]{5,})"',
+                    r'(https://[0-9]+\.img\.avito\.st[^"\'\\<\s]{5,})',
                 ]:
                     for im in re.finditer(pat, text):
                         raw = im.group(1).replace("\\/", "/")
                         url_img = ("https:" + raw) if raw.startswith("//") else raw
-                        if not any(x in url_img.lower() for x in ("/stub", "placeholder", "noimage")):
-                            all_images.append((im.start(), url_img))
+                        if any(x in url_img.lower() for x in ("/stub", "placeholder", "noimage")):
+                            continue
+                        if url_img in seen_imgs:
+                            continue
+                        seen_imgs.add(url_img)
+                        all_images.append((im.start(), url_img))
 
                 # Все описания
                 all_descs: list[tuple[int, str]] = []
@@ -2251,15 +2256,17 @@ async def _ensure_photo(item: dict) -> None:
                 pass
 
         if need_photo:
-            # 1. Парсим __NEXT_DATA__ JSON — рекурсивно ищем объекты с ключами размеров фото
+            # 1. Парсим __NEXT_DATA__ JSON — рекурсивно ищем любую avito.st строку
             if nd_json:
                 def _find_photo_url(obj, depth=0) -> str:
-                    if depth > 15 or not obj:
+                    if depth > 15 or obj is None:
                         return ""
                     if isinstance(obj, str):
-                        if "img.avito.st" in obj:
+                        if "img.avito.st" in obj and len(obj) > 10:
                             raw = obj.replace("\\/", "/")
-                            return ("https:" + raw) if raw.startswith("//") else raw
+                            url_c = ("https:" + raw) if raw.startswith("//") else raw
+                            if not any(x in url_c.lower() for x in ("/stub", "noimage", "placeholder")):
+                                return url_c
                         return ""
                     if isinstance(obj, list):
                         for el in obj:
@@ -2268,19 +2275,29 @@ async def _ensure_photo(item: dict) -> None:
                                 return r
                         return ""
                     if isinstance(obj, dict):
-                        for size in ("864x648", "1280x960", "640x480", "432x324", "320x240"):
-                            v = obj.get(size, "")
-                            if v and "avito" in str(v):
-                                raw = str(v).replace("\\/", "/")
-                                return ("https:" + raw) if raw.startswith("//") else raw
+                        # Сначала ищем по ключам размеров (все возможные форматы Авито)
+                        for size in ("1208x906", "864x648", "1280x960", "640x480",
+                                     "432x324", "320x240", "100x75", "originalSize"):
+                            v = obj.get(size)
+                            if isinstance(v, str) and "avito" in v:
+                                raw = v.replace("\\/", "/")
+                                url_c = ("https:" + raw) if raw.startswith("//") else raw
+                                if not any(x in url_c.lower() for x in ("/stub", "noimage")):
+                                    return url_c
+                        # Приоритетные ключи для обхода
                         for k in ("images", "photos", "gallery", "media", "image", "photo",
                                   "item", "initialData", "data", "props", "pageProps"):
                             if k in obj:
                                 r = _find_photo_url(obj[k], depth + 1)
                                 if r:
                                     return r
+                        # Полный обход всех значений (включая строки!)
                         for v in obj.values():
-                            if isinstance(v, (dict, list)):
+                            if isinstance(v, str):
+                                r = _find_photo_url(v, depth + 1)
+                                if r:
+                                    return r
+                            elif isinstance(v, (dict, list)):
                                 r = _find_photo_url(v, depth + 1)
                                 if r:
                                     return r
@@ -2290,15 +2307,15 @@ async def _ensure_photo(item: dict) -> None:
             # 2. Широкий regex по тексту страницы (если JSON не дал результата)
             if not photo:
                 for pat in [
-                    r'"(?:864x648|1280x960|640x480|432x324|320x240)"\s*:\s*"((?:https:)?(?:\\?/){2}[0-9]+\.img\.avito\.st[^"\'\\]{5,}\.(?:jpg|jpeg|webp|png))"',
-                    r'(https://[0-9]+\.img\.avito\.st[^\s"\'<\\]{5,}\.(?:jpg|jpeg|webp|png))',
-                    r'((?:https:)?//[0-9]+\.img\.avito\.st[^\s"\'<\\]{5,}\.(?:jpg|jpeg|webp|png))',
+                    r'"(?:1208x906|864x648|1280x960|640x480|432x324|320x240)"\s*:\s*"((?:https:)?(?:\\?/){2}[0-9]+\.img\.avito\.st[^"\'\\]{5,})"',
+                    r'(https://[0-9]+\.img\.avito\.st[^\s"\'<\\]{5,})',
+                    r'"((?:https:)?//[0-9]+\.img\.avito\.st[^"\'\\]{5,})"',
                 ]:
                     m = re.search(pat, text)
                     if m:
                         raw = m.group(1).replace("\\/", "/")
                         candidate = ("https:" + raw) if raw.startswith("//") else raw
-                        if not any(x in candidate.lower() for x in ("/stub", "/no-photo", "/placeholder", "noimage", "no_photo")):
+                        if not any(x in candidate.lower() for x in ("/stub", "/no-photo", "/placeholder", "noimage")):
                             photo = candidate
                             break
 
@@ -2530,15 +2547,17 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                 pass
     await asyncio.gather(*[_prefetch(it) for it in batch])
     # После загрузки индивидуальных страниц — финальная проверка цены
-    # (отфильтровываем объявления которые оказались вне бюджета)
     s = load_settings(uid)
     _pmin = s.get("price_min", 0)
     _pmax = s.get("price_max", 99_000_000)
     filtered_batch = []
     for it in batch:
         p = it.get("_price_int") or parse_price(it.get("price", ""))
-        if p and not (_pmin <= p <= _pmax):
-            continue  # цена известна и вне бюджета — пропускаем
+        if not p:
+            # Цена так и не найдена — пропускаем (чтобы не показывать новые дорогие авто)
+            continue
+        if not (_pmin <= p <= _pmax):
+            continue  # вне бюджета
         filtered_batch.append(it)
     batch = filtered_batch
     # Пересчитываем рыночное сравнение после загрузки цен
