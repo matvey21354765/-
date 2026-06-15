@@ -216,8 +216,14 @@ def in_price_range(item: dict, price_min: int, price_max: int) -> bool:
     p = item.get("_price_int") or parse_price(item.get("price", ""))
     if p:
         return price_min <= p <= price_max
-    # Цена неизвестна — доверяем только если Авито сам фильтровал по URL
-    return bool(item.get("_avito_price_filtered"))
+    # Цена неизвестна — доверяем если Авито сам фильтровал по URL
+    if item.get("_avito_price_filtered"):
+        return True
+    # Для Авито: если объявление прошло через scraper но цена не распознана —
+    # включаем его (цена будет уточнена при _ensure_photo)
+    if item.get("source") == "avito":
+        return True
+    return False
 
 
 def hot_score(item: dict) -> float:
@@ -1519,94 +1525,113 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
             for it in batch:
                 it["_avito_price_filtered"] = url_has_price_filter and not from_fallback
 
-            # Строим карты: цена, фото, описание
-            # Ключ: для каждого urlPath берём диапазон между ПРЕДЫДУЩИМ и СЛЕДУЮЩИМ urlPath
-            # чтобы захватить данные которые идут ДО urlPath в JSON (например images)
+            # Строим карты: цена, фото, описание — глобальный скан всей страницы
             price_map: dict[str, int] = {}
             image_map: dict[str, str] = {}
             desc_map: dict[str, str] = {}
             title_map: dict[str, str] = {}
 
-            # urlPath объявлений этого города: /{slug}/категория/название-NNNNNNN
-            # Разрешаем точки в названии (напр. 0.7 для объёма двигателя)
+            # Все urlPath объявлений этого города
             listing_pat = re.compile(
                 r'"urlPath"\s*:\s*"(/' + re.escape(slug) + r'/[a-z0-9_./-]+-\d{5,})"'
             )
             slug_matches = list(listing_pat.finditer(text))
             print(f"  [Авито] найдено listing urlPath: {len(slug_matches)}")
-            for i, m in enumerate(slug_matches):
-                url_p = m.group(1)
-                # Сегмент: от конца предыдущего совпадения до начала следующего
-                seg_start = slug_matches[i - 1].end() if i > 0 else max(0, m.start() - 6000)
-                seg_end = slug_matches[i + 1].start() if i < len(slug_matches) - 1 else min(len(text), m.end() + 6000)
-                seg = text[seg_start:seg_end]
 
-                # Цена — ищем несколькими методами
-                if url_p not in price_map:
-                    # 1. valueText с символом рубля — самый надёжный
-                    vt = re.search(r'"valueText"\s*:\s*"([\d][\d\s.,]{1,15}(?:₽|руб|\\u20bd))"', seg)
-                    if vt:
-                        digits = re.sub(r"[^\d]", "", vt.group(1))
-                        if digits and 10_000 < int(digits) < 99_000_000:
-                            price_map[url_p] = int(digits)
-                    # 2. priceDetailed → valueText (любой формат)
-                    if url_p not in price_map:
-                        pd_pos = seg.find('"priceDetailed"')
-                        if pd_pos >= 0:
-                            pd_chunk = seg[pd_pos:pd_pos + 500]
-                            vt2 = re.search(r'"valueText"\s*:\s*"([\d][\d\s.,]{1,20})"', pd_chunk)
-                            if vt2:
-                                digits = re.sub(r"[^\d]", "", vt2.group(1))
-                                if digits and 10_000 < int(digits) < 99_000_000:
-                                    price_map[url_p] = int(digits)
-                    # 3. priceDetailed → value (число строго в priceDetailed блоке)
-                    if url_p not in price_map:
-                        pd_pos = seg.find('"priceDetailed"')
-                        if pd_pos >= 0:
-                            pd_chunk = seg[pd_pos:pd_pos + 300]
-                            pd_m = re.search(r'"value"\s*:\s*(\d{4,9})', pd_chunk)
-                            if pd_m:
-                                val = int(pd_m.group(1))
-                                if 10_000 < val < 99_000_000:
-                                    price_map[url_p] = val
-                    # 4. "price":NNNNN — прямое число-цена в сегменте
-                    if url_p not in price_map:
-                        pm4 = re.search(r'"price"\s*:\s*(\d{5,8})\b', seg)
-                        if pm4:
-                            val = int(pm4.group(1))
-                            if 10_000 < val < 99_000_000:
-                                price_map[url_p] = val
+            if slug_matches:
+                # Глобальный скан: находим ВСЕ цены, фото, описания, заголовки
+                # и привязываем к ближайшему urlPath по позиции в тексте
 
-                # Фото — ищем img.avito.st в сегменте (изображения идут ДО urlPath в JSON)
-                if url_p not in image_map:
-                    for img_pat in [
-                        r'"(?:864x648|1280x960|640x480|432x324|320x240)"\s*:\s*"((?:https:)?(?:\\?/){2}[0-9]+\.img\.avito\.st[^"\\]{10,}\.(?:jpg|jpeg|webp|png))"',
-                        r'"((?:https:)?(?:\\?/){2}[0-9]+\.img\.avito\.st[^"\\]{10,}\.(?:jpg|jpeg|webp|png))"',
-                        r'(https://[0-9]+\.img\.avito\.st[^"\\<\s]{10,}\.(?:jpg|jpeg|webp|png))',
-                    ]:
-                        img_m = re.search(img_pat, seg)
-                        if img_m:
-                            raw = img_m.group(1).replace("\\/", "/")
-                            candidate = ("https:" + raw) if raw.startswith("//") else raw
-                            if not any(x in candidate.lower() for x in ("/stub", "placeholder", "noimage")):
-                                image_map[url_p] = candidate
-                                break
+                # Все цены — valueText с числом
+                all_prices: list[tuple[int, int]] = []  # (позиция, цена)
+                for pm in re.finditer(r'"valueText"\s*:\s*"([\d][\d\s.,]{1,18}(?:₽|руб|\\u20bd|р\.)?)"', text):
+                    d = re.sub(r"[^\d]", "", pm.group(1))
+                    if d and 10_000 < int(d) < 99_000_000:
+                        all_prices.append((pm.start(), int(d)))
+                # Fallback: priceDetailed → value (число)
+                for pm in re.finditer(r'"priceDetailed"\s*:\s*\{[^}]{0,200}"value"\s*:\s*(\d{4,9})', text):
+                    val = int(pm.group(1))
+                    if 10_000 < val < 99_000_000:
+                        all_prices.append((pm.start(), val))
+                # Прямое "price":NNN (только если нет valueText рядом)
+                for pm in re.finditer(r'"price"\s*:\s*(\d{5,8})\b', text):
+                    val = int(pm.group(1))
+                    if 10_000 < val < 99_000_000:
+                        all_prices.append((pm.start(), val))
 
-                # Описание
-                if url_p not in desc_map:
-                    dm = re.search(r'"description"\s*:\s*"([^"]{30,})"', seg)
-                    if dm:
-                        d = dm.group(1).replace("\\n", " ").replace('\\"', '"').strip()
-                        if len(d) > 20 and not d.startswith("http"):
-                            desc_map[url_p] = d[:350]
+                # Все фото — img.avito.st
+                all_images: list[tuple[int, str]] = []  # (позиция, url)
+                for pat in [
+                    r'"(?:864x648|1280x960|640x480|432x324|320x240)"\s*:\s*"((?:https:)?(?:\\?/){2}[0-9]+\.img\.avito\.st[^"\\]{5,}\.(?:jpg|jpeg|webp|png))"',
+                    r'"((?:https:)?(?:\\?/){2}[0-9]+\.img\.avito\.st[^"\\]{5,}\.(?:jpg|jpeg|webp|png))"',
+                ]:
+                    for im in re.finditer(pat, text):
+                        raw = im.group(1).replace("\\/", "/")
+                        url_img = ("https:" + raw) if raw.startswith("//") else raw
+                        if not any(x in url_img.lower() for x in ("/stub", "placeholder", "noimage")):
+                            all_images.append((im.start(), url_img))
 
-                # Заголовок (для fallback построения объявлений)
-                    tm2 = re.search(r'"title"\s*:\s*"([^"]{5,120})"', seg)
-                    if tm2:
-                        title_map[url_p] = tm2.group(1).replace('\\"', '"')
+                # Все описания
+                all_descs: list[tuple[int, str]] = []
+                for dm in re.finditer(r'"description"\s*:\s*"([^"]{30,800})"', text):
+                    d = dm.group(1).replace("\\n", " ").replace('\\"', '"').strip()
+                    if len(d) > 20 and not d.startswith("http") and "avito" not in d[:20]:
+                        all_descs.append((dm.start(), d[:400]))
 
-            if price_map or image_map:
-                print(f"  [Авито] regex: цены={len(price_map)}, фото={len(image_map)}, описания={len(desc_map)}, items={len(batch)}")
+                # Все заголовки
+                all_titles: list[tuple[int, str]] = []
+                for tm in re.finditer(r'"title"\s*:\s*"([^"]{5,120})"', text):
+                    t = tm.group(1).replace('\\"', '"')
+                    if not t.startswith("http") and len(t) > 3:
+                        all_titles.append((tm.start(), t))
+
+                # Привязка к urlPath: для каждого urlPath ищем ближайший элемент
+                positions = [m.start() for m in slug_matches]
+                paths = [m.group(1) for m in slug_matches]
+
+                def _nearest_path(pos: int, max_dist: int = 8000) -> str | None:
+                    """Ближайший urlPath к данной позиции в тексте."""
+                    best = None
+                    best_d = max_dist
+                    for i, p_pos in enumerate(positions):
+                        d = abs(p_pos - pos)
+                        if d < best_d:
+                            best_d = d
+                            best = paths[i]
+                    return best
+
+                for pos, price in all_prices:
+                    path = _nearest_path(pos, max_dist=6000)
+                    if path and path not in price_map:
+                        price_map[path] = price
+
+                # Фото: привязываем к ближайшему urlPath, но фото идёт ДО urlPath
+                # Поэтому ищем ближайший urlPath ПОСЛЕ позиции фото
+                for pos, url_img in all_images:
+                    best = None
+                    best_d = 8000
+                    for i, p_pos in enumerate(positions):
+                        d = p_pos - pos  # urlPath должен быть ПОСЛЕ фото (d > 0)
+                        if 0 < d < best_d:
+                            best_d = d
+                            best = paths[i]
+                    if not best:  # fallback — просто ближайший
+                        best = _nearest_path(pos, max_dist=8000)
+                    if best and not image_map.get(best):
+                        image_map[best] = url_img
+
+                for pos, desc in all_descs:
+                    path = _nearest_path(pos, max_dist=6000)
+                    if path and path not in desc_map:
+                        desc_map[path] = desc
+
+                for pos, title in all_titles:
+                    path = _nearest_path(pos, max_dist=5000)
+                    if path and path not in title_map:
+                        title_map[path] = title
+
+            print(f"  [Авито] глоб.скан: цены={len(price_map)}, фото={len(image_map)}, описания={len(desc_map)}")
+
 
             for it in batch:
                 path = it["url"].replace("https://www.avito.ru", "")
@@ -2504,6 +2529,18 @@ async def send_batch(chat_id: int, uid: int, offset: int):
             except Exception:
                 pass
     await asyncio.gather(*[_prefetch(it) for it in batch])
+    # После загрузки индивидуальных страниц — финальная проверка цены
+    # (отфильтровываем объявления которые оказались вне бюджета)
+    s = load_settings(uid)
+    _pmin = s.get("price_min", 0)
+    _pmax = s.get("price_max", 99_000_000)
+    filtered_batch = []
+    for it in batch:
+        p = it.get("_price_int") or parse_price(it.get("price", ""))
+        if p and not (_pmin <= p <= _pmax):
+            continue  # цена известна и вне бюджета — пропускаем
+        filtered_batch.append(it)
+    batch = filtered_batch
     # Пересчитываем рыночное сравнение после загрузки цен
     batch = rank_by_market_price(batch)
     for item in batch:
@@ -2554,7 +2591,7 @@ async def do_search_for_user(uid: int, reply_to):
     scraper_map = {
         "drom":   lambda: scrape_drom(region, pages=8, price_min=pmin, price_max=pmax),
         "autoru": lambda: scrape_autoru(region, pages=4, price_min=pmin, price_max=pmax),
-        "avito":  lambda: scrape_avito(region, pages=5, price_min=pmin, price_max=pmax),
+        "avito":  lambda: scrape_avito(region, pages=8, price_min=pmin, price_max=pmax),
     }
     tasks = [loop.run_in_executor(None, scraper_map[src]) for src in enabled_sources if src in scraper_map]
     results = await asyncio.gather(*tasks)
