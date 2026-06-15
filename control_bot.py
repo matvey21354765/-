@@ -1486,8 +1486,16 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
             "Referer": "https://www.avito.ru/",
         }
 
+        def _page_has_listings(t: str) -> bool:
+            """Проверяем что страница содержит реальные объявления, а не заглушку."""
+            return (
+                '"urlPath"' in t or
+                'data-marker="item"' in t or
+                ('"items"' in t and f'"/{slug}/' in t)
+            )
+
         def _try_fetch(fetch_url: str) -> str | None:
-            """Пробуем: ScraperAPI → прямой запрос."""
+            """Пробуем: ScraperAPI → прямой запрос. Принимаем только страницы с объявлениями."""
             # 1. ScraperAPI
             if SCRAPER_API_KEY:
                 try:
@@ -1496,14 +1504,14 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
                         "url": fetch_url,
                         "country_code": "ru",
                     }, timeout=35)
-                    if r.status_code == 200 and ('"urlPath"' in r.text or 'data-marker="item"' in r.text or '__NEXT_DATA__' in r.text):
+                    if r.status_code == 200 and _page_has_listings(r.text):
                         return r.text
                 except Exception:
                     pass
-            # 2. Прямой запрос (работает если нет блокировки)
+            # 2. Прямой запрос
             try:
                 r2 = _req.get(fetch_url, timeout=12, headers=_HEADERS)
-                if r2.status_code == 200 and ('"urlPath"' in r2.text or 'data-marker="item"' in r2.text or '__NEXT_DATA__' in r2.text):
+                if r2.status_code == 200 and _page_has_listings(r2.text):
                     return r2.text
             except Exception:
                 pass
@@ -2562,18 +2570,17 @@ async def send_batch(chat_id: int, uid: int, offset: int):
             except Exception:
                 pass
     await asyncio.gather(*[_prefetch(it) for it in batch])
-    # После загрузки индивидуальных страниц — финальная проверка цены
+    # После загрузки — финальная проверка цены
     s = load_settings(uid)
     _pmin = s.get("price_min", 0)
     _pmax = s.get("price_max", 99_000_000)
     filtered_batch = []
     for it in batch:
         p = it.get("_price_int") or parse_price(it.get("price", ""))
-        if not p:
-            # Цена так и не найдена — пропускаем (чтобы не показывать новые дорогие авто)
+        # Если цена найдена и вне бюджета — пропускаем
+        if p and not (_pmin <= p <= _pmax):
             continue
-        if not (_pmin <= p <= _pmax):
-            continue  # вне бюджета
+        # Если цена так и не найдена — показываем с пометкой (не роняем объявление)
         filtered_batch.append(it)
     batch = filtered_batch
     # Пересчитываем рыночное сравнение после загрузки цен
@@ -2695,14 +2702,10 @@ async def do_search_for_user(uid: int, reply_to):
         sample_prices = [i.get("_price_int", 0) for i in items[:5] if not is_dealer(i)]
         sample_flags = [i.get("_avito_price_filtered", False) for i in items[:5] if not is_dealer(i)]
         await reply_to.answer(
-            f"😔 Не нашёл в {region_name} ({pmin:,}–{pmax:,} ₽)\n\n"
-            f"📊 Debug: всего={len(items)}, дилеры={dealer_c}, вне бюджета={price_filtered_c}\n"
-            f"Без цены и фильтра={no_price_c}, цена>{pmax}={wrong_price_c}\n"
-            f"Цены первых 5: {sample_prices}\n"
-            f"price_filtered: {sample_flags}",
+            f"😔 Не нашёл частников в {region_name} по твоему бюджету.\n\n"
+            f"Попробуй расширить диапазон цен: /settings",
             reply_markup=MAIN_KEYBOARD,
         )
-        return
         return
 
     # Предзагружаем фото+описание для первых 10 объявлений заранее
