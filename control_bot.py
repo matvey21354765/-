@@ -1465,14 +1465,14 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
                         "url": fetch_url,
                         "country_code": "ru",
                     }, timeout=35)
-                    if r.status_code == 200 and ('"urlPath"' in r.text or 'data-marker="item"' in r.text):
+                    if r.status_code == 200 and ('"urlPath"' in r.text or 'data-marker="item"' in r.text or '__NEXT_DATA__' in r.text):
                         return r.text
                 except Exception:
                     pass
             # 2. Прямой запрос (работает если нет блокировки)
             try:
                 r2 = _req.get(fetch_url, timeout=12, headers=_HEADERS)
-                if r2.status_code == 200 and ('"urlPath"' in r2.text or 'data-marker="item"' in r2.text):
+                if r2.status_code == 200 and ('"urlPath"' in r2.text or 'data-marker="item"' in r2.text or '__NEXT_DATA__' in r2.text):
                     return r2.text
             except Exception:
                 pass
@@ -1523,8 +1523,13 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
 
                 # Цена — только надёжные источники
                 if url_p not in price_map:
-                    # 1. valueText — "60 000 ₽" — содержит символ рубля, однозначно цена
-                    vt = re.search(r'"valueText"\s*:\s*"([\d][\d\s.,]{1,15}(?:₽|руб))"', seg)
+                    # 1. valueText — "60 000 ₽" или "60 000 ₽" — содержит символ рубля
+                    vt = re.search(r'"valueText"\s*:\s*"([\d][\d\s.,]{1,15}(?:₽|руб|\\u20bd))"', seg)
+                    if not vt:
+                        # Fallback: любой valueText рядом с priceDetailed
+                        pd_pos = seg.find('"priceDetailed"')
+                        if pd_pos >= 0:
+                            vt = re.search(r'"valueText"\s*:\s*"([\d][\d\s.,]{1,20})"', seg[pd_pos:pd_pos+500])
                     if vt:
                         digits = re.sub(r"[^\d]", "", vt.group(1))
                         if digits and 10_000 < int(digits) < 99_000_000:
@@ -1540,11 +1545,12 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
                                 if 10_000 < val < 99_000_000:
                                     price_map[url_p] = val
 
-                # Фото — ищем img.avito.st в сегменте
+                # Фото — ищем img.avito.st в сегменте (изображения идут ДО urlPath в JSON)
                 if url_p not in image_map:
                     for img_pat in [
                         r'"(?:864x648|1280x960|640x480|432x324|320x240)"\s*:\s*"((?:https:)?(?:\\?/){2}[0-9]+\.img\.avito\.st[^"\\]{10,}\.(?:jpg|jpeg|webp|png))"',
                         r'"((?:https:)?(?:\\?/){2}[0-9]+\.img\.avito\.st[^"\\]{10,}\.(?:jpg|jpeg|webp|png))"',
+                        r'(https://[0-9]+\.img\.avito\.st[^"\\<\s]{10,}\.(?:jpg|jpeg|webp|png))',
                     ]:
                         img_m = re.search(img_pat, seg)
                         if img_m:
