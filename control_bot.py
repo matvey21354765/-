@@ -1507,11 +1507,13 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
             desc_map: dict[str, str] = {}
             title_map: dict[str, str] = {}
 
-            # Только urlPath-и объявлений этого города (формат /{slug}/avtomobili/...)
+            # urlPath объявлений этого города: /{slug}/категория/название-NNNNNNN
+            # Разрешаем точки в названии (напр. 0.7 для объёма двигателя)
             listing_pat = re.compile(
-                r'"urlPath"\s*:\s*"(/' + re.escape(slug) + r'/[a-z0-9_/-]+-\d{5,})"'
+                r'"urlPath"\s*:\s*"(/' + re.escape(slug) + r'/[a-z0-9_./-]+-\d{5,})"'
             )
             slug_matches = list(listing_pat.finditer(text))
+            print(f"  [Авито] найдено listing urlPath: {len(slug_matches)}")
             for i, m in enumerate(slug_matches):
                 url_p = m.group(1)
                 # Сегмент: от конца предыдущего совпадения до начала следующего
@@ -1519,28 +1521,24 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
                 seg_end = slug_matches[i + 1].start() if i < len(slug_matches) - 1 else min(len(text), m.end() + 6000)
                 seg = text[seg_start:seg_end]
 
-                # Цена — в порядке надёжности
+                # Цена — только надёжные источники
                 if url_p not in price_map:
-                    # 1. valueText — "60 000 ₽" — самый надёжный вариант
-                    vt = re.search(r'"valueText"\s*:\s*"([\d][^"]{0,25})"', seg)
+                    # 1. valueText — "60 000 ₽" — содержит символ рубля, однозначно цена
+                    vt = re.search(r'"valueText"\s*:\s*"([\d][\d\s.,]{1,15}(?:₽|руб))"', seg)
                     if vt:
                         digits = re.sub(r"[^\d]", "", vt.group(1))
                         if digits and 10_000 < int(digits) < 99_000_000:
                             price_map[url_p] = int(digits)
-                    # 2. priceDetailed.value (любое число 5+ цифр)
+                    # 2. priceDetailed объект — value строго внутри этого объекта
                     if url_p not in price_map:
-                        pd_m = re.search(r'"priceDetailed"\s*:\s*\{[^{]{0,500}"value"\s*:\s*(\d{5,9})', seg)
-                        if pd_m:
-                            val = int(pd_m.group(1))
-                            if 10_000 < val < 99_000_000:
-                                price_map[url_p] = val
-                    # 3. Любой "value": NNNNN где N — 5+ цифр (цена)
-                    if url_p not in price_map:
-                        for vm in re.finditer(r'"value"\s*:\s*(\d{5,9})', seg):
-                            val = int(vm.group(1))
-                            if 10_000 < val < 99_000_000:
-                                price_map[url_p] = val
-                                break
+                        pd_start = seg.find('"priceDetailed"')
+                        if pd_start >= 0:
+                            pd_chunk = seg[pd_start:pd_start + 300]
+                            pd_m = re.search(r'"value"\s*:\s*(\d{4,9})', pd_chunk)
+                            if pd_m:
+                                val = int(pd_m.group(1))
+                                if 10_000 < val < 99_000_000:
+                                    price_map[url_p] = val
 
                 # Фото — ищем img.avito.st в сегменте
                 if url_p not in image_map:
@@ -1564,8 +1562,7 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
                         if len(d) > 20 and not d.startswith("http"):
                             desc_map[url_p] = d[:350]
 
-                # Заголовок (для fallback)
-                if url_p not in title_map:
+                # Заголовок (для fallback построения объявлений)
                     tm2 = re.search(r'"title"\s*:\s*"([^"]{5,120})"', seg)
                     if tm2:
                         title_map[url_p] = tm2.group(1).replace('\\"', '"')
