@@ -1102,31 +1102,31 @@ def _avito_find_items_in_json(obj, depth=0) -> list:
     if isinstance(obj, list):
         if len(obj) >= 1 and isinstance(obj[0], dict):
             sample = obj[0]
-            # Достаточно: есть urlPath или url + хоть какой-то ценовой или id ключ
-            has_url = bool({"urlPath", "url"} & sample.keys())
-            has_price_or_id = bool({"price", "priceDetailed", "priceInfo", "id", "itemId"} & sample.keys())
-            has_title = bool({"title", "name"} & sample.keys())
-            if has_url and (has_title or has_price_or_id):
+            # urlPath (начинается с /) — самый надёжный признак объявления Авито
+            url_path = sample.get("urlPath", "")
+            if isinstance(url_path, str) and url_path.startswith("/"):
                 return obj
+            # Альтернатива: url + priceDetailed/images (точные признаки листинга)
+            if "url" in sample and any(k in sample for k in ("priceDetailed", "images", "gallery")):
+                url_val = sample.get("url", "")
+                if isinstance(url_val, str) and ("avito.ru" in url_val or url_val.startswith("/")):
+                    return obj
         for x in obj:
             r = _avito_find_items_in_json(x, depth + 1)
             if r:
                 return r
         return []
     if isinstance(obj, dict):
-        # Проверяем приоритетные ключи
-        for key in ("items", "catalog", "listing", "offers", "data", "list", "ads", "cars",
-                    "mainPage", "search", "results", "snippets", "adverts"):
+        for key in ("items", "catalog", "listing", "offers", "ads", "cars",
+                    "search", "results", "snippets", "adverts", "data", "list"):
             val = obj.get(key)
-            if isinstance(val, list) and len(val) >= 1:
-                sample = val[0] if val else {}
-                if isinstance(sample, dict) and (
-                    {"urlPath", "url"} & sample.keys() or
-                    {"title", "name", "id"} & sample.keys()
-                ):
-                    # Убеждаемся что это объявления, а не что-то другое
-                    if any(k in sample for k in ("urlPath", "priceDetailed", "price", "images")):
-                        return val
+            if isinstance(val, list) and len(val) >= 1 and isinstance(val[0], dict):
+                sample = val[0]
+                url_path = sample.get("urlPath", "")
+                if isinstance(url_path, str) and url_path.startswith("/"):
+                    return val
+                if any(k in sample for k in ("priceDetailed", "images", "gallery")):
+                    return val
         for v in obj.values():
             r = _avito_find_items_in_json(v, depth + 1)
             if r:
@@ -1534,8 +1534,8 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
                         if len(d) > 20 and not d.startswith("http"):
                             desc_map[url_p] = d[:350]
 
-            if price_map:
-                print(f"  [Авито] regex цены: {len(price_map)}, фото: {len(image_map)}, описания: {len(desc_map)}")
+            if price_map or image_map:
+                print(f"  [Авито] regex: цены={len(price_map)}, фото={len(image_map)}, описания={len(desc_map)}, items={len(batch)}")
 
             for it in batch:
                 path = it["url"].replace("https://www.avito.ru", "")
@@ -1547,6 +1547,36 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
                     it["_photo_url"] = image_map[path]
                 if not it.get("description") and path in desc_map:
                     it["description"] = desc_map[path]
+
+            # Если _parse_avito_html не нашёл объявлений — строим их из regex-карт
+            if not batch and (price_map or image_map):
+                title_map: dict[str, str] = {}
+                for m2 in re.finditer(r'"urlPath"\s*:\s*"(/[^"]+)"', text):
+                    url_p = m2.group(1)
+                    chunk2 = text[m2.end():m2.end() + 1000]
+                    tm = re.search(r'"title"\s*:\s*"([^"]{5,120})"', chunk2)
+                    if tm:
+                        title_map[url_p] = tm.group(1).replace('\\"', '"')
+                for url_p, title in title_map.items():
+                    if not url_p.startswith(f"/{slug}/"):
+                        continue
+                    item_url = "https://www.avito.ru" + url_p
+                    price_int = price_map.get(url_p, 0)
+                    price_str = f"{price_int:,} ₽".replace(",", " ") if price_int else ""
+                    item = {
+                        "source": "avito", "title": title,
+                        "price": price_str, "url": item_url,
+                        "date": str(today), "_photos": 0, "_days_on_site": 0,
+                        "description": desc_map.get(url_p, ""),
+                        "seller": "", "_photo_url": image_map.get(url_p, ""),
+                        "_price_int": price_int,
+                        "_avito_price_filtered": url_has_price_filter and not from_fallback,
+                    }
+                    item["_hot_score"] = hot_score(item)
+                    batch.append(item)
+                if batch:
+                    print(f"  [Авито] regex fallback: построено {len(batch)} объявлений")
+
             print(f"  [Авито] стр.{p}: {len(batch)} объявлений")
             return batch
         except Exception as e:
