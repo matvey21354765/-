@@ -224,13 +224,13 @@ def in_price_range(item: dict, price_min: int, price_max: int) -> bool:
 
 
 def hot_score(item: dict) -> float:
-    """Базовая оценка: срочность продажи + давность объявления."""
+    """Базовая оценка: срочность продажи + свежесть объявления (новые — выше)."""
     title = item.get("title", "") + " " + item.get("description", "")
     days = item.get("_days_on_site", 0)
     score = 0.0
     if HOT_WORDS.search(title):
         score += 20.0
-    score += min(days, 30) * 0.3
+    score += max(0, 14 - min(days, 14)) * 0.5
     return round(score, 2)
 
 
@@ -2609,7 +2609,6 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         await bot.send_message(chat_id, "✅ Объявления закончились. Нажми /search для нового поиска.")
         return
 
-    batch = items[offset:offset + 10]
     total = len(items)
 
     async def _send_item(item: dict):
@@ -2672,41 +2671,54 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                     pass
         await bot.send_message(chat_id, caption, reply_markup=kb)
 
-    # Предзагружаем фото/цену/описание (до 8 одновременно, 22 сек на каждое)
+    # Предзагружаем фото/цену/описание (до 8 одновременно, 40 сек на каждое).
+    # Добираем объявления порциями, пока не наберём 10 с фото+описанием
+    # или не кончится список (без фото и описания — пропускаем, не показываем).
+    s = load_settings(uid)
+    _pmin = s.get("price_min", 0)
+    _pmax = s.get("price_max", 99_000_000)
     sem = asyncio.Semaphore(8)
+
     async def _prefetch(it):
         async with sem:
             try:
                 await asyncio.wait_for(_ensure_photo(it), timeout=40)
             except Exception:
                 pass
-    await asyncio.gather(*[_prefetch(it) for it in batch])
-    # После загрузки — финальная проверка цены
-    s = load_settings(uid)
-    _pmin = s.get("price_min", 0)
-    _pmax = s.get("price_max", 99_000_000)
-    filtered_batch = []
-    for it in batch:
-        p = it.get("_price_int") or parse_price(it.get("price", ""))
-        # Если цена найдена и вне бюджета — пропускаем
-        if p and not (_pmin <= p <= _pmax):
-            continue
-        # Если цена так и не найдена — показываем с пометкой (не роняем объявление)
-        filtered_batch.append(it)
-    batch = filtered_batch
-    # Пересчитываем рыночное сравнение после загрузки цен
+
+    batch: list[dict] = []
+    cursor = offset
+    while len(batch) < 10 and cursor < total and cursor < offset + 50:
+        chunk = items[cursor:cursor + 10]
+        cursor += 10
+        await asyncio.gather(*[_prefetch(it) for it in chunk])
+        for it in chunk:
+            p = it.get("_price_int") or parse_price(it.get("price", ""))
+            if p and not (_pmin <= p <= _pmax):
+                continue
+            if not it.get("_photo_url") and not it.get("description"):
+                continue
+            batch.append(it)
+
+    # Пересчитываем рыночное сравнение после загрузки цен и сортируем:
+    # сначала максимальная скидка от рынка, затем более новые объявления
     batch = rank_by_market_price(batch)
+    batch.sort(key=lambda x: (
+        -x.get("_savings_pct", 0),
+        x.get("_days_on_site", 0),
+        -x.get("_hot_score", 0),
+    ))
     for item in batch:
         await _send_item(item)
         await asyncio.sleep(0.05)
 
-    next_offset = offset + 10
+    next_offset = cursor
     if next_offset < total:
         await bot.send_message(
             chat_id,
             f"Показано {min(next_offset, total)} из {total}:",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text=f"➡️ Ещё {min(10, total - next_offset)} объявлений", callback_data=f"page|{uid}|{next_offset}"),
+                InlineKeyboardButton(text=f"➡️ Ещё объявлений", callback_data=f"page|{uid}|{next_offset}"),
             ]])
         )
     else:
@@ -2801,6 +2813,7 @@ async def do_search_for_user(uid: int, reply_to):
     suitable = rank_by_market_price(suitable)
     suitable.sort(key=lambda x: (
         -x.get("_savings_pct", 0),
+        x.get("_days_on_site", 0),
         -x.get("_hot_score", 0),
         x.get("_price_int", 999_999_999)
     ))
