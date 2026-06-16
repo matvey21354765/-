@@ -976,7 +976,7 @@ async def _avito_async_init():
         except Exception:
             pass
     _avito_async_context = context
-    _avito_async_sem = _aio.Semaphore(2)  # не больше 2 вкладок одновременно — меньше похоже на бота
+    _avito_async_sem = _aio.Semaphore(3)  # компромисс скорость/незаметность
 
 
 def _avito_loop_main():
@@ -1002,7 +1002,7 @@ def _avito_ensure_loop():
 async def _avito_async_fetch(url: str, wait_ms: int, timeout_ms: int) -> str:
     async with _avito_async_sem:
         # небольшая случайная пауза перед навигацией — снижает шанс рейт-лимита (429)
-        await _aio.sleep(random.uniform(1.5, 4.0))
+        await _aio.sleep(random.uniform(0.5, 1.5))
         page = await _avito_async_context.new_page()
         try:
             try:
@@ -1884,7 +1884,7 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
                 return []
 
         with ThreadPoolExecutor(max_workers=5) as ex:
-            futs = [ex.submit(_fetch_fallback_page, p) for p in range(1, 6)]
+            futs = [ex.submit(_fetch_fallback_page, p) for p in range(1, 4)]
             for fut in as_completed(futs):
                 fb_results.extend(fut.result())
         results = fb_results
@@ -2764,12 +2764,13 @@ async def do_search_for_user(uid: int, reply_to):
     await reply_to.answer(f"🔍 Ищу в {region_name} ({pmin:,}–{pmax:,} ₽)\n{src_labels}")
 
     skipped = load_skipped(uid)
+    seen = load_seen(uid)
     loop = asyncio.get_event_loop()
 
     scraper_map = {
         "drom":   lambda: scrape_drom(region, pages=8, price_min=pmin, price_max=pmax),
         "autoru": lambda: scrape_autoru(region, pages=4, price_min=pmin, price_max=pmax),
-        "avito":  lambda: scrape_avito(region, pages=8, price_min=pmin, price_max=pmax),
+        "avito":  lambda: scrape_avito(region, pages=6, price_min=pmin, price_max=pmax),
     }
     tasks = [loop.run_in_executor(None, scraper_map[src]) for src in enabled_sources if src in scraper_map]
     results = await asyncio.gather(*tasks)
@@ -2822,6 +2823,7 @@ async def do_search_for_user(uid: int, reply_to):
         and in_price_range(i, pmin, pmax)
         and i.get("url")
         and i["url"] not in skipped
+        and i["url"] not in seen
     ]
     suitable = rank_by_market_price(suitable)
     suitable.sort(key=lambda x: (
