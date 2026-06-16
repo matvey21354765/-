@@ -121,6 +121,7 @@ DEALER_KEYWORDS = [
     "гарантия завода", "официальная гарантия",
     "автомагазин", "автодилер", "car dealer", "автошоу", "автовыставка",
     "в наличии и под заказ", "отдел продаж", "автосупермаркет",
+    "автопрестиж", "авто престиж",
 ]
 
 HOT_WORDS = re.compile(
@@ -218,9 +219,6 @@ def in_price_range(item: dict, price_min: int, price_max: int) -> bool:
         return price_min <= p <= price_max
     # Цена неизвестна — доверяем если Авито сам фильтровал по URL
     if item.get("_avito_price_filtered"):
-        return True
-    # Авито без цены: пропускаем на этом этапе, цена будет проверена после _ensure_photo
-    if item.get("source") == "avito" and not item.get("_no_price_skip"):
         return True
     return False
 
@@ -1041,10 +1039,16 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
                 return None
             seller_name = seller_obj.get("name") or seller_obj.get("title") or ""
         # Дополнительная проверка только по НАЗВАНИЮ ПРОДАВЦА (не заголовку объявления)
-        if seller_name and any(k in seller_name.lower() for k in ("автосалон", "автоцентр", "официальный", "ооо", "зао", "ип ", "дилер", "моторс", "авто групп")):
+        if seller_name and any(k in seller_name.lower() for k in ("автосалон", "автоцентр", "официальный", "ооо", "зао", "ип ", "дилер", "моторс", "авто групп", "автопрестиж")):
             return None
 
         price_str, price_int = _avito_price_from_item(it)
+
+        # Объявление без цены — почти всегда дилерский шоурум-листинг ("цена по запросу"),
+        # частники на Авито всегда указывают цену. Отбрасываем сразу, чтобы не показывать
+        # карточки с "—" вместо цены.
+        if not price_int:
+            return None
 
         mileage = 0
         for param in (it.get("params") or it.get("parameters") or []):
