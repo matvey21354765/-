@@ -1,27 +1,59 @@
 """
-local_avito_scraper.py — запускать на своём компьютере.
-Открывает браузер Chrome, парсит Авито и отправляет результаты боту.
+local_avito_scraper.py — запускать на своём компьютере (обычный домашний IP,
+не датацентр — Авито блокирует серверные IP, поэтому прямой парсинг с сервера
+бота не работает).
+
+Открывает браузер Chrome, парсит Авито по выбранному региону и отправляет
+результат боту документом — бот сам подхватывает файл и подмешивает эти
+объявления в обычный поиск (см. on_document/load_external_avito в control_bot.py).
 
 Установка (один раз):
-    pip install playwright requests
+    pip install playwright requests beautifulsoup4 lxml python-dotenv
     playwright install chromium
 
 Запуск:
-    python local_avito_scraper.py
+    python local_avito_scraper.py ekaterinburg
+    (или просто `python local_avito_scraper.py` — спросит регион)
 """
 
 import json
+import os
 import re
+import sys
 import time
 import random
 import datetime
 from pathlib import Path
 
-BOT_TOKEN = "8657191103:AAFBXaObKV2jcLbBsBzpYTuBfBj2bBkymrk"
-MY_CHAT_ID = 749256529
-PRICE_MIN = 500_000
-PRICE_MAX = 1_000_000
-PAGES = 10
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+# Тот же токен, что и у control_bot.py (берётся из .env / переменной окружения,
+# чтобы файл с локальным скрапером не хранил отдельный секрет).
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8923014188:AAHvNW2B5fin2XCmbVhlaLNjWhLwI3JhZ90")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "749256529"))
+PAGES = int(os.getenv("AVITO_PAGES", "10"))
+
+REGIONS = {
+    "ekaterinburg": "sverdlovskaya_oblast",
+    "moscow":       "moskva",
+    "spb":          "sankt-peterburg",
+    "novosibirsk":  "novosibirskaya_oblast",
+    "kazan":        "tatarstan",
+    "chelyabinsk":  "chelyabinskaya_oblast",
+    "ufa":          "bashkortostan",
+    "krasnodar":    "krasnodarskiy_kray",
+    "omsk":         "omskaya_oblast",
+    "tyumen":       "tyumenskaya_oblast",
+    "perm":         "permskiy_kray",
+    "krasnoyarsk":  "krasnoyarskiy_kray",
+    "voronezh":     "voronezhskaya_oblast",
+    "samara":       "samarskaya_oblast",
+    "rostov":       "rostovskaya_oblast",
+}
 
 DEALER_KEYWORDS = [
     "ооо", "ип ", "ао ", "зао ", "автосалон", "официальный дилер",
@@ -78,23 +110,25 @@ def parse_date(text):
     return None
 
 
-def send_to_bot(items):
+def send_to_bot(region, items):
     import requests
-    out = Path("avito_results.json")
+    fname = f"avito_{region}.json"
+    out = Path(fname)
     out.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
     with open(out, "rb") as f:
-        r = requests.post(url, data={"chat_id": MY_CHAT_ID}, files={"document": ("avito_results.json", f)})
+        r = requests.post(url, data={"chat_id": ADMIN_ID}, files={"document": (fname, f)})
     if r.status_code == 200:
-        print(f"✅ Отправлено боту: {len(items)} объявлений")
+        print(f"✅ Отправлено боту: {len(items)} объявлений ({region})")
     else:
         print(f"❌ Ошибка отправки: {r.text[:200]}")
 
 
-def scrape():
+def scrape(region):
     from playwright.sync_api import sync_playwright
     from bs4 import BeautifulSoup
 
+    slug = REGIONS[region]
     results = []
     today = datetime.date.today()
 
@@ -111,13 +145,12 @@ def scrape():
         page = context.new_page()
 
         for p in range(1, PAGES + 1):
-            url = f"https://www.avito.ru/ekaterinburg/avtomobili?p={p}&s=104"
+            url = f"https://www.avito.ru/{slug}/avtomobili?p={p}&s=104"
             print(f"  Страница {p}...", end=" ", flush=True)
             try:
                 page.goto(url, wait_until="domcontentloaded", timeout=30000)
                 time.sleep(random.uniform(2, 3))
 
-                # Капча? Проверяем по реальным признакам блокировки
                 html = page.content()
                 title = page.title()
                 is_blocked = (
@@ -150,9 +183,12 @@ def scrape():
                         if not title or is_dealer(title):
                             continue
 
-                        link_el = card.select_one("a[href*='/ekaterinburg/']")
+                        link_el = card.select_one(f"a[href*='/{slug.split('_')[0]}']") or card.select_one("a[itemprop='url']") or card.select_one("a[href*='avito.ru']")
                         href = link_el.get("href", "") if link_el else ""
-                        item_url = ("https://www.avito.ru" + href) if href else ""
+                        if href and not href.startswith("http"):
+                            item_url = "https://www.avito.ru" + href
+                        else:
+                            item_url = href
                         if not item_url:
                             continue
 
@@ -161,16 +197,23 @@ def scrape():
                         if price_el:
                             price = price_el.get("content") or price_el.get_text(strip=True)
 
-                        price_val = parse_price(price)
-                        if price_val and (price_val < PRICE_MIN or price_val > PRICE_MAX):
-                            continue
+                        img_el = card.select_one("img")
+                        photo_url = ""
+                        if img_el:
+                            src = img_el.get("src") or img_el.get("data-src") or ""
+                            if src.startswith("//"):
+                                src = "https:" + src
+                            if src.startswith("http"):
+                                photo_url = src
+
+                        desc_el = card.select_one("[itemprop='description']") or card.select_one("[class*='iva-item-text']")
+                        description = desc_el.get_text(strip=True) if desc_el else ""
 
                         date_el = card.select_one("[data-marker='item-date']") or card.select_one("span[class*='date']")
                         date_text = date_el.get_text(strip=True) if date_el else ""
                         date = parse_date(date_text)
                         days = max(0, (today - date).days) if date else 0
-                        photos = len(card.select("img[src*='avito']"))
-                        score = (5 - min(photos, 5)) * 2.0 + days * 0.3 + (10 if HOT.search(title) else 0)
+                        score = days * 0.3 + (10 if HOT.search(title) else 0)
 
                         results.append({
                             "source": "avito",
@@ -178,10 +221,12 @@ def scrape():
                             "price": price,
                             "url": item_url,
                             "date": str(date) if date else date_text,
-                            "_photos": photos,
+                            "_photos": 1 if photo_url else 0,
+                            "_photo_url": photo_url,
                             "_days_on_site": days,
                             "_hot_score": round(score, 2),
-                            "description": "",
+                            "description": description,
+                            "seller": "",
                         })
                         page_ok += 1
                     except Exception:
@@ -200,20 +245,28 @@ def scrape():
 
 
 if __name__ == "__main__":
-    print(f"🔍 Парсю Авито Екатеринбург, цена {PRICE_MIN//1000}–{PRICE_MAX//1000} тыс. руб...")
-    print("Откроется окно браузера — не закрывай его!\n")
-
     try:
-        from bs4 import BeautifulSoup
+        from bs4 import BeautifulSoup  # noqa: F401
     except ImportError:
         print("❌ Установи зависимости:")
-        print("   pip install playwright requests beautifulsoup4 lxml")
+        print("   pip install playwright requests beautifulsoup4 lxml python-dotenv")
         print("   playwright install chromium")
-        exit(1)
+        sys.exit(1)
 
-    items = scrape()
+    region = sys.argv[1] if len(sys.argv) > 1 else ""
+    if region not in REGIONS:
+        print("Доступные регионы: " + ", ".join(REGIONS))
+        region = input("Введите регион: ").strip()
+    if region not in REGIONS:
+        print(f"❌ Неизвестный регион: {region}")
+        sys.exit(1)
+
+    print(f"🔍 Парсю Авито: {region}...")
+    print("Откроется окно браузера — не закрывай его!\n")
+
+    items = scrape(region)
     print(f"\nНайдено: {len(items)} подходящих объявлений")
     if items:
-        send_to_bot(items)
+        send_to_bot(region, items)
     else:
         print("Ничего не найдено.")

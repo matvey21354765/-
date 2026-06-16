@@ -140,6 +140,25 @@ MONTHS = {
 USERS_DIR = Path("users")
 USERS_DIR.mkdir(exist_ok=True)
 
+# Объявления Авито, присланные локальным скрапером (с домашнего ПК,
+# чтобы обойти блокировку по IP датацентра)
+EXTERNAL_AVITO_DIR = Path("external_avito")
+EXTERNAL_AVITO_DIR.mkdir(exist_ok=True)
+EXTERNAL_AVITO_MAX_AGE = 12 * 3600  # старше 12 часов — считаем неактуальным
+ADMIN_ID = int(os.getenv("ADMIN_ID", "749256529"))
+
+
+def load_external_avito(region: str) -> list[dict]:
+    f = EXTERNAL_AVITO_DIR / f"{region}.json"
+    if not f.exists():
+        return []
+    if time.time() - f.stat().st_mtime > EXTERNAL_AVITO_MAX_AGE:
+        return []
+    try:
+        return json.loads(f.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
 # Мониторинг новых объявлений
 MONITOR_INTERVAL = 15 * 60   # проверять каждые 5 минут
 MONITOR_MIN_SAVINGS_PCT = 10  # показывать только если скидка от рынка ≥ 10%
@@ -2767,10 +2786,19 @@ async def do_search_for_user(uid: int, reply_to):
     seen = load_seen(uid)
     loop = asyncio.get_event_loop()
 
+    def _avito_with_external():
+        live = scrape_avito(region, pages=6, price_min=pmin, price_max=pmax)
+        live_urls = {i.get("url") for i in live}
+        extra = [
+            i for i in load_external_avito(region)
+            if i.get("url") not in live_urls and in_price_range(i, pmin, pmax)
+        ]
+        return live + extra
+
     scraper_map = {
         "drom":   lambda: scrape_drom(region, pages=8, price_min=pmin, price_max=pmax),
         "autoru": lambda: scrape_autoru(region, pages=4, price_min=pmin, price_max=pmax),
-        "avito":  lambda: scrape_avito(region, pages=6, price_min=pmin, price_max=pmax),
+        "avito":  _avito_with_external,
     }
     tasks = [loop.run_in_executor(None, scraper_map[src]) for src in enabled_sources if src in scraper_map]
     results = await asyncio.gather(*tasks)
@@ -2945,6 +2973,37 @@ async def cmd_favorites(msg: Message):
     for it in favs[-20:]:
         lines.append(f"• {it.get('title','')} — {it.get('price','?')}\n  {it.get('url','')}")
     await msg.answer(f"⭐ Избранное ({len(favs)} шт.):\n\n" + "\n\n".join(lines[-10:]))
+
+
+@dp.message(F.document)
+async def on_document(msg: Message):
+    """Принимает JSON с объявлениями от local_avito_scraper.py (запускается на ПК с обычным IP)."""
+    if msg.from_user.id != ADMIN_ID:
+        return
+    doc = msg.document
+    fname = doc.file_name or ""
+    m = re.match(r"avito_([a-z_]+)\.json$", fname)
+    if not m:
+        return
+    region = m.group(1)
+    if region not in REGIONS:
+        await msg.answer(f"⚠️ Неизвестный регион в имени файла: {region}")
+        return
+
+    file = await bot.get_file(doc.file_id)
+    buf = await bot.download_file(file.file_path)
+    try:
+        items = json.loads(buf.read().decode("utf-8"))
+    except Exception as e:
+        await msg.answer(f"❌ Не удалось разобрать файл: {e}")
+        return
+    if not isinstance(items, list):
+        await msg.answer("❌ Ожидался JSON-список объявлений")
+        return
+
+    out = EXTERNAL_AVITO_DIR / f"{region}.json"
+    out.write_text(json.dumps(items, ensure_ascii=False), encoding="utf-8")
+    await msg.answer(f"✅ Авито ({REGIONS.get(region, region)}): сохранено {len(items)} объявлений с локального скрапера")
 
 
 @dp.message(Command("test_avito"))
