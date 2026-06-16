@@ -3066,22 +3066,30 @@ async def cmd_test_avito(msg: Message):
             "Accept-Language": "ru-RU,ru;q=0.9",
         }, timeout=15, proxies=AVITO_PROXIES)
         await msg.answer(_stat(r_direct, "Прямой запрос"))
+        if 'data-marker="item"' not in r_direct.text and '"urlPath"' not in r_direct.text:
+            import html as _html_mod
+            snippet = _html_mod.escape(re.sub(r"\s+", " ", r_direct.text)[2000:2600])
+            await msg.answer(f"Фрагмент HTML (прямой запрос):\n<code>{snippet}</code>", parse_mode="HTML")
     except Exception as e:
         await msg.answer(f"Прямой запрос ошибка: {str(e)[:200]}")
 
     try:
         await msg.answer("Пробую headless-браузер (Playwright)...")
-        loop = asyncio.get_event_loop()
-        html = await loop.run_in_executor(None, _avito_fetch_html, url)
+        _avito_ensure_loop()
+        fut = _aio.run_coroutine_threadsafe(_avito_async_fetch(url, 2500, 25000), _avito_loop)
+        html = await asyncio.wrap_future(fut)
         if html:
             class _FakeResp:
                 status_code = 200
                 text = html
             await msg.answer(_stat(_FakeResp(), "Headless-браузер"))
+            import html as _html_mod
+            snippet = _html_mod.escape(re.sub(r"\s+", " ", html)[2000:2600])
+            await msg.answer(f"Фрагмент HTML:\n<code>{snippet}</code>", parse_mode="HTML")
         else:
             await msg.answer("Headless-браузер: пустой ответ ❌")
     except Exception as e:
-        await msg.answer(f"Headless-браузер ошибка: {str(e)[:200]}")
+        await msg.answer(f"Headless-браузер ошибка: {type(e).__name__}: {str(e)[:300]}")
 
     await msg.answer("✅ Диагностика завершена. Пришли эти результаты разработчику.")
 
