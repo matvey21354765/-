@@ -29,6 +29,8 @@ def setup_scheduler(scheduler: AsyncIOScheduler, bot: Bot):
                       id="btc_alerts", replace_existing=True, misfire_grace_time=60)
     scheduler.add_job(_run_resolve_forecasts, "interval", minutes=5,
                       id="resolve_forecasts", replace_existing=True, misfire_grace_time=60)
+    scheduler.add_job(_run_auto_forecasts, "interval", minutes=5,
+                      id="auto_forecasts", replace_existing=True, misfire_grace_time=60)
     logger.info(f"Scheduler ready: signals/{settings.SIGNAL_INTERVAL_MINUTES}min, BTC alerts 5min, Polymarket, News, Terms")
 
 
@@ -102,6 +104,20 @@ async def _run_resolve_forecasts():
         await resolve_forecasts()
     except Exception as e:
         logger.error(f"resolve_forecasts job error: {e}")
+
+
+async def _run_auto_forecasts():
+    """Generate short forecasts on a fixed schedule so accuracy stats fill
+    up even without users opening the forecast screen themselves."""
+    try:
+        from app.services.short_forecast import get_short_forecast
+        for coin in ("BTC", "ETH", "SOL"):
+            try:
+                await get_short_forecast(coin)
+            except Exception as e:
+                logger.warning(f"auto_forecast {coin} error: {e}")
+    except Exception as e:
+        logger.error(f"auto_forecasts job error: {e}")
 
 
 async def _run_polymarket(bot: Bot):
