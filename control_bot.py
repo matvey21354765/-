@@ -1172,7 +1172,10 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
         return []
 
     results = []
-    soup = _BS(text, "lxml")
+    try:
+        soup = _BS(text, "lxml")
+    except Exception:
+        soup = _BS(text, "html.parser")
 
     # 1. __NEXT_DATA__ (Next.js SSR)
     nd = soup.find("script", {"id": "__NEXT_DATA__"})
