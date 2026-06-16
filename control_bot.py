@@ -2564,7 +2564,10 @@ async def send_batch(chat_id: int, uid: int, offset: int):
             f"📅 {days_str}"
         )
         if item.get("description"):
-            caption += f"\n\n📝 {item['description'][:500]}"
+            _desc = item["description"][:180].strip()
+            if len(item["description"]) > 180:
+                _desc += "…"
+            caption += f"\n\n📝 {_desc}"
 
         source = item.get("source", "")
         phone_hint = "📞 Позвонить" if source in ("avito", "drom") else "📞 Контакт"
@@ -2949,7 +2952,10 @@ async def _send_monitor_item(uid: int, it: dict):
         f"📅 только что на Авито"
     )
     if it.get("description"):
-        caption += f"\n📝 {it['description'][:250]}"
+        _desc = it["description"][:180].strip()
+        if len(it["description"]) > 180:
+            _desc += "…"
+        caption += f"\n📝 {_desc}"
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="🔗 Открыть", url=url),
