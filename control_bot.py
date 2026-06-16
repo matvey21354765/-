@@ -1510,7 +1510,9 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
                         "api_key": SCRAPER_API_KEY,
                         "url": fetch_url,
                         "country_code": "ru",
-                    }, timeout=35)
+                        "render": "true",
+                        "wait": "3000",
+                    }, timeout=70)
                     if r.status_code == 200 and _page_has_listings(r.text):
                         return r.text
                 except Exception:
@@ -1733,7 +1735,9 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
                 "api_key": SCRAPER_API_KEY,
                 "url": fallback_url,
                 "country_code": "ru",
-            }, timeout=35)
+                "render": "true",
+                "wait": "3000",
+            }, timeout=70)
             if r_fb.status_code == 200 and ('"urlPath"' in r_fb.text or 'data-marker="item"' in r_fb.text):
                 batch_fb = _parse_avito_html(r_fb.text, slug, today)
                 fb_text = r_fb.text
@@ -2440,7 +2444,9 @@ async def _ensure_photo(item: dict) -> None:
                             "api_key": SCRAPER_API_KEY,
                             "url": url,
                             "country_code": "ru",
-                        }, timeout=30)
+                            "render": "true",
+                            "wait": "3000",
+                        }, timeout=70)
                         if r2.status_code == 200 and len(r2.text) > 5000:
                             p2, d2, pi2 = _extract_from_page(r2.text)
                             if p2 and not photo: photo = p2
