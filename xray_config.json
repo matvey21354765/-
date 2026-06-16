@@ -1,26 +1,74 @@
 {
-  "log": { "loglevel": "debug", "error": "/tmp/xray_error.log" },
+  "dns": {
+    "queryStrategy": "UseIP",
+    "servers": [
+      "1.1.1.1",
+      "1.0.0.1"
+    ]
+  },
   "inbounds": [
     {
-      "port": 10808,
       "listen": "127.0.0.1",
+      "port": 10808,
       "protocol": "socks",
-      "settings": { "auth": "noauth", "udp": true }
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      },
+      "sniffing": {
+        "destOverride": [
+          "http",
+          "tls",
+          "fakedns"
+        ],
+        "domainsExcluded": [
+          "courier.push.apple.com",
+          "push.apple.com",
+          "api.push.apple.com"
+        ],
+        "enabled": true,
+        "routeOnly": true
+      },
+      "tag": "socks"
+    },
+    {
+      "listen": "127.0.0.1",
+      "port": 10809,
+      "protocol": "http",
+      "settings": {
+        "allowTransparent": false
+      },
+      "sniffing": {
+        "destOverride": [
+          "http",
+          "tls",
+          "fakedns"
+        ],
+        "domainsExcluded": [
+          "courier.push.apple.com",
+          "push.apple.com",
+          "api.push.apple.com"
+        ],
+        "enabled": true,
+        "routeOnly": true
+      },
+      "tag": "http"
     }
   ],
+  "log": { "loglevel": "warning", "error": "/tmp/xray_error.log" },
   "outbounds": [
     {
       "protocol": "vless",
       "settings": {
         "vnext": [
           {
-            "address": "ru.gsupport.support",
+            "address": "ru.axolab.org",
             "port": 443,
             "users": [
               {
-                "id": "cd0c9b10-02fb-4456-977c-120d3db6c585",
+                "encryption": "none",
                 "flow": "xtls-rprx-vision",
-                "encryption": "none"
+                "id": "56aa8e13-e446-0007-a08b-1480e7d248a6"
               }
             ]
           }
@@ -28,15 +76,39 @@
       },
       "streamSettings": {
         "network": "tcp",
-        "security": "reality",
         "realitySettings": {
-          "serverName": "video.intfreed.ru",
           "fingerprint": "firefox",
-          "publicKey": "JxwG7rAbNCd_C82p9K69AZDWh51fri2nm3wLHHrfyiw",
-          "shortId": "7755e972daf8eec8",
-          "spiderX": ""
+          "publicKey": "k9BuzZPnzofDcPTaa7ROHNIc9ww2jy3tLAJ04GuKvAQ",
+          "serverName": "sun9-8.userapi.com",
+          "shortId": "669d7ae5e1611511"
+        },
+        "security": "reality",
+        "tcpSettings": {
         }
-      }
+      },
+      "tag": "proxy"
+    },
+    {
+      "protocol": "freedom",
+      "tag": "direct"
+    },
+    {
+      "protocol": "blackhole",
+      "tag": "block"
     }
-  ]
+  ],
+  "remarks": "🇷🇺 Russia 1 | YouTube без рекламы",
+  "routing": {
+    "domainMatcher": "hybrid",
+    "domainStrategy": "IPIfNonMatch",
+    "rules": [
+      {
+        "outboundTag": "direct",
+        "protocol": [
+          "bittorrent"
+        ],
+        "type": "field"
+      }
+    ]
+  }
 }
