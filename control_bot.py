@@ -29,6 +29,19 @@ from aiogram.fsm.storage.memory import MemoryStorage
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8923014188:AAHvNW2B5fin2XCmbVhlaLNjWhLwI3JhZ90")
 SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY", "b317ae63b4d847805e2f91a1dc073b40")
 
+# ── Резидентный прокси для запросов к Авито (опционально) ────────
+# Если задан в .env — все запросы к Авито идут через него (чистый IP,
+# не датацентр). Если не задан — работаем как обычно, напрямую.
+AVITO_PROXY_HOST = os.getenv("AVITO_PROXY_HOST", "")
+AVITO_PROXY_PORT = os.getenv("AVITO_PROXY_PORT", "")
+AVITO_PROXY_USER = os.getenv("AVITO_PROXY_USER", "")
+AVITO_PROXY_PASS = os.getenv("AVITO_PROXY_PASS", "")
+AVITO_PROXIES: "dict[str, str] | None" = None
+if AVITO_PROXY_HOST and AVITO_PROXY_PORT:
+    _auth = f"{AVITO_PROXY_USER}:{AVITO_PROXY_PASS}@" if AVITO_PROXY_USER else ""
+    _avito_proxy_url = f"http://{_auth}{AVITO_PROXY_HOST}:{AVITO_PROXY_PORT}"
+    AVITO_PROXIES = {"http": _avito_proxy_url, "https": _avito_proxy_url}
+
 # ── Регионы ─────────────────────────────────────────────────────
 REGIONS = {
     "ekaterinburg": "Екатеринбург",
@@ -958,10 +971,17 @@ async def _avito_async_init():
     global _avito_async_context, _avito_async_sem
     from playwright.async_api import async_playwright
     pw = await async_playwright().start()
-    browser = await pw.chromium.launch(
-        headless=True,
-        args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
-    )
+    _launch_kwargs = {
+        "headless": True,
+        "args": ["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+    }
+    if AVITO_PROXY_HOST and AVITO_PROXY_PORT:
+        _proxy = {"server": f"http://{AVITO_PROXY_HOST}:{AVITO_PROXY_PORT}"}
+        if AVITO_PROXY_USER:
+            _proxy["username"] = AVITO_PROXY_USER
+            _proxy["password"] = AVITO_PROXY_PASS
+        _launch_kwargs["proxy"] = _proxy
+    browser = await pw.chromium.launch(**_launch_kwargs)
     context = await browser.new_context(
         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         locale="ru-RU",
@@ -1599,7 +1619,7 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
             """Пробуем: быстрый прямой запрос → бесплатный headless-браузер. Принимаем только страницы с объявлениями."""
             # 1. Прямой запрос — отказ приходит быстро (~1-2 сек)
             try:
-                r2 = _req.get(fetch_url, timeout=8, headers=_HEADERS)
+                r2 = _req.get(fetch_url, timeout=8, headers=_HEADERS, proxies=AVITO_PROXIES)
                 if r2.status_code == 200 and _page_has_listings(r2.text):
                     return r2.text
             except Exception:
@@ -1825,7 +1845,7 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
                 # Прямой запрос первой — бесплатно и быстро, при неудаче — headless-браузер
                 fb_text = ""
                 try:
-                    r_direct = _req_fb.get(fallback_url, timeout=8, headers=_HEADERS)
+                    r_direct = _req_fb.get(fallback_url, timeout=8, headers=_HEADERS, proxies=AVITO_PROXIES)
                     if r_direct.status_code == 200 and ('"urlPath"' in r_direct.text or 'data-marker="item"' in r_direct.text):
                         fb_text = r_direct.text
                 except Exception:
@@ -2535,7 +2555,7 @@ async def _ensure_photo(item: dict) -> None:
                 # берём то, что нашлось первым/успешным, экономим время на ожидании.
                 def _direct() -> tuple[str, str, int]:
                     try:
-                        r = _req.get(url, timeout=10, headers=_HDR)
+                        r = _req.get(url, timeout=10, headers=_HDR, proxies=AVITO_PROXIES)
                         if r.status_code == 200 and len(r.text) > 5000:
                             return _extract_from_page(r.text)
                     except Exception:
@@ -2976,9 +2996,9 @@ async def cmd_test_avito(msg: Message):
 
     try:
         r_direct = _req.get(url, headers={
-            "User-Agent": "Mozilla/5.0 (Linux; Android 12; SM-G991B) AppleWebKit/537.36 Mobile Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "Accept-Language": "ru-RU,ru;q=0.9",
-        }, timeout=15)
+        }, timeout=15, proxies=AVITO_PROXIES)
         await msg.answer(_stat(r_direct, "Прямой запрос"))
     except Exception as e:
         await msg.answer(f"Прямой запрос ошибка: {str(e)[:200]}")
