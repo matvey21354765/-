@@ -260,14 +260,12 @@ def _score(df1m: pd.DataFrame, df5m: pd.DataFrame, df15m: pd.DataFrame) -> dict:
 
     total = macd_vote + fast_vote + m15_vote + trend_vote + candle_vote + stoch_vote + mom_vote + bb_vote + rsi_vote
 
-    # ── РЕШЕНИЕ: высокий порог для качества ─────────────────────────────────
-    # LONG: нужен кросс 5м + оба тренда + RSI не перекуплен + большинство голосов
-    # SHORT: зеркально
-    if (total >= 8 and both_bull and rsi5 < 65 and not majority_bear
-            and (m5_std["cross_up"] or m5_fast["cross_up"])):
+    # ── РЕШЕНИЕ: порог сбалансирован, чтобы сигналы реально выдавались ──────
+    # Триггер (MACD кросс 5м или экстремум StochRSI) уже проверен выше —
+    # здесь только голоса и базовые тренд/RSI фильтры.
+    if total >= 5 and both_bull and rsi5 < 68 and not majority_bear:
         direction = "UP"
-    elif (total <= -8 and both_bear and rsi5 > 35 and not majority_bull
-            and (m5_std["cross_down"] or m5_fast["cross_down"])):
+    elif total <= -5 and both_bear and rsi5 > 32 and not majority_bull:
         direction = "DOWN"
     else:
         direction = "FLAT"
