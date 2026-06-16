@@ -29,51 +29,6 @@ from aiogram.fsm.storage.memory import MemoryStorage
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8923014188:AAHvNW2B5fin2XCmbVhlaLNjWhLwI3JhZ90")
 SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY", "b317ae63b4d847805e2f91a1dc073b40")
 
-# ── Прокси для запросов к Авито ────────────────────────────────
-# Серверный датацентр-IP заблокирован Авито на уровне инфраструктуры.
-# Приоритет 1: выделенный резидентный/мобильный прокси (логин/пароль в .env) —
-# у него собственный "чистый" IP, не шаренный с другими пользователями.
-# Приоритет 2 (фоллбэк, если AVITO_PROXY_HOST не задан): локальный xray
-# с публичным VPN-конфигом — он почти всегда уже в блок-листе Авито,
-# поэтому реально полезен только резидентный прокси из приоритета 1.
-AVITO_PROXY_HOST = os.getenv("AVITO_PROXY_HOST", "")
-AVITO_PROXY_PORT = os.getenv("AVITO_PROXY_PORT", "")
-AVITO_PROXY_USER = os.getenv("AVITO_PROXY_USER", "")
-AVITO_PROXY_PASS = os.getenv("AVITO_PROXY_PASS", "")
-
-if AVITO_PROXY_HOST and AVITO_PROXY_PORT:
-    _auth = f"{AVITO_PROXY_USER}:{AVITO_PROXY_PASS}@" if AVITO_PROXY_USER else ""
-    AVITO_PROXY_HTTP = f"http://{_auth}{AVITO_PROXY_HOST}:{AVITO_PROXY_PORT}"
-else:
-    AVITO_PROXY_HTTP = "http://127.0.0.1:10809"  # локальный xray-фоллбэк
-AVITO_PROXIES = {"http": AVITO_PROXY_HTTP, "https": AVITO_PROXY_HTTP}
-_XRAY_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "xray_config.json")
-_xray_process: "subprocess.Popen | None" = None
-
-
-def _start_xray():
-    """Запускает xray-core как локальный прокси-фоллбэк (127.0.0.1:10808/10809).
-
-    Если задан AVITO_PROXY_HOST (выделенный резидентный прокси), xray не нужен —
-    запросы и так пойдут напрямую через него.
-    """
-    global _xray_process
-    if AVITO_PROXY_HOST and AVITO_PROXY_PORT:
-        print("✅ Использую резидентный прокси из .env для Авито")
-        return
-    if not os.path.exists(_XRAY_CONFIG):
-        return
-    try:
-        _xray_process = subprocess.Popen(
-            ["xray", "run", "-c", _XRAY_CONFIG],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        print("✅ xray-прокси запущен (фоллбэк для Авито)")
-    except FileNotFoundError:
-        print("⚠️ xray не найден — Авито будет работать напрямую (может блокироваться)")
-    except Exception as e:
-        print(f"⚠️ Не удалось запустить xray: {e}")
-
 # ── Регионы ─────────────────────────────────────────────────────
 REGIONS = {
     "ekaterinburg": "Екатеринбург",
@@ -184,25 +139,6 @@ MONTHS = {
 # ── Пользователи ────────────────────────────────────────────────
 USERS_DIR = Path("users")
 USERS_DIR.mkdir(exist_ok=True)
-
-# Объявления Авито, присланные локальным скрапером (с домашнего ПК,
-# чтобы обойти блокировку по IP датацентра)
-EXTERNAL_AVITO_DIR = Path("external_avito")
-EXTERNAL_AVITO_DIR.mkdir(exist_ok=True)
-EXTERNAL_AVITO_MAX_AGE = 12 * 3600  # старше 12 часов — считаем неактуальным
-ADMIN_ID = int(os.getenv("ADMIN_ID", "749256529"))
-
-
-def load_external_avito(region: str) -> list[dict]:
-    f = EXTERNAL_AVITO_DIR / f"{region}.json"
-    if not f.exists():
-        return []
-    if time.time() - f.stat().st_mtime > EXTERNAL_AVITO_MAX_AGE:
-        return []
-    try:
-        return json.loads(f.read_text(encoding="utf-8"))
-    except Exception:
-        return []
 
 # Мониторинг новых объявлений
 MONITOR_INTERVAL = 15 * 60   # проверять каждые 5 минут
@@ -1022,17 +958,9 @@ async def _avito_async_init():
     global _avito_async_context, _avito_async_sem
     from playwright.async_api import async_playwright
     pw = await async_playwright().start()
-    if AVITO_PROXY_HOST and AVITO_PROXY_PORT:
-        _pw_proxy = {"server": f"http://{AVITO_PROXY_HOST}:{AVITO_PROXY_PORT}"}
-        if AVITO_PROXY_USER:
-            _pw_proxy["username"] = AVITO_PROXY_USER
-            _pw_proxy["password"] = AVITO_PROXY_PASS
-    else:
-        _pw_proxy = {"server": AVITO_PROXY_HTTP}
     browser = await pw.chromium.launch(
         headless=True,
         args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
-        proxy=_pw_proxy,
     )
     context = await browser.new_context(
         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -1671,7 +1599,7 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
             """Пробуем: быстрый прямой запрос → бесплатный headless-браузер. Принимаем только страницы с объявлениями."""
             # 1. Прямой запрос — отказ приходит быстро (~1-2 сек)
             try:
-                r2 = _req.get(fetch_url, timeout=8, headers=_HEADERS, proxies=AVITO_PROXIES)
+                r2 = _req.get(fetch_url, timeout=8, headers=_HEADERS)
                 if r2.status_code == 200 and _page_has_listings(r2.text):
                     return r2.text
             except Exception:
@@ -1897,7 +1825,7 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
                 # Прямой запрос первой — бесплатно и быстро, при неудаче — headless-браузер
                 fb_text = ""
                 try:
-                    r_direct = _req_fb.get(fallback_url, timeout=8, headers=_HEADERS, proxies=AVITO_PROXIES)
+                    r_direct = _req_fb.get(fallback_url, timeout=8, headers=_HEADERS)
                     if r_direct.status_code == 200 and ('"urlPath"' in r_direct.text or 'data-marker="item"' in r_direct.text):
                         fb_text = r_direct.text
                 except Exception:
@@ -2607,7 +2535,7 @@ async def _ensure_photo(item: dict) -> None:
                 # берём то, что нашлось первым/успешным, экономим время на ожидании.
                 def _direct() -> tuple[str, str, int]:
                     try:
-                        r = _req.get(url, timeout=10, headers=_HDR, proxies=AVITO_PROXIES)
+                        r = _req.get(url, timeout=10, headers=_HDR)
                         if r.status_code == 200 and len(r.text) > 5000:
                             return _extract_from_page(r.text)
                     except Exception:
@@ -2839,19 +2767,10 @@ async def do_search_for_user(uid: int, reply_to):
     seen = load_seen(uid)
     loop = asyncio.get_event_loop()
 
-    def _avito_with_external():
-        live = scrape_avito(region, pages=6, price_min=pmin, price_max=pmax)
-        live_urls = {i.get("url") for i in live}
-        extra = [
-            i for i in load_external_avito(region)
-            if i.get("url") not in live_urls and in_price_range(i, pmin, pmax)
-        ]
-        return live + extra
-
     scraper_map = {
         "drom":   lambda: scrape_drom(region, pages=8, price_min=pmin, price_max=pmax),
         "autoru": lambda: scrape_autoru(region, pages=4, price_min=pmin, price_max=pmax),
-        "avito":  _avito_with_external,
+        "avito":  lambda: scrape_avito(region, pages=6, price_min=pmin, price_max=pmax),
     }
     tasks = [loop.run_in_executor(None, scraper_map[src]) for src in enabled_sources if src in scraper_map]
     results = await asyncio.gather(*tasks)
@@ -3028,37 +2947,6 @@ async def cmd_favorites(msg: Message):
     await msg.answer(f"⭐ Избранное ({len(favs)} шт.):\n\n" + "\n\n".join(lines[-10:]))
 
 
-@dp.message(F.document)
-async def on_document(msg: Message):
-    """Принимает JSON с объявлениями от local_avito_scraper.py (запускается на ПК с обычным IP)."""
-    if msg.from_user.id != ADMIN_ID:
-        return
-    doc = msg.document
-    fname = doc.file_name or ""
-    m = re.match(r"avito_([a-z_]+)\.json$", fname)
-    if not m:
-        return
-    region = m.group(1)
-    if region not in REGIONS:
-        await msg.answer(f"⚠️ Неизвестный регион в имени файла: {region}")
-        return
-
-    file = await bot.get_file(doc.file_id)
-    buf = await bot.download_file(file.file_path)
-    try:
-        items = json.loads(buf.read().decode("utf-8"))
-    except Exception as e:
-        await msg.answer(f"❌ Не удалось разобрать файл: {e}")
-        return
-    if not isinstance(items, list):
-        await msg.answer("❌ Ожидался JSON-список объявлений")
-        return
-
-    out = EXTERNAL_AVITO_DIR / f"{region}.json"
-    out.write_text(json.dumps(items, ensure_ascii=False), encoding="utf-8")
-    await msg.answer(f"✅ Авито ({REGIONS.get(region, region)}): сохранено {len(items)} объявлений с локального скрапера")
-
-
 @dp.message(Command("test_avito"))
 async def cmd_test_avito(msg: Message):
     """Диагностика Авито — присылает что именно возвращает ScraperAPI."""
@@ -3088,34 +2976,26 @@ async def cmd_test_avito(msg: Message):
 
     try:
         r_direct = _req.get(url, headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (Linux; Android 12; SM-G991B) AppleWebKit/537.36 Mobile Safari/537.36",
             "Accept-Language": "ru-RU,ru;q=0.9",
-        }, timeout=15, proxies=AVITO_PROXIES)
+        }, timeout=15)
         await msg.answer(_stat(r_direct, "Прямой запрос"))
-        if 'data-marker="item"' not in r_direct.text and '"urlPath"' not in r_direct.text:
-            import html as _html_mod
-            snippet = _html_mod.escape(re.sub(r"\s+", " ", r_direct.text)[2000:2600])
-            await msg.answer(f"Фрагмент HTML (прямой запрос):\n<code>{snippet}</code>", parse_mode="HTML")
     except Exception as e:
         await msg.answer(f"Прямой запрос ошибка: {str(e)[:200]}")
 
     try:
         await msg.answer("Пробую headless-браузер (Playwright)...")
-        _avito_ensure_loop()
-        fut = _aio.run_coroutine_threadsafe(_avito_async_fetch(url, 2500, 25000), _avito_loop)
-        html = await asyncio.wrap_future(fut)
+        loop = asyncio.get_event_loop()
+        html = await loop.run_in_executor(None, _avito_fetch_html, url)
         if html:
             class _FakeResp:
                 status_code = 200
                 text = html
             await msg.answer(_stat(_FakeResp(), "Headless-браузер"))
-            import html as _html_mod
-            snippet = _html_mod.escape(re.sub(r"\s+", " ", html)[2000:2600])
-            await msg.answer(f"Фрагмент HTML:\n<code>{snippet}</code>", parse_mode="HTML")
         else:
             await msg.answer("Headless-браузер: пустой ответ ❌")
     except Exception as e:
-        await msg.answer(f"Headless-браузер ошибка: {type(e).__name__}: {str(e)[:300]}")
+        await msg.answer(f"Headless-браузер ошибка: {str(e)[:200]}")
 
     await msg.answer("✅ Диагностика завершена. Пришли эти результаты разработчику.")
 
@@ -3354,8 +3234,6 @@ async def cmd_monitor(msg: Message):
 
 async def main():
     logging.basicConfig(level=logging.WARNING)
-    _start_xray()
-    await asyncio.sleep(1.5)  # дать xray время поднять локальные порты
     print("✅ Авто-брокер бот запущен!")
 
     # Единый глобальный монитор — опрашивает всех активных пользователей каждые 2 минуты
