@@ -156,10 +156,10 @@ def _score(df1m: pd.DataFrame, df5m: pd.DataFrame, df15m: pd.DataFrame) -> dict:
     m15     = _macd(c15, 12, 26, 9)
     ema9_5   = _ema(c5,  9);  ema21_5  = _ema(c5,  21)
     ema9_15  = _ema(c15, 9);  ema21_15 = _ema(c15, 21)
-    trend5_bull  = ema9_5  > ema21_5  * 1.0001 and price > ema21_5
-    trend5_bear  = ema9_5  < ema21_5  * 0.9999 and price < ema21_5
-    trend15_bull = ema9_15 > ema21_15 * 1.0001 and price > ema21_15 * 0.9995
-    trend15_bear = ema9_15 < ema21_15 * 0.9999 and price < ema21_15 * 1.0005
+    trend5_bull  = ema9_5  > ema21_5
+    trend5_bear  = ema9_5  < ema21_5
+    trend15_bull = ema9_15 > ema21_15
+    trend15_bear = ema9_15 < ema21_15
     both_bull = trend5_bull and trend15_bull
     both_bear = trend5_bear and trend15_bear
 
