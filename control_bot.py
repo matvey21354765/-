@@ -3203,16 +3203,27 @@ async def cmd_test_avito(msg: Message):
     def _stat(r, name: str) -> str:
         t = r.text
         has_items = 'data-marker="item"' in t
+        item_count = t.count('data-marker="item"')
         has_nd = '__NEXT_DATA__' in t
-        has_block = "captcha" in t.lower() or "Доступ ограничен" in t or "blocked" in t.lower()
-        links = len(re.findall(rf'href="/{re.escape(slug)}/[a-z0-9_/-]+-\d{{5,}}"', t))
+        # Реальная блокировка: капча-страница ("Подтвердите что вы не робот"),
+        # ограничение доступа или 429. Просто наличие слова "captcha" в тексте
+        # не является блокировкой — Авито встраивает капча-JS в каждую страницу.
+        has_block = (
+            r.status_code in (429, 403)
+            or "Доступ ограничен" in t
+            or "Подтвердите, что вы не робот" in t
+            or (len(t) < 50_000 and r.status_code != 200)
+        )
+        links = len(re.findall(rf'href="/{re.escape(slug)}/[a-z0-9_/%-]+-\d{{4,}}"', t))
+        parsed = len(_parse_avito_html(t, slug, datetime.date.today())) if has_items else 0
         return (
             f"📡 {name}:\n"
             f"HTTP {r.status_code} | {len(t):,} байт\n"
-            f"data-marker: {'ДА ✅' if has_items else 'нет ❌'}\n"
+            f"data-marker: {'ДА ✅' if has_items else 'нет ❌'} ({item_count} шт)\n"
             f"__NEXT_DATA__: {'ДА ✅' if has_nd else 'нет ❌'}\n"
             f"ссылки на авто: {links} шт\n"
-            f"блокировка: {'ДА ⛔' if has_block else 'нет'}"
+            f"распознано объявлений: {parsed} шт\n"
+            f"блокировка: {'ДА ⛔' if has_block else 'нет ✅'}"
         )
 
     try:
