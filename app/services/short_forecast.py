@@ -349,7 +349,7 @@ def _score(df1m: pd.DataFrame, df5m: pd.DataFrame, df15m: pd.DataFrame) -> dict:
     }
 
 
-async def get_short_forecast(coin: str) -> dict:
+async def get_short_forecast(coin: str, telegram_id: int | None = None) -> dict:
     try:
         df1m, df5m, df15m = await asyncio.gather(
             _kraken_df(coin, 1, 30),
@@ -361,7 +361,8 @@ async def get_short_forecast(coin: str) -> dict:
         result["source"] = "kraken"
         try:
             from app.services.leaderboard import log_forecast
-            await log_forecast(coin, result["direction"], result["price"])
+            await log_forecast(coin, result["direction"], result["price"],
+                               telegram_id=telegram_id)
         except Exception:
             pass
         return result

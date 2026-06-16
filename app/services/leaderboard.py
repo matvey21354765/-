@@ -6,28 +6,28 @@ from sqlalchemy import select, func, and_
 logger = logging.getLogger(__name__)
 
 
-async def log_forecast(coin: str, direction: str, price: float) -> int | None:
-    """Save a new forecast to forecast_log, deduplicating within 15 minutes."""
+async def log_forecast(coin: str, direction: str, price: float,
+                       telegram_id: int | None = None) -> int | None:
+    """Save a new forecast, deduplicating within 15 minutes per user."""
     if direction == "FLAT":
         return None
     try:
         from app.models.database import AsyncSessionLocal, ForecastLog
         dedup_window = datetime.now(timezone.utc) - timedelta(minutes=15)
         async with AsyncSessionLocal() as db:
-            # Don't log if same coin+direction already logged in last 15 min
-            existing = await db.execute(
-                select(ForecastLog).where(
-                    and_(
-                        ForecastLog.coin == coin,
-                        ForecastLog.direction == direction,
-                        ForecastLog.created_at >= dedup_window,
-                        ForecastLog.correct.is_(None),
-                    )
-                ).limit(1)
-            )
+            filters = [
+                ForecastLog.coin == coin,
+                ForecastLog.direction == direction,
+                ForecastLog.created_at >= dedup_window,
+                ForecastLog.correct.is_(None),
+            ]
+            if telegram_id is not None:
+                filters.append(ForecastLog.telegram_id == telegram_id)
+            existing = await db.execute(select(ForecastLog).where(and_(*filters)).limit(1))
             if existing.scalar_one_or_none():
                 return None
-            row = ForecastLog(coin=coin, direction=direction, price_entry=price)
+            row = ForecastLog(coin=coin, direction=direction, price_entry=price,
+                              telegram_id=telegram_id)
             db.add(row)
             await db.commit()
             await db.refresh(row)
@@ -80,8 +80,8 @@ async def resolve_forecasts():
         logger.warning(f"resolve_forecasts error: {e}")
 
 
-async def get_stats(days: int = 7) -> dict:
-    """Return accuracy stats for last N days — short forecasts only."""
+async def get_stats(days: int = 7, telegram_id: int | None = None) -> dict:
+    """Return accuracy stats for last N days, filtered by user if telegram_id given."""
     try:
         from app.models.database import AsyncSessionLocal, ForecastLog
         from sqlalchemy import case
@@ -90,15 +90,15 @@ async def get_stats(days: int = 7) -> dict:
         coins: dict[str, dict] = {}
 
         async with AsyncSessionLocal() as db:
+            filters = [ForecastLog.correct.isnot(None), ForecastLog.created_at >= since]
+            if telegram_id is not None:
+                filters.append(ForecastLog.telegram_id == telegram_id)
             res = await db.execute(
                 select(
                     ForecastLog.coin,
                     func.count().label("total"),
                     func.sum(case((ForecastLog.correct == True, 1), else_=0)).label("wins"),
-                ).where(
-                    and_(ForecastLog.correct.isnot(None),
-                         ForecastLog.created_at >= since)
-                ).group_by(ForecastLog.coin)
+                ).where(and_(*filters)).group_by(ForecastLog.coin)
             )
             for r in res.all():
                 coins[r.coin] = {"total": r.total, "wins": r.wins,
@@ -121,15 +121,18 @@ async def get_stats(days: int = 7) -> dict:
         return {"days": days, "total": 0, "wins": 0, "acc": 0, "coins": {}}
 
 
-async def get_recent_signals(limit: int = 10) -> list:
-    """Return last N resolved forecasts with entry/exit prices."""
+async def get_recent_signals(limit: int = 10, telegram_id: int | None = None) -> list:
+    """Return last N resolved forecasts, filtered by user if telegram_id given."""
     try:
         from app.models.database import AsyncSessionLocal, ForecastLog
         from sqlalchemy import desc
         async with AsyncSessionLocal() as db:
+            filters = [ForecastLog.correct.isnot(None)]
+            if telegram_id is not None:
+                filters.append(ForecastLog.telegram_id == telegram_id)
             res = await db.execute(
                 select(ForecastLog)
-                .where(ForecastLog.correct.isnot(None))
+                .where(and_(*filters))
                 .order_by(desc(ForecastLog.resolved_at))
                 .limit(limit)
             )
@@ -173,7 +176,7 @@ def format_leaderboard(stats: dict, recent: list = None) -> str:
     recent_text = "\n".join(recent_lines) if recent_lines else "  Ещё нет данных"
 
     return (
-        f"🏆 <b>Точность прогнозов 3–5м</b>\n"
+        f"🏆 <b>Твоя точность прогнозов 3–5м</b>\n"
         f"📅 За последние {days} дней\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📊 Точность: <b>{acc}%</b>  <code>{bar}</code>\n"

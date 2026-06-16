@@ -34,9 +34,13 @@ async def cb_lb_period(call: CallbackQuery):
 
 async def _show(call: CallbackQuery, days: int):
     await call.answer()
+    uid = call.from_user.id
     try:
         from app.services.leaderboard import get_stats, format_leaderboard, get_recent_signals
-        stats, recent = await asyncio.gather(get_stats(days), get_recent_signals(8))
+        stats, recent = await asyncio.gather(
+            get_stats(days, telegram_id=uid),
+            get_recent_signals(8, telegram_id=uid),
+        )
         text = format_leaderboard(stats, recent)
     except Exception as e:
         logger.error(f"Leaderboard error: {e}")

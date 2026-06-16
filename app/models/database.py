@@ -136,6 +136,7 @@ class ForecastLog(Base):
     __tablename__ = "forecast_log"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    telegram_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True, index=True)
     coin: Mapped[str] = mapped_column(String(10), nullable=False)
     direction: Mapped[str] = mapped_column(String(8), nullable=False)
     price_entry: Mapped[float] = mapped_column(Float, nullable=False)
@@ -172,6 +173,9 @@ async def init_db():
                 resolved_at TIMESTAMPTZ
             )
         """))
+        await conn.execute(text(
+            "ALTER TABLE forecast_log ADD COLUMN IF NOT EXISTS telegram_id BIGINT"
+        ))
         await conn.execute(text(
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS notifications_enabled BOOLEAN DEFAULT FALSE"
         ))

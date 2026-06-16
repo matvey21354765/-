@@ -429,7 +429,7 @@ async def cb_markets(call: CallbackQuery):
 
     try:
         from app.services.short_forecast import get_short_forecast
-        forecast = await get_short_forecast(coin)
+        forecast = await get_short_forecast(coin, telegram_id=call.from_user.id)
         direction = forecast["direction"]
         conf = forecast["confidence"]
         price = forecast["price"]

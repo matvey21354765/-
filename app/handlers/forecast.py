@@ -77,11 +77,12 @@ async def cb_forecast(call: CallbackQuery):
         import asyncio
         user = await _get_user(call)
         has_access = user and user.has_access()
+        uid = call.from_user.id
         try:
             results = await asyncio.gather(
-                get_short_forecast("BTC"),
-                get_short_forecast("ETH"),
-                get_short_forecast("SOL"),
+                get_short_forecast("BTC", telegram_id=uid),
+                get_short_forecast("ETH", telegram_id=uid),
+                get_short_forecast("SOL", telegram_id=uid),
             )
             fmt = format_forecast if has_access else format_forecast_free
             parts = [fmt(r) for r in results]
@@ -115,7 +116,7 @@ async def cb_forecast(call: CallbackQuery):
     try:
         user = await _get_user(call)
         has_access = user and user.has_access()
-        forecast = await get_short_forecast(coin)
+        forecast = await get_short_forecast(coin, telegram_id=call.from_user.id)
         if has_access:
             text = format_forecast(forecast)
             kb = _forecast_kb(coin)
