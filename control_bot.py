@@ -1179,7 +1179,8 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
             if depth > 10 or obj is None:
                 return ""
             if isinstance(obj, str):
-                if "img.avito.st" in obj and len(obj) > 10:
+                # Только реальные фото объявлений: img.avito.st/image/...
+                if "img.avito.st/image/" in obj and len(obj) > 10:
                     raw = obj.replace("\\/", "/")
                     url_c = ("https:" + raw) if raw.startswith("//") else raw
                     if not any(x in url_c.lower() for x in ("/stub", "noimage", "placeholder")):
@@ -1196,7 +1197,7 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
                 for size in ("1208x906", "864x648", "1280x960", "640x480",
                              "432x324", "320x240", "100x75", "originalSize"):
                     v = obj.get(size)
-                    if isinstance(v, str) and "avito" in v:
+                    if isinstance(v, str) and "img.avito.st/image/" in v:
                         raw = v.replace("\\/", "/")
                         url_c = ("https:" + raw) if raw.startswith("//") else raw
                         if not any(x in url_c.lower() for x in ("/stub", "noimage")):
@@ -1373,6 +1374,7 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
                 or card.select_one("a[href]")
             )
             href = link.get("href", "") if link else ""
+            href = href.split("?")[0]  # убираем tracking-параметры (иначе повторы)
             item_url = ("https://www.avito.ru" + href) if href.startswith("/") else href
             if not item_url or "avito.ru" not in item_url:
                 continue
@@ -1385,38 +1387,65 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
             )
             title = title_el.get_text(strip=True) if title_el else ""
 
-            price_el = (
-                card.select_one("[itemprop='price']")
-                or card.select_one("[data-marker='item-price']")
-                or card.select_one("[class*='price']")
-            )
-            price = ""
-            if price_el:
-                price = price_el.get("content") or price_el.get_text(strip=True)
+            card_str = str(card)
 
+            # Цена — несколько стратегий, т.к. Авито меняет классы:
+            # 1) meta itemprop=price content="850000"
+            # 2) data-marker="item-price"
+            # 3) любой элемент с itemprop/class price
+            # 4) regex по сырому HTML карточки ("850 000 ₽" / content="850000")
+            price = ""
+            price_int = 0
+            meta_price = card.select_one("meta[itemprop='price']")
+            if meta_price and meta_price.get("content"):
+                price_int = parse_price(meta_price.get("content"))
+            if not price_int:
+                price_el = (
+                    card.select_one("[data-marker='item-price']")
+                    or card.select_one("[itemprop='price']")
+                    or card.select_one("[class*='price']")
+                    or card.select_one("[class*='Price']")
+                )
+                if price_el:
+                    price = price_el.get("content") or price_el.get_text(strip=True)
+                    price_int = parse_price(price)
+            if not price_int:
+                # content="850000" где-то в карточке
+                cm = re.search(r'content="(\d{5,8})"', card_str)
+                if cm and 10_000 < int(cm.group(1)) < 99_000_000:
+                    price_int = int(cm.group(1))
+            if not price_int:
+                # "850 000 ₽" или "850000 ₽" в тексте
+                tm = re.search(r'(\d[\d\s ]{4,12})\s*(?:₽|руб)', card_str)
+                if tm:
+                    price_int = parse_price(tm.group(1))
+            if price_int and not price:
+                price = f"{price_int:,} ₽".replace(",", " ")
+
+            # Фото — ТОЛЬКО реальные фото объявлений Авито: .img.avito.st/image/...
+            # (иначе ловятся промо-баннеры и иконки, напр. мультяшный ноутбук)
             photo_url = ""
             for img_el in card.find_all("img"):
                 src = (img_el.get("src") or img_el.get("data-src") or
                        img_el.get("data-lazy-src") or img_el.get("data-original") or "")
+                if not src and img_el.get("srcset"):
+                    src = img_el.get("srcset").split()[0]
                 if src.startswith("//"):
                     src = "https:" + src
-                if src.startswith("http") and len(src) > 20:
+                if "img.avito.st/image/" in src and src.startswith("http"):
                     photo_url = src
                     break
-            # Fallback: regex по сырому тексту карточки
             if not photo_url:
-                card_str = str(card)
-                img_m = re.search(r'((?:https?:)?//[^"\']+(?:img\.avito|avito\.st|cdn-avito)[^"\']+\.(?:jpg|jpeg|webp))', card_str)
+                img_m = re.search(r'((?:https?:)?//[^"\']*img\.avito\.st/image/[^"\']+\.(?:jpg|jpeg|webp))', card_str)
                 if img_m:
                     raw = img_m.group(1)
                     photo_url = ("https:" + raw) if raw.startswith("//") else raw
 
             if title:
-                price_int = parse_price(price)
                 item = {
                     "source": "avito", "title": title, "price": price,
                     "url": item_url, "date": str(today),
-                    "_photos": 0, "_days_on_site": 0,
+                    "_photos": 1 if photo_url else 0, "_days_on_site": 0,
                     "description": "", "seller": "", "_photo_url": photo_url,
                     "_price_int": price_int,
                 }
@@ -1480,19 +1509,14 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
         if v:
             price_map[upath] = v
         # Ищем фото CDN Авито — могут быть //img.avito.st/... (без схемы) или https://...
+        # Только реальные фото объявлений: img.avito.st/image/...
         img_m = re.search(
-            r'"(?:864x648|640x480|320x240|url)"\s*:\s*"((?:https?:)?(?:\\?/){2}[^"]{10,}(?:avito|img)[^"]{5,}\.(?:jpg|jpeg|webp|png))"',
+            r'((?:https?:)?(?:\\?/){2}[^"\']*img\.avito\.st(?:\\?/)image(?:\\?/)[^"\']+\.(?:jpg|jpeg|webp))',
             window
         )
         if img_m:
             raw_url = img_m.group(1).replace("\\/", "/")
             photo_map[upath] = ("https:" + raw_url) if raw_url.startswith("//") else raw_url
-        else:
-            # Более широкий поиск по любому img.avito CDN
-            img_m2 = re.search(r'((?:https?:)?//[^"\']{5,}(?:img\.avito|avito\.st|cdn-avito)[^"\']{5,}\.(?:jpg|jpeg|webp))', window)
-            if img_m2:
-                raw_url = img_m2.group(1)
-                photo_map[upath] = ("https:" + raw_url) if raw_url.startswith("//") else raw_url
 
     sample_prices = list(price_map.values())[:5]
     print(f"  [Авито] цен найдено: {len(price_map)}, фото: {len(photo_map)}, примеры: {sample_prices}")
@@ -3232,6 +3256,20 @@ async def cmd_test_avito(msg: Message):
             "Accept-Language": "ru-RU,ru;q=0.9",
         }, timeout=15, proxies=AVITO_PROXIES)
         await msg.answer(_stat(r_direct, "Прямой запрос"))
+        # Пример распознанного объявления — видно, извлеклись ли цена и фото
+        sample_items = _parse_avito_html(r_direct.text, slug, datetime.date.today())
+        with_price = sum(1 for i in sample_items if i.get("_price_int"))
+        with_photo = sum(1 for i in sample_items if i.get("_photo_url"))
+        if sample_items:
+            ex = sample_items[0]
+            await msg.answer(
+                f"📋 Пример (всего {len(sample_items)}):\n"
+                f"с ценой: {with_price} | с фото: {with_photo}\n\n"
+                f"🚗 {ex.get('title','')}\n"
+                f"💰 {ex.get('_price_int',0):,} ₽\n".replace(",", " ") +
+                f"🖼 фото: {'да' if ex.get('_photo_url') else 'нет'}\n"
+                f"🔗 {ex.get('url','')}"
+            )
     except Exception as e:
         await msg.answer(f"Прямой запрос ошибка: {str(e)[:200]}")
 
