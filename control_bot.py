@@ -1566,6 +1566,7 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
             image_map: dict[str, str] = {}
             desc_map: dict[str, str] = {}
             title_map: dict[str, str] = {}
+            mileage_map: dict[str, int] = {}
 
             # Все urlPath объявлений этого города
             listing_pat = re.compile(
@@ -1637,7 +1638,6 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
                     return best
 
                 # Пробег — mileage в params
-                mileage_map: dict[str, int] = {}
                 # "mileage" or "km" in params array
                 for mm in re.finditer(r'"mileage"\s*:\s*(\d{3,7})', text):
                     val = int(mm.group(1))
@@ -1725,20 +1725,27 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
         for fut in as_completed(futs):
             results.extend(fut.result())
 
-    # Глобальный fallback: если 0 результатов — пробуем без ценового фильтра (1 страница)
+    # Глобальный fallback: если 0 результатов — пробуем без ценового фильтра.
+    # Авито часто отдаёт CAPTCHA именно на URL с pmin/pmax, поэтому сканируем
+    # несколько страниц обычного списка и фильтруем по цене на нашей стороне.
     if not results and (price_min > 0 or price_max < 99_000_000):
         print(f"  [Авито] 0 результатов с ценовым фильтром — пробуем без фильтра")
-        try:
-            import requests as _req_fb
-            fallback_url = f"https://www.avito.ru/{slug}/avtomobili?s=104"
-            r_fb = _req_fb.get("http://api.scraperapi.com", params={
-                "api_key": SCRAPER_API_KEY,
-                "url": fallback_url,
-                "country_code": "ru",
-                "render": "true",
-                "wait": "3000",
-            }, timeout=70)
-            if r_fb.status_code == 200 and ('"urlPath"' in r_fb.text or 'data-marker="item"' in r_fb.text):
+        import requests as _req_fb
+        fb_results: list[dict] = []
+        for fb_page in range(1, 5):
+            try:
+                fallback_url = f"https://www.avito.ru/{slug}/avtomobili?s=104"
+                if fb_page > 1:
+                    fallback_url += f"&p={fb_page}"
+                r_fb = _req_fb.get("http://api.scraperapi.com", params={
+                    "api_key": SCRAPER_API_KEY,
+                    "url": fallback_url,
+                    "country_code": "ru",
+                    "render": "true",
+                    "wait": "3000",
+                }, timeout=70)
+                if r_fb.status_code != 200 or not ('"urlPath"' in r_fb.text or 'data-marker="item"' in r_fb.text):
+                    continue
                 batch_fb = _parse_avito_html(r_fb.text, slug, today)
                 fb_text = r_fb.text
                 price_map_fb: dict[str, int] = {}
@@ -1781,10 +1788,15 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
                     if not it.get("description") and path in desc_map_fb:
                         it["description"] = desc_map_fb[path]
                     it["_avito_price_filtered"] = False
-                results = batch_fb
-                print(f"  [Авито] fallback: {len(results)} объявлений")
-        except Exception as e:
-            print(f"  [Авито] fallback ошибка: {e}")
+                fb_results.extend(batch_fb)
+                in_budget = sum(1 for it in fb_results if price_min <= it.get("_price_int", 0) <= price_max)
+                print(f"  [Авито] fallback стр.{fb_page}: {len(batch_fb)} объявлений, в бюджете={in_budget}")
+                if in_budget >= 25:
+                    break
+            except Exception as e:
+                print(f"  [Авито] fallback стр.{fb_page} ошибка: {e}")
+        results = fb_results
+        print(f"  [Авито] fallback итого: {len(results)} объявлений")
 
     print(f"  [Авито] итого {len(results)} объявлений")
     return results
