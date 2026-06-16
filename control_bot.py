@@ -1503,20 +1503,21 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
 
         def _try_fetch(fetch_url: str) -> str | None:
             """Пробуем: ScraperAPI → прямой запрос. Принимаем только страницы с объявлениями."""
-            # 1. ScraperAPI
+            # 1. ScraperAPI (Авито иногда отдаёт CAPTCHA — пробуем дважды)
             if SCRAPER_API_KEY:
-                try:
-                    r = _req.get("http://api.scraperapi.com", params={
-                        "api_key": SCRAPER_API_KEY,
-                        "url": fetch_url,
-                        "country_code": "ru",
-                        "render": "true",
-                        "wait": "3000",
-                    }, timeout=70)
-                    if r.status_code == 200 and _page_has_listings(r.text):
-                        return r.text
-                except Exception:
-                    pass
+                for _attempt in range(2):
+                    try:
+                        r = _req.get("http://api.scraperapi.com", params={
+                            "api_key": SCRAPER_API_KEY,
+                            "url": fetch_url,
+                            "country_code": "ru",
+                            "render": "true",
+                            "wait": "3000",
+                        }, timeout=70)
+                        if r.status_code == 200 and _page_has_listings(r.text):
+                            return r.text
+                    except Exception:
+                        pass
             # 2. Прямой запрос
             try:
                 r2 = _req.get(fetch_url, timeout=12, headers=_HEADERS)
