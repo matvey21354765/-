@@ -3062,7 +3062,7 @@ async def cmd_test_avito(msg: Message):
 
     try:
         r_direct = _req.get(url, headers={
-            "User-Agent": "Mozilla/5.0 (Linux; Android 12; SM-G991B) AppleWebKit/537.36 Mobile Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "Accept-Language": "ru-RU,ru;q=0.9",
         }, timeout=15, proxies=AVITO_PROXIES)
         await msg.answer(_stat(r_direct, "Прямой запрос"))
