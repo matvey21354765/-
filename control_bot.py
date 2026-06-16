@@ -1795,8 +1795,8 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
                 print(f"  [Авито] fallback стр.{fb_page} ошибка: {e}")
                 return []
 
-        with ThreadPoolExecutor(max_workers=3) as ex:
-            futs = [ex.submit(_fetch_fallback_page, p) for p in range(1, 4)]
+        with ThreadPoolExecutor(max_workers=5) as ex:
+            futs = [ex.submit(_fetch_fallback_page, p) for p in range(1, 6)]
             for fut in as_completed(futs):
                 fb_results.extend(fut.result())
         results = fb_results
@@ -2443,18 +2443,20 @@ async def _ensure_photo(item: dict) -> None:
         try:
             import requests as _req
             if source == "avito":
-                # 1. Прямой запрос первым — Авито SSR-страницы доступны для crawler
-                try:
-                    r = _req.get(url, timeout=10, headers=_HDR)
-                    if r.status_code == 200 and len(r.text) > 5000:
-                        p, d, pi = _extract_from_page(r.text)
-                        if p: photo = p
-                        if d: desc = d
-                        if pi: price_int = pi
-                except Exception:
-                    pass
-                # 2. ScraperAPI если прямой не дал результата
-                if SCRAPER_API_KEY and ((need_photo and not photo) or (need_desc and not desc) or (need_price and not price_int)):
+                # Запускаем прямой запрос и ScraperAPI ОДНОВРЕМЕННО (а не по очереди) —
+                # берём то, что нашлось первым/успешным, экономим время на ожидании.
+                def _direct() -> tuple[str, str, int]:
+                    try:
+                        r = _req.get(url, timeout=10, headers=_HDR)
+                        if r.status_code == 200 and len(r.text) > 5000:
+                            return _extract_from_page(r.text)
+                    except Exception:
+                        pass
+                    return "", "", 0
+
+                def _via_scraperapi() -> tuple[str, str, int]:
+                    if not SCRAPER_API_KEY:
+                        return "", "", 0
                     try:
                         r2 = _req.get("http://api.scraperapi.com", params={
                             "api_key": SCRAPER_API_KEY,
@@ -2462,14 +2464,22 @@ async def _ensure_photo(item: dict) -> None:
                             "country_code": "ru",
                             "render": "true",
                             "wait": "1500",
-                        }, timeout=20)
+                        }, timeout=45)
                         if r2.status_code == 200 and len(r2.text) > 5000:
-                            p2, d2, pi2 = _extract_from_page(r2.text)
-                            if p2 and not photo: photo = p2
-                            if d2 and not desc: desc = d2
-                            if pi2 and not price_int: price_int = pi2
+                            return _extract_from_page(r2.text)
                     except Exception:
                         pass
+                    return "", "", 0
+
+                from concurrent.futures import ThreadPoolExecutor as _TPE
+                with _TPE(max_workers=2) as _ex:
+                    fut_d = _ex.submit(_direct)
+                    fut_s = _ex.submit(_via_scraperapi)
+                    pd, dd, pid = fut_d.result()
+                    ps, ds, pis = fut_s.result()
+                photo = pd or ps
+                desc = dd or ds
+                price_int = pid or pis
             elif source in ("drom", "autoru"):
                 r = _req.get(url, timeout=10, headers=_HDR)
                 if r.status_code == 200:
@@ -2595,7 +2605,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
     async def _prefetch(it):
         async with sem:
             try:
-                await asyncio.wait_for(_ensure_photo(it), timeout=22)
+                await asyncio.wait_for(_ensure_photo(it), timeout=40)
             except Exception:
                 pass
     await asyncio.gather(*[_prefetch(it) for it in batch])
@@ -2743,7 +2753,7 @@ async def do_search_for_user(uid: int, reply_to):
     async def _pre(it):
         async with sem_pre:
             try:
-                await asyncio.wait_for(_ensure_photo(it), timeout=22)
+                await asyncio.wait_for(_ensure_photo(it), timeout=40)
             except Exception:
                 pass
     await asyncio.gather(*[_pre(it) for it in first_batch])
