@@ -976,7 +976,7 @@ async def _avito_async_init():
         except Exception:
             pass
     _avito_async_context = context
-    _avito_async_sem = _aio.Semaphore(4)  # не больше 4 вкладок одновременно — меньше похоже на бота
+    _avito_async_sem = _aio.Semaphore(2)  # не больше 2 вкладок одновременно — меньше похоже на бота
 
 
 def _avito_loop_main():
@@ -1002,7 +1002,7 @@ def _avito_ensure_loop():
 async def _avito_async_fetch(url: str, wait_ms: int, timeout_ms: int) -> str:
     async with _avito_async_sem:
         # небольшая случайная пауза перед навигацией — снижает шанс рейт-лимита (429)
-        await _aio.sleep(random.uniform(0.3, 1.2))
+        await _aio.sleep(random.uniform(1.5, 4.0))
         page = await _avito_async_context.new_page()
         try:
             try:
