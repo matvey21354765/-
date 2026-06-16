@@ -2692,12 +2692,17 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         chunk = items[cursor:cursor + 10]
         cursor += 10
         await asyncio.gather(*[_prefetch(it) for it in chunk])
+        chunk = rank_by_market_price(chunk)
         for it in chunk:
             p = it.get("_price_int") or parse_price(it.get("price", ""))
             if p and not (_pmin <= p <= _pmax):
                 continue
-            if not it.get("_photo_url") and not it.get("description"):
-                continue
+            has_photo = bool(it.get("_photo_url"))
+            has_desc = bool(it.get("description"))
+            if not has_photo and not has_desc:
+                continue  # ни фото, ни описания — пропускаем
+            if not has_photo and it.get("_below_market"):
+                continue  # выгодные предложения без фото не показываем — нужно фото
             batch.append(it)
 
     # Пересчитываем рыночное сравнение после загрузки цен и сортируем:
