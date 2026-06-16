@@ -1524,6 +1524,217 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
     return results
 
 
+def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, today) -> list[dict]:
+    """
+    Использует внутренний JSON API Авито (как мобильное приложение).
+    Пробует несколько эндпоинтов с разными заголовками — мобильный сайт,
+    cloudscraper с Android UA, публичный API. Эти каналы имеют менее
+    агрессивную антибот-защиту, чем десктопный веб-скрейпинг.
+    """
+    try:
+        import requests as _req
+    except ImportError:
+        return []
+
+    slug = AVITO_SLUGS.get(region, region)
+    location_id = AVITO_LOCATION_IDS.get(region, 637640)
+    results: list[dict] = []
+
+    session = _req.Session()
+
+    # Заголовки мобильного браузера Android
+    mobile_headers = {
+        "User-Agent": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Cache-Control": "max-age=0",
+    }
+
+    # cloudscraper с мобильным UA — обходит CF/JS-challenge без браузера
+    try:
+        import cloudscraper as _cs
+        cs_session = _cs.create_scraper(
+            browser={"browser": "chrome", "platform": "android", "mobile": True},
+            delay=2,
+        )
+    except ImportError:
+        cs_session = None
+
+    def _items_from_json_response(data) -> list[dict]:
+        """Извлекает объявления из любого JSON-ответа Авито."""
+        items_raw = _avito_find_items_in_json(data)
+        out = []
+        for it in items_raw:
+            item = _avito_item_from_json(it, today)
+            if item:
+                out.append(item)
+        return out
+
+    def _try_mobile_site(p: int) -> list[dict]:
+        """m.avito.ru — мобильный сайт, отдельная антибот-цепочка от десктопа."""
+        url = f"https://m.avito.ru/{slug}/avtomobili"
+        params: dict = {"seller_type": "1"}  # 1 = частники
+        if p > 1:
+            params["p"] = p
+        if price_min > 0:
+            params["pmin"] = price_min
+        if price_max < 99_000_000:
+            params["pmax"] = price_max
+        try:
+            r = session.get(url, params=params, headers=mobile_headers, timeout=15, proxies=AVITO_PROXIES)
+            print(f"  [Авито m.] стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
+            if r.status_code == 200 and ('"urlPath"' in r.text or 'data-marker="item"' in r.text):
+                return _parse_avito_html(r.text, slug, today)
+        except Exception as e:
+            print(f"  [Авито m.] стр.{p}: {e}")
+        return []
+
+    def _try_cs_web(p: int) -> list[dict]:
+        """cloudscraper + Android UA — обходит JS-challenge без headless-браузера."""
+        if not cs_session:
+            return []
+        url = f"https://www.avito.ru/{slug}/avtomobili"
+        params: dict = {"seller_type": "1"}
+        if p > 1:
+            params["p"] = p
+        if price_min > 0:
+            params["pmin"] = price_min
+        if price_max < 99_000_000:
+            params["pmax"] = price_max
+        try:
+            r = cs_session.get(url, params=params, timeout=25, proxies=AVITO_PROXIES)
+            print(f"  [Авито cs] стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
+            if r.status_code == 200 and ('"urlPath"' in r.text or 'data-marker="item"' in r.text):
+                return _parse_avito_html(r.text, slug, today)
+        except Exception as e:
+            print(f"  [Авито cs] стр.{p}: {e}")
+        return []
+
+    def _try_avito_public_api(p: int) -> list[dict]:
+        """
+        api.avito.ru/core/v1/items — публичный REST API Авито.
+        Используется официальным мобильным приложением, отдельная инфраструктура.
+        category_id=9 «Транспорт», params[109]=106 «Легковые автомобили».
+        """
+        params: dict = {
+            "locationId": location_id,
+            "categoryId": 9,
+            "params[109]": 106,
+            "privateOnly": 1,
+            "page": p,
+            "limit": 30,
+        }
+        if price_min > 0:
+            params["priceMin"] = price_min
+        if price_max < 99_000_000:
+            params["priceMax"] = price_max
+
+        try:
+            r = session.get(
+                "https://api.avito.ru/core/v1/items",
+                params=params,
+                headers={
+                    "User-Agent": "ru.avito.avitomobile/12 (Android 13; ru_RU)",
+                    "Accept": "application/json",
+                    "Accept-Language": "ru-RU",
+                    "x-device-id": f"avito-{random.randint(10**9, 10**10 - 1)}",
+                },
+                timeout=15,
+                proxies=AVITO_PROXIES,
+            )
+            print(f"  [Авито pubAPI] стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
+            if r.status_code == 200:
+                try:
+                    return _items_from_json_response(r.json())
+                except Exception as e:
+                    print(f"  [Авито pubAPI] json: {e}")
+        except Exception as e:
+            print(f"  [Авито pubAPI] стр.{p}: {e}")
+        return []
+
+    def _try_avito_web_api(p: int) -> list[dict]:
+        """
+        www.avito.ru/web/1/main/items — внутренний JSON API веб-фронтенда.
+        Используется при пагинации без перезагрузки. Принимает те же параметры,
+        что и обычный URL, но возвращает чистый JSON.
+        """
+        params: dict = {
+            "locationId": location_id,
+            "categoryId": 9,
+            "user": 1,
+            "page": p,
+            "items": 30,
+        }
+        if price_min > 0:
+            params["priceMin"] = price_min
+        if price_max < 99_000_000:
+            params["priceMax"] = price_max
+
+        try:
+            r = session.get(
+                "https://www.avito.ru/web/1/main/items",
+                params=params,
+                headers={
+                    **mobile_headers,
+                    "Accept": "application/json, text/plain, */*",
+                    "X-Requested-With": "XMLHttpRequest",
+                    "Referer": f"https://www.avito.ru/{slug}/avtomobili",
+                },
+                timeout=15,
+                proxies=AVITO_PROXIES,
+            )
+            print(f"  [Авито webAPI] стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
+            if r.status_code == 200:
+                try:
+                    data = r.json()
+                    items = _items_from_json_response(data)
+                    if items:
+                        return items
+                    # Прямое извлечение из структуры ответа
+                    raw_items = (
+                        data.get("items") or
+                        data.get("result", {}).get("items") or
+                        data.get("data", {}).get("items") or []
+                    )
+                    for it in raw_items:
+                        obj = _avito_item_from_json(it, today)
+                        if obj:
+                            items.append(obj)
+                    return items
+                except Exception as e:
+                    print(f"  [Авито webAPI] json: {e}")
+        except Exception as e:
+            print(f"  [Авито webAPI] стр.{p}: {e}")
+        return []
+
+    # Пробуем каждый метод; при первом успехе продолжаем им же для всех страниц
+    working_method = None
+    for p in range(1, pages + 1):
+        batch: list[dict] = []
+        methods_to_try = ([working_method] if working_method
+                          else [_try_cs_web, _try_mobile_site, _try_avito_public_api, _try_avito_web_api])
+        for method in methods_to_try:
+            batch = method(p)
+            if batch:
+                if working_method is None:
+                    working_method = method
+                    print(f"  [Авито API] рабочий метод: {method.__name__}")
+                break
+        results.extend(batch)
+        if not batch:
+            print(f"  [Авито API] стр.{p}: 0 объявлений")
+            break
+        time.sleep(0.5)
+
+    return results
+
+
 def _scrape_avito_direct(slug: str, pages: int, price_min: int, price_max: int, today) -> list[dict]:
     """Прямой запрос к Авито без ScraperAPI (мобильный User-Agent)."""
     try:
@@ -1566,9 +1777,11 @@ def _scrape_avito_direct(slug: str, pages: int, price_min: int, price_max: int, 
 
 def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int = 99_000_000, sort_by_date: bool = False) -> list[dict]:
     """
-    Бесплатный парсер Авито: сначала пробуем быстрый прямой HTTP-запрос,
-    если он не дал страницы с объявлениями — открываем страницу в headless-браузере
-    (Playwright + stealth), который ведёт себя как обычный пользователь.
+    Бесплатный парсер Авито. Стратегия (порядок попыток):
+    1. _avito_api_fetch: cloudscraper+Android UA, m.avito.ru, публичный API, веб-API —
+       всё это легче проходит с датацентровых IP, чем десктопный скрейпинг.
+    2. Прямой HTTP-запрос с Desktop UA (иногда работает в определённых регионах).
+    3. Headless Playwright + stealth — последний резерв, требует больше времени.
     """
     slug = AVITO_SLUGS.get(region, region)
     today = datetime.date.today()
@@ -1579,6 +1792,14 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
         from concurrent.futures import ThreadPoolExecutor, as_completed
     except ImportError:
         return []
+
+    # ── Метод 1: API / мобильный сайт / cloudscraper ─────────────
+    print(f"  [Авито] пробуем API-методы для {region}…")
+    api_results = _avito_api_fetch(region, pages, price_min, price_max, today)
+    if api_results:
+        print(f"  [Авито] API-метод дал {len(api_results)} объявлений")
+        return api_results
+    print(f"  [Авито] API-методы не дали результатов, переходим к Playwright")
 
     def _build_url(p: int) -> str:
         qs_parts = []
