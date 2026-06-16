@@ -1503,21 +1503,20 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
 
         def _try_fetch(fetch_url: str) -> str | None:
             """Пробуем: ScraperAPI → прямой запрос. Принимаем только страницы с объявлениями."""
-            # 1. ScraperAPI (Авито иногда отдаёт CAPTCHA — пробуем дважды)
+            # 1. ScraperAPI
             if SCRAPER_API_KEY:
-                for _attempt in range(2):
-                    try:
-                        r = _req.get("http://api.scraperapi.com", params={
-                            "api_key": SCRAPER_API_KEY,
-                            "url": fetch_url,
-                            "country_code": "ru",
-                            "render": "true",
-                            "wait": "3000",
-                        }, timeout=70)
-                        if r.status_code == 200 and _page_has_listings(r.text):
-                            return r.text
-                    except Exception:
-                        pass
+                try:
+                    r = _req.get("http://api.scraperapi.com", params={
+                        "api_key": SCRAPER_API_KEY,
+                        "url": fetch_url,
+                        "country_code": "ru",
+                        "render": "true",
+                        "wait": "1500",
+                    }, timeout=45)
+                    if r.status_code == 200 and _page_has_listings(r.text):
+                        return r.text
+                except Exception:
+                    pass
             # 2. Прямой запрос
             try:
                 r2 = _req.get(fetch_url, timeout=12, headers=_HEADERS)
@@ -1719,9 +1718,9 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
             print(f"  [Авито] стр.{p}: {e}")
             return []
 
-    # Параллельно запрашиваем все страницы (3 потока одновременно)
+    # Параллельно запрашиваем все страницы (5 потоков — лимит конкурентности ScraperAPI)
     results = []
-    with ThreadPoolExecutor(max_workers=3) as ex:
+    with ThreadPoolExecutor(max_workers=5) as ex:
         futs = {ex.submit(_fetch_page, p): p for p in range(1, pages + 1)}
         for fut in as_completed(futs):
             results.extend(fut.result())
@@ -1733,7 +1732,8 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
         print(f"  [Авито] 0 результатов с ценовым фильтром — пробуем без фильтра")
         import requests as _req_fb
         fb_results: list[dict] = []
-        for fb_page in range(1, 5):
+
+        def _fetch_fallback_page(fb_page: int) -> list[dict]:
             try:
                 fallback_url = f"https://www.avito.ru/{slug}/avtomobili?s=104"
                 if fb_page > 1:
@@ -1743,10 +1743,10 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
                     "url": fallback_url,
                     "country_code": "ru",
                     "render": "true",
-                    "wait": "3000",
-                }, timeout=70)
+                    "wait": "1500",
+                }, timeout=45)
                 if r_fb.status_code != 200 or not ('"urlPath"' in r_fb.text or 'data-marker="item"' in r_fb.text):
-                    continue
+                    return []
                 batch_fb = _parse_avito_html(r_fb.text, slug, today)
                 fb_text = r_fb.text
                 price_map_fb: dict[str, int] = {}
@@ -1789,13 +1789,16 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
                     if not it.get("description") and path in desc_map_fb:
                         it["description"] = desc_map_fb[path]
                     it["_avito_price_filtered"] = False
-                fb_results.extend(batch_fb)
-                in_budget = sum(1 for it in fb_results if price_min <= it.get("_price_int", 0) <= price_max)
-                print(f"  [Авито] fallback стр.{fb_page}: {len(batch_fb)} объявлений, в бюджете={in_budget}")
-                if in_budget >= 25:
-                    break
+                print(f"  [Авито] fallback стр.{fb_page}: {len(batch_fb)} объявлений")
+                return batch_fb
             except Exception as e:
                 print(f"  [Авито] fallback стр.{fb_page} ошибка: {e}")
+                return []
+
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            futs = [ex.submit(_fetch_fallback_page, p) for p in range(1, 4)]
+            for fut in as_completed(futs):
+                fb_results.extend(fut.result())
         results = fb_results
         print(f"  [Авито] fallback итого: {len(results)} объявлений")
 
@@ -2458,8 +2461,8 @@ async def _ensure_photo(item: dict) -> None:
                             "url": url,
                             "country_code": "ru",
                             "render": "true",
-                            "wait": "3000",
-                        }, timeout=70)
+                            "wait": "1500",
+                        }, timeout=20)
                         if r2.status_code == 200 and len(r2.text) > 5000:
                             p2, d2, pi2 = _extract_from_page(r2.text)
                             if p2 and not photo: photo = p2
