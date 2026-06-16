@@ -29,19 +29,38 @@ from aiogram.fsm.storage.memory import MemoryStorage
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8923014188:AAHvNW2B5fin2XCmbVhlaLNjWhLwI3JhZ90")
 SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY", "b317ae63b4d847805e2f91a1dc073b40")
 
-# ── Прокси (xray, VLESS+Reality) для запросов к Авито ─────────────
-# Серверный датацентр-IP заблокирован Авито на уровне инфраструктуры,
-# поэтому запросы к Авито идут через VPN-прокси с российским выходным IP.
-AVITO_PROXY_HTTP = "http://127.0.0.1:10809"
-AVITO_PROXY_SOCKS = "socks5://127.0.0.1:10808"
+# ── Прокси для запросов к Авито ────────────────────────────────
+# Серверный датацентр-IP заблокирован Авито на уровне инфраструктуры.
+# Приоритет 1: выделенный резидентный/мобильный прокси (логин/пароль в .env) —
+# у него собственный "чистый" IP, не шаренный с другими пользователями.
+# Приоритет 2 (фоллбэк, если AVITO_PROXY_HOST не задан): локальный xray
+# с публичным VPN-конфигом — он почти всегда уже в блок-листе Авито,
+# поэтому реально полезен только резидентный прокси из приоритета 1.
+AVITO_PROXY_HOST = os.getenv("AVITO_PROXY_HOST", "")
+AVITO_PROXY_PORT = os.getenv("AVITO_PROXY_PORT", "")
+AVITO_PROXY_USER = os.getenv("AVITO_PROXY_USER", "")
+AVITO_PROXY_PASS = os.getenv("AVITO_PROXY_PASS", "")
+
+if AVITO_PROXY_HOST and AVITO_PROXY_PORT:
+    _auth = f"{AVITO_PROXY_USER}:{AVITO_PROXY_PASS}@" if AVITO_PROXY_USER else ""
+    AVITO_PROXY_HTTP = f"http://{_auth}{AVITO_PROXY_HOST}:{AVITO_PROXY_PORT}"
+else:
+    AVITO_PROXY_HTTP = "http://127.0.0.1:10809"  # локальный xray-фоллбэк
 AVITO_PROXIES = {"http": AVITO_PROXY_HTTP, "https": AVITO_PROXY_HTTP}
 _XRAY_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "xray_config.json")
 _xray_process: "subprocess.Popen | None" = None
 
 
 def _start_xray():
-    """Запускает xray-core как локальный прокси (127.0.0.1:10808/10809)."""
+    """Запускает xray-core как локальный прокси-фоллбэк (127.0.0.1:10808/10809).
+
+    Если задан AVITO_PROXY_HOST (выделенный резидентный прокси), xray не нужен —
+    запросы и так пойдут напрямую через него.
+    """
     global _xray_process
+    if AVITO_PROXY_HOST and AVITO_PROXY_PORT:
+        print("✅ Использую резидентный прокси из .env для Авито")
+        return
     if not os.path.exists(_XRAY_CONFIG):
         return
     try:
@@ -49,7 +68,7 @@ def _start_xray():
             ["xray", "run", "-c", _XRAY_CONFIG],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
-        print("✅ xray-прокси запущен (для обхода блокировки Авито)")
+        print("✅ xray-прокси запущен (фоллбэк для Авито)")
     except FileNotFoundError:
         print("⚠️ xray не найден — Авито будет работать напрямую (может блокироваться)")
     except Exception as e:
@@ -1003,10 +1022,17 @@ async def _avito_async_init():
     global _avito_async_context, _avito_async_sem
     from playwright.async_api import async_playwright
     pw = await async_playwright().start()
+    if AVITO_PROXY_HOST and AVITO_PROXY_PORT:
+        _pw_proxy = {"server": f"http://{AVITO_PROXY_HOST}:{AVITO_PROXY_PORT}"}
+        if AVITO_PROXY_USER:
+            _pw_proxy["username"] = AVITO_PROXY_USER
+            _pw_proxy["password"] = AVITO_PROXY_PASS
+    else:
+        _pw_proxy = {"server": AVITO_PROXY_HTTP}
     browser = await pw.chromium.launch(
         headless=True,
         args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
-        proxy={"server": AVITO_PROXY_HTTP},
+        proxy=_pw_proxy,
     )
     context = await browser.new_context(
         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
