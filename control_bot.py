@@ -153,6 +153,11 @@ MONTHS = {
 USERS_DIR = Path("users")
 USERS_DIR.mkdir(exist_ok=True)
 
+# Лимит частоты поиска на пользователя — защита от спама запросами,
+# чтобы один человек не нагружал площадки слишком часто.
+SEARCH_COOLDOWN_SEC = 45
+_last_search_at: dict[int, float] = {}
+
 # Мониторинг новых объявлений
 MONITOR_INTERVAL = 15 * 60   # проверять каждые 5 минут
 MONITOR_MIN_SAVINGS_PCT = 10  # показывать только если скидка от рынка ≥ 10%
@@ -1803,6 +1808,33 @@ def _scrape_avito_direct(slug: str, pages: int, price_min: int, price_max: int, 
 # (а значит и риск блокировки 429), когда много пользователей ищут подряд.
 _AVITO_REGION_CACHE: dict[str, tuple[float, list[dict]]] = {}
 _AVITO_REGION_CACHE_TTL = 20 * 60  # 20 минут
+_AVITO_CACHE_FILE = Path("avito_region_cache.json")
+
+
+def _load_avito_cache():
+    """Загружает кэш Авито с диска при старте — чтобы он пережил перезапуск бота."""
+    if not _AVITO_CACHE_FILE.exists():
+        return
+    try:
+        data = json.loads(_AVITO_CACHE_FILE.read_text(encoding="utf-8"))
+        now = time.time()
+        for region, entry in data.items():
+            ts, items = entry[0], entry[1]
+            if now - ts < _AVITO_REGION_CACHE_TTL:  # грузим только ещё свежие
+                _AVITO_REGION_CACHE[region] = (ts, items)
+        print(f"  [Авито] кэш с диска: {len(_AVITO_REGION_CACHE)} регионов")
+    except Exception as e:
+        print(f"  [Авито] не удалось загрузить кэш: {e}")
+
+
+def _save_avito_cache():
+    """Сохраняет кэш Авито на диск."""
+    try:
+        _AVITO_CACHE_FILE.write_text(
+            json.dumps(_AVITO_REGION_CACHE, ensure_ascii=False), encoding="utf-8"
+        )
+    except Exception as e:
+        print(f"  [Авито] не удалось сохранить кэш: {e}")
 
 
 def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int = 99_000_000, sort_by_date: bool = False) -> list[dict]:
@@ -1821,6 +1853,7 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
         items = _scrape_avito_raw(region, pages=pages, sort_by_date=sort_by_date)
         if items:
             _AVITO_REGION_CACHE[region] = (now, items)
+            _save_avito_cache()
         elif cached:
             # Авито временно недоступен (429) — отдаём недавний кэш, чтобы не показывать пустоту
             items = cached[1]
@@ -3056,6 +3089,15 @@ async def do_search_for_user(uid: int, reply_to):
         await reply_to.answer("Сначала настрой поиск: /start")
         return
 
+    # Лимит частоты: не чаще раза в SEARCH_COOLDOWN_SEC секунд на пользователя
+    now_ts = time.time()
+    last = _last_search_at.get(uid, 0)
+    wait_left = SEARCH_COOLDOWN_SEC - (now_ts - last)
+    if wait_left > 0:
+        await reply_to.answer(f"⏳ Подожди {int(wait_left) + 1} сек перед новым поиском.")
+        return
+    _last_search_at[uid] = now_ts
+
     region = s["region"]
     pmin = s.get("price_min", 0)
     pmax = s.get("price_max", 99_000_000)
@@ -3561,6 +3603,7 @@ async def cmd_monitor(msg: Message):
 
 async def main():
     logging.basicConfig(level=logging.WARNING)
+    _load_avito_cache()
     print("✅ Авто-брокер бот запущен!")
 
     # Единый глобальный монитор — опрашивает всех активных пользователей каждые 2 минуты

@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 .claude/
 .avito_cookies.json
+avito_region_cache.json
+users/
+external_avito/
