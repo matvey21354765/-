@@ -939,25 +939,30 @@ AVITO_LOCATION_IDS = {
 
 
 import threading as _threading
-import queue as _queue
+import asyncio as _aio
 
-# Playwright (sync API) привязан к одному ОС-потоку — все обращения к браузеру
-# идут через единственный выделенный воркер-поток и очередь задач.
+# Playwright живёт на одном выделенном asyncio event loop в отдельном потоке
+# (объекты Playwright привязаны к loop, на котором были созданы), но благодаря
+# async API внутри этого loop можно держать НЕСКОЛЬКО страниц одновременно —
+# поэтому параллельность не теряется, в отличие от sync API под общим локом.
 _AVITO_COOKIE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".avito_cookies.json")
-_avito_pw_jobs: "_queue.Queue" = _queue.Queue()
-_avito_pw_thread: "_threading.Thread | None" = None
-_avito_pw_thread_lock = _threading.Lock()
+_avito_loop: "_aio.AbstractEventLoop | None" = None
+_avito_loop_thread: "_threading.Thread | None" = None
+_avito_loop_lock = _threading.Lock()
+_avito_ready = _threading.Event()
+_avito_async_context = None  # type: ignore
+_avito_async_sem: "_aio.Semaphore | None" = None  # ограничивает кол-во одновр. вкладок
 
 
-def _avito_pw_worker():
-    """Единственный поток, владеющий Playwright/браузером/контекстом всю жизнь процесса."""
-    from playwright.sync_api import sync_playwright
-    pw = sync_playwright().start()
-    browser = pw.chromium.launch(
+async def _avito_async_init():
+    global _avito_async_context, _avito_async_sem
+    from playwright.async_api import async_playwright
+    pw = await async_playwright().start()
+    browser = await pw.chromium.launch(
         headless=True,
         args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
     )
-    context = browser.new_context(
+    context = await browser.new_context(
         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         locale="ru-RU",
         viewport={"width": 1366, "height": 900},
@@ -967,64 +972,67 @@ def _avito_pw_worker():
     if os.path.exists(_AVITO_COOKIE_FILE):
         try:
             with open(_AVITO_COOKIE_FILE, "r", encoding="utf-8") as f:
-                context.add_cookies(json.load(f))
+                await context.add_cookies(json.load(f))
         except Exception:
             pass
-    try:
-        from playwright_stealth import stealth_sync
-    except Exception:
-        stealth_sync = None
+    _avito_async_context = context
+    _avito_async_sem = _aio.Semaphore(4)  # не больше 4 вкладок одновременно — меньше похоже на бота
 
-    while True:
-        url, wait_ms, timeout_ms, result, done = _avito_pw_jobs.get()
-        page = None
+
+def _avito_loop_main():
+    global _avito_loop
+    loop = _aio.new_event_loop()
+    _avito_loop = loop
+    _aio.set_event_loop(loop)
+    loop.run_until_complete(_avito_async_init())
+    _avito_ready.set()
+    loop.run_forever()
+
+
+def _avito_ensure_loop():
+    global _avito_loop_thread
+    with _avito_loop_lock:
+        if _avito_loop_thread is None or not _avito_loop_thread.is_alive():
+            _avito_ready.clear()
+            _avito_loop_thread = _threading.Thread(target=_avito_loop_main, daemon=True)
+            _avito_loop_thread.start()
+    _avito_ready.wait(timeout=30)
+
+
+async def _avito_async_fetch(url: str, wait_ms: int, timeout_ms: int) -> str:
+    async with _avito_async_sem:
+        # небольшая случайная пауза перед навигацией — снижает шанс рейт-лимита (429)
+        await _aio.sleep(random.uniform(0.3, 1.2))
+        page = await _avito_async_context.new_page()
         try:
-            page = context.new_page()
-            if stealth_sync:
-                try:
-                    stealth_sync(page)
-                except Exception:
-                    pass
-            page.goto(url, timeout=timeout_ms, wait_until="domcontentloaded")
-            page.wait_for_timeout(wait_ms)
-            result["html"] = page.content()
             try:
-                with open(_AVITO_COOKIE_FILE, "w", encoding="utf-8") as f:
-                    json.dump(context.cookies(), f)
+                from playwright_stealth import stealth_async
+                await stealth_async(page)
             except Exception:
                 pass
-        except Exception as e:
-            result["error"] = str(e)
+            await page.goto(url, timeout=timeout_ms, wait_until="domcontentloaded")
+            await page.wait_for_timeout(wait_ms)
+            html = await page.content()
+            try:
+                cookies = await _avito_async_context.cookies()
+                with open(_AVITO_COOKIE_FILE, "w", encoding="utf-8") as f:
+                    json.dump(cookies, f)
+            except Exception:
+                pass
+            return html
         finally:
-            if page is not None:
-                try:
-                    page.close()
-                except Exception:
-                    pass
-            done.set()
-
-
-def _avito_ensure_pw_thread():
-    global _avito_pw_thread
-    with _avito_pw_thread_lock:
-        if _avito_pw_thread is None or not _avito_pw_thread.is_alive():
-            _avito_pw_thread = _threading.Thread(target=_avito_pw_worker, daemon=True)
-            _avito_pw_thread.start()
+            await page.close()
 
 
 def _avito_fetch_html(url: str, wait_ms: int = 2500, timeout_ms: int = 25000) -> str:
     """Бесплатно получает HTML страницы Авито через headless-браузер (Playwright + stealth)."""
-    _avito_ensure_pw_thread()
-    result: dict = {}
-    done = _threading.Event()
-    _avito_pw_jobs.put((url, wait_ms, timeout_ms, result, done))
-    if not done.wait(timeout=(timeout_ms + wait_ms) / 1000 + 15):
-        print("  [Авито][браузер] ошибка: таймаут ожидания воркера")
+    try:
+        _avito_ensure_loop()
+        fut = _aio.run_coroutine_threadsafe(_avito_async_fetch(url, wait_ms, timeout_ms), _avito_loop)
+        return fut.result(timeout=(timeout_ms + wait_ms) / 1000 + 15)
+    except Exception as e:
+        print(f"  [Авито][браузер] ошибка: {e}")
         return ""
-    if result.get("error"):
-        print(f"  [Авито][браузер] ошибка: {result['error']}")
-        return ""
-    return result.get("html", "")
 
 
 def _avito_scraperapi(url: str) -> "requests.Response | None":
