@@ -1481,17 +1481,17 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
             u += "?" + "&".join(qs_parts)
         return u
 
+    _HEADERS = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+        "Accept-Language": "ru-RU,ru;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Referer": "https://www.avito.ru/",
+    }
+
     def _fetch_page(p: int) -> list[dict]:
         url = _build_url(p)
         url_has_price_filter = price_max < 99_000_000 or price_min > 0
-
-        _HEADERS = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
-            "Accept-Language": "ru-RU,ru;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Referer": "https://www.avito.ru/",
-        }
 
         def _page_has_listings(t: str) -> bool:
             """Проверяем что страница содержит реальные объявления, а не заглушку."""
@@ -1502,8 +1502,15 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
             )
 
         def _try_fetch(fetch_url: str) -> str | None:
-            """Пробуем: ScraperAPI → прямой запрос. Принимаем только страницы с объявлениями."""
-            # 1. ScraperAPI
+            """Пробуем: бесплатный прямой запрос → платный ScraperAPI. Принимаем только страницы с объявлениями."""
+            # 1. Прямой запрос — бесплатно, отказ приходит быстро (~1-2 сек), если не сработал — платим за ScraperAPI
+            try:
+                r2 = _req.get(fetch_url, timeout=12, headers=_HEADERS)
+                if r2.status_code == 200 and _page_has_listings(r2.text):
+                    return r2.text
+            except Exception:
+                pass
+            # 2. ScraperAPI (платный, расходует кредиты) — только если прямой запрос не сработал
             if SCRAPER_API_KEY:
                 try:
                     r = _req.get("http://api.scraperapi.com", params={
@@ -1517,13 +1524,6 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
                         return r.text
                 except Exception:
                     pass
-            # 2. Прямой запрос
-            try:
-                r2 = _req.get(fetch_url, timeout=12, headers=_HEADERS)
-                if r2.status_code == 200 and _page_has_listings(r2.text):
-                    return r2.text
-            except Exception:
-                pass
             return None
 
         try:
@@ -1738,17 +1738,27 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
                 fallback_url = f"https://www.avito.ru/{slug}/avtomobili?s=104"
                 if fb_page > 1:
                     fallback_url += f"&p={fb_page}"
-                r_fb = _req_fb.get("http://api.scraperapi.com", params={
-                    "api_key": SCRAPER_API_KEY,
-                    "url": fallback_url,
-                    "country_code": "ru",
-                    "render": "true",
-                    "wait": "1500",
-                }, timeout=45)
-                if r_fb.status_code != 200 or not ('"urlPath"' in r_fb.text or 'data-marker="item"' in r_fb.text):
+                # Бесплатная попытка первой — платим за ScraperAPI только если она не сработала
+                fb_text = ""
+                try:
+                    r_direct = _req_fb.get(fallback_url, timeout=12, headers=_HEADERS)
+                    if r_direct.status_code == 200 and ('"urlPath"' in r_direct.text or 'data-marker="item"' in r_direct.text):
+                        fb_text = r_direct.text
+                except Exception:
+                    pass
+                if not fb_text and SCRAPER_API_KEY:
+                    r_fb = _req_fb.get("http://api.scraperapi.com", params={
+                        "api_key": SCRAPER_API_KEY,
+                        "url": fallback_url,
+                        "country_code": "ru",
+                        "render": "true",
+                        "wait": "1500",
+                    }, timeout=45)
+                    if r_fb.status_code == 200 and ('"urlPath"' in r_fb.text or 'data-marker="item"' in r_fb.text):
+                        fb_text = r_fb.text
+                if not fb_text:
                     return []
-                batch_fb = _parse_avito_html(r_fb.text, slug, today)
-                fb_text = r_fb.text
+                batch_fb = _parse_avito_html(fb_text, slug, today)
                 price_map_fb: dict[str, int] = {}
                 image_map_fb: dict[str, str] = {}
                 desc_map_fb: dict[str, str] = {}
