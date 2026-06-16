@@ -1799,7 +1799,44 @@ def _scrape_avito_direct(slug: str, pages: int, price_min: int, price_max: int, 
     return results
 
 
+# Кэш результатов Авито по региону — резко снижает число запросов к Авито
+# (а значит и риск блокировки 429), когда много пользователей ищут подряд.
+_AVITO_REGION_CACHE: dict[str, tuple[float, list[dict]]] = {}
+_AVITO_REGION_CACHE_TTL = 20 * 60  # 20 минут
+
+
 def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int = 99_000_000, sort_by_date: bool = False) -> list[dict]:
+    """
+    Парсер Авито с кэшем по региону. Кэшируем ШИРОКИЙ результат (без фильтра
+    по цене) на 20 минут, а конкретный бюджет применяем уже в памяти — так
+    разные пользователи с разными бюджетами в одном городе делят один запрос
+    к Авито вместо десятков. Это главный приём против блокировки 429 под нагрузкой.
+    """
+    now = time.time()
+    cached = _AVITO_REGION_CACHE.get(region)
+    if cached and (now - cached[0]) < _AVITO_REGION_CACHE_TTL:
+        items = cached[1]
+        print(f"  [Авито] кэш региона {region}: {len(items)} объявлений (возраст {int(now-cached[0])}с)")
+    else:
+        items = _scrape_avito_raw(region, pages=pages, sort_by_date=sort_by_date)
+        if items:
+            _AVITO_REGION_CACHE[region] = (now, items)
+        elif cached:
+            # Авито временно недоступен (429) — отдаём недавний кэш, чтобы не показывать пустоту
+            items = cached[1]
+            print(f"  [Авито] скрейп пустой, отдаём устаревший кэш {region}: {len(items)} шт")
+
+    # Фильтр по бюджету применяем в памяти
+    out = []
+    for it in items:
+        p = it.get("_price_int", 0)
+        if p and (p < price_min or p > price_max):
+            continue
+        out.append(it)
+    return out
+
+
+def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max: int = 99_000_000, sort_by_date: bool = False) -> list[dict]:
     """
     Бесплатный парсер Авито. Стратегия (порядок попыток):
     1. _avito_api_fetch: cloudscraper+Android UA, m.avito.ru, публичный API, веб-API —
