@@ -938,6 +938,95 @@ AVITO_LOCATION_IDS = {
 
 
 
+import threading as _threading
+import queue as _queue
+
+# Playwright (sync API) привязан к одному ОС-потоку — все обращения к браузеру
+# идут через единственный выделенный воркер-поток и очередь задач.
+_AVITO_COOKIE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".avito_cookies.json")
+_avito_pw_jobs: "_queue.Queue" = _queue.Queue()
+_avito_pw_thread: "_threading.Thread | None" = None
+_avito_pw_thread_lock = _threading.Lock()
+
+
+def _avito_pw_worker():
+    """Единственный поток, владеющий Playwright/браузером/контекстом всю жизнь процесса."""
+    from playwright.sync_api import sync_playwright
+    pw = sync_playwright().start()
+    browser = pw.chromium.launch(
+        headless=True,
+        args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+    )
+    context = browser.new_context(
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        locale="ru-RU",
+        viewport={"width": 1366, "height": 900},
+        extra_http_headers={"Accept-Language": "ru-RU,ru;q=0.9"},
+        ignore_https_errors=True,
+    )
+    if os.path.exists(_AVITO_COOKIE_FILE):
+        try:
+            with open(_AVITO_COOKIE_FILE, "r", encoding="utf-8") as f:
+                context.add_cookies(json.load(f))
+        except Exception:
+            pass
+    try:
+        from playwright_stealth import stealth_sync
+    except Exception:
+        stealth_sync = None
+
+    while True:
+        url, wait_ms, timeout_ms, result, done = _avito_pw_jobs.get()
+        page = None
+        try:
+            page = context.new_page()
+            if stealth_sync:
+                try:
+                    stealth_sync(page)
+                except Exception:
+                    pass
+            page.goto(url, timeout=timeout_ms, wait_until="domcontentloaded")
+            page.wait_for_timeout(wait_ms)
+            result["html"] = page.content()
+            try:
+                with open(_AVITO_COOKIE_FILE, "w", encoding="utf-8") as f:
+                    json.dump(context.cookies(), f)
+            except Exception:
+                pass
+        except Exception as e:
+            result["error"] = str(e)
+        finally:
+            if page is not None:
+                try:
+                    page.close()
+                except Exception:
+                    pass
+            done.set()
+
+
+def _avito_ensure_pw_thread():
+    global _avito_pw_thread
+    with _avito_pw_thread_lock:
+        if _avito_pw_thread is None or not _avito_pw_thread.is_alive():
+            _avito_pw_thread = _threading.Thread(target=_avito_pw_worker, daemon=True)
+            _avito_pw_thread.start()
+
+
+def _avito_fetch_html(url: str, wait_ms: int = 2500, timeout_ms: int = 25000) -> str:
+    """Бесплатно получает HTML страницы Авито через headless-браузер (Playwright + stealth)."""
+    _avito_ensure_pw_thread()
+    result: dict = {}
+    done = _threading.Event()
+    _avito_pw_jobs.put((url, wait_ms, timeout_ms, result, done))
+    if not done.wait(timeout=(timeout_ms + wait_ms) / 1000 + 15):
+        print("  [Авито][браузер] ошибка: таймаут ожидания воркера")
+        return ""
+    if result.get("error"):
+        print(f"  [Авито][браузер] ошибка: {result['error']}")
+        return ""
+    return result.get("html", "")
+
+
 def _avito_scraperapi(url: str) -> "requests.Response | None":
     """Запрашивает страницу через ScraperAPI с JS-рендером и ждёт 5 секунд."""
     try:
@@ -1449,15 +1538,12 @@ def _scrape_avito_direct(slug: str, pages: int, price_min: int, price_max: int, 
 
 def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int = 99_000_000, sort_by_date: bool = False) -> list[dict]:
     """
-    Использует ScraperAPI БЕЗ render — Авито отдаёт SSR-HTML с data-marker='item' карточками.
-    render=true требует premium аккаунта ScraperAPI и возвращает 500.
+    Бесплатный парсер Авито: сначала пробуем быстрый прямой HTTP-запрос,
+    если он не дал страницы с объявлениями — открываем страницу в headless-браузере
+    (Playwright + stealth), который ведёт себя как обычный пользователь.
     """
     slug = AVITO_SLUGS.get(region, region)
     today = datetime.date.today()
-
-    if not SCRAPER_API_KEY:
-        print("  [Авито] нет SCRAPER_API_KEY")
-        return []
 
     try:
         import requests as _req
@@ -1502,28 +1588,18 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
             )
 
         def _try_fetch(fetch_url: str) -> str | None:
-            """Пробуем: бесплатный прямой запрос → платный ScraperAPI. Принимаем только страницы с объявлениями."""
-            # 1. Прямой запрос — бесплатно, отказ приходит быстро (~1-2 сек), если не сработал — платим за ScraperAPI
+            """Пробуем: быстрый прямой запрос → бесплатный headless-браузер. Принимаем только страницы с объявлениями."""
+            # 1. Прямой запрос — отказ приходит быстро (~1-2 сек)
             try:
-                r2 = _req.get(fetch_url, timeout=12, headers=_HEADERS)
+                r2 = _req.get(fetch_url, timeout=8, headers=_HEADERS)
                 if r2.status_code == 200 and _page_has_listings(r2.text):
                     return r2.text
             except Exception:
                 pass
-            # 2. ScraperAPI (платный, расходует кредиты) — только если прямой запрос не сработал
-            if SCRAPER_API_KEY:
-                try:
-                    r = _req.get("http://api.scraperapi.com", params={
-                        "api_key": SCRAPER_API_KEY,
-                        "url": fetch_url,
-                        "country_code": "ru",
-                        "render": "true",
-                        "wait": "1500",
-                    }, timeout=45)
-                    if r.status_code == 200 and _page_has_listings(r.text):
-                        return r.text
-                except Exception:
-                    pass
+            # 2. Headless-браузер (Playwright) — бесплатно, без сторонних платных API
+            html = _avito_fetch_html(fetch_url)
+            if html and _page_has_listings(html):
+                return html
             return None
 
         try:
@@ -1738,24 +1814,18 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
                 fallback_url = f"https://www.avito.ru/{slug}/avtomobili?s=104"
                 if fb_page > 1:
                     fallback_url += f"&p={fb_page}"
-                # Бесплатная попытка первой — платим за ScraperAPI только если она не сработала
+                # Прямой запрос первой — бесплатно и быстро, при неудаче — headless-браузер
                 fb_text = ""
                 try:
-                    r_direct = _req_fb.get(fallback_url, timeout=12, headers=_HEADERS)
+                    r_direct = _req_fb.get(fallback_url, timeout=8, headers=_HEADERS)
                     if r_direct.status_code == 200 and ('"urlPath"' in r_direct.text or 'data-marker="item"' in r_direct.text):
                         fb_text = r_direct.text
                 except Exception:
                     pass
-                if not fb_text and SCRAPER_API_KEY:
-                    r_fb = _req_fb.get("http://api.scraperapi.com", params={
-                        "api_key": SCRAPER_API_KEY,
-                        "url": fallback_url,
-                        "country_code": "ru",
-                        "render": "true",
-                        "wait": "1500",
-                    }, timeout=45)
-                    if r_fb.status_code == 200 and ('"urlPath"' in r_fb.text or 'data-marker="item"' in r_fb.text):
-                        fb_text = r_fb.text
+                if not fb_text:
+                    html = _avito_fetch_html(fallback_url)
+                    if html and ('"urlPath"' in html or 'data-marker="item"' in html):
+                        fb_text = html
                 if not fb_text:
                     return []
                 batch_fb = _parse_avito_html(fb_text, slug, today)
@@ -2453,7 +2523,7 @@ async def _ensure_photo(item: dict) -> None:
         try:
             import requests as _req
             if source == "avito":
-                # Запускаем прямой запрос и ScraperAPI ОДНОВРЕМЕННО (а не по очереди) —
+                # Запускаем прямой запрос и headless-браузер ОДНОВРЕМЕННО (а не по очереди) —
                 # берём то, что нашлось первым/успешным, экономим время на ожидании.
                 def _direct() -> tuple[str, str, int]:
                     try:
@@ -2464,27 +2534,16 @@ async def _ensure_photo(item: dict) -> None:
                         pass
                     return "", "", 0
 
-                def _via_scraperapi() -> tuple[str, str, int]:
-                    if not SCRAPER_API_KEY:
-                        return "", "", 0
-                    try:
-                        r2 = _req.get("http://api.scraperapi.com", params={
-                            "api_key": SCRAPER_API_KEY,
-                            "url": url,
-                            "country_code": "ru",
-                            "render": "true",
-                            "wait": "1500",
-                        }, timeout=45)
-                        if r2.status_code == 200 and len(r2.text) > 5000:
-                            return _extract_from_page(r2.text)
-                    except Exception:
-                        pass
+                def _via_browser() -> tuple[str, str, int]:
+                    html = _avito_fetch_html(url, wait_ms=1500)
+                    if html and len(html) > 5000:
+                        return _extract_from_page(html)
                     return "", "", 0
 
                 from concurrent.futures import ThreadPoolExecutor as _TPE
                 with _TPE(max_workers=2) as _ex:
                     fut_d = _ex.submit(_direct)
-                    fut_s = _ex.submit(_via_scraperapi)
+                    fut_s = _ex.submit(_via_browser)
                     pd, dd, pid = fut_d.result()
                     ps, ds, pis = fut_s.result()
                 photo = pd or ps
@@ -2896,28 +2955,19 @@ async def cmd_test_avito(msg: Message):
     except Exception as e:
         await msg.answer(f"Прямой запрос ошибка: {str(e)[:200]}")
 
-    if not SCRAPER_API_KEY:
-        await msg.answer("SCRAPER_API_KEY не задан!")
-        return
-
     try:
-        await msg.answer("Пробую ScraperAPI без render...")
-        r1 = _req.get("http://api.scraperapi.com", params={
-            "api_key": SCRAPER_API_KEY, "url": url, "country_code": "ru",
-        }, timeout=30)
-        await msg.answer(_stat(r1, "ScraperAPI без render"))
+        await msg.answer("Пробую headless-браузер (Playwright)...")
+        loop = asyncio.get_event_loop()
+        html = await loop.run_in_executor(None, _avito_fetch_html, url)
+        if html:
+            class _FakeResp:
+                status_code = 200
+                text = html
+            await msg.answer(_stat(_FakeResp(), "Headless-браузер"))
+        else:
+            await msg.answer("Headless-браузер: пустой ответ ❌")
     except Exception as e:
-        await msg.answer(f"ScraperAPI без render ошибка: {str(e)[:200]}")
-
-    try:
-        await msg.answer("Пробую ScraperAPI render=true + wait=5000 (до 90 сек)...")
-        r2 = _req.get("http://api.scraperapi.com", params={
-            "api_key": SCRAPER_API_KEY, "url": url,
-            "render": "true", "wait": "5000", "country_code": "ru",
-        }, timeout=120)
-        await msg.answer(_stat(r2, "ScraperAPI render=true"))
-    except Exception as e:
-        await msg.answer(f"ScraperAPI render ошибка: {str(e)[:200]}")
+        await msg.answer(f"Headless-браузер ошибка: {str(e)[:200]}")
 
     await msg.answer("✅ Диагностика завершена. Пришли эти результаты разработчику.")
 
