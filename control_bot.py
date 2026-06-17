@@ -2894,9 +2894,26 @@ async def _ensure_photo(item: dict) -> None:
         try:
             import requests as _req
             if source == "avito":
-                # Запускаем прямой запрос и headless-браузер ОДНОВРЕМЕННО (а не по очереди) —
-                # берём то, что нашлось первым/успешным, экономим время на ожидании.
+                # Мобильный URL блокируется реже чем десктопный
+                mobile_url = url.replace("https://www.avito.ru/", "https://m.avito.ru/")
+                _MOB_HDR = {
+                    "User-Agent": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36",
+                    "Accept": "text/html,application/xhtml+xml,*/*;q=0.9",
+                    "Accept-Language": "ru-RU,ru;q=0.9",
+                    "Referer": "https://m.avito.ru/",
+                }
+
                 def _direct() -> tuple[str, str, int]:
+                    # 1. Пробуем мобильный URL
+                    try:
+                        r = _req.get(mobile_url, timeout=10, headers=_MOB_HDR, proxies=AVITO_PROXIES)
+                        if r.status_code == 200 and len(r.text) > 5000:
+                            res = _extract_from_page(r.text)
+                            if res[0] or res[1]:
+                                return res
+                    except Exception:
+                        pass
+                    # 2. Десктопный URL
                     try:
                         r = _req.get(url, timeout=10, headers=_HDR, proxies=AVITO_PROXIES)
                         if r.status_code == 200 and len(r.text) > 5000:
@@ -3201,9 +3218,11 @@ async def do_search_for_user(uid: int, reply_to):
         and i["url"] not in seen
     ]
     suitable = rank_by_market_price(suitable)
+    # Сортировка: сначала самое выгодное (% ниже рынка), при равной выгоде —
+    # сегодняшние выше старых, при одинаковой свежести — ниже цена.
     suitable.sort(key=lambda x: (
-        -x.get("_savings_pct", 0),
-        x.get("_days_on_site", 0),
+        -x.get("_savings_pct", 0),   # больше скидка → выше
+        x.get("_days_on_site", 0),    # 0 дней (сегодня) → выше
         -x.get("_hot_score", 0),
         x.get("_price_int", 999_999_999)
     ))
