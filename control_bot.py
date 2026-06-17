@@ -1190,6 +1190,7 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
         item_url = ("https://www.avito.ru" + url_path) if url_path.startswith("/") else url_path
         if not title or "avito.ru" not in item_url:
             return None
+        print(f"  [item] title={title[:30]!r} url={url_path[:40]!r}")
 
         # Фильтр дилеров по типу продавца в JSON
         seller_obj = it.get("seller") or it.get("user") or {}
@@ -1202,11 +1203,19 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
                 seller_obj.get("userType") or ""
             ).lower()
             # company, shop, dealer, pro, business, 1 (pro account) — дилеры
-            if any(t in seller_type for t in ("company", "shop", "dealer", "pro", "business", "commercial")):
+            # ВАЖНО: используем точное совпадение или разграниченные подстроки
+            # чтобы не отфильтровать частников с типом "private" и т.п.
+            _DEALER_TYPES = {"company", "shop", "dealer", "pro", "business", "commercial", "1"}
+            if seller_type in _DEALER_TYPES or any(
+                seller_type == t or seller_type.startswith(t + "_") or seller_type.endswith("_" + t)
+                for t in _DEALER_TYPES
+            ):
+                print(f"  [item] DROPPED (dealer type): seller_type={seller_type!r} title={title[:30]!r}")
                 return None
             seller_name = seller_obj.get("name") or seller_obj.get("title") or ""
         # Дополнительная проверка только по НАЗВАНИЮ ПРОДАВЦА (не заголовку объявления)
         if seller_name and any(k in seller_name.lower() for k in ("автосалон", "автоцентр", "официальный", "ооо", "зао", "ип ", "дилер", "моторс", "авто групп", "автопрестиж")):
+            print(f"  [item] DROPPED (dealer name): seller_name={seller_name!r}")
             return None
 
         price_str, price_int = _avito_price_from_item(it)
@@ -1215,6 +1224,18 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
         # частники на Авито всегда указывают цену. Отбрасываем сразу, чтобы не показывать
         # карточки с "—" вместо цены.
         if not price_int:
+            # Запасной вариант: ищем любое число в диапазоне цен прямо в сыром JSON
+            import json as _j
+            _raw = _j.dumps(it)
+            for _m in re.finditer(r'\b(\d{5,8})\b', _raw):
+                _v = int(_m.group(1))
+                if 50_000 <= _v <= 30_000_000:
+                    price_int = _v
+                    price_str = f"{_v:,} ₽".replace(",", " ")
+                    print(f"  [item] цена найдена regex-fallback: {price_str} для {title[:30]!r}")
+                    break
+        if not price_int:
+            print(f"  [item] DROPPED (no price): {title[:30]!r}")
             return None
 
         mileage = 0
@@ -1356,14 +1377,20 @@ def _avito_find_items_in_json(obj, depth=0) -> list:
     if isinstance(obj, list):
         if len(obj) >= 1 and isinstance(obj[0], dict):
             sample = obj[0]
-            # urlPath (начинается с /) — самый надёжный признак объявления Авито
+            # urlPath (начинается с /) + обязательный признак листинга (цена/фото/id)
+            # Проверяем на РЕАЛЬНОЕ объявление, а не навигационный пункт
             url_path = sample.get("urlPath", "")
-            if isinstance(url_path, str) and url_path.startswith("/"):
+            if isinstance(url_path, str) and url_path.startswith("/") and (
+                any(k in sample for k in ("priceDetailed", "price", "images", "gallery", "photos"))
+                or ("id" in sample and "title" in sample)
+            ):
+                print(f"  [findItems] найден массив len={len(obj)}, sample_url={url_path!r}")
                 return obj
             # Альтернатива: url + priceDetailed/images (точные признаки листинга)
             if "url" in sample and any(k in sample for k in ("priceDetailed", "images", "gallery")):
                 url_val = sample.get("url", "")
                 if isinstance(url_val, str) and ("avito.ru" in url_val or url_val.startswith("/")):
+                    print(f"  [findItems] найден массив (url+price/images) len={len(obj)}")
                     return obj
         for x in obj:
             r = _avito_find_items_in_json(x, depth + 1)
@@ -1377,9 +1404,14 @@ def _avito_find_items_in_json(obj, depth=0) -> list:
             if isinstance(val, list) and len(val) >= 1 and isinstance(val[0], dict):
                 sample = val[0]
                 url_path = sample.get("urlPath", "")
-                if isinstance(url_path, str) and url_path.startswith("/"):
+                if isinstance(url_path, str) and url_path.startswith("/") and (
+                    any(k in sample for k in ("priceDetailed", "price", "images", "gallery", "photos"))
+                    or ("id" in sample and "title" in sample)
+                ):
+                    print(f"  [findItems] найден массив [{key}] len={len(val)}, sample_url={url_path!r}")
                     return val
                 if any(k in sample for k in ("priceDetailed", "images", "gallery")):
+                    print(f"  [findItems] найден массив [{key}] (price/images) len={len(val)}")
                     return val
         for v in obj.values():
             r = _avito_find_items_in_json(v, depth + 1)
@@ -1415,12 +1447,12 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
         except Exception:
             nd = {}
 
-    items_raw = (
-        _deep_get(nd, "props.initialState.catalog.items") or
-        _deep_get(nd, "props.pageProps.initialState.catalog.items") or
-        _deep_get(nd, "initialState.catalog.items") or
-        _avito_find_items_in_json(nd)
-    )
+    _di1 = _deep_get(nd, "props.initialState.catalog.items")
+    _di2 = _deep_get(nd, "props.pageProps.initialState.catalog.items")
+    _di3 = _deep_get(nd, "initialState.catalog.items")
+    print(f"  [parse] nd found={bool(nd)}, deep_get paths: {len(_di1) if _di1 else 0}/{len(_di2) if _di2 else 0}/{len(_di3) if _di3 else 0}")
+    items_raw = _di1 or _di2 or _di3 or _avito_find_items_in_json(nd)
+    print(f"  [parse] items_raw count={len(items_raw) if items_raw else 0}")
     # Авито хранит фото отдельно: catalog.itemsImages = {str(id): [{size: url}]}
     items_images_map: dict = (
         _deep_get(nd, "props.initialState.catalog.itemsImages") or
@@ -1471,6 +1503,7 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
                                     item["_photo_url"] = url_c
                                     break
                 results.append(item)
+        print(f"  [parse] после цикла: results={len(results)} из items_raw={len(items_raw)}")
         if results:
             # Полная страница: ищем все CDN-URL и назначаем фото объявлениям без фото
             _no_photo = [r for r in results if not r.get("_photo_url")]
