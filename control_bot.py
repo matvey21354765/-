@@ -159,7 +159,7 @@ SEARCH_COOLDOWN_SEC = 45
 _last_search_at: dict[int, float] = {}
 
 # Мониторинг новых объявлений
-MONITOR_INTERVAL = 15 * 60   # проверять каждые 5 минут
+MONITOR_INTERVAL = 15 * 60   # проверять каждые 15 минут
 MONITOR_MIN_SAVINGS_PCT = 10  # показывать только если скидка от рынка ≥ 10%
 _monitor_tasks: dict[int, asyncio.Task] = {}   # uid → Task
 
@@ -2360,7 +2360,7 @@ async def cb_notify_toggle(cb: CallbackQuery):
         region_name = REGIONS.get(s.get("region", ""), s.get("region", ""))
         await cb.message.answer(
             f"✅ *Мониторинг включён!*\n\nБуду присылать новые авто в {region_name} ниже рынка.\n"
-            f"Интервал: каждые {s.get('monitor_interval_min', 15)} мин.",
+            f"Интервал: каждые {s.get('monitor_interval_min', 5)} мин.",
             parse_mode="Markdown",
             reply_markup=_notify_keyboard(s),
         )
@@ -2443,7 +2443,7 @@ async def cb_change_settings(cb: CallbackQuery, state: FSMContext):
     await state.set_state(Setup.region)
 
 
-@dp.callback_query(F.data.startswith("region|"), Setup.region)
+@dp.callback_query(F.data.startswith("region|"))
 async def cb_region(cb: CallbackQuery, state: FSMContext):
     slug = cb.data.split("|", 1)[1]
     await state.update_data(region=slug)
@@ -2477,7 +2477,8 @@ async def fsm_price_max(msg: Message, state: FSMContext):
     region = data.get("region", "ekaterinburg")
     pmin = data.get("price_min", 0)
 
-    s = {"region": region, "price_min": pmin, "price_max": pmax}
+    s = load_settings(msg.from_user.id)
+    s.update({"region": region, "price_min": pmin, "price_max": pmax})
     save_settings(msg.from_user.id, s)
     await state.clear()
 
@@ -3367,6 +3368,7 @@ async def cmd_test_avito(msg: Message):
 
     await msg.answer("✅ Диагностика завершена. Пришли эти результаты разработчику.")
 
+@dp.message(Command("help"))
 async def cmd_help(msg: Message):
     await msg.answer(
         "🤖 *Авто-брокер — поиск авто ниже рынка*\n\n"
