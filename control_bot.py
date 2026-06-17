@@ -1837,36 +1837,38 @@ def _save_avito_cache():
         print(f"  [Авито] не удалось сохранить кэш: {e}")
 
 
+def _avito_price_bucket(price_min: int, price_max: int) -> str:
+    """Округляем бюджет до ближайшего «слота» (100k шаг), чтобы пользователи
+    с похожим бюджетом разделяли один кэш, а не делали отдельный запрос каждый."""
+    lo = (price_min // 100_000) * 100_000
+    hi = ((price_max + 99_999) // 100_000) * 100_000
+    return f"{lo}_{hi}"
+
+
 def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int = 99_000_000, sort_by_date: bool = False) -> list[dict]:
     """
-    Парсер Авито с кэшем по региону. Кэшируем ШИРОКИЙ результат (без фильтра
-    по цене) на 20 минут, а конкретный бюджет применяем уже в памяти — так
-    разные пользователи с разными бюджетами в одном городе делят один запрос
-    к Авито вместо десятков. Это главный приём против блокировки 429 под нагрузкой.
+    Парсер Авито с кэшем по (региону, ценовому бакету).
+    Каждый диапазон цен хранит свой кэш на 20 минут — это позволяет нескольким
+    пользователям с похожим бюджетом в одном городе делить один запрос к Авито,
+    не смешивая результаты с разными ценами.
     """
+    bucket = _avito_price_bucket(price_min, price_max)
+    cache_key = f"{region}_{bucket}"
     now = time.time()
-    cached = _AVITO_REGION_CACHE.get(region)
+    cached = _AVITO_REGION_CACHE.get(cache_key)
     if cached and (now - cached[0]) < _AVITO_REGION_CACHE_TTL:
         items = cached[1]
-        print(f"  [Авито] кэш региона {region}: {len(items)} объявлений (возраст {int(now-cached[0])}с)")
+        print(f"  [Авито] кэш {cache_key}: {len(items)} объявлений (возраст {int(now-cached[0])}с)")
     else:
-        items = _scrape_avito_raw(region, pages=pages, sort_by_date=sort_by_date)
+        items = _scrape_avito_raw(region, pages=pages, price_min=price_min, price_max=price_max, sort_by_date=sort_by_date)
         if items:
-            _AVITO_REGION_CACHE[region] = (now, items)
+            _AVITO_REGION_CACHE[cache_key] = (now, items)
             _save_avito_cache()
         elif cached:
-            # Авито временно недоступен (429) — отдаём недавний кэш, чтобы не показывать пустоту
             items = cached[1]
-            print(f"  [Авито] скрейп пустой, отдаём устаревший кэш {region}: {len(items)} шт")
+            print(f"  [Авито] скрейп пустой, отдаём устаревший кэш {cache_key}: {len(items)} шт")
 
-    # Фильтр по бюджету применяем в памяти
-    out = []
-    for it in items:
-        p = it.get("_price_int", 0)
-        if p and (p < price_min or p > price_max):
-            continue
-        out.append(it)
-    return out
+    return list(items)
 
 
 def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max: int = 99_000_000, sort_by_date: bool = False) -> list[dict]:
@@ -3161,6 +3163,11 @@ async def do_search_for_user(uid: int, reply_to):
                     pass
         await asyncio.gather(*[_fetch_price(it) for it in no_price[:100]])
 
+    already_seen_count = sum(
+        1 for i in items
+        if not is_dealer(i) and in_price_range(i, pmin, pmax)
+        and i.get("url") and i["url"] in seen
+    )
     suitable = [
         i for i in items
         if not is_dealer(i)
@@ -3184,9 +3191,15 @@ async def do_search_for_user(uid: int, reply_to):
         wrong_price_c = sum(1 for i in items if not is_dealer(i) and i.get("_price_int", 0) > pmax)
         sample_prices = [i.get("_price_int", 0) for i in items[:5] if not is_dealer(i)]
         sample_flags = [i.get("_avito_price_filtered", False) for i in items[:5] if not is_dealer(i)]
+        hint = ""
+        if already_seen_count > 0:
+            hint = f"\n\n👁 Уже видел {already_seen_count} подходящих объявлений. Сбрось историю командой /reset чтобы увидеть их снова."
+        elif price_filtered_c > 0:
+            hint = f"\n\nНайдено {price_filtered_c} объявлений вне бюджета. Попробуй расширить диапазон цен: /settings"
+        else:
+            hint = f"\n\nПопробуй расширить диапазон цен: /settings"
         await reply_to.answer(
-            f"😔 Не нашёл частников в {region_name} по твоему бюджету.\n\n"
-            f"Попробуй расширить диапазон цен: /settings",
+            f"😔 Не нашёл новых частников в {region_name} по твоему бюджету.{hint}",
             reply_markup=MAIN_KEYBOARD,
         )
         return
@@ -3368,6 +3381,20 @@ async def cmd_test_avito(msg: Message):
 
     await msg.answer("✅ Диагностика завершена. Пришли эти результаты разработчику.")
 
+@dp.message(Command("reset"))
+async def cmd_reset(msg: Message):
+    uid = msg.from_user.id
+    save_seen(uid, set())
+    save_skipped(uid, set())
+    if uid in _search_cache:
+        del _search_cache[uid]
+    await msg.answer(
+        "♻️ История просмотренных и скрытых объявлений сброшена.\n"
+        "Теперь /search покажет все доступные объявления заново.",
+        reply_markup=MAIN_KEYBOARD,
+    )
+
+
 @dp.message(Command("help"))
 async def cmd_help(msg: Message):
     await msg.answer(
@@ -3378,6 +3405,7 @@ async def cmd_help(msg: Message):
         "/monitor — авто-мониторинг новых авто ниже рынка (вкл/выкл)\n"
         "/favorites — сохранённые объявления\n"
         "/settings — изменить регион и бюджет\n"
+        "/reset — сбросить историю (увидеть все объявления заново)\n"
         "/help — помощь\n\n"
         "🔥 — объявления с признаками срочной продажи (торг, срочно, уступлю)\n"
         "⭐ — объявления давно висят — продавец мотивирован",
