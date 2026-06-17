@@ -1896,15 +1896,14 @@ def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max
     print(f"  [Авито] API-методы не дали результатов, переходим к Playwright")
 
     def _build_url(p: int) -> str:
-        qs_parts = []
+        qs_parts = ["seller_type=1"]  # только частники
         if p > 1:
             qs_parts.append(f"p={p}")
         if price_min > 0:
             qs_parts.append(f"pmin={price_min}")
         if price_max < 99_000_000:
             qs_parts.append(f"pmax={price_max}")
-        if sort_by_date:
-            qs_parts.append("s=104")
+        qs_parts.append("s=104")  # сортировка по дате
         u = f"https://www.avito.ru/{slug}/avtomobili"
         if qs_parts:
             u += "?" + "&".join(qs_parts)
@@ -1951,7 +1950,7 @@ def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max
 
             if not text:
                 # Fallback URL без ценового фильтра
-                fallback_url = f"https://www.avito.ru/{slug}/avtomobili" + (f"?p={p}" if p > 1 else "")
+                fallback_url = f"https://www.avito.ru/{slug}/avtomobili?seller_type=1" + (f"&p={p}" if p > 1 else "")
                 text = _try_fetch(fallback_url)
                 if not text:
                     print(f"  [Авито] стр.{p}: нет данных")
@@ -1965,7 +1964,7 @@ def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max
 
             # Если price-filtered URL вернул страницу но 0 items (CAPTCHA/пустая) — пробуем fallback
             if not batch and not from_fallback:
-                fallback_url = f"https://www.avito.ru/{slug}/avtomobili" + (f"?p={p}" if p > 1 else "")
+                fallback_url = f"https://www.avito.ru/{slug}/avtomobili?seller_type=1" + (f"&p={p}" if p > 1 else "")
                 text2 = _try_fetch(fallback_url)
                 if text2:
                     batch2 = _parse_avito_html(text2, slug, today)
@@ -2154,7 +2153,7 @@ def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max
 
         def _fetch_fallback_page(fb_page: int) -> list[dict]:
             try:
-                fallback_url = f"https://www.avito.ru/{slug}/avtomobili?s=104"
+                fallback_url = f"https://www.avito.ru/{slug}/avtomobili?seller_type=1&s=104"
                 if fb_page > 1:
                     fallback_url += f"&p={fb_page}"
                 # Прямой запрос первой — бесплатно и быстро, при неудаче — headless-браузер
@@ -3114,7 +3113,7 @@ async def do_search_for_user(uid: int, reply_to):
     scraper_map = {
         "drom":   lambda: scrape_drom(region, pages=8, price_min=pmin, price_max=pmax),
         "autoru": lambda: scrape_autoru(region, pages=4, price_min=pmin, price_max=pmax),
-        "avito":  lambda: scrape_avito(region, pages=6, price_min=pmin, price_max=pmax),
+        "avito":  lambda: scrape_avito(region, pages=6, price_min=pmin, price_max=pmax, sort_by_date=True),
     }
     tasks = [loop.run_in_executor(None, scraper_map[src]) for src in enabled_sources if src in scraper_map]
     results = await asyncio.gather(*tasks)
