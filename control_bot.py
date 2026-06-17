@@ -4146,14 +4146,48 @@ async def cmd_monitor(msg: Message):
         )
 
 
+async def _warmup_cache():
+    """Прогревает кеш Авито для всех городов в фоне при старте бота.
+    Запускает последовательный скрейп каждого города (1 страница, без ценового
+    фильтра) с паузами, чтобы не вызвать 429. Результаты пишутся в
+    _AVITO_REGION_CACHE — пользователи получают данные даже при первом поиске.
+    """
+    await asyncio.sleep(10)  # дождаться полного старта бота
+    loop = asyncio.get_event_loop()
+    print("  [прогрев] начинаю прогрев кеша всех городов...")
+    for region in list(REGIONS.keys()):
+        try:
+            bucket = _avito_price_bucket(0, 99_000_000)
+            cache_key = f"{region}_{bucket}"
+            cached = _AVITO_REGION_CACHE.get(cache_key)
+            if cached and (time.time() - cached[0]) < _AVITO_REGION_CACHE_TTL:
+                print(f"  [прогрев] {region}: кеш свежий, пропускаем")
+                continue
+            print(f"  [прогрев] {region}: скрейплю...")
+            items = await loop.run_in_executor(
+                None,
+                lambda r=region: scrape_avito(r, pages=2, sort_by_date=True)
+            )
+            print(f"  [прогрев] {region}: {len(items)} объявлений")
+            await asyncio.sleep(8)  # пауза между городами — защита от 429
+        except Exception as e:
+            print(f"  [прогрев] {region}: ошибка {e}")
+            await asyncio.sleep(5)
+    print("  [прогрев] прогрев завершён")
+
+
 async def main():
     logging.basicConfig(level=logging.WARNING)
     _load_avito_cache()
     print("✅ Авто-брокер бот запущен!")
 
+    loop = asyncio.get_event_loop()
     # Единый глобальный монитор — опрашивает всех активных пользователей каждые 2 минуты
-    asyncio.get_event_loop().create_task(_global_monitor_loop())
+    loop.create_task(_global_monitor_loop())
     print(f"  [монитор] глобальный цикл запущен (интервал {GLOBAL_POLL_SEC}с)")
+
+    # Прогрев кеша всех городов в фоне (не блокирует старт)
+    loop.create_task(_warmup_cache())
 
     await dp.start_polling(bot)
 
