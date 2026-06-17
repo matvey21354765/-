@@ -1184,20 +1184,15 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
 
         def _find_avito_photo_in_obj(obj, depth=0) -> str:
             """Рекурсивно ищет первый URL фото Авито в любом месте JSON объекта."""
-            if depth > 10 or obj is None:
+            if depth > 12 or obj is None:
                 return ""
             if isinstance(obj, str):
-                # Реальные фото объявлений на CDN Авито. Поддомен может быть
-                # числовым (00.img.avito.st), буквенным или images.avito.st,
-                # а путь — /image/ или /images/. Раньше жёстко требовали
-                # "img.avito.st/image/" — из-за этого терялись валидные фото.
+                # Любой URL на CDN Авито — принимаем без ограничений по пути
                 low = obj.lower()
-                if len(obj) > 10 and (
-                    "img.avito.st/image" in low or "images.avito.st/image" in low
-                ):
+                if len(obj) > 15 and "avito.st" in low and (obj.startswith("//") or obj.startswith("http")):
                     raw = obj.replace("\\/", "/")
                     url_c = ("https:" + raw) if raw.startswith("//") else raw
-                    if not any(x in url_c.lower() for x in ("/stub", "noimage", "placeholder")):
+                    if not any(x in url_c.lower() for x in ("/stub", "noimage", "placeholder", "/logo", "/icon", "favicon")):
                         return url_c
                 return ""
             if isinstance(obj, list):
@@ -1208,18 +1203,18 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
                 return ""
             if isinstance(obj, dict):
                 # Ищем по всем известным ключам размеров фото Авито
-                for size in ("1208x906", "864x648", "1280x960", "640x480",
-                             "432x324", "320x240", "100x75", "originalSize"):
+                for size in ("1280x960", "1208x906", "864x648", "640x480",
+                             "432x324", "320x240", "100x75", "originalSize", "big", "small"):
                     v = obj.get(size)
-                    if isinstance(v, str) and ("img.avito.st/" in v.lower() or "images.avito.st/" in v.lower()):
+                    if isinstance(v, str) and "avito.st" in v.lower():
                         raw = v.replace("\\/", "/")
                         url_c = ("https:" + raw) if raw.startswith("//") else raw
                         if not any(x in url_c.lower() for x in ("/stub", "noimage")):
                             return url_c
                 # Прямые ключи-превью (часто содержат готовый URL фото)
-                for k in ("thumb", "thumbnail", "coverImage", "firstImage"):
+                for k in ("url", "thumb", "thumbnail", "coverImage", "firstImage", "src"):
                     v = obj.get(k)
-                    if isinstance(v, str) and ("avito.st" in v.lower()):
+                    if isinstance(v, str) and "avito.st" in v.lower():
                         raw = v.replace("\\/", "/")
                         url_c = ("https:" + raw) if raw.startswith("//") else raw
                         if not any(x in url_c.lower() for x in ("/stub", "noimage", "placeholder", "logo")):
@@ -1228,8 +1223,8 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
                         r = _find_avito_photo_in_obj(v, depth + 1)
                         if r:
                             return r
-                # Рекурсия в приоритетные ключи
-                for k in ("images", "photos", "gallery", "media", "image", "photo", "preview"):
+                # Рекурсия в приоритетные ключи (включая "sizes" — Авито иногда прячет URLs туда)
+                for k in ("sizes", "images", "photos", "gallery", "media", "image", "photo", "preview", "data"):
                     if k in obj:
                         r = _find_avito_photo_in_obj(obj[k], depth + 1)
                         if r:
@@ -1250,12 +1245,29 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
         if not photo_url:
             photo_url = ""
 
+        # Всегда формируем текст цены из числа — страховка от пустого valueText
+        if price_int and not price_str:
+            price_str = f"{price_int:,} ₽".replace(",", " ")
+
         _desc_raw = (
             it.get("description") or
             it.get("descriptionFull") or
             it.get("shortDescription") or
             (it.get("item", {}).get("description") if isinstance(it.get("item"), dict) else "") or ""
         )
+        # Если описание пустое — составляем из параметров (год, пробег, тип КПП и т.д.)
+        if not _desc_raw:
+            params = it.get("params") or it.get("parameters") or []
+            desc_parts = []
+            for p in params:
+                if isinstance(p, dict):
+                    pname = p.get("title") or p.get("name") or ""
+                    pval  = p.get("valueText") or p.get("value") or ""
+                    if pname and pval and str(pval) not in ("0", ""):
+                        desc_parts.append(f"{pname}: {pval}")
+            if desc_parts:
+                _desc_raw = " · ".join(desc_parts[:6])
+
         _images_list = it.get("images") or it.get("photos") or it.get("gallery") or []
         item = {
             "source": "avito", "title": title,
@@ -1361,22 +1373,46 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
         _deep_get(nd, "initialState.catalog.itemsImages") or
         {}
     )
+    # Regex-карта: item_id -> первый avito.st URL (запасной метод)
+    _nd_text = nd_match.group(1) if nd_match else ""
+    _cdn_re = re.compile(
+        r'((?:https?:)?//(?:\d+\.)?(?:img|images)\.avito\.st/[^"\'\\<>\s]{5,})'
+    )
+
     if items_raw:
         print(f"  [Авито] __NEXT_DATA__ items={len(items_raw)}, images_map={len(items_images_map)}")
         for item_data in items_raw:
             if not isinstance(item_data, dict):
                 continue
-            # Подставляем фото из itemsImages если в самом item нет
-            if items_images_map and not item_data.get("images"):
+            # Всегда берём фото из itemsImages (карта точнее, чем item.images)
+            if items_images_map:
                 item_id = str(item_data.get("id", ""))
                 if item_id and item_id in items_images_map:
                     item_data = dict(item_data)
                     item_data["images"] = items_images_map[item_id]
             item = _avito_item_from_json(item_data, today)
             if item:
+                # Если фото не нашли через JSON — ищем через regex в __NEXT_DATA__
+                if not item.get("_photo_url") and _nd_text:
+                    item_path = item["url"].replace("https://www.avito.ru", "")
+                    esc_path = item_path.replace("/", "\\/")
+                    for search_path in (esc_path, item_path):
+                        idx = _nd_text.find(search_path)
+                        if idx > -1:
+                            chunk = _nd_text[max(0, idx - 200):idx + 3000]
+                            m = _cdn_re.search(chunk)
+                            if m:
+                                raw = m.group(1).replace("\\/", "/")
+                                url_c = ("https:" + raw) if raw.startswith("//") else raw
+                                if not any(x in url_c.lower() for x in ("/stub", "noimage", "placeholder")):
+                                    item["_photo_url"] = url_c
+                                    break
                 results.append(item)
         if results:
-            print(f"  [Авито] __NEXT_DATA__ итого: {len(results)} объявлений")
+            with_photo = sum(1 for r in results if r.get("_photo_url"))
+            with_desc  = sum(1 for r in results if r.get("description"))
+            print(f"  [Авито] __NEXT_DATA__ итого: {len(results)} объявлений, "
+                  f"с фото: {with_photo}, с описанием: {with_desc}")
             return results
         print("  [Авито] __NEXT_DATA__ дал 0 объявлений — fallback на BS4")
 
@@ -3262,7 +3298,11 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         hot_tag = " 🔥" if score >= 15 else " ⭐" if score >= 5 else ""
         source_tag = SOURCE_TAGS.get(item.get("source", ""), "🔵")
 
-        price_line = item.get("price", "—") or "—"
+        _pi = item.get("_price_int", 0)
+        price_line = (
+            item.get("price") or
+            (f"{_pi:,} ₽".replace(",", " ") if _pi else "—")
+        )
         if item.get("_below_market") and item.get("_market_price"):
             market = item["_market_price"]
             pct = item.get("_savings_pct", 0)
