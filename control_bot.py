@@ -1273,6 +1273,15 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
         return None
 
 
+def _deep_get(d, path):
+    """Получить значение по пути вида 'a.b.c' из вложенного dict."""
+    for key in path.split("."):
+        if not isinstance(d, dict):
+            return None
+        d = d.get(key)
+    return d
+
+
 def _avito_find_items_in_json(obj, depth=0) -> list:
     """Рекурсивно ищет массив объявлений в JSON Авито."""
     if depth > 15 or not isinstance(obj, (dict, list)):
@@ -1325,9 +1334,42 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
     except Exception:
         soup = _BS(text, "html.parser")
 
-    # 0. ОСНОВНОЙ МЕТОД (как Дром): BeautifulSoup + CSS-селекторы прямо по
-    #    карточкам поисковой выдачи. Извлекаем title/url/price/description/photo/date
-    #    прямо из HTML — без дополнительных запросов к страницам объявлений.
+    # 0. ОСНОВНОЙ МЕТОД: __NEXT_DATA__ JSON (Next.js SSR).
+    #    Авито — React/Next.js приложение: <img> в HTML отдают серые
+    #    placeholder-квадраты, а реальные фото/описания/цены лежат в JSON-блоке
+    #    __NEXT_DATA__ на КАЖДОЙ странице. Это главный источник данных.
+    nd_match = re.search(
+        r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>', text, re.S
+    )
+    nd = {}
+    if nd_match:
+        try:
+            nd = json.loads(nd_match.group(1))
+        except Exception:
+            nd = {}
+
+    items_raw = (
+        _deep_get(nd, "props.initialState.catalog.items") or
+        _deep_get(nd, "props.pageProps.initialState.catalog.items") or
+        _deep_get(nd, "initialState.catalog.items") or
+        _avito_find_items_in_json(nd)
+    )
+    if items_raw:
+        print(f"  [Авито] __NEXT_DATA__ items={len(items_raw)}")
+        for item_data in items_raw:
+            if not isinstance(item_data, dict):
+                continue
+            item = _avito_item_from_json(item_data, today)
+            if item:
+                results.append(item)
+        if results:
+            print(f"  [Авито] __NEXT_DATA__ итого: {len(results)} объявлений")
+            return results
+        print("  [Авито] __NEXT_DATA__ дал 0 объявлений — fallback на BS4")
+
+    # 0b. FALLBACK (как Дром): BeautifulSoup + CSS-селекторы прямо по
+    #    карточкам поисковой выдачи. Используется только если __NEXT_DATA__
+    #    отсутствует/пуст. ВНИМАНИЕ: <img> здесь часто placeholder'ы.
     cards = soup.select('[data-marker="item"]')
     print(f"  [Авито] BS4 cards (data-marker=item)={len(cards)}")
     for card in cards:
