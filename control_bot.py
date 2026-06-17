@@ -1472,6 +1472,36 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
                                     break
                 results.append(item)
         if results:
+            # Полная страница: ищем все CDN-URL и назначаем фото объявлениям без фото
+            _no_photo = [r for r in results if not r.get("_photo_url")]
+            if _no_photo:
+                _all_cdn: list[tuple[int, str]] = []
+                for _im in re.finditer(
+                    r'((?:https?:)?(?:\\?/){2}(?:[a-z0-9-]+\.)?(?:img|images)\.avito\.st'
+                    r'(?:\\?/)(?:image|images)(?:\\?/)[^"\'<\s\\]{5,})',
+                    text
+                ):
+                    _raw = _im.group(1).replace("\\/", "/").replace("\\u002F", "/")
+                    _url = ("https:" + _raw) if _raw.startswith("//") else _raw
+                    if not any(x in _url.lower() for x in ("/stub", "noimage", "placeholder")):
+                        _all_cdn.append((_im.start(), _url))
+                if _all_cdn:
+                    for item in _no_photo:
+                        _path = item["url"].replace("https://www.avito.ru", "")
+                        _pos = text.find(_path.replace("/", "\\/"))
+                        if _pos < 0:
+                            _pos = text.find(_path)
+                        if _pos < 0:
+                            continue
+                        _best_url = ""
+                        _best_dist = 5000
+                        for (_cdn_pos, _cdn_url) in _all_cdn:
+                            _d = abs(_cdn_pos - _pos)
+                            if _d < _best_dist:
+                                _best_dist = _d
+                                _best_url = _cdn_url
+                        if _best_url:
+                            item["_photo_url"] = _best_url
             with_photo = sum(1 for r in results if r.get("_photo_url"))
             with_desc  = sum(1 for r in results if r.get("description"))
             print(f"  [Авито] __NEXT_DATA__ итого: {len(results)} объявлений, "
@@ -1589,6 +1619,36 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
             pass
 
     if results:
+        # Полная страница: ищем все CDN-URL и назначаем фото объявлениям без фото
+        _no_photo_bs4 = [r for r in results if not r.get("_photo_url")]
+        if _no_photo_bs4:
+            _all_cdn_bs4: list[tuple[int, str]] = []
+            for _im in re.finditer(
+                r'((?:https?:)?(?:\\?/){2}(?:[a-z0-9-]+\.)?(?:img|images)\.avito\.st'
+                r'(?:\\?/)(?:image|images)(?:\\?/)[^"\'<\s\\]{5,})',
+                text
+            ):
+                _raw = _im.group(1).replace("\\/", "/").replace("\\u002F", "/")
+                _url = ("https:" + _raw) if _raw.startswith("//") else _raw
+                if not any(x in _url.lower() for x in ("/stub", "noimage", "placeholder")):
+                    _all_cdn_bs4.append((_im.start(), _url))
+            if _all_cdn_bs4:
+                for item in _no_photo_bs4:
+                    _path = item["url"].replace("https://www.avito.ru", "")
+                    _pos = text.find(_path.replace("/", "\\/"))
+                    if _pos < 0:
+                        _pos = text.find(_path)
+                    if _pos < 0:
+                        continue
+                    _best_url = ""
+                    _best_dist = 5000
+                    for (_cdn_pos, _cdn_url) in _all_cdn_bs4:
+                        _d = abs(_cdn_pos - _pos)
+                        if _d < _best_dist:
+                            _best_dist = _d
+                            _best_url = _cdn_url
+                    if _best_url:
+                        item["_photo_url"] = _best_url
         print(f"  [Авито] BS4 итого: {len(results)} объявлений")
         return results
 
@@ -2102,7 +2162,7 @@ def _scrape_avito_direct(slug: str, pages: int, price_min: int, price_max: int, 
 # Кэш результатов Авито по региону — резко снижает число запросов к Авито
 # (а значит и риск блокировки 429), когда много пользователей ищут подряд.
 _AVITO_REGION_CACHE: dict[str, tuple[float, list[dict]]] = {}
-_AVITO_REGION_CACHE_TTL = 20 * 60  # 20 минут
+_AVITO_REGION_CACHE_TTL = 4 * 60 * 60  # 4 часа
 _AVITO_CACHE_FILE = Path("avito_region_cache.json")
 
 
@@ -2115,8 +2175,9 @@ def _load_avito_cache():
         now = time.time()
         for region, entry in data.items():
             ts, items = entry[0], entry[1]
-            if now - ts < _AVITO_REGION_CACHE_TTL:  # грузим только ещё свежие
-                _AVITO_REGION_CACHE[region] = (ts, items)
+            # Загружаем ВСЕ записи — устаревшие используются как запасной кэш
+            # при блокировке Авито. Проверка TTL происходит в scrape_avito.
+            _AVITO_REGION_CACHE[region] = (ts, items)
         print(f"  [Авито] кэш с диска: {len(_AVITO_REGION_CACHE)} регионов")
     except Exception as e:
         print(f"  [Авито] не удалось загрузить кэш: {e}")
@@ -2166,10 +2227,11 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
             any_cached_age = 999_999
             for k, (ts, its) in _AVITO_REGION_CACHE.items():
                 if k.startswith(region + "_") or k == region:
-                    age = now - ts
-                    if age < any_cached_age:
+                    # Берём кэш с наибольшим числом объявлений (не самый свежий),
+                    # чтобы пользователь видел максимум результатов при блокировке.
+                    if len(its) > len(any_cached):
                         any_cached = its
-                        any_cached_age = age
+                        any_cached_age = now - ts
             if any_cached:
                 items = any_cached
                 print(f"  [Авито] 429/пусто — стале-кэш региона {region}: {len(items)} шт (возраст {int(any_cached_age)}с)")
@@ -2406,18 +2468,17 @@ def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max
                     if path and path not in price_map:
                         price_map[path] = price
 
-                # Фото: привязываем к ближайшему urlPath, но фото идёт ДО urlPath
-                # Поэтому ищем ближайший urlPath ПОСЛЕ позиции фото
+                # Фото: привязываем к ближайшему urlPath по абсолютному расстоянию.
+                # Авито может размещать urlPath как ДО, так и ПОСЛЕ блока images,
+                # поэтому убираем направленное ограничение (0 < d) и берём min(abs).
                 for pos, url_img in all_images:
                     best = None
                     best_d = 8000
                     for i, p_pos in enumerate(positions):
-                        d = p_pos - pos  # urlPath должен быть ПОСЛЕ фото (d > 0)
-                        if 0 < d < best_d:
+                        d = abs(p_pos - pos)  # абсолютное расстояние — направление не важно
+                        if d < best_d:
                             best_d = d
                             best = paths[i]
-                    if not best:  # fallback — просто ближайший
-                        best = _nearest_path(pos, max_dist=8000)
                     if best and not image_map.get(best):
                         image_map[best] = url_img
 
