@@ -2050,14 +2050,38 @@ def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max
                 # Все фото — img.avito.st (расширенный поиск без требования расширения)
                 all_images: list[tuple[int, str]] = []
                 seen_imgs: set[str] = set()
-                for im in re.finditer(r'(?:https:)?(?:\\?/){2}(?:[a-z0-9-]+\.)?(?:img|images)\.avito\.st(?:\\?/)images?(?:\\?/)(?:[^"\'<\s,\]}{]|\\/){5,}', text):
-                    raw_url = im.group(0).replace("\\/", "/")
+
+                def _add_img(pos: int, raw_match: str) -> None:
+                    raw_url = raw_match.replace("\\/", "/").replace("\\u002F", "/")
                     url_img = ("https:" + raw_url) if raw_url.startswith("//") else raw_url
-                    if any(x in url_img.lower() for x in ("/stub", "placeholder", "noimage")):
-                        continue
+                    if any(x in url_img.lower() for x in ("/stub", "placeholder", "noimage", "logo")):
+                        return
                     if url_img not in seen_imgs:
                         seen_imgs.add(url_img)
-                        all_images.append((im.start(), url_img))
+                        all_images.append((pos, url_img))
+
+                # Паттерн 1: стандартный CDN URL (img/images.avito.st), в т.ч.
+                # экранированный JSON ("https:\/\/75.img.avito.st\/...") и
+                # protocol-relative ("//75.img.avito.st/...").
+                for im in re.finditer(r'(?:https:)?(?:\\?/){2}(?:[a-z0-9-]+\.)?(?:img|images)\.avito\.st(?:\\?/|\\u002[fF])images?(?:\\?/|\\u002[fF])(?:[^"\'<\s,\]}{]|\\/|\\u002[fF]){5,}', text):
+                    _add_img(im.start(), im.group(0))
+
+                # Паттерн 2: HTML-атрибуты data-src / src указывающие на CDN
+                #            (мобильная/ленивая загрузка карточек выдачи).
+                for im in re.finditer(r'(?:data-src|src|data-marker[^=]*)=["\'](\s*(?:https:)?//(?:[a-z0-9-]+\.)?(?:img|images)\.avito\.st/images?/[^"\']{5,})["\']', text):
+                    _add_img(im.start(), im.group(1).strip())
+
+                # Паттерн 3: srcset="//75.img.avito.st/... 1x, ... 2x"
+                for im in re.finditer(r'srcset=["\']([^"\']+)["\']', text):
+                    for piece in im.group(1).split(","):
+                        u = piece.strip().split(" ")[0]
+                        if "img.avito.st" in u or "images.avito.st" in u:
+                            _add_img(im.start(), u)
+
+                # Паттерн 4: JSON-массив "images":["https://..."] / вложенные
+                #            размеры {"864x648":"https://..."} с экранированием.
+                for im in re.finditer(r'"(?:images?|photos?|gallery|preview|\d+x\d+)"\s*:\s*"((?:https?:)?(?:\\?/){2}(?:[a-z0-9-]+\.)?(?:img|images)\.avito\.st(?:\\?/)[^"]{5,})"', text):
+                    _add_img(im.start(), im.group(1))
 
                 # Все описания
                 all_descs: list[tuple[int, str]] = []
@@ -2784,6 +2808,19 @@ async def _ensure_photo(item: dict) -> None:
                     x in candidate.lower() for x in ("logo", "stub", "noimage", "placeholder", "icon")
                 ):
                     photo = candidate
+            # twitter:image как запасной вариант (на части моб. страниц нет og:image)
+            if not photo:
+                tw = re.search(
+                    r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']'
+                    r'|<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']twitter:image["\']',
+                    text
+                )
+                if tw:
+                    candidate = (tw.group(1) or tw.group(2) or "").strip()
+                    if candidate and "avito" in candidate and not any(
+                        x in candidate.lower() for x in ("logo", "stub", "noimage", "placeholder", "icon")
+                    ):
+                        photo = candidate
 
         # 2. __NEXT_DATA__ JSON
         nd_m = re.search(r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>', text, re.S)
@@ -2940,7 +2977,23 @@ async def _ensure_photo(item: dict) -> None:
                     try:
                         r = _req.get(url, timeout=10, headers=_HDR, proxies=AVITO_PROXIES)
                         if r.status_code == 200 and len(r.text) > 5000:
-                            return _extract_from_page(r.text)
+                            res = _extract_from_page(r.text)
+                            if res[0] or res[1]:
+                                return res
+                    except Exception:
+                        pass
+                    # 3. cloudscraper — обходит антибот-защиту (429/403), когда
+                    #    обычные requests к m./www.avito.ru блокируются.
+                    try:
+                        import cloudscraper
+                        cs = cloudscraper.create_scraper(
+                            browser={"browser": "chrome", "platform": "android", "mobile": True}
+                        )
+                        r = cs.get(mobile_url, timeout=12, proxies=AVITO_PROXIES)
+                        if r.status_code == 200 and len(r.text) > 3000:
+                            res = _extract_from_page(r.text)
+                            if res[0] or res[1]:
+                                return res
                     except Exception:
                         pass
                     return "", "", 0
@@ -3058,10 +3111,14 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                 try:
                     import requests as _req
                     from aiogram.types import BufferedInputFile
-                    resp = _req.get(photo_url, timeout=10, headers={
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                        "Referer": "https://www.avito.ru/",
-                    })
+                    # Скачивание блокирующее — уводим в executor, чтобы не
+                    # стопорить event loop при отправке партии объявлений.
+                    loop = asyncio.get_event_loop()
+                    resp = await loop.run_in_executor(None, lambda: _req.get(
+                        photo_url, timeout=10, headers={
+                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                            "Referer": "https://www.avito.ru/",
+                        }))
                     if resp.status_code == 200 and len(resp.content) > 3_000:
                         photo_bytes = BufferedInputFile(resp.content, filename="photo.jpg")
                         await bot.send_photo(chat_id, photo=photo_bytes, caption=caption, reply_markup=kb)
