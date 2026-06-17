@@ -1511,7 +1511,7 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
                 _all_cdn: list[tuple[int, str]] = []
                 for _im in re.finditer(
                     r'((?:https?:)?(?:\\?/){2}(?:[a-z0-9-]+\.)?(?:img|images)\.avito\.st'
-                    r'(?:\\?/)(?:image|images)(?:\\?/)[^"\'<\s\\]{5,})',
+                    r'/[^"\'<\s\\]{10,})',
                     text
                 ):
                     _raw = _im.group(1).replace("\\/", "/").replace("\\u002F", "/")
@@ -1658,7 +1658,7 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
             _all_cdn_bs4: list[tuple[int, str]] = []
             for _im in re.finditer(
                 r'((?:https?:)?(?:\\?/){2}(?:[a-z0-9-]+\.)?(?:img|images)\.avito\.st'
-                r'(?:\\?/)(?:image|images)(?:\\?/)[^"\'<\s\\]{5,})',
+                r'/[^"\'<\s\\]{10,})',
                 text
             ):
                 _raw = _im.group(1).replace("\\/", "/").replace("\\u002F", "/")
@@ -2520,8 +2520,8 @@ def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max
                 # Паттерн 1: стандартный CDN URL (img/images.avito.st), в т.ч.
                 # экранированный JSON ("https:\/\/75.img.avito.st\/...") и
                 # protocol-relative ("//75.img.avito.st/...").
-                for im in re.finditer(r'(?:https:)?(?:\\?/){2}(?:[a-z0-9-]+\.)?(?:img|images)\.avito\.st(?:\\?/|\\u002[fF])images?(?:\\?/|\\u002[fF])(?:[^"\'<\s,\]}{]|\\/|\\u002[fF]){5,}', text):
-                    _add_img(im.start(), im.group(0))
+                for im in re.finditer(r'((?:https?:)?(?:\\?/){2}(?:[a-z0-9-]+\.)?(?:img|images)\.avito\.st/[^"\'<\s,\]}{\\]{10,})', text):
+                    _add_img(im.start(), im.group(1))
 
                 # Паттерн 2: HTML-атрибуты data-src / src указывающие на CDN
                 #            (мобильная/ленивая загрузка карточек выдачи).
@@ -3301,10 +3301,10 @@ async def _ensure_photo(item: dict) -> None:
                 if depth > 15 or obj is None:
                     return ""
                 if isinstance(obj, str):
-                    if "img.avito.st" in obj and len(obj) > 15:
+                    if "avito.st" in obj and len(obj) > 15 and (obj.startswith("//") or obj.startswith("http")):
                         raw = obj.replace("\\/", "/")
                         u = ("https:" + raw) if raw.startswith("//") else raw
-                        if not any(x in u.lower() for x in ("/stub", "noimage", "logo", "placeholder")):
+                        if not any(x in u.lower() for x in ("/stub", "noimage", "logo", "placeholder", "/icon", "favicon")):
                             return u
                     return ""
                 if isinstance(obj, list):
@@ -3382,13 +3382,13 @@ async def _ensure_photo(item: dict) -> None:
                             price_int = int(d)
                             break
 
-        # 3. Regex fallback — любой img.avito.st
+        # 3. Regex fallback — любой avito.st URL (широкий паттерн)
         if need_photo and not photo:
-            m = re.search(r'(?:https:)?(?:\\?/){2}(?:[a-z0-9-]+\.)?(?:img|images)\.avito\.st(?:\\?/)images?(?:\\?/)(?:[^"\'<\s]|\\/){10,}', text)
+            m = re.search(r'((?:https?:)?//(?:[a-z0-9-]+\.)?(?:img|images)\.avito\.st/[^"\'<\s\\]{10,})', text)
             if m:
-                raw = m.group(0).replace("\\/", "/")
+                raw = m.group(1).replace("\\/", "/")
                 candidate = ("https:" + raw) if raw.startswith("//") else raw
-                if not any(x in candidate.lower() for x in ("/stub", "noimage", "logo")):
+                if not any(x in candidate.lower() for x in ("/stub", "noimage", "logo", "/icon", "favicon")):
                     photo = candidate
 
         # 4. Regex desc fallback
