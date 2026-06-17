@@ -1354,11 +1354,24 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
         _deep_get(nd, "initialState.catalog.items") or
         _avito_find_items_in_json(nd)
     )
+    # Авито хранит фото отдельно: catalog.itemsImages = {str(id): [{size: url}]}
+    items_images_map: dict = (
+        _deep_get(nd, "props.initialState.catalog.itemsImages") or
+        _deep_get(nd, "props.pageProps.initialState.catalog.itemsImages") or
+        _deep_get(nd, "initialState.catalog.itemsImages") or
+        {}
+    )
     if items_raw:
-        print(f"  [Авито] __NEXT_DATA__ items={len(items_raw)}")
+        print(f"  [Авито] __NEXT_DATA__ items={len(items_raw)}, images_map={len(items_images_map)}")
         for item_data in items_raw:
             if not isinstance(item_data, dict):
                 continue
+            # Подставляем фото из itemsImages если в самом item нет
+            if items_images_map and not item_data.get("images"):
+                item_id = str(item_data.get("id", ""))
+                if item_id and item_id in items_images_map:
+                    item_data = dict(item_data)
+                    item_data["images"] = items_images_map[item_id]
             item = _avito_item_from_json(item_data, today)
             if item:
                 results.append(item)
@@ -3282,24 +3295,24 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         photo_url = item.get("_photo_url", "")
         if photo_url:
             try:
-                await bot.send_photo(chat_id, photo=photo_url, caption=caption, reply_markup=kb)
-                return
+                import requests as _req
+                from aiogram.types import BufferedInputFile
+                loop = asyncio.get_event_loop()
+                resp = await loop.run_in_executor(None, lambda: _req.get(
+                    photo_url, timeout=12, headers={
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                        "Referer": "https://www.avito.ru/",
+                        "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                    }))
+                if resp.status_code == 200 and len(resp.content) > 3_000:
+                    photo_bytes = BufferedInputFile(resp.content, filename="photo.jpg")
+                    await bot.send_photo(chat_id, photo=photo_bytes, caption=caption, reply_markup=kb)
+                    return
             except Exception:
+                # Fallback: передаём URL напрямую Telegram
                 try:
-                    import requests as _req
-                    from aiogram.types import BufferedInputFile
-                    # Скачивание блокирующее — уводим в executor, чтобы не
-                    # стопорить event loop при отправке партии объявлений.
-                    loop = asyncio.get_event_loop()
-                    resp = await loop.run_in_executor(None, lambda: _req.get(
-                        photo_url, timeout=10, headers={
-                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                            "Referer": "https://www.avito.ru/",
-                        }))
-                    if resp.status_code == 200 and len(resp.content) > 3_000:
-                        photo_bytes = BufferedInputFile(resp.content, filename="photo.jpg")
-                        await bot.send_photo(chat_id, photo=photo_bytes, caption=caption, reply_markup=kb)
-                        return
+                    await bot.send_photo(chat_id, photo=photo_url, caption=caption, reply_markup=kb)
+                    return
                 except Exception:
                     pass
         await bot.send_message(chat_id, caption, reply_markup=kb)
