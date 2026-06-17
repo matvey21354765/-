@@ -1989,22 +1989,40 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         return out
 
     def _try_mobile_site(p: int) -> list[dict]:
-        """m.avito.ru — мобильный сайт, отдельная антибот-цепочка от десктопа."""
-        url = f"https://m.avito.ru/{slug}/avtomobili"
-        params: dict = {"seller_type": "1"}  # 1 = частники
+        """m.avito.ru — мобильный сайт, отдельная антибот-цепочка от десктопа.
+        Пробует несколько URL-вариантов: с фильтром частников, без фильтра,
+        и через корневой домен — чтобы найти хоть один незаблокированный эндпоинт."""
+        # Параметры с фильтром частников
+        params_private: dict = {"seller_type": "1"}
         if p > 1:
-            params["p"] = p
+            params_private["p"] = p
         if price_min > 0:
-            params["pmin"] = price_min
+            params_private["pmin"] = price_min
         if price_max < 99_000_000:
-            params["pmax"] = price_max
-        try:
-            r = session.get(url, params=params, headers=mobile_headers, timeout=15, proxies=AVITO_PROXIES)
-            print(f"  [Авито m.] стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
-            if r.status_code == 200 and ('"urlPath"' in r.text or 'data-marker="item"' in r.text):
-                return _parse_avito_html(r.text, slug, today)
-        except Exception as e:
-            print(f"  [Авито m.] стр.{p}: {e}")
+            params_private["pmax"] = price_max
+
+        # Параметры без фильтра частников — фильтруем дилеров в коде
+        params_no_filter: dict = {}
+        if p > 1:
+            params_no_filter["p"] = p
+
+        urls_to_try = [
+            (f"https://m.avito.ru/{slug}/avtomobili", params_private),
+            # Без фильтра seller_type — меньше параметров, иногда не триггерит капчу
+            (f"https://m.avito.ru/{slug}/avtomobili", params_no_filter),
+            # Корневой домен без субдомена
+            (f"https://avito.ru/{slug}/avtomobili", {}),
+        ]
+        for url, params in urls_to_try:
+            try:
+                r = session.get(url, params=params, headers=mobile_headers, timeout=15, proxies=AVITO_PROXIES)
+                print(f"  [Авито m.] {url} стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
+                if r.status_code == 200 and ('"urlPath"' in r.text or 'data-marker="item"' in r.text or '__NEXT_DATA__' in r.text):
+                    result = _parse_avito_html(r.text, slug, today)
+                    if result:
+                        return result
+            except Exception as e:
+                print(f"  [Авито m.] {url} стр.{p}: {e}")
         return []
 
     def _try_cs_web(p: int) -> list[dict]:
@@ -2114,13 +2132,76 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             print(f"  [Авито webHTML] стр.{p}: {e}")
         return []
 
+    def _try_avito_rss(p: int) -> list[dict]:
+        """Попытка получить данные через RSS Авито (менее защищён антиботом)."""
+        if p > 2:
+            return []
+        import xml.etree.ElementTree as ET
+
+        rss_urls = [
+            f"https://www.avito.ru/{slug}/avtomobili?output_type=rss&seller_type=1",
+            f"https://www.avito.ru/{slug}/avtomobili?output_type=rss",
+        ]
+        for rss_url in rss_urls:
+            try:
+                r = session.get(
+                    rss_url, timeout=15,
+                    headers={"User-Agent": "Mozilla/5.0", "Accept": "application/rss+xml,*/*"},
+                    proxies=AVITO_PROXIES,
+                )
+                print(f"  [Авито RSS] {rss_url}: HTTP {r.status_code}")
+                if r.status_code == 200 and ("<rss" in r.text or "<channel" in r.text):
+                    root = ET.fromstring(r.text)
+                    ns = {"media": "http://search.yahoo.com/mrss/"}
+                    items_out = []
+                    for item in root.findall(".//item"):
+                        link = item.findtext("link", "") or ""
+                        title = item.findtext("title", "")
+                        desc = item.findtext("description", "")
+                        if not link or "avito.ru" not in link:
+                            continue
+                        price_int = 0
+                        price_str = ""
+                        for pm in re.finditer(r'(\d[\d\s]{3,10})\s*(?:₽|руб)', desc + " " + title):
+                            v = int(re.sub(r"[^\d]", "", pm.group(1)))
+                            if 10_000 < v < 99_000_000:
+                                price_int = v
+                                price_str = f"{v:,} ₽".replace(",", " ")
+                                break
+                        if not price_int:
+                            continue
+                        photo_url = ""
+                        enclosure = item.find("enclosure")
+                        if enclosure is not None:
+                            photo_url = enclosure.get("url", "")
+                        media_content = item.find("media:content", ns)
+                        if media_content is not None and not photo_url:
+                            photo_url = media_content.get("url", "")
+                        listing = {
+                            "source": "avito", "title": title,
+                            "price": price_str, "url": link.strip(), "date": str(today),
+                            "_photos": 1 if photo_url else 0, "_days_on_site": 0,
+                            "description": re.sub(r"<[^>]+>", " ", desc)[:300].strip(),
+                            "seller": "", "_photo_url": photo_url,
+                            "_price_int": price_int, "mileage": 0,
+                            "_avito_price_filtered": False,
+                        }
+                        listing["_hot_score"] = hot_score(listing)
+                        items_out.append(listing)
+                    if items_out:
+                        print(f"  [Авито RSS] {len(items_out)} объявлений из RSS")
+                        return items_out
+            except Exception as e:
+                print(f"  [Авито RSS] ошибка: {e}")
+        return []
+
     # Определяем рабочий метод: на стр.1 запускаем ВСЕ методы параллельно и
     # берём первый, который вернул объявления. Это быстрее, чем пробовать
     # их последовательно (ждать таймаут каждого по очереди).
     from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _as_completed
     working_method = None
     page1_batch: list[dict] = []
-    all_methods = [_try_cs_web, _try_mobile_site, _try_web_html, _try_avito_public_api]
+    all_methods = [_try_cs_web, _try_mobile_site, _try_web_html, _try_avito_public_api, _try_avito_rss]
     with _TPE(max_workers=len(all_methods)) as _ex:
         fut_map = {_ex.submit(m, 1): m for m in all_methods}
         for fut in _as_completed(fut_map):
@@ -2334,7 +2415,8 @@ def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max
             return (
                 '"urlPath"' in t or
                 'data-marker="item"' in t or
-                ('"items"' in t and f'"/{slug}/' in t)
+                ('__NEXT_DATA__' in t and (f'"/{slug}/' in t or '"catalog"' in t)) or
+                ('"items"' in t and (f'"/{slug}/' in t or '"priceDetailed"' in t))
             )
 
         def _try_fetch(fetch_url: str) -> str | None:
@@ -3650,6 +3732,27 @@ async def do_search_for_user(uid: int, reply_to):
     if stat_parts:
         await reply_to.answer("📊 " + " | ".join(stat_parts))
 
+    # Если Авито — единственный включённый источник и вернул 0 результатов,
+    # автоматически добавляем Дром как запасной источник.
+    avito_enabled = "avito" in enabled_sources and "avito" in scraper_map
+    avito_count = 0
+    if avito_enabled:
+        for src, batch in zip([s for s in enabled_sources if s in scraper_map], results):
+            if src == "avito":
+                avito_count = len(batch)
+                break
+    if avito_count == 0 and avito_enabled and "drom" not in enabled_sources:
+        print("  [fallback] Авито вернул 0 — добавляем Дром как запасной источник")
+        try:
+            drom_fallback = await loop.run_in_executor(
+                None, lambda: scrape_drom(region, pages=4, price_min=pmin, price_max=pmax)
+            )
+            if drom_fallback:
+                items.extend(drom_fallback)
+                await reply_to.answer(f"🔵 Авито недоступен, показываю объявления с Дрома: {len(drom_fallback)}")
+        except Exception as e:
+            print(f"  [fallback] Дром ошибка: {e}")
+
     dealer_count = sum(1 for i in items if is_dealer(i))
     price_count = sum(1 for i in items if not is_dealer(i) and not in_price_range(i, pmin, pmax))
     print(f"  [поиск] всего={len(items)}, дилеров={dealer_count}, вне бюджета={price_count}")
@@ -4219,8 +4322,10 @@ async def main():
     loop.create_task(_global_monitor_loop())
     print(f"  [монитор] глобальный цикл запущен (интервал {GLOBAL_POLL_SEC}с)")
 
-    # Прогрев кеша всех городов в фоне (не блокирует старт)
-    loop.create_task(_warmup_cache())
+    # Прогрев кеша всех городов отключён — массовые запросы при старте
+    # провоцируют IP-блокировку Авито. Кэш прогревается органически по мере
+    # того, как пользователи делают поиск по разным городам.
+    # loop.create_task(_warmup_cache())
 
     await dp.start_polling(bot)
 
