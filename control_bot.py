@@ -1216,6 +1216,18 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
                         url_c = ("https:" + raw) if raw.startswith("//") else raw
                         if not any(x in url_c.lower() for x in ("/stub", "noimage")):
                             return url_c
+                # Прямые ключи-превью (часто содержат готовый URL фото)
+                for k in ("thumb", "thumbnail", "coverImage", "firstImage"):
+                    v = obj.get(k)
+                    if isinstance(v, str) and ("avito.st" in v.lower()):
+                        raw = v.replace("\\/", "/")
+                        url_c = ("https:" + raw) if raw.startswith("//") else raw
+                        if not any(x in url_c.lower() for x in ("/stub", "noimage", "placeholder", "logo")):
+                            return url_c
+                    elif isinstance(v, (dict, list)):
+                        r = _find_avito_photo_in_obj(v, depth + 1)
+                        if r:
+                            return r
                 # Рекурсия в приоритетные ключи
                 for k in ("images", "photos", "gallery", "media", "image", "photo", "preview"):
                     if k in obj:
@@ -1313,6 +1325,120 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
     except Exception:
         soup = _BS(text, "html.parser")
 
+    # 0. ОСНОВНОЙ МЕТОД (как Дром): BeautifulSoup + CSS-селекторы прямо по
+    #    карточкам поисковой выдачи. Извлекаем title/url/price/description/photo/date
+    #    прямо из HTML — без дополнительных запросов к страницам объявлений.
+    cards = soup.select('[data-marker="item"]')
+    print(f"  [Авито] BS4 cards (data-marker=item)={len(cards)}")
+    for card in cards:
+        try:
+            # --- Ссылка ---
+            link = (
+                card.select_one("a[itemprop='url']")
+                or card.select_one("a[data-marker='item-title']")
+                or card.select_one(f"a[href*='/{slug}/']")
+                or card.select_one("a[href*='/avtomobili/']")
+                or card.select_one("a[href]")
+            )
+            href = (link.get("href", "") if link else "").split("?")[0]
+            item_url = ("https://www.avito.ru" + href) if href.startswith("/") else href
+            if not item_url or "avito.ru" not in item_url:
+                continue
+
+            # --- Заголовок ---
+            title_el = (
+                card.select_one("[itemprop='name']")
+                or card.select_one("[data-marker='item-title']")
+                or card.select_one("h3")
+                or card.select_one("h2")
+            )
+            title = title_el.get_text(strip=True) if title_el else ""
+            if not title:
+                continue
+
+            card_str = str(card)
+
+            # --- Цена ---
+            price = ""
+            price_int = 0
+            meta_price = card.select_one("meta[itemprop='price']")
+            if meta_price and meta_price.get("content"):
+                price_int = parse_price(meta_price.get("content"))
+            if not price_int:
+                price_el = (
+                    card.select_one("[data-marker='item-price']")
+                    or card.select_one("[itemprop='price']")
+                    or card.select_one("[class*='price']")
+                    or card.select_one("[class*='Price']")
+                )
+                if price_el:
+                    price = price_el.get("content") or price_el.get_text(strip=True)
+                    price_int = parse_price(price)
+            if not price_int:
+                cm = re.search(r'content="(\d{5,8})"', card_str)
+                if cm and 10_000 < int(cm.group(1)) < 99_000_000:
+                    price_int = int(cm.group(1))
+            if not price_int:
+                tm = re.search(r'(\d[\d\s ]{4,12})\s*(?:₽|руб)', card_str)
+                if tm:
+                    price_int = parse_price(tm.group(1))
+            if price_int and not price:
+                price = f"{price_int:,} ₽".replace(",", " ")
+
+            # --- Описание (из карточки) ---
+            desc_el = (
+                card.select_one("[data-marker='item-description']")
+                or card.select_one("p[class*='description']")
+                or card.select_one("div[class*='description']")
+                or card.select_one("[class*='iva-item-text']")
+            )
+            description = desc_el.get_text(" ", strip=True)[:300] if desc_el else ""
+
+            # --- Дата ---
+            date_el = card.select_one("[data-marker='item-date']")
+            date_text = date_el.get_text(strip=True) if date_el else ""
+
+            # --- Фото (как Дром): первый <img> с реальным фото Авито ---
+            photo_url = ""
+            for img_el in card.find_all("img"):
+                src = (img_el.get("src") or img_el.get("data-src") or
+                       img_el.get("data-lazy-src") or img_el.get("data-original") or "")
+                if not src and img_el.get("srcset"):
+                    src = img_el.get("srcset").split()[0]
+                if src.startswith("//"):
+                    src = "https:" + src
+                _sl = src.lower()
+                if (("avito.st" in _sl) or ("avito-static" in _sl)) and src.startswith("http"):
+                    if any(x in _sl for x in ("placeholder", "logo", "stub", "noimage", "/icon")):
+                        continue
+                    photo_url = src
+                    break
+            if not photo_url:
+                img_m = re.search(
+                    r'((?:https?:)?//(?:[a-z0-9-]+\.)?(?:img|images)\.avito\.st/[^"\']+\.(?:jpg|jpeg|webp|png))',
+                    card_str
+                )
+                if img_m:
+                    raw = img_m.group(1)
+                    photo_url = ("https:" + raw) if raw.startswith("//") else raw
+
+            item = {
+                "source": "avito", "title": title, "price": price,
+                "url": item_url, "date": str(today),
+                "_photos": 1 if photo_url else 0, "_days_on_site": 0,
+                "description": description, "seller": "", "_photo_url": photo_url,
+                "_price_int": price_int, "_date_text": date_text,
+            }
+            item["_hot_score"] = hot_score(item)
+            results.append(item)
+        except Exception:
+            pass
+
+    if results:
+        print(f"  [Авито] BS4 итого: {len(results)} объявлений")
+        return results
+
+    # === FALLBACK (страница заблокирована / другой формат) ===
     # 1. __NEXT_DATA__ (Next.js SSR)
     nd = soup.find("script", {"id": "__NEXT_DATA__"})
     if nd and nd.string:
@@ -2772,7 +2898,16 @@ async def enrich_and_filter(items: list[dict], max_check: int = 25) -> list[dict
 
 
 async def _ensure_photo(item: dict) -> None:
-    """Для объявлений без фото/описания/цены — загружает страницу и вытаскивает данные."""
+    """Догружает недостающие данные (обычно описание) со страницы объявления.
+
+    Основной парсер (_parse_avito_html через BeautifulSoup, как Дром) уже
+    извлекает фото/описание/цену прямо из карточек поисковой выдачи, поэтому
+    в большинстве случаев тут ничего грузить не нужно — выходим сразу.
+    """
+    # Всё уже собрано из карточки поиска — дополнительный запрос не нужен.
+    if item.get("_photo_url") and item.get("description") and item.get("_price_int"):
+        return
+
     need_photo = not item.get("_photo_url")
     need_desc = not item.get("description")
     need_price = not item.get("_price_int")
