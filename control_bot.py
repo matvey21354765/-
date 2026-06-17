@@ -2299,6 +2299,7 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🔍 Найти авто"), KeyboardButton(text="🔔 Уведомления")],
         [KeyboardButton(text="⭐ Избранное"),  KeyboardButton(text="⚙️ Настройки")],
+        [KeyboardButton(text="♻️ Сбросить историю"), KeyboardButton(text="❓ Помощь")],
     ],
     resize_keyboard=True,
     persistent=True,
@@ -2320,22 +2321,30 @@ def region_keyboard():
 async def cmd_start(msg: Message, state: FSMContext):
     await state.clear()
     s = load_settings(msg.from_user.id)
+    name = msg.from_user.first_name or "друг"
     if s.get("region"):
         region_name = REGIONS.get(s["region"], s["region"])
         pmin = s.get("price_min", 0)
         pmax = s.get("price_max", 99_000_000)
-        mon = "🟢" if s.get("monitor_enabled") else "🔴"
+        mon = "🟢 включён" if s.get("monitor_enabled") else "🔴 выключен"
         await msg.answer(
-            f"👋 Привет! Твои настройки:\n"
-            f"📍 Регион: {region_name}\n"
-            f"💰 Бюджет: {pmin:,} – {pmax:,} ₽\n"
-            f"🔔 Мониторинг: {mon}",
+            f"👋 Привет, {name}!\n\n"
+            f"📍 Город: *{region_name}*\n"
+            f"💰 Бюджет: *{pmin:,} – {pmax:,} ₽*\n"
+            f"🔔 Мониторинг: {mon}\n\n"
+            f"Нажми 🔍 *Найти авто* чтобы начать поиск.\n"
+            f"Если ничего не нашлось — нажми ♻️ *Сбросить историю* и попробуй снова.".replace(",", " "),
+            parse_mode="Markdown",
             reply_markup=MAIN_KEYBOARD,
         )
     else:
         await msg.answer(
-            "👋 Привет! Я ищу автомобили от частных лиц по цене ниже рынка.\n\n"
-            "Для начала выбери регион поиска:",
+            f"👋 Привет, {name}! Я *PerekupDrive* — бот для поиска авто ниже рыночной цены.\n\n"
+            f"🔍 Ищу объявления от частных лиц на Авито\n"
+            f"📊 Сравниваю цены с рынком и нахожу выгодные\n"
+            f"🔔 Могу присылать уведомления когда появится новое выгодное авто\n\n"
+            f"Для начала выбери свой город 👇",
+            parse_mode="Markdown",
             reply_markup=MAIN_KEYBOARD,
         )
         await msg.answer("📍 Выбери город:", reply_markup=region_keyboard())
@@ -3428,6 +3437,7 @@ async def cmd_test_avito(msg: Message):
     await msg.answer("✅ Диагностика завершена. Пришли эти результаты разработчику.")
 
 @dp.message(Command("reset"))
+@dp.message(F.text == "♻️ Сбросить историю")
 async def cmd_reset(msg: Message):
     uid = msg.from_user.id
     save_seen(uid, set())
@@ -3435,27 +3445,34 @@ async def cmd_reset(msg: Message):
     if uid in _search_cache:
         del _search_cache[uid]
     await msg.answer(
-        "♻️ История просмотренных и скрытых объявлений сброшена.\n"
-        "Теперь /search покажет все доступные объявления заново.",
+        "♻️ История сброшена! Теперь нажми 🔍 *Найти авто* — покажу все доступные объявления заново.",
+        parse_mode="Markdown",
         reply_markup=MAIN_KEYBOARD,
     )
 
 
 @dp.message(Command("help"))
+@dp.message(F.text == "❓ Помощь")
 async def cmd_help(msg: Message):
     await msg.answer(
-        "🤖 *Авто-брокер — поиск авто ниже рынка*\n\n"
-        "Команды:\n"
-        "/start — начало работы\n"
-        "/search — найти авто по твоим настройкам\n"
-        "/monitor — авто-мониторинг новых авто ниже рынка (вкл/выкл)\n"
-        "/favorites — сохранённые объявления\n"
-        "/settings — изменить регион и бюджет\n"
-        "/reset — сбросить историю (увидеть все объявления заново)\n"
-        "/help — помощь\n\n"
-        "🔥 — объявления с признаками срочной продажи (торг, срочно, уступлю)\n"
-        "⭐ — объявления давно висят — продавец мотивирован",
-        parse_mode="Markdown"
+        "🤖 *PerekupDrive — умный поиск авто ниже рынка*\n\n"
+        "Бот автоматически ищет объявления от частных лиц на Авито, "
+        "сравнивает цены с рынком и показывает только выгодные.\n\n"
+        "📌 *Кнопки меню:*\n"
+        "🔍 *Найти авто* — запустить поиск по твоим настройкам\n"
+        "🔔 *Уведомления* — авто-мониторинг (бот сам пришлёт когда появится выгодное авто)\n"
+        "⭐ *Избранное* — сохранённые объявления\n"
+        "⚙️ *Настройки* — сменить город и бюджет\n"
+        "♻️ *Сбросить историю* — показать все объявления заново (если ничего не находит)\n\n"
+        "📌 *Что означают значки:*\n"
+        "🔻 рынок ~X₽ (-Y%) — цена ниже рыночной на Y%\n"
+        "🔥 — срочная продажа (торг, уступлю, срочно)\n"
+        "⭐ — объявление давно висит, продавец мотивирован снизить цену\n\n"
+        "📌 *Если ничего не нашлось:*\n"
+        "— Нажми ♻️ *Сбросить историю* и ищи снова\n"
+        "— Или расширь бюджет в ⚙️ *Настройках*",
+        parse_mode="Markdown",
+        reply_markup=MAIN_KEYBOARD,
     )
 
 
