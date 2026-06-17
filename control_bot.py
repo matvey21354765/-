@@ -1858,9 +1858,9 @@ def _avito_price_bucket(price_min: int, price_max: int) -> str:
 def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int = 99_000_000, sort_by_date: bool = False) -> list[dict]:
     """
     Парсер Авито с кэшем по (региону, ценовому бакету).
-    Каждый диапазон цен хранит свой кэш на 20 минут — это позволяет нескольким
-    пользователям с похожим бюджетом в одном городе делить один запрос к Авито,
-    не смешивая результаты с разными ценами.
+    При промахе кэша делает свежий запрос. Если запрос вернул 0 (Авито заблокировал) —
+    ищем любой кэш по этому региону (любой бакет) и фильтруем в памяти,
+    чтобы не показывать пустоту при смене бюджета пользователем.
     """
     bucket = _avito_price_bucket(price_min, price_max)
     cache_key = f"{region}_{bucket}"
@@ -1874,11 +1874,27 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
         if items:
             _AVITO_REGION_CACHE[cache_key] = (now, items)
             _save_avito_cache()
-        elif cached:
-            items = cached[1]
-            print(f"  [Авито] скрейп пустой, отдаём устаревший кэш {cache_key}: {len(items)} шт")
+        else:
+            # Свежий скрейп вернул 0 (429 / блокировка). Ищем любой кэш региона
+            # (любой бакет — другой бюджет пользователя) и фильтруем в памяти.
+            any_cached: list[dict] = []
+            any_cached_age = 999_999
+            for k, (ts, its) in _AVITO_REGION_CACHE.items():
+                if k.startswith(region + "_") or k == region:
+                    age = now - ts
+                    if age < any_cached_age:
+                        any_cached = its
+                        any_cached_age = age
+            if any_cached:
+                items = any_cached
+                print(f"  [Авито] 429/пусто — стале-кэш региона {region}: {len(items)} шт (возраст {int(any_cached_age)}с)")
+            elif cached:
+                items = cached[1]
+                print(f"  [Авито] скрейп пустой, устаревший кэш {cache_key}: {len(items)} шт")
 
-    return list(items)
+    # Фильтр по бюджету в памяти (для стале-кэша с другим бакетом)
+    out = [it for it in items if not (it.get("_price_int", 0) and (it["_price_int"] < price_min or it["_price_int"] > price_max))]
+    return out
 
 
 def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max: int = 99_000_000, sort_by_date: bool = False) -> list[dict]:
@@ -3052,12 +3068,10 @@ async def send_batch(chat_id: int, uid: int, offset: int):
             p = it.get("_price_int") or parse_price(it.get("price", ""))
             if p and not (_pmin <= p <= _pmax):
                 continue
-            has_photo = bool(it.get("_photo_url"))
-            has_desc = bool(it.get("description"))
-            if not has_photo and not has_desc:
-                continue  # ни фото, ни описания — пропускаем
-            if not has_photo and it.get("_below_market"):
-                continue  # выгодные предложения без фото не показываем — нужно фото
+            # Показываем объявление если есть хотя бы цена или заголовок.
+            # Без фото/описания показываем как текст — лучше чем ничего.
+            if not it.get("title") and not p:
+                continue
             batch.append(it)
 
     # Пересчитываем рыночное сравнение после загрузки цен и сортируем:
