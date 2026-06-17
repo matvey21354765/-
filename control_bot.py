@@ -187,11 +187,12 @@ def save_settings(uid: int, s: dict):
 
 def load_seen(uid: int) -> set:
     f = user_dir(uid) / "seen.json"
-    if f.exists():
-        try:
-            return set(json.loads(f.read_text(encoding="utf-8")))
-        except Exception:
-            pass
+    try:
+        data = json.loads(f.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            return set(data[-300:])  # keep only last 300
+    except Exception:
+        pass
     return set()
 
 
@@ -3386,6 +3387,8 @@ async def send_batch(chat_id: int, uid: int, offset: int):
             f"💰 {price_line}{deal_line}\n"
             f"📅 {days_str}{mileage_str}"
         )
+        if not item.get("description") and item.get("title"):
+            item["description"] = _avito_desc_from_title(item["title"], item.get("mileage", 0))
         if item.get("description"):
             _desc = item["description"][:180].strip()
             if len(item["description"]) > 180:
@@ -3609,6 +3612,27 @@ async def do_search_for_user(uid: int, reply_to):
         x.get("_price_int", 999_999_999)
     ))
 
+    if not suitable and already_seen_count > 0:
+        # auto-clear seen and retry
+        seen = set()
+        save_seen(uid, seen)
+        suitable = [
+            i for i in items
+            if not is_dealer(i)
+            and in_price_range(i, pmin, pmax)
+            and i.get("url")
+            and i["url"] not in skipped
+        ]
+        suitable = rank_by_market_price(suitable)
+        suitable.sort(key=lambda x: (
+            -x.get("_savings_pct", 0),
+            x.get("_days_on_site", 0),
+            -x.get("_hot_score", 0),
+            x.get("_price_int", 999_999_999)
+        ))
+        if suitable:
+            await reply_to.answer("♻️ История просмотров сброшена — показываю объявления заново.")
+
     if not suitable:
         dealer_c = sum(1 for i in items if is_dealer(i))
         price_filtered_c = sum(1 for i in items if not is_dealer(i) and not in_price_range(i, pmin, pmax))
@@ -3617,9 +3641,7 @@ async def do_search_for_user(uid: int, reply_to):
         sample_prices = [i.get("_price_int", 0) for i in items[:5] if not is_dealer(i)]
         sample_flags = [i.get("_avito_price_filtered", False) for i in items[:5] if not is_dealer(i)]
         hint = ""
-        if already_seen_count > 0:
-            hint = f"\n\n👁 Уже видел {already_seen_count} подходящих объявлений. Сбрось историю командой /reset чтобы увидеть их снова."
-        elif price_filtered_c > 0:
+        if price_filtered_c > 0:
             hint = f"\n\nНайдено {price_filtered_c} объявлений вне бюджета. Попробуй расширить диапазон цен: /settings"
         else:
             hint = f"\n\nПопробуй расширить диапазон цен: /settings"
@@ -3642,7 +3664,7 @@ async def do_search_for_user(uid: int, reply_to):
 
     _search_cache[uid] = suitable
     _save_cache(uid, suitable)
-    await reply_to.answer(f"✅ Найдено {len(suitable)} актуальных объявлений!")
+    await reply_to.answer(f"✅ Найдено {len(suitable)} объявлений!\n📈 Сначала самые выгодные (ниже рынка)")
     await send_batch(reply_to.chat.id, uid, 0)
 
 
