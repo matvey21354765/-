@@ -1205,7 +1205,7 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
             # company, shop, dealer, pro, business, 1 (pro account) — дилеры
             # ВАЖНО: используем точное совпадение или разграниченные подстроки
             # чтобы не отфильтровать частников с типом "private" и т.п.
-            _DEALER_TYPES = {"company", "shop", "dealer", "pro", "business", "commercial", "1"}
+            _DEALER_TYPES = {"company", "shop", "dealer", "business", "commercial"}
             if seller_type in _DEALER_TYPES or any(
                 seller_type == t or seller_type.startswith(t + "_") or seller_type.endswith("_" + t)
                 for t in _DEALER_TYPES
