@@ -1202,9 +1202,9 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
                 seller_obj.get("sellerType") or
                 seller_obj.get("userType") or ""
             ).lower()
-            # company, shop, dealer, pro, business, 1 (pro account) — дилеры
+            # company, shop, dealer, business, commercial — дилеры (type="1" — это частник, НЕ фильтруем!)
             # ВАЖНО: используем точное совпадение или разграниченные подстроки
-            # чтобы не отфильтровать частников с типом "private" и т.п.
+            # чтобы не отфильтровать частников с типом "private", "1" и т.п.
             _DEALER_TYPES = {"company", "shop", "dealer", "business", "commercial"}
             if seller_type in _DEALER_TYPES or any(
                 seller_type == t or seller_type.startswith(t + "_") or seller_type.endswith("_" + t)
@@ -2195,13 +2195,40 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                 print(f"  [Авито RSS] ошибка: {e}")
         return []
 
+    def _try_scraperapi(p: int) -> list[dict]:
+        """ScraperAPI с JS-рендером — обходит блокировку IP через резидентные прокси."""
+        if not SCRAPER_API_KEY:
+            return []
+        url = f"https://www.avito.ru/{slug}/avtomobili"
+        params_str = f"seller_type=1"
+        if p > 1:
+            params_str += f"&p={p}"
+        if price_min > 0:
+            params_str += f"&pmin={price_min}"
+        if price_max < 99_000_000:
+            params_str += f"&pmax={price_max}"
+        full_url = f"{url}?{params_str}"
+        try:
+            r = _avito_scraperapi(full_url)
+            if r and r.status_code == 200:
+                print(f"  [ScraperAPI] стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
+                if '"urlPath"' in r.text or 'data-marker="item"' in r.text or '__NEXT_DATA__' in r.text:
+                    result = _parse_avito_html(r.text, slug, today)
+                    if result:
+                        return result
+            elif r:
+                print(f"  [ScraperAPI] стр.{p}: HTTP {r.status_code}")
+        except Exception as e:
+            print(f"  [ScraperAPI] стр.{p}: {e}")
+        return []
+
     # Определяем рабочий метод: на стр.1 запускаем ВСЕ методы параллельно и
     # берём первый, который вернул объявления. Это быстрее, чем пробовать
     # их последовательно (ждать таймаут каждого по очереди).
     from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _as_completed
     working_method = None
     page1_batch: list[dict] = []
-    all_methods = [_try_cs_web, _try_mobile_site, _try_web_html, _try_avito_public_api, _try_avito_rss]
+    all_methods = [_try_cs_web, _try_mobile_site, _try_web_html, _try_avito_public_api, _try_avito_rss, _try_scraperapi]
     with _TPE(max_workers=len(all_methods)) as _ex:
         fut_map = {_ex.submit(m, 1): m for m in all_methods}
         for fut in _as_completed(fut_map):
