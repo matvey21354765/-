@@ -1741,19 +1741,35 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             print(f"  [Авито webHTML] стр.{p}: {e}")
         return []
 
-    # Пробуем каждый метод; при первом успехе продолжаем им же для всех страниц
+    # Определяем рабочий метод: на стр.1 запускаем ВСЕ методы параллельно и
+    # берём первый, который вернул объявления. Это быстрее, чем пробовать
+    # их последовательно (ждать таймаут каждого по очереди).
+    from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _as_completed
     working_method = None
-    for p in range(1, pages + 1):
-        batch: list[dict] = []
-        methods_to_try = ([working_method] if working_method
-                          else [_try_cs_web, _try_mobile_site, _try_web_html, _try_avito_public_api])
-        for method in methods_to_try:
-            batch = method(p)
-            if batch:
-                if working_method is None:
-                    working_method = method
-                    print(f"  [Авито API] рабочий метод: {method.__name__}")
+    page1_batch: list[dict] = []
+    all_methods = [_try_cs_web, _try_mobile_site, _try_web_html, _try_avito_public_api]
+    with _TPE(max_workers=len(all_methods)) as _ex:
+        fut_map = {_ex.submit(m, 1): m for m in all_methods}
+        for fut in _as_completed(fut_map):
+            try:
+                b = fut.result()
+            except Exception:
+                b = []
+            if b and working_method is None:
+                working_method = fut_map[fut]
+                page1_batch = b
+                print(f"  [Авито API] рабочий метод: {working_method.__name__}")
                 break
+
+    if not working_method:
+        print(f"  [Авито API] стр.1: 0 объявлений")
+        return results
+
+    results.extend(page1_batch)
+
+    # Остальные страницы добираем рабочим методом последовательно
+    for p in range(2, pages + 1):
+        batch = working_method(p)
         results.extend(batch)
         if not batch:
             print(f"  [Авито API] стр.{p}: 0 объявлений")
@@ -2867,13 +2883,22 @@ async def _ensure_photo(item: dict) -> None:
         # 4. Regex desc fallback
         if need_desc and not desc:
             for dpat in [
-                r'"descriptionFull"\s*:\s*"([^"]{30,})"',
-                r'"description"\s*:\s*"([^"]{30,})"',
+                # Версия, которая корректно обрабатывает экранированные кавычки (\")
+                # и переводы строк (\n, \r, \t) внутри JSON-строки описания.
+                r'"descriptionFull"\s*:\s*"((?:\\.|[^"\\]){30,})"',
+                r'"description"\s*:\s*"((?:\\.|[^"\\]){30,})"',
                 r'<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']{20,})["\']',
             ]:
                 dm = re.search(dpat, text)
                 if dm:
-                    desc = dm.group(1).replace("\\n", " ").replace('\\"', '"')[:400]
+                    desc = (
+                        dm.group(1)
+                        .replace("\\n", " ")
+                        .replace("\\r", " ")
+                        .replace("\\t", " ")
+                        .replace('\\"', '"')
+                        .replace("\\/", "/")
+                    )[:400]
                     break
 
         return photo, desc, price_int
@@ -2911,21 +2936,9 @@ async def _ensure_photo(item: dict) -> None:
                         pass
                     return "", "", 0
 
-                def _via_browser() -> tuple[str, str, int]:
-                    html = _avito_fetch_html(url, wait_ms=1500)
-                    if html and len(html) > 5000:
-                        return _extract_from_page(html)
-                    return "", "", 0
-
-                from concurrent.futures import ThreadPoolExecutor as _TPE
-                with _TPE(max_workers=2) as _ex:
-                    fut_d = _ex.submit(_direct)
-                    fut_s = _ex.submit(_via_browser)
-                    pd, dd, pid = fut_d.result()
-                    ps, ds, pis = fut_s.result()
-                photo = pd or ps
-                desc = dd or ds
-                price_int = pid or pis
+                # Playwright (_via_browser) убран — слишком медленный для 10+
+                # параллельных запросов. Оставлен только быстрый _direct.
+                photo, desc, price_int = _direct()
             elif source in ("drom", "autoru"):
                 r = _req.get(url, timeout=10, headers=_HDR)
                 if r.status_code == 200:
@@ -3054,12 +3067,12 @@ async def send_batch(chat_id: int, uid: int, offset: int):
     s = load_settings(uid)
     _pmin = s.get("price_min", 0)
     _pmax = s.get("price_max", 99_000_000)
-    sem = asyncio.Semaphore(8)
+    sem = asyncio.Semaphore(10)
 
     async def _prefetch(it):
         async with sem:
             try:
-                await asyncio.wait_for(_ensure_photo(it), timeout=40)
+                await asyncio.wait_for(_ensure_photo(it), timeout=6)
             except Exception:
                 pass
 
@@ -3184,11 +3197,11 @@ async def do_search_for_user(uid: int, reply_to):
     # Для объявлений где цена всё ещё неизвестна — быстро загружаем (параллельно, 8 сек)
     no_price = [i for i in items if not is_dealer(i) and not i.get("_price_int") and i.get("url") and i["url"] not in skipped]
     if no_price:
-        sem_price = asyncio.Semaphore(20)
+        sem_price = asyncio.Semaphore(10)
         async def _fetch_price(it):
             async with sem_price:
                 try:
-                    await asyncio.wait_for(_ensure_photo(it), timeout=8)
+                    await asyncio.wait_for(_ensure_photo(it), timeout=5)
                 except Exception:
                     pass
         await asyncio.gather(*[_fetch_price(it) for it in no_price[:100]])
