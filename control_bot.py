@@ -1660,7 +1660,12 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         api.avito.ru/core/v1/items — публичный REST API Авито.
         Используется официальным мобильным приложением, отдельная инфраструктура.
         category_id=9 «Транспорт», params[109]=106 «Легковые автомобили».
+        Требует OAuth-токен (env AVITO_API_TOKEN) — без него Авито отдаёт 401,
+        поэтому без токена метод просто пропускается (не тратим запрос впустую).
         """
+        token = os.environ.get("AVITO_API_TOKEN", "").strip()
+        if not token:
+            return []
         params: dict = {
             "locationId": location_id,
             "categoryId": 9,
@@ -1682,6 +1687,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                     "User-Agent": "ru.avito.avitomobile/12 (Android 13; ru_RU)",
                     "Accept": "application/json",
                     "Accept-Language": "ru-RU",
+                    "Authorization": f"Bearer {token}",
                     "x-device-id": f"avito-{random.randint(10**9, 10**10 - 1)}",
                 },
                 timeout=15,
@@ -1697,59 +1703,42 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             print(f"  [Авито pubAPI] стр.{p}: {e}")
         return []
 
-    def _try_avito_web_api(p: int) -> list[dict]:
+    def _try_web_html(p: int) -> list[dict]:
         """
-        www.avito.ru/web/1/main/items — внутренний JSON API веб-фронтенда.
-        Используется при пагинации без перезагрузки. Принимает те же параметры,
-        что и обычный URL, но возвращает чистый JSON.
+        Десктопная страница каталога www.avito.ru/<slug>/avtomobili.
+        Прежний эндпоинт www.avito.ru/web/1/main/items НЕ существует (всегда 404),
+        а api.avito.ru/core/v1/items требует OAuth-токен (401 без авторизации) —
+        оба гарантированно давали 0. Здесь тянем обычную HTML-страницу каталога
+        в той же сессии и парсим __NEXT_DATA__/карточки — это реально отдаёт
+        объявления, когда IP не заблокирован.
         """
-        params: dict = {
-            "locationId": location_id,
-            "categoryId": 9,
-            "user": 1,
-            "page": p,
-            "items": 30,
-        }
+        url = f"https://www.avito.ru/{slug}/avtomobili"
+        params: dict = {"seller_type": "1", "s": "104"}  # частники, сортировка по дате
+        if p > 1:
+            params["p"] = p
         if price_min > 0:
-            params["priceMin"] = price_min
+            params["pmin"] = price_min
         if price_max < 99_000_000:
-            params["priceMax"] = price_max
-
+            params["pmax"] = price_max
         try:
             r = session.get(
-                "https://www.avito.ru/web/1/main/items",
+                url,
                 params=params,
                 headers={
-                    **mobile_headers,
-                    "Accept": "application/json, text/plain, */*",
-                    "X-Requested-With": "XMLHttpRequest",
-                    "Referer": f"https://www.avito.ru/{slug}/avtomobili",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language": "ru-RU,ru;q=0.9",
+                    "Accept-Encoding": "gzip, deflate, br",
+                    "Referer": "https://www.avito.ru/",
                 },
-                timeout=15,
+                timeout=20,
                 proxies=AVITO_PROXIES,
             )
-            print(f"  [Авито webAPI] стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
-            if r.status_code == 200:
-                try:
-                    data = r.json()
-                    items = _items_from_json_response(data)
-                    if items:
-                        return items
-                    # Прямое извлечение из структуры ответа
-                    raw_items = (
-                        data.get("items") or
-                        data.get("result", {}).get("items") or
-                        data.get("data", {}).get("items") or []
-                    )
-                    for it in raw_items:
-                        obj = _avito_item_from_json(it, today)
-                        if obj:
-                            items.append(obj)
-                    return items
-                except Exception as e:
-                    print(f"  [Авито webAPI] json: {e}")
+            print(f"  [Авито webHTML] стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
+            if r.status_code == 200 and ('"urlPath"' in r.text or 'data-marker="item"' in r.text):
+                return _parse_avito_html(r.text, slug, today)
         except Exception as e:
-            print(f"  [Авито webAPI] стр.{p}: {e}")
+            print(f"  [Авито webHTML] стр.{p}: {e}")
         return []
 
     # Пробуем каждый метод; при первом успехе продолжаем им же для всех страниц
@@ -1757,7 +1746,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
     for p in range(1, pages + 1):
         batch: list[dict] = []
         methods_to_try = ([working_method] if working_method
-                          else [_try_cs_web, _try_mobile_site, _try_avito_public_api, _try_avito_web_api])
+                          else [_try_cs_web, _try_mobile_site, _try_web_html, _try_avito_public_api])
         for method in methods_to_try:
             batch = method(p)
             if batch:
@@ -3209,6 +3198,7 @@ async def do_search_for_user(uid: int, reply_to):
         if not is_dealer(i) and in_price_range(i, pmin, pmax)
         and i.get("url") and i["url"] in seen
     )
+    print(f"  [поиск] items={len(items)}, seen={len(seen)}, skipped={len(skipped)}, already_seen={already_seen_count}")
     suitable = [
         i for i in items
         if not is_dealer(i)
