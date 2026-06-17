@@ -1138,6 +1138,47 @@ def _avito_price_from_item(it: dict) -> tuple[str, int]:
     return "", 0
 
 
+def _avito_desc_from_title(title: str, mileage: int = 0) -> str:
+    """Синтезирует описание из структурированного заголовка Авито.
+
+    Заголовок объявления Авито имеет вид:
+        "ВАЗ (LADA) 2109 1.3 MT, 1988, 1 000 000 км"
+    Из него можно вытащить: модель, объём двигателя, КПП, год, пробег.
+    Карточка никогда не должна выглядеть пустой — это гарантия descriptions.
+    """
+    if not title:
+        return ""
+    parts = []
+    # Год выпуска
+    ym = re.search(r"\b(19\d{2}|20\d{2})\b", title)
+    if ym:
+        parts.append(f"{ym.group(1)} г.")
+    # Объём двигателя (1.3, 2.0 и т.п.)
+    em = re.search(r"\b(\d\.\d)\b", title)
+    if em:
+        parts.append(f"{em.group(1)} л")
+    # Коробка передач
+    tl = title.upper()
+    if re.search(r"\bAT\b|АКПП|АКП|\bАТ\b", tl):
+        parts.append("АКПП")
+    elif re.search(r"\bMT\b|МКПП|МКП|\bМТ\b", tl):
+        parts.append("МКПП")
+    elif re.search(r"\bCVT\b|вариатор", tl, re.I):
+        parts.append("вариатор")
+    elif re.search(r"\bAMT\b|робот", tl, re.I):
+        parts.append("робот")
+    # Пробег: из параметра или из заголовка
+    if mileage and mileage > 0:
+        parts.append(f"{mileage:,} км".replace(",", " "))
+    else:
+        mm = re.search(r"([\d][\d\s ]{2,})\s*км", title)
+        if mm:
+            km = re.sub(r"[^\d]", "", mm.group(1))
+            if km:
+                parts.append(f"{int(km):,} км".replace(",", " "))
+    return " · ".join(parts)
+
+
 def _avito_item_from_json(it: dict, today) -> dict | None:
     """Преобразует объект Авито JSON в dict объявления. Возвращает None для дилеров."""
     try:
@@ -1181,6 +1222,12 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
                 if param.get("type") == "mileage" or "пробег" in str(param.get("title","")).lower():
                     try: mileage = int(re.sub(r"[^\d]", "", str(param.get("value","") or param.get("valueText",""))))
                     except: pass
+        # Если пробег не нашли в параметрах — вытаскиваем из заголовка ("..., 150 000 км")
+        if not mileage:
+            mm = re.search(r"([\d][\d\s ]{2,})\s*км", title)
+            if mm:
+                try: mileage = int(re.sub(r"[^\d]", "", mm.group(1)))
+                except: pass
 
         def _find_avito_photo_in_obj(obj, depth=0) -> str:
             """Рекурсивно ищет первый URL фото Авито в любом месте JSON объекта."""
@@ -1267,6 +1314,10 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
                         desc_parts.append(f"{pname}: {pval}")
             if desc_parts:
                 _desc_raw = " · ".join(desc_parts[:6])
+        # Гарантия: если описания всё ещё нет — синтезируем из заголовка,
+        # чтобы карточка никогда не была пустой (год · объём · КПП · пробег).
+        if not _desc_raw:
+            _desc_raw = _avito_desc_from_title(title, mileage)
 
         _images_list = it.get("images") or it.get("photos") or it.get("gallery") or []
         item = {
@@ -1278,6 +1329,9 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
             "seller": seller_name, "_photo_url": photo_url,
             "_price_int": price_int,
             "mileage": mileage,
+            # Явный мусор: пробег >= 900 000 км (заглушки "1 000 000 км"),
+            # такие объявления не должны доминировать в выдаче.
+            "_junk": 1 if mileage >= 900_000 else 0,
         }
         item["_hot_score"] = hot_score(item)
         return item
@@ -1384,12 +1438,20 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
         for item_data in items_raw:
             if not isinstance(item_data, dict):
                 continue
-            # Всегда берём фото из itemsImages (карта точнее, чем item.images)
+            # Всегда берём фото из itemsImages (карта точнее, чем item.images).
+            # Ключи карты в JSON — строки, но id объявления может быть int/str —
+            # пробуем оба варианта ключа.
             if items_images_map:
-                item_id = str(item_data.get("id", ""))
-                if item_id and item_id in items_images_map:
+                raw_id = item_data.get("id")
+                img_entry = None
+                if raw_id is not None:
+                    img_entry = (
+                        items_images_map.get(str(raw_id))
+                        or (items_images_map.get(raw_id) if not isinstance(raw_id, str) else None)
+                    )
+                if img_entry:
                     item_data = dict(item_data)
-                    item_data["images"] = items_images_map[item_id]
+                    item_data["images"] = img_entry
             item = _avito_item_from_json(item_data, today)
             if item:
                 # Если фото не нашли через JSON — ищем через regex в __NEXT_DATA__
@@ -3303,15 +3365,26 @@ async def send_batch(chat_id: int, uid: int, offset: int):
             item.get("price") or
             (f"{_pi:,} ₽".replace(",", " ") if _pi else "—")
         )
+        deal_line = ""
         if item.get("_below_market") and item.get("_market_price"):
             market = item["_market_price"]
             pct = item.get("_savings_pct", 0)
             price_line += f"  🔻 рынок ~{market:,} ₽ (-{pct}%)".replace(",", " ")
+            # Явный сигнал выгоды для перекупа: сколько денег экономия
+            saving = market - (item.get("_price_int", 0) or 0)
+            if saving > 0:
+                tier = "🟢 ВЫГОДНО" if pct >= 25 else "🟡 ниже рынка"
+                deal_line = f"\n{tier}: выгода ~{saving:,} ₽".replace(",", " ")
+
+        mileage = item.get("mileage", 0)
+        mileage_str = ""
+        if mileage and mileage < 900_000:
+            mileage_str = f"  ·  🛣 {mileage:,} км".replace(",", " ")
 
         caption = (
             f"{source_tag} {item.get('title', '')}{hot_tag}\n"
-            f"💰 {price_line}\n"
-            f"📅 {days_str}"
+            f"💰 {price_line}{deal_line}\n"
+            f"📅 {days_str}{mileage_str}"
         )
         if item.get("description"):
             _desc = item["description"][:180].strip()
@@ -3357,46 +3430,56 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                     pass
         await bot.send_message(chat_id, caption, reply_markup=kb)
 
-    # Предзагружаем фото/цену/описание (до 8 одновременно, 40 сек на каждое).
-    # Добираем объявления порциями, пока не наберём 10 с фото+описанием
-    # или не кончится список (без фото и описания — пропускаем, не показываем).
+    # Отбираем кандидатов и дозагружаем фото/описание только для них (см. ниже).
     s = load_settings(uid)
     _pmin = s.get("price_min", 0)
     _pmax = s.get("price_max", 99_000_000)
-    sem = asyncio.Semaphore(10)
+    # Низкая параллельность + увеличенный таймаут: Авито агрессивно отдаёт 429
+    # при веерных параллельных запросах со страниц объявлений. 3 одновременных
+    # запроса с 12-сек таймаутом надёжнее, чем 10 по 6 сек — и мы дозагружаем
+    # ТОЛЬКО те ~10 карточек, что реально показываем, а не все подряд.
+    sem = asyncio.Semaphore(3)
 
     async def _prefetch(it):
+        # Если фото уже есть из поисковой выдачи — страницу не трогаем.
+        if it.get("_photo_url"):
+            return
         async with sem:
             try:
-                await asyncio.wait_for(_ensure_photo(it), timeout=6)
+                await asyncio.wait_for(_ensure_photo(it), timeout=12)
             except Exception:
                 pass
 
-    batch: list[dict] = []
+    # 1. Сначала отбираем кандидатов по цене/заголовку БЕЗ сетевых запросов.
+    #    Мусорные объявления (пробег ~1 000 000 км) уводим в конец.
+    candidates: list[dict] = []
     cursor = offset
-    while len(batch) < 10 and cursor < total and cursor < offset + 50:
-        chunk = items[cursor:cursor + 10]
-        cursor += 10
-        await asyncio.gather(*[_prefetch(it) for it in chunk])
-        chunk = rank_by_market_price(chunk)
-        for it in chunk:
-            p = it.get("_price_int") or parse_price(it.get("price", ""))
-            if p and not (_pmin <= p <= _pmax):
-                continue
-            # Показываем объявление если есть хотя бы цена или заголовок.
-            # Без фото/описания показываем как текст — лучше чем ничего.
-            if not it.get("title") and not p:
-                continue
-            batch.append(it)
+    while len(candidates) < 14 and cursor < total and cursor < offset + 60:
+        it = items[cursor]
+        cursor += 1
+        p = it.get("_price_int") or parse_price(it.get("price", ""))
+        if p and not (_pmin <= p <= _pmax):
+            continue
+        if not it.get("title") and not p:
+            continue
+        candidates.append(it)
+
+    # 2. Дозагружаем фото/описание только для отобранных кандидатов
+    #    (макс. 12), с низкой параллельностью.
+    await asyncio.gather(*[_prefetch(it) for it in candidates[:12]])
+
+    batch = candidates[:12]
 
     # Пересчитываем рыночное сравнение после загрузки цен и сортируем:
     # сначала максимальная скидка от рынка, затем более новые объявления
     batch = rank_by_market_price(batch)
     batch.sort(key=lambda x: (
+        x.get("_junk", 0),            # мусорные (1 000 000 км) — в конец
         -x.get("_savings_pct", 0),
         x.get("_days_on_site", 0),
         -x.get("_hot_score", 0),
     ))
+    batch = batch[:10]
     for item in batch:
         await _send_item(item)
         await asyncio.sleep(0.05)
