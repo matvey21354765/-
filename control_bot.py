@@ -235,10 +235,13 @@ def in_price_range(item: dict, price_min: int, price_max: int) -> bool:
     p = item.get("_price_int") or parse_price(item.get("price", ""))
     if p:
         return price_min <= p <= price_max
-    # Цена неизвестна — доверяем если Авито сам фильтровал по URL
-    if item.get("_avito_price_filtered"):
-        return True
-    return False
+    # Цена ещё неизвестна. Раньше такие объявления отбрасывались (если не было
+    # флага _avito_price_filtered) — из-за этого при сбое парсинга цены до
+    # пользователя не доходило НИ ОДНО объявление ("не нашёл частников").
+    # Теперь пропускаем их как кандидатов: реальная цена догружается в
+    # _ensure_photo, а финальная отсечка по бюджету делается в send_batch,
+    # где у объявления уже есть _price_int.
+    return True
 
 
 def hot_score(item: dict) -> float:
@@ -1189,8 +1192,8 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
                 # а путь — /image/ или /images/. Раньше жёстко требовали
                 # "img.avito.st/image/" — из-за этого терялись валидные фото.
                 low = obj.lower()
-                if "img.avito.st/" in low and len(obj) > 10 and (
-                    "img.avito.st/image" in low or "img.avito.st/images" in low
+                if len(obj) > 10 and (
+                    "img.avito.st/image" in low or "images.avito.st/image" in low
                 ):
                     raw = obj.replace("\\/", "/")
                     url_c = ("https:" + raw) if raw.startswith("//") else raw
@@ -1208,7 +1211,7 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
                 for size in ("1208x906", "864x648", "1280x960", "640x480",
                              "432x324", "320x240", "100x75", "originalSize"):
                     v = obj.get(size)
-                    if isinstance(v, str) and "img.avito.st/" in v.lower():
+                    if isinstance(v, str) and ("img.avito.st/" in v.lower() or "images.avito.st/" in v.lower()):
                         raw = v.replace("\\/", "/")
                         url_c = ("https:" + raw) if raw.startswith("//") else raw
                         if not any(x in url_c.lower() for x in ("/stub", "noimage")):
@@ -1443,11 +1446,12 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
                     src = img_el.get("srcset").split()[0]
                 if src.startswith("//"):
                     src = "https:" + src
-                if "img.avito.st/" in src.lower() and src.startswith("http"):
+                _sl = src.lower()
+                if ("img.avito.st/" in _sl or "images.avito.st/" in _sl) and src.startswith("http"):
                     photo_url = src
                     break
             if not photo_url:
-                img_m = re.search(r'((?:https?:)?//[^"\']*img\.avito\.st/[^"\']+\.(?:jpg|jpeg|webp|png))', card_str)
+                img_m = re.search(r'((?:https?:)?//(?:[a-z0-9-]+\.)?(?:img|images)\.avito\.st/[^"\']+\.(?:jpg|jpeg|webp|png))', card_str)
                 if img_m:
                     raw = img_m.group(1)
                     photo_url = ("https:" + raw) if raw.startswith("//") else raw
@@ -1522,7 +1526,7 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
         # Ищем фото CDN Авито — могут быть //img.avito.st/... (без схемы) или https://...
         # Только реальные фото объявлений: img.avito.st/image/...
         img_m = re.search(
-            r'((?:https?:)?(?:\\?/){2}[^"\']*img\.avito\.st(?:\\?/)images?(?:\\?/)[^"\']+\.(?:jpg|jpeg|webp|png))',
+            r'((?:https?:)?(?:\\?/){2}(?:[a-z0-9-]+\.)?(?:img|images)\.avito\.st(?:\\?/)images?(?:\\?/)[^"\']+\.(?:jpg|jpeg|webp|png))',
             window
         )
         if img_m:
@@ -2025,7 +2029,7 @@ def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max
                 # Все фото — img.avito.st (расширенный поиск без требования расширения)
                 all_images: list[tuple[int, str]] = []
                 seen_imgs: set[str] = set()
-                for im in re.finditer(r'(?:https:)?(?:\\?/){2}[a-z0-9.-]*img\.avito\.st(?:\\?/)images?(?:\\?/)[^"\'\\<\s,\]}{]{5,}', text):
+                for im in re.finditer(r'(?:https:)?(?:\\?/){2}(?:[a-z0-9-]+\.)?(?:img|images)\.avito\.st(?:\\?/)images?(?:\\?/)(?:[^"\'<\s,\]}{]|\\/){5,}', text):
                     raw_url = im.group(0).replace("\\/", "/")
                     url_img = ("https:" + raw_url) if raw_url.startswith("//") else raw_url
                     if any(x in url_img.lower() for x in ("/stub", "placeholder", "noimage")):
@@ -2197,7 +2201,7 @@ def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max
                             if digits and 10_000 < int(digits) < 99_000_000:
                                 price_map_fb[url_p] = int(digits)
                     img_m = re.search(
-                        r'"(?:864x648|1280x960|640x480|432x324|320x240)"\s*:\s*"((?:https:)?(?:\\?/){2}[a-z0-9.-]*img\.avito\.st[^"\\]{10,}\.(?:jpg|jpeg|webp|png))"',
+                        r'"(?:864x648|1280x960|640x480|432x324|320x240)"\s*:\s*"((?:https:)?(?:\\?/){2}(?:[a-z0-9-]+\.)?(?:img|images)\.avito\.st[^"\\]{10,}\.(?:jpg|jpeg|webp|png))"',
                         chunk
                     )
                     if img_m:
@@ -2848,7 +2852,7 @@ async def _ensure_photo(item: dict) -> None:
 
         # 3. Regex fallback — любой img.avito.st
         if need_photo and not photo:
-            m = re.search(r'(?:https:)?(?:\\?/){2}[a-z0-9.-]*img\.avito\.st(?:\\?/)images?(?:\\?/)[^"\'\\<\s]{10,}', text)
+            m = re.search(r'(?:https:)?(?:\\?/){2}(?:[a-z0-9-]+\.)?(?:img|images)\.avito\.st(?:\\?/)images?(?:\\?/)(?:[^"\'<\s]|\\/){10,}', text)
             if m:
                 raw = m.group(0).replace("\\/", "/")
                 candidate = ("https:" + raw) if raw.startswith("//") else raw
