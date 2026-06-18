@@ -1346,13 +1346,23 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
         if price_int and not price_str:
             price_str = f"{price_int:,} ₽".replace(",", " ")
 
-        _desc_raw = (
+        # РЕАЛЬНОЕ описание объявления продавца из JSON поисковой выдачи.
+        _desc_real = (
             it.get("description") or
             it.get("descriptionFull") or
             it.get("shortDescription") or
             (it.get("item", {}).get("description") if isinstance(it.get("item"), dict) else "") or ""
         )
-        # Если описание пустое — составляем из параметров (год, пробег, тип КПП и т.д.)
+        if isinstance(_desc_real, str):
+            _desc_real = _desc_real.strip()
+        else:
+            _desc_real = ""
+        # _desc_synthetic=True означает, что описание собрано нами из заголовка/
+        # параметров, а НЕ взято из текста объявления. В этом случае _ensure_photo
+        # дозагрузит настоящее описание со страницы объявления.
+        _desc_synthetic = False
+        _desc_raw = _desc_real
+        # Если реального описания нет — составляем из параметров (год, пробег, КПП…)
         if not _desc_raw:
             params = it.get("params") or it.get("parameters") or []
             desc_parts = []
@@ -1364,10 +1374,12 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
                         desc_parts.append(f"{pname}: {pval}")
             if desc_parts:
                 _desc_raw = " · ".join(desc_parts[:6])
+                _desc_synthetic = True
         # Гарантия: если описания всё ещё нет — синтезируем из заголовка,
         # чтобы карточка никогда не была пустой (год · объём · КПП · пробег).
         if not _desc_raw:
             _desc_raw = _avito_desc_from_title(title, mileage)
+            _desc_synthetic = True
 
         _images_list = it.get("images") or it.get("photos") or it.get("gallery") or []
         item = {
@@ -1376,6 +1388,7 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
             "_photos": len(_images_list) if isinstance(_images_list, list) else 0,
             "_days_on_site": 0,
             "description": _desc_raw[:400],
+            "_desc_synthetic": _desc_synthetic,
             "seller": seller_name, "_photo_url": photo_url,
             "_price_int": price_int,
             "mileage": mileage,
@@ -3629,12 +3642,17 @@ async def _ensure_photo(item: dict) -> None:
     извлекает фото/описание/цену прямо из карточек поисковой выдачи, поэтому
     в большинстве случаев тут ничего грузить не нужно — выходим сразу.
     """
+    # Описание считается реальным только если оно НЕ синтезировано из заголовка/
+    # параметров (_desc_synthetic). Синтетику пытаемся заменить настоящим текстом
+    # объявления, дозагрузив страницу.
+    _has_real_desc = bool(item.get("description")) and not item.get("_desc_synthetic")
+
     # Всё уже собрано из карточки поиска — дополнительный запрос не нужен.
-    if item.get("_photo_url") and item.get("description") and item.get("_price_int"):
+    if item.get("_photo_url") and _has_real_desc and item.get("_price_int"):
         return
 
     need_photo = not item.get("_photo_url")
-    need_desc = not item.get("description")
+    need_desc = not _has_real_desc
     need_price = not item.get("_price_int")
     if not need_photo and not need_desc and not need_price:
         return
@@ -3888,8 +3906,11 @@ async def _ensure_photo(item: dict) -> None:
     photo, desc, price_int = await loop.run_in_executor(None, _fetch)
     if photo:
         item["_photo_url"] = photo
-    if desc and not item.get("description"):
-        item["description"] = desc
+    # Перезаписываем синтетическое (собранное из заголовка) описание реальным
+    # текстом объявления, если он получен со страницы.
+    if desc and (not item.get("description") or item.get("_desc_synthetic")):
+        item["description"] = desc[:400]
+        item["_desc_synthetic"] = False
     if price_int and not item.get("_price_int"):
         item["_price_int"] = price_int
         item["price"] = f"{price_int:,} ₽".replace(",", " ")
@@ -4048,8 +4069,11 @@ async def send_batch(chat_id: int, uid: int, offset: int):
     sem = asyncio.Semaphore(3)
 
     async def _prefetch(it):
-        # Если фото уже есть из поисковой выдачи — страницу не трогаем.
-        if it.get("_photo_url"):
+        # Если фото уже есть И описание реальное (не синтезированное из заголовка) —
+        # страницу объявления не трогаем. Иначе дозагружаем недостающее
+        # (настоящее описание и/или фото) через _ensure_photo.
+        _real_desc = bool(it.get("description")) and not it.get("_desc_synthetic")
+        if it.get("_photo_url") and _real_desc:
             return
         async with sem:
             try:
