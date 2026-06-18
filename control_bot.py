@@ -1224,17 +1224,6 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
         # частники на Авито всегда указывают цену. Отбрасываем сразу, чтобы не показывать
         # карточки с "—" вместо цены.
         if not price_int:
-            # Запасной вариант: ищем любое число в диапазоне цен прямо в сыром JSON
-            import json as _j
-            _raw = _j.dumps(it)
-            for _m in re.finditer(r'\b(\d{5,8})\b', _raw):
-                _v = int(_m.group(1))
-                if 50_000 <= _v <= 30_000_000:
-                    price_int = _v
-                    price_str = f"{_v:,} ₽".replace(",", " ")
-                    print(f"  [item] цена найдена regex-fallback: {price_str} для {title[:30]!r}")
-                    break
-        if not price_int:
             print(f"  [item] DROPPED (no price): {title[:30]!r}")
             return None
 
@@ -1601,6 +1590,8 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
                     price_int = parse_price(tm.group(1))
             if price_int and not price:
                 price = f"{price_int:,} ₽".replace(",", " ")
+            if not price_int:
+                continue  # без цены — не показываем
 
             # --- Описание (из карточки) ---
             desc_el = (
@@ -3885,6 +3876,15 @@ async def do_search_for_user(uid: int, reply_to):
             except Exception:
                 pass
     await asyncio.gather(*[_pre(it) for it in first_batch])
+
+    # После загрузки цен — выкидываем всё, что осталось без цены или вышло за бюджет
+    suitable = [
+        i for i in suitable
+        if i.get("_price_int", 0) and pmin <= i["_price_int"] <= pmax
+    ]
+    if not suitable:
+        await reply_to.answer("😔 Не нашёл объявлений в твоём бюджете. Попробуй расширить диапазон цен: /settings")
+        return
 
     _search_cache[uid] = suitable
     _save_cache(uid, suitable)
