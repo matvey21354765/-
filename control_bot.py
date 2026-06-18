@@ -1381,12 +1381,25 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
             _desc_raw = _avito_desc_from_title(title, mileage)
             _desc_synthetic = True
 
+        # Реальная дата объявления из sortTimeStamp (мс). Если её нет —
+        # считаем «сегодня». Так не показываем ложное «сегодня» на старых.
+        _days = 0
+        _ts = it.get("sortTimeStamp") or it.get("time") or 0
+        try:
+            if _ts:
+                _ts_sec = int(_ts) / 1000 if int(_ts) > 10_000_000_000 else int(_ts)
+                _posted = datetime.datetime.fromtimestamp(_ts_sec).date()
+                _days = max(0, (today - _posted).days)
+        except Exception:
+            _days = 0
+
         _images_list = it.get("images") or it.get("photos") or it.get("gallery") or []
         item = {
             "source": "avito", "title": title,
-            "price": price_str, "url": item_url, "date": str(today),
+            "price": price_str, "url": item_url,
+            "date": str(today - datetime.timedelta(days=_days)),
             "_photos": len(_images_list) if isinstance(_images_list, list) else 0,
-            "_days_on_site": 0,
+            "_days_on_site": _days,
             "description": _desc_raw[:400],
             "_desc_synthetic": _desc_synthetic,
             "seller": seller_name, "_photo_url": photo_url,
@@ -2809,7 +2822,10 @@ def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max
             qs_parts.append(f"pmin={price_min}")
         if price_max < 99_000_000:
             qs_parts.append(f"pmax={price_max}")
-        qs_parts.append("s=104")  # сортировка по дате
+        # s=104 — по дате (только свежие). Без сортировки Авито отдаёт
+        # релевантные объявления любых дат — это даёт больше машин ниже рынка.
+        if sort_by_date:
+            qs_parts.append("s=104")
         u = f"https://www.avito.ru/{slug}/avtomobili"
         if qs_parts:
             u += "?" + "&".join(qs_parts)
@@ -3083,7 +3099,9 @@ def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max
 
         def _fetch_fallback_page(fb_page: int) -> list[dict]:
             try:
-                fallback_url = f"https://www.avito.ru/{slug}/avtomobili?seller_type=1&s=104"
+                fallback_url = f"https://www.avito.ru/{slug}/avtomobili?seller_type=1"
+                if sort_by_date:
+                    fallback_url += "&s=104"
                 if fb_page > 1:
                     fallback_url += f"&p={fb_page}"
                 # Прямой запрос первой — бесплатно и быстро, при неудаче — headless-браузер
@@ -4178,7 +4196,7 @@ async def do_search_for_user(uid: int, reply_to):
     scraper_map = {
         "drom":   lambda: scrape_drom(region, pages=8, price_min=pmin, price_max=pmax),
         "autoru": lambda: scrape_autoru(region, pages=4, price_min=pmin, price_max=pmax),
-        "avito":  lambda: scrape_avito(region, pages=10, price_min=pmin, price_max=pmax, sort_by_date=True),
+        "avito":  lambda: scrape_avito(region, pages=10, price_min=pmin, price_max=pmax, sort_by_date=False),
     }
     tasks = [loop.run_in_executor(None, scraper_map[src]) for src in enabled_sources if src in scraper_map]
     results = await asyncio.gather(*tasks)
