@@ -1054,7 +1054,7 @@ async def _avito_async_fetch(url: str, wait_ms: int, timeout_ms: int) -> str:
             except Exception:
                 pass
             await page.goto(url, timeout=timeout_ms, wait_until="domcontentloaded")
-            await page.wait_for_timeout(wait_ms)
+            await page.wait_for_timeout(max(wait_ms, 3000))
             # Simulate human: random scroll and mouse movements
             try:
                 await page.evaluate("window.scrollBy(0, Math.random() * 300)")
@@ -1131,19 +1131,19 @@ def _avito_price_from_item(it: dict) -> tuple[str, int]:
     def _find_price_in_obj(obj, depth=0):
         if depth > 5 or not isinstance(obj, dict):
             return "", 0
-        # Прямое числовое значение
-        for val_key in ("value", "number", "amount", "price", "sum"):
-            v = obj.get(val_key)
-            if v and isinstance(v, (int, float)) and 10_000 < v < 99_000_000:
-                text_v = obj.get("valueText") or obj.get("text") or f"{int(v):,} ₽".replace(",", " ")
-                return str(text_v), int(v)
-        # Текстовое значение цены
+        # Текстовое значение цены — проверяем ПЕРВЫМ (сохраняем форматирование)
         for text_key in ("valueText", "text", "label", "displayValue"):
             t = obj.get(text_key)
             if t and isinstance(t, str):
                 digits = re.sub(r"[^\d]", "", t)
                 if digits and 10_000 < int(digits) < 99_000_000:
                     return t, int(digits)
+        # Прямое числовое значение
+        for val_key in ("value", "number", "amount", "price", "sum"):
+            v = obj.get(val_key)
+            if v and isinstance(v, (int, float)) and 10_000 < v < 99_000_000:
+                text_v = obj.get("valueText") or obj.get("text") or f"{int(v):,} ₽".replace(",", " ")
+                return str(text_v), int(v)
         # Рекурсия в под-объекты
         for k, v in obj.items():
             if isinstance(v, dict):
@@ -1244,8 +1244,6 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
             ):
                 print(f"  [item] DROPPED (dealer type): seller_type={seller_type!r} title={title[:30]!r}")
                 return None
-            if not seller_type:
-                print(f"  [item] KEPT (no seller type — treated as private): title={title[:30]!r}")
             seller_name = seller_obj.get("name") or seller_obj.get("title") or ""
         # Дополнительная проверка только по НАЗВАНИЮ ПРОДАВЦА (не заголовку объявления)
         if seller_name and any(k in seller_name.lower() for k in ("автосалон", "автоцентр", "официальный", "ооо", "зао", "ип ", "дилер", "моторс", "авто групп", "автопрестиж")):
@@ -1405,6 +1403,7 @@ def _avito_find_items_in_json(obj, depth=0) -> list:
             url_path = sample.get("urlPath", "")
             if isinstance(url_path, str) and url_path.startswith("/") and (
                 any(k in sample for k in ("priceDetailed", "price", "images", "gallery", "photos"))
+                or ("id" in sample and "title" in sample and ("avto" in url_path or "auto" in url_path or "avtomobili" in url_path))
             ):
                 print(f"  [findItems] найден массив len={len(obj)}, sample_url={url_path!r}")
                 return obj
@@ -1428,6 +1427,7 @@ def _avito_find_items_in_json(obj, depth=0) -> list:
                 url_path = sample.get("urlPath", "")
                 if isinstance(url_path, str) and url_path.startswith("/") and (
                     any(k in sample for k in ("priceDetailed", "price", "images", "gallery", "photos"))
+                    or ("id" in sample and "title" in sample and ("avto" in url_path or "auto" in url_path or "avtomobili" in url_path))
                 ):
                     print(f"  [findItems] найден массив [{key}] len={len(val)}, sample_url={url_path!r}")
                     return val
@@ -2171,7 +2171,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             try:
                 r = session.get(
                     rss_url, timeout=15,
-                    headers={"User-Agent": "Feedfetcher-Google; (+http://www.google.com/feedfetcher.html)", "Accept": "application/rss+xml,*/*"},
+                    headers={"User-Agent": "Mozilla/5.0 (compatible; Feedfetcher-Google; +http://www.google.com/feedfetcher.html)", "Accept": "application/rss+xml,*/*"},
                     proxies=AVITO_PROXIES,
                 )
                 print(f"  [Авито RSS] {rss_url}: HTTP {r.status_code}")
@@ -2278,52 +2278,35 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                 headers=headers,
                 timeout=30,
             )
-            if r.status_code == 200:
-                data = r.json()
-                raw_items = (
-                    data.get("data", {}).get("items", [])
-                    or data.get("items", [])
-                    or data.get("result", {}).get("items", [])
-                )
-                results_out: list[dict] = []
-                for it in raw_items:
-                    title = it.get("title", "") or it.get("name", "")
-                    url_path = it.get("url", "") or it.get("urlPath", "")
-                    if url_path and not url_path.startswith("http"):
-                        url_path = "https://www.avito.ru" + url_path
-                    price_val = 0
-                    price_obj = it.get("price") or it.get("priceDetailed") or {}
-                    if isinstance(price_obj, dict):
-                        price_val = price_obj.get("value", 0) or price_obj.get("number", 0)
-                    elif isinstance(price_obj, (int, float)):
-                        price_val = int(price_obj)
-                    price_str = f"{price_val:,} ₽".replace(",", " ") if price_val else ""
-                    photo_url = ""
-                    imgs = it.get("images", []) or it.get("photos", [])
-                    if imgs and isinstance(imgs[0], dict):
-                        photo_url = imgs[0].get("864x648", "") or imgs[0].get("url", "")
-                    if title and url_path and price_val:
-                        listing = {
-                            "source": "avito",
-                            "title": title,
-                            "price": price_str,
-                            "url": url_path,
-                            "date": str(today),
-                            "_price_int": price_val,
-                            "_photo_url": photo_url,
-                            "_photos": [photo_url] if photo_url else [],
-                            "description": it.get("description", ""),
-                            "seller": it.get("seller", {}).get("name", "") if isinstance(it.get("seller"), dict) else "",
-                            "mileage": 0,
-                            "_days_on_site": 0,
-                        }
-                        listing["_hot_score"] = hot_score(listing)
-                        results_out.append(listing)
-                if results_out:
-                    print(f"  [Авито JSON API] стр.{p}: {len(results_out)} объявлений")
-                    return results_out
-            else:
+            if r.status_code == 404:
+                print(f"  [Авито JSON API] стр.{p}: HTTP 404 — эндпоинт недоступен")
+                return []
+            if r.status_code != 200:
                 print(f"  [Авито JSON API] стр.{p}: HTTP {r.status_code}")
+                return []
+            try:
+                data = r.json()
+            except Exception:
+                print(f"  [Авито JSON API] стр.{p}: не JSON-ответ")
+                return []
+            raw_items = (
+                data.get("data", {}).get("items", [])
+                or data.get("items", [])
+                or data.get("result", {}).get("items", [])
+            )
+            if not raw_items:
+                print(f"  [Авито JSON API] стр.{p}: пустой ответ (нет items)")
+                return []
+            results_out: list[dict] = []
+            for it in raw_items:
+                item = _avito_item_from_json(it, today)
+                if item:
+                    results_out.append(item)
+            if results_out:
+                print(f"  [Авито JSON API] стр.{p}: {len(results_out)} объявлений")
+            else:
+                print(f"  [Авито JSON API] стр.{p}: raw_items={len(raw_items)}, после фильтра=0")
+            return results_out
         except Exception as e:
             print(f"  [Авито JSON API] стр.{p}: {e}")
         return []
@@ -2422,11 +2405,11 @@ def _load_avito_cache():
         return
     try:
         raw = json.loads(_AVITO_CACHE_FILE.read_text(encoding="utf-8"))
+        # Версионирование кэша: отбрасываем старые форматы без version=2
         if not isinstance(raw, dict) or raw.get("version") != 2:
-            print(f"  [Авито] кэш устаревшего формата — сбрасываем")
-            _AVITO_CACHE_FILE.unlink(missing_ok=True)
+            print(f"  [Авито] кэш устарел (нет version=2) — сбрасываем")
             return
-        data = raw["data"]
+        data = raw.get("data", {})
         now = time.time()
         for region, entry in data.items():
             ts, items = entry[0], entry[1]
@@ -3890,16 +3873,23 @@ async def do_search_for_user(uid: int, reply_to):
                 avito_count = len(batch)
                 break
     if avito_count == 0 and avito_enabled and "drom" not in enabled_sources:
-        print("  [fallback] Авито вернул 0 — добавляем Дром как запасной источник")
-        try:
-            drom_fallback = await loop.run_in_executor(
-                None, lambda: scrape_drom(region, pages=4, price_min=pmin, price_max=pmax)
-            )
-            if drom_fallback:
-                items.extend(drom_fallback)
-                await reply_to.answer(f"🔵 Авито недоступен, показываю объявления с Дрома: {len(drom_fallback)}")
-        except Exception as e:
-            print(f"  [fallback] Дром ошибка: {e}")
+        # Проверяем: если в кэше есть данные по этому региону — Авито был доступен,
+        # просто всё отфильтровалось по бюджету. Не показываем "недоступен".
+        _avito_was_accessible = any(
+            k.startswith(region + "_") or k == region
+            for k in _AVITO_REGION_CACHE
+        )
+        print(f"  [fallback] Авито вернул 0 (accessible={_avito_was_accessible}) — {'фильтрация' if _avito_was_accessible else 'добавляем Дром'}")
+        if not _avito_was_accessible:
+            try:
+                drom_fallback = await loop.run_in_executor(
+                    None, lambda: scrape_drom(region, pages=4, price_min=pmin, price_max=pmax)
+                )
+                if drom_fallback:
+                    items.extend(drom_fallback)
+                    await reply_to.answer(f"🔵 Авито недоступен, показываю объявления с Дрома: {len(drom_fallback)}")
+            except Exception as e:
+                print(f"  [fallback] Дром ошибка: {e}")
 
     dealer_count = sum(1 for i in items if is_dealer(i))
     price_count = sum(1 for i in items if not is_dealer(i) and not in_price_range(i, pmin, pmax))
