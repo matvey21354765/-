@@ -1314,7 +1314,7 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
                     if isinstance(v, str) and "avito.st" in v.lower():
                         raw = v.replace("\\/", "/")
                         url_c = ("https:" + raw) if raw.startswith("//") else raw
-                        if not any(x in url_c.lower() for x in ("/stub", "noimage", "placeholder", "logo")):
+                        if not any(x in url_c.lower() for x in ("/stub", "noimage", "placeholder", "/ava/", "/avatar/", "/userAva/", "/user_ava", "/profile", "/logo", "/icon", "favicon")):
                             return url_c
                     elif isinstance(v, (dict, list)):
                         r = _find_avito_photo_in_obj(v, depth + 1)
@@ -1509,6 +1509,10 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
         r'((?:https?:)?//(?:\d+\.)?(?:img|images)\.avito\.st/[^"\'\\<>\s]{5,})'
     )
 
+    # Пути, однозначно указывающие на аватар продавца или системный значок — не фото машины
+    _BAD_PHOTO_PATHS = ("/stub", "noimage", "placeholder", "/ava/", "/avatar/",
+                        "/userAva/", "/user_ava", "/profile", "/logo", "/icon", "favicon")
+
     if items_raw:
         print(f"  [Авито] __NEXT_DATA__ items={len(items_raw)}, images_map={len(items_images_map)}")
         for item_data in items_raw:
@@ -1531,7 +1535,7 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
             item = _avito_item_from_json(item_data, today)
             if item:
                 # Если фото не нашли через JSON — ищем через regex в __NEXT_DATA__
-                if not item.get("_photo_url") and _nd_text:
+                if not item.get("_photo_url") and _nd_text and not items_images_map:
                     item_path = item["url"].replace("https://www.avito.ru", "")
                     esc_path = item_path.replace("/", "\\/")
                     for search_path in (esc_path, item_path):
@@ -1542,15 +1546,20 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
                             if m:
                                 raw = m.group(1).replace("\\/", "/")
                                 url_c = ("https:" + raw) if raw.startswith("//") else raw
-                                if not any(x in url_c.lower() for x in ("/stub", "noimage", "placeholder")):
+                                if not any(x in url_c.lower() for x in _BAD_PHOTO_PATHS):
                                     item["_photo_url"] = url_c
                                     break
                 results.append(item)
         print(f"  [parse] после цикла: results={len(results)} из items_raw={len(items_raw)}")
+        # Нельзя путать аватары продавцов с фото машины
+        _BAD_PHOTO_PATHS = ("/stub", "noimage", "placeholder", "/ava/", "/avatar/",
+                            "/userAva/", "/user_ava", "/profile", "/logo", "/icon", "favicon")
+
         if results:
-            # Полная страница: ищем все CDN-URL и назначаем фото объявлениям без фото
+            # Proximity-fallback только если itemsImages не пришёл вообще.
+            # Если карта есть, но для объявления пусто — реально нет фото, не берём чужое.
             _no_photo = [r for r in results if not r.get("_photo_url")]
-            if _no_photo:
+            if _no_photo and not items_images_map:
                 _all_cdn: list[tuple[int, str]] = []
                 for _im in re.finditer(
                     r'((?:https?:)?(?:\\?/){2}(?:[a-z0-9-]+\.)?(?:img|images)\.avito\.st'
@@ -1559,7 +1568,7 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
                 ):
                     _raw = _im.group(1).replace("\\/", "/").replace("\\u002F", "/")
                     _url = ("https:" + _raw) if _raw.startswith("//") else _raw
-                    if not any(x in _url.lower() for x in ("/stub", "noimage", "placeholder")):
+                    if not any(x in _url.lower() for x in _BAD_PHOTO_PATHS):
                         _all_cdn.append((_im.start(), _url))
                 if _all_cdn:
                     for item in _no_photo:
@@ -4169,7 +4178,7 @@ async def do_search_for_user(uid: int, reply_to):
     scraper_map = {
         "drom":   lambda: scrape_drom(region, pages=8, price_min=pmin, price_max=pmax),
         "autoru": lambda: scrape_autoru(region, pages=4, price_min=pmin, price_max=pmax),
-        "avito":  lambda: scrape_avito(region, pages=6, price_min=pmin, price_max=pmax, sort_by_date=True),
+        "avito":  lambda: scrape_avito(region, pages=10, price_min=pmin, price_max=pmax, sort_by_date=True),
     }
     tasks = [loop.run_in_executor(None, scraper_map[src]) for src in enabled_sources if src in scraper_map]
     results = await asyncio.gather(*tasks)
