@@ -1053,7 +1053,7 @@ async def _avito_async_fetch(url: str, wait_ms: int, timeout_ms: int) -> str:
                 await page.wait_for_timeout(1000)
             except Exception:
                 pass
-            await page.goto(url, timeout=timeout_ms, wait_until="networkidle")
+            await page.goto(url, timeout=timeout_ms, wait_until="domcontentloaded")
             await page.wait_for_timeout(wait_ms)
             # Simulate human: random scroll and mouse movements
             try:
@@ -1244,6 +1244,8 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
             ):
                 print(f"  [item] DROPPED (dealer type): seller_type={seller_type!r} title={title[:30]!r}")
                 return None
+            if not seller_type:
+                print(f"  [item] KEPT (no seller type — treated as private): title={title[:30]!r}")
             seller_name = seller_obj.get("name") or seller_obj.get("title") or ""
         # Дополнительная проверка только по НАЗВАНИЮ ПРОДАВЦА (не заголовку объявления)
         if seller_name and any(k in seller_name.lower() for k in ("автосалон", "автоцентр", "официальный", "ооо", "зао", "ип ", "дилер", "моторс", "авто групп", "автопрестиж")):
@@ -1403,7 +1405,6 @@ def _avito_find_items_in_json(obj, depth=0) -> list:
             url_path = sample.get("urlPath", "")
             if isinstance(url_path, str) and url_path.startswith("/") and (
                 any(k in sample for k in ("priceDetailed", "price", "images", "gallery", "photos"))
-                or ("id" in sample and "title" in sample)
             ):
                 print(f"  [findItems] найден массив len={len(obj)}, sample_url={url_path!r}")
                 return obj
@@ -1427,7 +1428,6 @@ def _avito_find_items_in_json(obj, depth=0) -> list:
                 url_path = sample.get("urlPath", "")
                 if isinstance(url_path, str) and url_path.startswith("/") and (
                     any(k in sample for k in ("priceDetailed", "price", "images", "gallery", "photos"))
-                    or ("id" in sample and "title" in sample)
                 ):
                     print(f"  [findItems] найден массив [{key}] len={len(val)}, sample_url={url_path!r}")
                     return val
@@ -1471,8 +1471,10 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
     _di1 = _deep_get(nd, "props.initialState.catalog.items")
     _di2 = _deep_get(nd, "props.pageProps.initialState.catalog.items")
     _di3 = _deep_get(nd, "initialState.catalog.items")
-    print(f"  [parse] nd found={bool(nd)}, deep_get paths: {len(_di1) if _di1 else 0}/{len(_di2) if _di2 else 0}/{len(_di3) if _di3 else 0}")
-    items_raw = _di1 or _di2 or _di3 or _avito_find_items_in_json(nd)
+    _di4 = _deep_get(nd, "props.initialState.listing.catalog.items")
+    _di5 = _deep_get(nd, "props.pageProps.catalog.items")
+    print(f"  [parse] nd found={bool(nd)}, deep_get paths: {len(_di1) if _di1 else 0}/{len(_di2) if _di2 else 0}/{len(_di3) if _di3 else 0}/{len(_di4) if _di4 else 0}/{len(_di5) if _di5 else 0}")
+    items_raw = _di1 or _di2 or _di3 or _di4 or _di5 or _avito_find_items_in_json(nd)
     print(f"  [parse] items_raw count={len(items_raw) if items_raw else 0}")
     # Авито хранит фото отдельно: catalog.itemsImages = {str(id): [{size: url}]}
     items_images_map: dict = (
@@ -2169,7 +2171,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             try:
                 r = session.get(
                     rss_url, timeout=15,
-                    headers={"User-Agent": "Mozilla/5.0", "Accept": "application/rss+xml,*/*"},
+                    headers={"User-Agent": "Feedfetcher-Google; (+http://www.google.com/feedfetcher.html)", "Accept": "application/rss+xml,*/*"},
                     proxies=AVITO_PROXIES,
                 )
                 print(f"  [Авито RSS] {rss_url}: HTTP {r.status_code}")
@@ -2300,14 +2302,20 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                     imgs = it.get("images", []) or it.get("photos", [])
                     if imgs and isinstance(imgs[0], dict):
                         photo_url = imgs[0].get("864x648", "") or imgs[0].get("url", "")
-                    if title and url_path:
+                    if title and url_path and price_val:
                         listing = {
                             "source": "avito",
                             "title": title,
                             "price": price_str,
                             "url": url_path,
                             "date": str(today),
-                            "photo": photo_url,
+                            "_price_int": price_val,
+                            "_photo_url": photo_url,
+                            "_photos": [photo_url] if photo_url else [],
+                            "description": it.get("description", ""),
+                            "seller": it.get("seller", {}).get("name", "") if isinstance(it.get("seller"), dict) else "",
+                            "mileage": 0,
+                            "_days_on_site": 0,
                         }
                         listing["_hot_score"] = hot_score(listing)
                         results_out.append(listing)
@@ -2413,7 +2421,12 @@ def _load_avito_cache():
     if not _AVITO_CACHE_FILE.exists():
         return
     try:
-        data = json.loads(_AVITO_CACHE_FILE.read_text(encoding="utf-8"))
+        raw = json.loads(_AVITO_CACHE_FILE.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict) or raw.get("version") != 2:
+            print(f"  [Авито] кэш устаревшего формата — сбрасываем")
+            _AVITO_CACHE_FILE.unlink(missing_ok=True)
+            return
+        data = raw["data"]
         now = time.time()
         for region, entry in data.items():
             ts, items = entry[0], entry[1]
@@ -2431,7 +2444,7 @@ def _save_avito_cache():
     """Сохраняет кэш Авито на диск."""
     try:
         _AVITO_CACHE_FILE.write_text(
-            json.dumps(_AVITO_REGION_CACHE, ensure_ascii=False), encoding="utf-8"
+            json.dumps({"version": 2, "data": _AVITO_REGION_CACHE}, ensure_ascii=False), encoding="utf-8"
         )
     except Exception as e:
         print(f"  [Авито] не удалось сохранить кэш: {e}")
