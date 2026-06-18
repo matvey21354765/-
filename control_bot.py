@@ -33,6 +33,8 @@ SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY", "b317ae63b4d847805e2f91a1dc073b40
 AVITO_CLIENT_ID     = os.getenv("AVITO_CLIENT_ID", "")
 AVITO_CLIENT_SECRET = os.getenv("AVITO_CLIENT_SECRET", "")
 _avito_oauth_token: "dict | None" = None  # {"token": "...", "expires_at": timestamp}
+_free_proxy_cache: list[str] = []
+_free_proxy_cache_time: float = 0.0
 
 # ── Резидентный прокси для запросов к Авито (опционально) ────────
 # Если задан в .env — все запросы к Авито идут через него (чистый IP,
@@ -2285,6 +2287,166 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             print(f"  [ScraperAPI] стр.{p}: {e}")
         return []
 
+    def _try_curl_cffi(p: int) -> list[dict]:
+        """curl_cffi — точная имитация TLS-отпечатка Chrome. Обходит большинство анти-бот систем."""
+        try:
+            from curl_cffi import requests as cffi_req
+        except ImportError:
+            return []
+        url = f"https://www.avito.ru/{slug}/avtomobili"
+        params: dict = {"seller_type": "1", "s": "104"}
+        if p > 1:
+            params["p"] = p
+        if price_min > 0:
+            params["pmin"] = price_min
+        if price_max < 99_000_000:
+            params["pmax"] = price_max
+        proxies = AVITO_PROXIES or {}
+        try:
+            r = cffi_req.get(
+                url,
+                params=params,
+                impersonate="chrome124",
+                headers={
+                    "Accept-Language": "ru-RU,ru;q=0.9",
+                    "Referer": "https://www.avito.ru/",
+                },
+                proxies=proxies,
+                timeout=20,
+            )
+            print(f"  [curl_cffi] стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
+            if r.status_code == 200 and ('"urlPath"' in r.text or '__NEXT_DATA__' in r.text):
+                return _parse_avito_html(r.text, slug, today)
+        except Exception as e:
+            print(f"  [curl_cffi] стр.{p}: {e}")
+        return []
+
+    def _try_yandex_search(p: int) -> list[dict]:
+        """Поиск Авито через Яндекс XML — Яндекс не блокирует датацентровые IP."""
+        if p > 1:
+            return []
+        try:
+            import requests as _rq
+            price_q = ""
+            if price_min > 0 and price_max < 99_000_000:
+                price_q = f" цена от {price_min} до {price_max}"
+            elif price_max < 99_000_000:
+                price_q = f" цена до {price_max}"
+            query = f"site:avito.ru/{slug}/avtomobili частник{price_q}"
+            r = _rq.get(
+                "https://html.duckduckgo.com/html/",
+                params={"q": query, "kl": "ru-ru"},
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                    "Accept-Language": "ru-RU,ru;q=0.9",
+                },
+                timeout=15,
+            )
+            if r.status_code != 200:
+                return []
+            # Извлекаем URL объявлений Авито из результатов поиска
+            avito_urls = list(dict.fromkeys(re.findall(
+                rf'https?://(?:www\.)?avito\.ru/{re.escape(slug)}/[a-z0-9_/-]+-\d{{5,}}',
+                r.text
+            )))
+            if not avito_urls:
+                print(f"  [DDG] нет URL в результатах поиска")
+                return []
+            print(f"  [DDG] найдено {len(avito_urls)} URL Авито")
+            # Пробуем загрузить первые 5 страниц объявлений напрямую
+            items_out = []
+            for item_url in avito_urls[:8]:
+                try:
+                    ri = _rq.get(item_url, timeout=8, headers={
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                        "Referer": "https://www.avito.ru/",
+                    })
+                    if ri.status_code == 200:
+                        items = _parse_avito_html(ri.text, slug, today)
+                        # Если это страница одного объявления — оно может не распарситься как список,
+                        # пробуем _avito_item_from_json напрямую через __NEXT_DATA__
+                        if not items:
+                            nd_m = re.search(r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>', ri.text, re.S)
+                            if nd_m:
+                                try:
+                                    nd = json.loads(nd_m.group(1))
+                                    for path in ("props.initialState.advert", "props.pageProps.advert"):
+                                        adv = _deep_get(nd, path)
+                                        if adv:
+                                            item = _avito_item_from_json(adv, today)
+                                            if item:
+                                                items_out.append(item)
+                                except Exception:
+                                    pass
+                        else:
+                            items_out.extend(items)
+                except Exception:
+                    pass
+            return items_out
+        except Exception as e:
+            print(f"  [DDG] ошибка: {e}")
+        return []
+
+    def _try_googlebot_ua(p: int) -> list[dict]:
+        """Запрос с User-Agent Googlebot — некоторые сайты открывают ботам поиска."""
+        try:
+            import requests as _rq
+            url = f"https://www.avito.ru/{slug}/avtomobili"
+            params: dict = {"seller_type": "1"}
+            if p > 1:
+                params["p"] = p
+            if price_min > 0:
+                params["pmin"] = price_min
+            if price_max < 99_000_000:
+                params["pmax"] = price_max
+            r = _rq.get(url, params=params, timeout=10, headers={
+                "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+                "Accept": "text/html,*/*;q=0.8",
+                "Accept-Language": "ru",
+                "From": "googlebot(at)googlebot.com",
+            }, proxies=AVITO_PROXIES)
+            print(f"  [Googlebot UA] стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
+            if r.status_code == 200 and ('"urlPath"' in r.text or '__NEXT_DATA__' in r.text):
+                return _parse_avito_html(r.text, slug, today)
+        except Exception as e:
+            print(f"  [Googlebot UA] стр.{p}: {e}")
+        return []
+
+    def _try_avito_lite(p: int) -> list[dict]:
+        """Авито lite — упрощённая версия сайта, меньше JS-защиты."""
+        try:
+            import requests as _rq
+            # Пробуем несколько вариантов облегчённых эндпоинтов
+            urls_to_try = [
+                f"https://m.avito.ru/{slug}/avtomobili",
+                f"https://avito.ru/{slug}/avtomobili",  # без www
+            ]
+            params: dict = {"seller_type": "1", "forceLocation": "1"}
+            if p > 1:
+                params["p"] = p
+            if price_min > 0:
+                params["pmin"] = price_min
+            if price_max < 99_000_000:
+                params["pmax"] = price_max
+            hdrs = {
+                "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+                "Accept-Language": "ru-RU,ru;q=0.9",
+                "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+            }
+            for url in urls_to_try:
+                try:
+                    r = _rq.get(url, params=params, headers=hdrs, timeout=12, proxies=AVITO_PROXIES, allow_redirects=True)
+                    print(f"  [Авито lite] {url} стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
+                    if r.status_code == 200 and ('"urlPath"' in r.text or '__NEXT_DATA__' in r.text or 'data-marker="item"' in r.text):
+                        result = _parse_avito_html(r.text, slug, today)
+                        if result:
+                            return result
+                except Exception as e:
+                    print(f"  [Авито lite] {url}: {e}")
+        except Exception as e:
+            print(f"  [Авито lite] {e}")
+        return []
+
     def _try_avito_json_api(p: int) -> list[dict]:
         """Avito internal JSON listing endpoint — returns structured data without HTML parsing."""
         try:
@@ -2358,17 +2520,22 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
     def _try_free_proxies(p: int) -> list[dict]:
         """Пробуем бесплатные российские прокси из публичных списков."""
         import requests as _rq
-        free_proxies: list[str] = []
-        # Источник 1: proxyscrape
-        try:
-            r = _rq.get(
-                "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=3000&country=RU&ssl=yes&anonymity=all",
-                timeout=5,
-            )
-            if r.status_code == 200:
-                free_proxies += [ln.strip() for ln in r.text.splitlines() if ln.strip()]
-        except Exception:
-            pass
+        global _free_proxy_cache, _free_proxy_cache_time
+        if time.time() - _free_proxy_cache_time > 600 or not _free_proxy_cache:
+            free_proxies_fresh: list[str] = []
+            try:
+                r = _rq.get(
+                    "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=3000&country=RU&ssl=yes&anonymity=all",
+                    timeout=5,
+                )
+                if r.status_code == 200:
+                    free_proxies_fresh += [ln.strip() for ln in r.text.splitlines() if ln.strip()]
+            except Exception:
+                pass
+            if free_proxies_fresh:
+                _free_proxy_cache = free_proxies_fresh
+                _free_proxy_cache_time = time.time()
+        free_proxies = list(_free_proxy_cache)
         # Источник 2: проверенный список из geonode
         try:
             r2 = _rq.get(
@@ -2412,7 +2579,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                 continue
         return []
 
-    all_methods = [_try_scraperapi, _try_avito_rss, _try_avito_json_api, _try_cs_web, _try_mobile_site, _try_web_html, _try_avito_public_api, _try_free_proxies]
+    all_methods = [_try_curl_cffi, _try_scraperapi, _try_avito_rss, _try_avito_json_api, _try_cs_web, _try_mobile_site, _try_web_html, _try_avito_public_api, _try_free_proxies, _try_googlebot_ua, _try_yandex_search, _try_avito_lite]
     _ex = _TPE(max_workers=len(all_methods))
     try:
         fut_map = {_ex.submit(m, 1): m for m in all_methods}
