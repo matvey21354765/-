@@ -4157,7 +4157,8 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                     try:
                         from curl_cffi import requests as _cffi
                         r = _cffi.get(photo_url, impersonate="chrome124", timeout=12,
-                                      headers={"Referer": "https://www.avito.ru/"})
+                                      headers={"Referer": "https://www.avito.ru/"},
+                                      proxies=AVITO_PROXIES)
                         if r.status_code == 200 and len(r.content) > 3_000:
                             return r.content
                     except Exception:
@@ -4168,7 +4169,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                             "Referer": "https://www.avito.ru/",
                             "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-                        })
+                        }, proxies=AVITO_PROXIES)
                         if r2.status_code == 200 and len(r2.content) > 3_000:
                             return r2.content
                     except Exception:
