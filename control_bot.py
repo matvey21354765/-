@@ -1039,8 +1039,38 @@ async def _avito_async_fetch(url: str, wait_ms: int, timeout_ms: int) -> str:
                 await stealth_async(page)
             except Exception:
                 pass
-            await page.goto(url, timeout=timeout_ms, wait_until="domcontentloaded")
+            # Load saved cookies if available to warm up the session
+            try:
+                if os.path.exists(_AVITO_COOKIE_FILE):
+                    with open(_AVITO_COOKIE_FILE, "r", encoding="utf-8") as f:
+                        saved_cookies = json.load(f)
+                    await _avito_async_context.add_cookies(saved_cookies)
+            except Exception:
+                pass
+            # First visit the homepage to warm up cookies and look like a real browser
+            try:
+                await page.goto("https://www.avito.ru/", timeout=timeout_ms, wait_until="domcontentloaded")
+                await page.wait_for_timeout(1000)
+            except Exception:
+                pass
+            await page.goto(url, timeout=timeout_ms, wait_until="networkidle")
             await page.wait_for_timeout(wait_ms)
+            # Simulate human: random scroll and mouse movements
+            try:
+                await page.evaluate("window.scrollBy(0, Math.random() * 300)")
+                await page.wait_for_timeout(random.randint(300, 700))
+                vp = page.viewport_size or {"width": 1280, "height": 720}
+                await page.mouse.move(
+                    random.randint(100, vp["width"] - 100),
+                    random.randint(100, vp["height"] - 100),
+                )
+                await page.wait_for_timeout(random.randint(200, 500))
+                await page.mouse.move(
+                    random.randint(100, vp["width"] - 100),
+                    random.randint(100, vp["height"] - 100),
+                )
+            except Exception:
+                pass
             html = await page.content()
             try:
                 cookies = await _avito_async_context.cookies()
@@ -1053,7 +1083,7 @@ async def _avito_async_fetch(url: str, wait_ms: int, timeout_ms: int) -> str:
             await page.close()
 
 
-def _avito_fetch_html(url: str, wait_ms: int = 2500, timeout_ms: int = 25000) -> str:
+def _avito_fetch_html(url: str, wait_ms: int = 4000, timeout_ms: int = 25000) -> str:
     """Бесплатно получает HTML страницы Авито через headless-браузер (Playwright + stealth)."""
     try:
         _avito_ensure_loop()
@@ -1074,6 +1104,7 @@ def _avito_scraperapi(url: str) -> "requests.Response | None":
             "render": "true",
             "wait": "5000",
             "country_code": "ru",
+            "ultra_premium": "true",
         }, timeout=120)
         return r
     except Exception as e:
@@ -2213,14 +2244,90 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             print(f"  [ScraperAPI] стр.{p}: {e}")
         return []
 
+    def _try_avito_json_api(p: int) -> list[dict]:
+        """Avito internal JSON listing endpoint — returns structured data without HTML parsing."""
+        try:
+            import requests as _req
+        except ImportError:
+            return []
+        location_id = AVITO_LOCATION_IDS.get(region, 637640)
+        params: dict = {
+            "categoryId": 9,
+            "locationId": location_id,
+            "params[109]": 106,
+            "page": p,
+        }
+        if price_min > 0:
+            params["priceMin"] = price_min
+        if price_max < 99_000_000:
+            params["priceMax"] = price_max
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept": "application/json",
+            "Accept-Language": "ru-RU,ru;q=0.9",
+            "x-requested-with": "XMLHttpRequest",
+            "Referer": f"https://www.avito.ru/{slug}/avtomobili",
+        }
+        try:
+            r = _req.get(
+                "https://www.avito.ru/web/1/listing",
+                params=params,
+                headers=headers,
+                timeout=30,
+            )
+            if r.status_code == 200:
+                data = r.json()
+                raw_items = (
+                    data.get("data", {}).get("items", [])
+                    or data.get("items", [])
+                    or data.get("result", {}).get("items", [])
+                )
+                results_out: list[dict] = []
+                for it in raw_items:
+                    title = it.get("title", "") or it.get("name", "")
+                    url_path = it.get("url", "") or it.get("urlPath", "")
+                    if url_path and not url_path.startswith("http"):
+                        url_path = "https://www.avito.ru" + url_path
+                    price_val = 0
+                    price_obj = it.get("price") or it.get("priceDetailed") or {}
+                    if isinstance(price_obj, dict):
+                        price_val = price_obj.get("value", 0) or price_obj.get("number", 0)
+                    elif isinstance(price_obj, (int, float)):
+                        price_val = int(price_obj)
+                    price_str = f"{price_val:,} ₽".replace(",", " ") if price_val else ""
+                    photo_url = ""
+                    imgs = it.get("images", []) or it.get("photos", [])
+                    if imgs and isinstance(imgs[0], dict):
+                        photo_url = imgs[0].get("864x648", "") or imgs[0].get("url", "")
+                    if title and url_path:
+                        listing = {
+                            "source": "avito",
+                            "title": title,
+                            "price": price_str,
+                            "url": url_path,
+                            "date": str(today),
+                            "photo": photo_url,
+                        }
+                        listing["_hot_score"] = hot_score(listing)
+                        results_out.append(listing)
+                if results_out:
+                    print(f"  [Авито JSON API] стр.{p}: {len(results_out)} объявлений")
+                    return results_out
+            else:
+                print(f"  [Авито JSON API] стр.{p}: HTTP {r.status_code}")
+        except Exception as e:
+            print(f"  [Авито JSON API] стр.{p}: {e}")
+        return []
+
     # Определяем рабочий метод: на стр.1 запускаем ВСЕ методы параллельно и
     # берём первый, который вернул объявления. Это быстрее, чем пробовать
     # их последовательно (ждать таймаут каждого по очереди).
     from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _as_completed
     working_method = None
     page1_batch: list[dict] = []
-    all_methods = [_try_cs_web, _try_mobile_site, _try_web_html, _try_avito_public_api, _try_avito_rss, _try_scraperapi]
-    with _TPE(max_workers=len(all_methods)) as _ex:
+    all_methods = [_try_cs_web, _try_mobile_site, _try_web_html, _try_avito_public_api, _try_avito_rss, _try_scraperapi, _try_avito_json_api]
+    _ex = _TPE(max_workers=len(all_methods))
+    try:
         fut_map = {_ex.submit(m, 1): m for m in all_methods}
         for fut in _as_completed(fut_map):
             try:
@@ -2232,6 +2339,8 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                 page1_batch = b
                 print(f"  [Авито API] рабочий метод: {working_method.__name__}")
                 break
+    finally:
+        _ex.shutdown(wait=False)
 
     if not working_method:
         print(f"  [Авито API] стр.1: 0 объявлений")
