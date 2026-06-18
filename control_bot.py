@@ -2657,7 +2657,7 @@ def _scrape_avito_direct(slug: str, pages: int, price_min: int, price_max: int, 
 # Кэш результатов Авито по региону — резко снижает число запросов к Авито
 # (а значит и риск блокировки 429), когда много пользователей ищут подряд.
 _AVITO_REGION_CACHE: dict[str, tuple[float, list[dict]]] = {}
-_AVITO_REGION_CACHE_TTL = 4 * 60 * 60  # 4 часа
+_AVITO_REGION_CACHE_TTL = 8 * 60 * 60  # 8 часов (было 4)
 _AVITO_CACHE_FILE = Path("avito_region_cache.json")
 
 
@@ -2705,41 +2705,43 @@ def _avito_price_bucket(price_min: int, price_max: int) -> str:
 
 def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int = 99_000_000, sort_by_date: bool = False) -> list[dict]:
     """
-    Парсер Авито с кэшем по (региону, ценовому бакету).
-    При промахе кэша делает свежий запрос. Если запрос вернул 0 (Авито заблокировал) —
-    ищем любой кэш по этому региону (любой бакет) и фильтруем в памяти,
-    чтобы не показывать пустоту при смене бюджета пользователем.
+    Парсер Авито. Кэш хранится по РЕГИОНУ (без разбивки по цене), чтобы один
+    успешный скрейп покрывал все ценовые диапазоны и не вызывал повторных блокировок.
     """
-    bucket = _avito_price_bucket(price_min, price_max)
-    cache_key = f"{region}_{bucket}"
+    # Единый ключ по региону — не по бюджету
+    cache_key = region
     now = time.time()
     cached = _AVITO_REGION_CACHE.get(cache_key)
     if cached and (now - cached[0]) < _AVITO_REGION_CACHE_TTL:
         items = cached[1]
         print(f"  [Авито] кэш {cache_key}: {len(items)} объявлений (возраст {int(now-cached[0])}с)")
     else:
-        items = _scrape_avito_raw(region, pages=pages, price_min=price_min, price_max=price_max, sort_by_date=sort_by_date)
+        # Скрейпим БЕЗ ценового фильтра — берём все объявления региона сразу,
+        # фильтрация по бюджету происходит в памяти. Это значит один запрос
+        # к Авито покрывает любой бюджет любого пользователя на 8 часов.
+        items = _scrape_avito_raw(region, pages=pages, price_min=0, price_max=99_000_000, sort_by_date=sort_by_date)
         if items:
             _AVITO_REGION_CACHE[cache_key] = (now, items)
+            # Также сохраняем в старые bucket-ключи для обратной совместимости
+            bucket = _avito_price_bucket(price_min, price_max)
+            _AVITO_REGION_CACHE[f"{region}_{bucket}"] = (now, items)
             _save_avito_cache()
+            print(f"  [Авито] скрейп OK: {len(items)} объявлений → кэш на 8ч")
         else:
-            # Свежий скрейп вернул 0 (429 / блокировка). Ищем любой кэш региона
-            # (любой бакет — другой бюджет пользователя) и фильтруем в памяти.
+            # Скрейп вернул 0. Ищем любой кэш региона.
             any_cached: list[dict] = []
             any_cached_age = 999_999
             for k, (ts, its) in _AVITO_REGION_CACHE.items():
-                if k.startswith(region + "_") or k == region:
-                    # Берём кэш с наибольшим числом объявлений (не самый свежий),
-                    # чтобы пользователь видел максимум результатов при блокировке.
+                if k == region or k.startswith(region + "_"):
                     if len(its) > len(any_cached):
                         any_cached = its
                         any_cached_age = now - ts
             if any_cached:
                 items = any_cached
-                print(f"  [Авито] 429/пусто — стале-кэш региона {region}: {len(items)} шт (возраст {int(any_cached_age)}с)")
+                print(f"  [Авито] блокировка → старый кэш {region}: {len(items)} шт (возраст {int(any_cached_age)}с)")
             elif cached:
                 items = cached[1]
-                print(f"  [Авито] скрейп пустой, устаревший кэш {cache_key}: {len(items)} шт")
+                print(f"  [Авито] пусто → устаревший кэш: {len(items)} шт")
 
     # Фильтр по бюджету в памяти (для стале-кэша с другим бакетом)
     # Также выбрасываем объявления без цены (_price_int=0) — они не могут
