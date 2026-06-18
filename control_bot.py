@@ -1289,7 +1289,7 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
                 if len(obj) > 15 and "avito.st" in low and (obj.startswith("//") or obj.startswith("http")):
                     raw = obj.replace("\\/", "/")
                     url_c = ("https:" + raw) if raw.startswith("//") else raw
-                    if not any(x in url_c.lower() for x in ("/stub", "noimage", "placeholder", "/logo", "/icon", "favicon")):
+                    if not any(x in url_c.lower() for x in ("/stub", "noimage", "placeholder", "/ava/", "/avatar/", "/userAva/", "/user_ava", "/profile", "/logo", "/icon", "favicon")):
                         return url_c
                 return ""
             if isinstance(obj, list):
@@ -1535,7 +1535,7 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
             item = _avito_item_from_json(item_data, today)
             if item:
                 # Если фото не нашли через JSON — ищем через regex в __NEXT_DATA__
-                if not item.get("_photo_url") and _nd_text and not items_images_map:
+                if not item.get("_photo_url") and _nd_text:
                     item_path = item["url"].replace("https://www.avito.ru", "")
                     esc_path = item_path.replace("/", "\\/")
                     for search_path in (esc_path, item_path):
@@ -1559,7 +1559,7 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
             # Proximity-fallback только если itemsImages не пришёл вообще.
             # Если карта есть, но для объявления пусто — реально нет фото, не берём чужое.
             _no_photo = [r for r in results if not r.get("_photo_url")]
-            if _no_photo and not items_images_map:
+            if _no_photo:
                 _all_cdn: list[tuple[int, str]] = []
                 for _im in re.finditer(
                     r'((?:https?:)?(?:\\?/){2}(?:[a-z0-9-]+\.)?(?:img|images)\.avito\.st'
@@ -1579,7 +1579,7 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
                         if _pos < 0:
                             continue
                         _best_url = ""
-                        _best_dist = 5000
+                        _best_dist = 3000
                         for (_cdn_pos, _cdn_url) in _all_cdn:
                             _d = abs(_cdn_pos - _pos)
                             if _d < _best_dist:
