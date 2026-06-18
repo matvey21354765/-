@@ -3824,7 +3824,21 @@ async def _ensure_photo(item: dict) -> None:
                 }
 
                 def _direct() -> tuple[str, str, int]:
-                    # 1. Пробуем мобильный URL
+                    # 1. curl_cffi — лучший TLS-fingerprint Chrome, обходит Railway-блок
+                    try:
+                        from curl_cffi import requests as _cffi
+                        r = _cffi.get(url, impersonate="chrome124", timeout=15, headers={
+                            "Accept": "text/html,application/xhtml+xml,*/*;q=0.9",
+                            "Accept-Language": "ru-RU,ru;q=0.9",
+                            "Referer": "https://www.avito.ru/",
+                        }, proxies=AVITO_PROXIES)
+                        if r.status_code == 200 and len(r.text) > 5000:
+                            res = _extract_from_page(r.text)
+                            if res[0] or res[1]:
+                                return res
+                    except Exception:
+                        pass
+                    # 2. Пробуем мобильный URL
                     try:
                         r = _req.get(mobile_url, timeout=10, headers=_MOB_HDR, proxies=AVITO_PROXIES)
                         if r.status_code == 200 and len(r.text) > 5000:
@@ -3833,7 +3847,7 @@ async def _ensure_photo(item: dict) -> None:
                                 return res
                     except Exception:
                         pass
-                    # 2. Десктопный URL
+                    # 3. Десктопный URL
                     try:
                         r = _req.get(url, timeout=10, headers=_HDR, proxies=AVITO_PROXIES)
                         if r.status_code == 200 and len(r.text) > 5000:
@@ -3842,8 +3856,7 @@ async def _ensure_photo(item: dict) -> None:
                                 return res
                     except Exception:
                         pass
-                    # 3. cloudscraper — обходит антибот-защиту (429/403), когда
-                    #    обычные requests к m./www.avito.ru блокируются.
+                    # 4. cloudscraper — обходит антибот-защиту (429/403)
                     try:
                         import cloudscraper
                         cs = cloudscraper.create_scraper(
@@ -3985,23 +3998,43 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                 import requests as _req
                 from aiogram.types import BufferedInputFile
                 loop = asyncio.get_event_loop()
-                resp = await loop.run_in_executor(None, lambda: _req.get(
-                    photo_url, timeout=12, headers={
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                        "Referer": "https://www.avito.ru/",
-                        "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-                    }))
-                if resp.status_code == 200 and len(resp.content) > 3_000:
-                    photo_bytes = BufferedInputFile(resp.content, filename="photo.jpg")
+
+                def _download_photo():
+                    # 1. curl_cffi — обходит блокировку Avito CDN с Railway IP
+                    try:
+                        from curl_cffi import requests as _cffi
+                        r = _cffi.get(photo_url, impersonate="chrome124", timeout=12,
+                                      headers={"Referer": "https://www.avito.ru/"})
+                        if r.status_code == 200 and len(r.content) > 3_000:
+                            return r.content
+                    except Exception:
+                        pass
+                    # 2. Обычный requests с Referer
+                    try:
+                        r2 = _req.get(photo_url, timeout=12, headers={
+                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                            "Referer": "https://www.avito.ru/",
+                            "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                        })
+                        if r2.status_code == 200 and len(r2.content) > 3_000:
+                            return r2.content
+                    except Exception:
+                        pass
+                    return None
+
+                content = await loop.run_in_executor(None, _download_photo)
+                if content:
+                    photo_bytes = BufferedInputFile(content, filename="photo.jpg")
                     await bot.send_photo(chat_id, photo=photo_bytes, caption=caption, reply_markup=kb)
                     return
             except Exception:
-                # Fallback: передаём URL напрямую Telegram
-                try:
-                    await bot.send_photo(chat_id, photo=photo_url, caption=caption, reply_markup=kb)
-                    return
-                except Exception:
-                    pass
+                pass
+            # Fallback: передаём URL напрямую Telegram
+            try:
+                await bot.send_photo(chat_id, photo=photo_url, caption=caption, reply_markup=kb)
+                return
+            except Exception:
+                pass
         await bot.send_message(chat_id, caption, reply_markup=kb)
 
     # Отбираем кандидатов и дозагружаем фото/описание только для них (см. ниже).
@@ -4202,11 +4235,9 @@ async def do_search_for_user(uid: int, reply_to):
         and i["url"] not in seen
     ]
     suitable = rank_by_market_price(suitable)
-    # Сортировка: сначала самое выгодное (% ниже рынка), при равной выгоде —
-    # сегодняшние выше старых, при одинаковой свежести — ниже цена.
+    # Сортировка: главное — выгода ниже рынка. Дата не важна — пользователю нужна цена.
     suitable.sort(key=lambda x: (
         -x.get("_savings_pct", 0),   # больше скидка → выше
-        x.get("_days_on_site", 0),    # 0 дней (сегодня) → выше
         -x.get("_hot_score", 0),
         x.get("_price_int", 999_999_999)
     ))
@@ -4225,7 +4256,6 @@ async def do_search_for_user(uid: int, reply_to):
         suitable = rank_by_market_price(suitable)
         suitable.sort(key=lambda x: (
             -x.get("_savings_pct", 0),
-            x.get("_days_on_site", 0),
             -x.get("_hot_score", 0),
             x.get("_price_int", 999_999_999)
         ))
