@@ -1289,7 +1289,7 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
                 if len(obj) > 15 and "avito.st" in low and (obj.startswith("//") or obj.startswith("http")):
                     raw = obj.replace("\\/", "/")
                     url_c = ("https:" + raw) if raw.startswith("//") else raw
-                    if not any(x in url_c.lower() for x in ("/stub", "noimage", "placeholder", "/ava/", "/avatar/", "/userAva/", "/user_ava", "/profile", "/logo", "/icon", "favicon")):
+                    if not any(x in url_c.lower() for x in ("/stub", "noimage", "placeholder", "/ava/", "/avatar/", "/userAva/", "/user_ava", "/logo", "/icon", "favicon")):
                         return url_c
                 return ""
             if isinstance(obj, list):
@@ -1309,7 +1309,7 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
                         # Полный фильтр аватаров/логотипов — иначе фото продавца
                         # под ключом-размером (avatar: {1280x960: ...}) утечёт как
                         # «фото машины».
-                        if not any(x in url_c.lower() for x in ("/stub", "noimage", "placeholder", "/ava/", "/avatar/", "/userava", "/user_ava", "/profile", "/logo", "/icon", "favicon")):
+                        if not any(x in url_c.lower() for x in ("/stub", "noimage", "placeholder", "/ava/", "/avatar/", "/userava", "/user_ava", "/logo", "/icon", "favicon")):
                             return url_c
                 # Прямые ключи-превью (часто содержат готовый URL фото)
                 for k in ("url", "thumb", "thumbnail", "coverImage", "firstImage", "src"):
@@ -1317,7 +1317,7 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
                     if isinstance(v, str) and "avito.st" in v.lower():
                         raw = v.replace("\\/", "/")
                         url_c = ("https:" + raw) if raw.startswith("//") else raw
-                        if not any(x in url_c.lower() for x in ("/stub", "noimage", "placeholder", "/ava/", "/avatar/", "/userAva/", "/user_ava", "/profile", "/logo", "/icon", "favicon")):
+                        if not any(x in url_c.lower() for x in ("/stub", "noimage", "placeholder", "/ava/", "/avatar/", "/userAva/", "/user_ava", "/logo", "/icon", "favicon")):
                             return url_c
                     elif isinstance(v, (dict, list)):
                         r = _find_avito_photo_in_obj(v, depth + 1)
@@ -1387,7 +1387,9 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
         # Реальная дата объявления из sortTimeStamp (мс). Если её нет —
         # считаем «сегодня». Так не показываем ложное «сегодня» на старых.
         _days = 0
-        _ts = it.get("sortTimeStamp") or it.get("time") or 0
+        _ts = (it.get("sortTimeStamp") or it.get("time") or
+               it.get("addDate") or it.get("closingDate") or
+               it.get("statsUpdateDate") or 0)
         try:
             if _ts:
                 _ts_sec = int(_ts) / 1000 if int(_ts) > 10_000_000_000 else int(_ts)
@@ -1567,7 +1569,7 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
 
     # Пути, однозначно указывающие на аватар продавца или системный значок — не фото машины
     _BAD_PHOTO_PATHS = ("/stub", "noimage", "placeholder", "/ava/", "/avatar/",
-                        "/userAva/", "/user_ava", "/profile", "/logo", "/icon", "favicon")
+                        "/userAva/", "/user_ava", "/logo", "/icon", "favicon")
 
     if items_raw:
         print(f"  [Авито] __NEXT_DATA__ items={len(items_raw)}, images_map={len(items_images_map)}")
@@ -1606,10 +1608,44 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
                                     item["_photo_url"] = url_c
                                     break
                 results.append(item)
+                # Proximity-парсинг даты из HTML для объявлений с _days_on_site == 0
+                if item.get("_days_on_site", 0) == 0:
+                    _item_path = item["url"].replace("https://www.avito.ru", "")
+                    _idx = text.find(_item_path.replace("/", "\\/"))
+                    if _idx < 0:
+                        _idx = text.find(_item_path)
+                    if _idx >= 0:
+                        _chunk = text[max(0, _idx - 500): _idx + 2000]
+                        _days_found = None
+                        _dm = re.search(r'(\d+)\s*дн[яей\.]+\s*назад', _chunk, re.I)
+                        if _dm:
+                            _days_found = int(_dm.group(1))
+                        elif re.search(r'вчера', _chunk, re.I):
+                            _days_found = 1
+                        elif re.search(r'сегодня|час[а-я]*\s*назад|\d+\s*мин[уть]*\s*назад', _chunk, re.I):
+                            _days_found = 0
+                        if _days_found is None:
+                            _ru_months = {"янв":1,"фев":2,"мар":3,"апр":4,"май":5,"мая":5,
+                                          "июн":6,"июл":7,"авг":8,"сен":9,"окт":10,"ноя":11,"дек":12}
+                            _dm2 = re.search(r'(\d{1,2})\s+([а-яё]{3})', _chunk, re.I)
+                            if _dm2:
+                                try:
+                                    _d, _m_str = int(_dm2.group(1)), _dm2.group(2)[:3].lower()
+                                    _m = _ru_months.get(_m_str)
+                                    if _m:
+                                        _posted_dt = datetime.date(today.year, _m, _d)
+                                        if _posted_dt > today:
+                                            _posted_dt = datetime.date(today.year - 1, _m, _d)
+                                        _days_found = max(0, (today - _posted_dt).days)
+                                except Exception:
+                                    pass
+                        if _days_found is not None and _days_found > 0:
+                            item["_days_on_site"] = _days_found
+                            item["date"] = str(today - datetime.timedelta(days=_days_found))
         print(f"  [parse] после цикла: results={len(results)} из items_raw={len(items_raw)}")
         # Нельзя путать аватары продавцов с фото машины
         _BAD_PHOTO_PATHS = ("/stub", "noimage", "placeholder", "/ava/", "/avatar/",
-                            "/userAva/", "/user_ava", "/profile", "/logo", "/icon", "favicon")
+                            "/userAva/", "/user_ava", "/logo", "/icon", "favicon")
 
         if results:
             # Proximity-fallback только если itemsImages не пришёл вообще.
