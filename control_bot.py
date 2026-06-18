@@ -2309,7 +2309,9 @@ def _load_avito_cache():
             ts, items = entry[0], entry[1]
             # Загружаем ВСЕ записи — устаревшие используются как запасной кэш
             # при блокировке Авито. Проверка TTL происходит в scrape_avito.
-            _AVITO_REGION_CACHE[region] = (ts, items)
+            # Выбрасываем старые записи без цены (junk из прошлых версий).
+            clean_items = [i for i in items if i.get("_price_int", 0)]
+            _AVITO_REGION_CACHE[region] = (ts, clean_items)
         print(f"  [Авито] кэш с диска: {len(_AVITO_REGION_CACHE)} регионов")
     except Exception as e:
         print(f"  [Авито] не удалось загрузить кэш: {e}")
@@ -2372,7 +2374,12 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
                 print(f"  [Авито] скрейп пустой, устаревший кэш {cache_key}: {len(items)} шт")
 
     # Фильтр по бюджету в памяти (для стале-кэша с другим бакетом)
-    out = [it for it in items if not (it.get("_price_int", 0) and (it["_price_int"] < price_min or it["_price_int"] > price_max))]
+    # Также выбрасываем объявления без цены (_price_int=0) — они не могут
+    # правильно отображаться и проходят через in_price_range по умолчанию.
+    out = [
+        it for it in items
+        if it.get("_price_int", 0) and price_min <= it["_price_int"] <= price_max
+    ]
     return out
 
 
