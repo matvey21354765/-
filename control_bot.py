@@ -1083,12 +1083,13 @@ async def _avito_async_fetch(url: str, wait_ms: int, timeout_ms: int) -> str:
             await page.close()
 
 
-def _avito_fetch_html(url: str, wait_ms: int = 4000, timeout_ms: int = 25000) -> str:
+def _avito_fetch_html(url: str, wait_ms: int = 4000, timeout_ms: int = 30000) -> str:
     """Бесплатно получает HTML страницы Авито через headless-браузер (Playwright + stealth)."""
     try:
         _avito_ensure_loop()
         fut = _aio.run_coroutine_threadsafe(_avito_async_fetch(url, wait_ms, timeout_ms), _avito_loop)
-        return fut.result(timeout=(timeout_ms + wait_ms) / 1000 + 15)
+        # +20s: warmup главной страницы + скролл/мышь
+        return fut.result(timeout=(timeout_ms * 2 + wait_ms) / 1000 + 20)
     except Exception as e:
         print(f"  [Авито][браузер] ошибка: {e}")
         return ""
