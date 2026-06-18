@@ -1306,7 +1306,10 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
                     if isinstance(v, str) and "avito.st" in v.lower():
                         raw = v.replace("\\/", "/")
                         url_c = ("https:" + raw) if raw.startswith("//") else raw
-                        if not any(x in url_c.lower() for x in ("/stub", "noimage")):
+                        # Полный фильтр аватаров/логотипов — иначе фото продавца
+                        # под ключом-размером (avatar: {1280x960: ...}) утечёт как
+                        # «фото машины».
+                        if not any(x in url_c.lower() for x in ("/stub", "noimage", "placeholder", "/ava/", "/avatar/", "/userava", "/user_ava", "/profile", "/logo", "/icon", "favicon")):
                             return url_c
                 # Прямые ключи-превью (часто содержат готовый URL фото)
                 for k in ("url", "thumb", "thumbnail", "coverImage", "firstImage", "src"):
@@ -1424,6 +1427,38 @@ def _deep_get(d, path):
     return d
 
 
+def _avito_find_images_map(obj, depth=0) -> dict:
+    """Рекурсивно ищет карту картинок Авито: {str(item_id): images}.
+
+    Признак карты: dict, у которого хотя бы половина ключей — числовые id (строки
+    из цифр), а значения содержат где-то внутри URL на avito.st. Авито меняет путь
+    к этой карте между версиями, поэтому ищем её по структуре, а не по фикс. пути.
+    """
+    if depth > 8 or not isinstance(obj, (dict, list)):
+        return {}
+    if isinstance(obj, dict):
+        keys = list(obj.keys())
+        numeric = [k for k in keys if isinstance(k, str) and k.isdigit() and len(k) >= 6]
+        if numeric and len(numeric) >= max(1, len(keys) // 2):
+            # Проверяем, что под числовыми ключами действительно лежат фото
+            sample_val = obj.get(numeric[0])
+            try:
+                if "avito.st" in json.dumps(sample_val).lower():
+                    return obj
+            except Exception:
+                pass
+        for v in obj.values():
+            r = _avito_find_images_map(v, depth + 1)
+            if r:
+                return r
+        return {}
+    for v in obj:
+        r = _avito_find_images_map(v, depth + 1)
+        if r:
+            return r
+    return {}
+
+
 def _avito_find_items_in_json(obj, depth=0) -> list:
     """Рекурсивно ищет массив объявлений в JSON Авито."""
     if depth > 15 or not isinstance(obj, (dict, list)):
@@ -1514,8 +1549,16 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
         _deep_get(nd, "props.initialState.catalog.itemsImages") or
         _deep_get(nd, "props.pageProps.initialState.catalog.itemsImages") or
         _deep_get(nd, "initialState.catalog.itemsImages") or
+        _deep_get(nd, "props.pageProps.catalog.itemsImages") or
+        _deep_get(nd, "props.initialState.listing.catalog.itemsImages") or
+        _deep_get(nd, "props.initialState.catalog.images") or
         {}
     )
+    # Если по известным путям карты картинок нет — ищем её рекурсивно по структуре:
+    # это dict, где ключ = числовой id объявления (строкой), значение = список/словарь
+    # с avito.st URL. Авито периодически меняет путь, поэтому это надёжная страховка.
+    if not items_images_map:
+        items_images_map = _avito_find_images_map(nd) or {}
     # Regex-карта: item_id -> первый avito.st URL (запасной метод)
     _nd_text = nd_match.group(1) if nd_match else ""
     _cdn_re = re.compile(
@@ -2703,8 +2746,8 @@ def _load_avito_cache():
     try:
         raw = json.loads(_AVITO_CACHE_FILE.read_text(encoding="utf-8"))
         # Версионирование кэша: отбрасываем старые форматы без version=2
-        if not isinstance(raw, dict) or raw.get("version") != 2:
-            print(f"  [Авито] кэш устарел (нет version=2) — сбрасываем")
+        if not isinstance(raw, dict) or raw.get("version") != 3:
+            print(f"  [Авито] кэш устарел (нет version=3) — сбрасываем")
             return
         data = raw.get("data", {})
         now = time.time()
@@ -2724,7 +2767,7 @@ def _save_avito_cache():
     """Сохраняет кэш Авито на диск."""
     try:
         _AVITO_CACHE_FILE.write_text(
-            json.dumps({"version": 2, "data": _AVITO_REGION_CACHE}, ensure_ascii=False), encoding="utf-8"
+            json.dumps({"version": 3, "data": _AVITO_REGION_CACHE}, ensure_ascii=False), encoding="utf-8"
         )
     except Exception as e:
         print(f"  [Авито] не удалось сохранить кэш: {e}")
@@ -4128,14 +4171,15 @@ async def send_batch(chat_id: int, uid: int, offset: int):
 
     batch = candidates[:12]
 
-    # Пересчитываем рыночное сравнение после загрузки цен и сортируем:
-    # сначала максимальная скидка от рынка, затем более новые объявления
+    # Пересчитываем рыночное сравнение после загрузки цен и сортируем СТРОГО по
+    # выгоде: максимальная скидка от рынка. Дата (_days_on_site) НЕ участвует в
+    # сортировке — пользователю важна цена ниже рынка, а не свежесть.
     batch = rank_by_market_price(batch)
     batch.sort(key=lambda x: (
         x.get("_junk", 0),            # мусорные (1 000 000 км) — в конец
         -x.get("_savings_pct", 0),
-        x.get("_days_on_site", 0),
         -x.get("_hot_score", 0),
+        x.get("_price_int", 999_999_999),
     ))
     batch = batch[:10]
     for item in batch:
@@ -4651,10 +4695,16 @@ async def _global_monitor_loop():
 
             for region, users in by_region.items():
                 try:
-                    # Скрапим Авито по дате (новые сверху), 1 страница — достаточно для свежих
+                    # Скрапим Авито БЕЗ сортировки по дате: фоновые уведомления
+                    # и основной поиск делят ОДИН региональный кэш, поэтому кэш
+                    # обязан содержать объявления ЛЮБЫХ дат (отсортированные по
+                    # релевантности/выгоде), а не только сегодняшние. Иначе
+                    # уведомления перезапишут кэш свежими, и основной поиск
+                    # покажет только сегодняшние. Новизну для уведомлений
+                    # отслеживаем по _days_on_site ниже.
                     raw = await loop.run_in_executor(
                         None,
-                        lambda r=region: scrape_avito(r, pages=1, sort_by_date=True)
+                        lambda r=region: scrape_avito(r, pages=2, sort_by_date=False)
                     )
                     if not raw:
                         continue
@@ -4792,9 +4842,13 @@ async def _warmup_cache():
                 print(f"  [прогрев] {region}: кеш свежий, пропускаем")
                 continue
             print(f"  [прогрев] {region}: скрейплю...")
+            # ВАЖНО: без сортировки по дате. Прогрев пишет в ТОТ ЖЕ региональный
+            # кэш, что читает основной поиск пользователя. Если прогревать с
+            # s=104 (по дате), кэш заполнится только сегодняшними объявлениями и
+            # пользователь увидит лишь свежие. Прогреваем релевантными любых дат.
             items = await loop.run_in_executor(
                 None,
-                lambda r=region: scrape_avito(r, pages=2, sort_by_date=True)
+                lambda r=region: scrape_avito(r, pages=2, sort_by_date=False)
             )
             print(f"  [прогрев] {region}: {len(items)} объявлений")
             await asyncio.sleep(8)  # пауза между городами — защита от 429
