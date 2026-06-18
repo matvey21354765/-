@@ -28,6 +28,11 @@ from aiogram.fsm.storage.memory import MemoryStorage
 # ── Токен ───────────────────────────────────────────────────────
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8923014188:AAHvNW2B5fin2XCmbVhlaLNjWhLwI3JhZ90")
 SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY", "b317ae63b4d847805e2f91a1dc073b40")
+# Официальный API Авито (бесплатно): зарегистрируй приложение на https://developers.avito.ru/
+# и добавь переменные окружения AVITO_CLIENT_ID и AVITO_CLIENT_SECRET в Railway
+AVITO_CLIENT_ID     = os.getenv("AVITO_CLIENT_ID", "")
+AVITO_CLIENT_SECRET = os.getenv("AVITO_CLIENT_SECRET", "")
+_avito_oauth_token: "dict | None" = None  # {"token": "...", "expires_at": timestamp}
 
 # ── Резидентный прокси для запросов к Авито (опционально) ────────
 # Если задан в .env — все запросы к Авито идут через него (чистый IP,
@@ -1961,6 +1966,36 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
     return results
 
 
+def _avito_get_oauth_token() -> str:
+    """Получает OAuth-токен Авито через client_credentials (бесплатный официальный API)."""
+    global _avito_oauth_token
+    import time as _time
+    import requests as _rq
+    now = _time.time()
+    if _avito_oauth_token and _avito_oauth_token.get("expires_at", 0) > now + 60:
+        return _avito_oauth_token["token"]
+    if not AVITO_CLIENT_ID or not AVITO_CLIENT_SECRET:
+        return ""
+    try:
+        r = _rq.post("https://api.avito.ru/token", data={
+            "client_id": AVITO_CLIENT_ID,
+            "client_secret": AVITO_CLIENT_SECRET,
+            "grant_type": "client_credentials",
+        }, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            token = data.get("access_token", "")
+            expires_in = data.get("expires_in", 3600)
+            _avito_oauth_token = {"token": token, "expires_at": now + expires_in}
+            print(f"  [Авито OAuth] токен получен, expires_in={expires_in}s")
+            return token
+        else:
+            print(f"  [Авито OAuth] ошибка {r.status_code}: {r.text[:200]}")
+    except Exception as e:
+        print(f"  [Авито OAuth] {e}")
+    return ""
+
+
 def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, today) -> list[dict]:
     """
     Использует внутренний JSON API Авито (как мобильное приложение).
@@ -2079,7 +2114,10 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         Требует OAuth-токен (env AVITO_API_TOKEN) — без него Авито отдаёт 401,
         поэтому без токена метод просто пропускается (не тратим запрос впустую).
         """
+        # Сначала пробуем AVITO_API_TOKEN, потом автоматически получаем через client_credentials
         token = os.environ.get("AVITO_API_TOKEN", "").strip()
+        if not token and AVITO_CLIENT_ID and AVITO_CLIENT_SECRET:
+            token = _avito_get_oauth_token()
         if not token:
             return []
         params: dict = {
@@ -2317,7 +2355,64 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
     from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _as_completed
     working_method = None
     page1_batch: list[dict] = []
-    all_methods = [_try_cs_web, _try_mobile_site, _try_web_html, _try_avito_public_api, _try_avito_rss, _try_scraperapi, _try_avito_json_api]
+    def _try_free_proxies(p: int) -> list[dict]:
+        """Пробуем бесплатные российские прокси из публичных списков."""
+        import requests as _rq
+        free_proxies: list[str] = []
+        # Источник 1: proxyscrape
+        try:
+            r = _rq.get(
+                "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=3000&country=RU&ssl=yes&anonymity=all",
+                timeout=5,
+            )
+            if r.status_code == 200:
+                free_proxies += [ln.strip() for ln in r.text.splitlines() if ln.strip()]
+        except Exception:
+            pass
+        # Источник 2: проверенный список из geonode
+        try:
+            r2 = _rq.get(
+                "https://proxylist.geonode.com/api/proxy-list?limit=20&country=RU&protocols=https,http&sort_by=lastChecked&sort_type=desc",
+                timeout=5,
+            )
+            if r2.status_code == 200:
+                for item in r2.json().get("data", []):
+                    ip = item.get("ip", ""); port = item.get("port", "")
+                    if ip and port:
+                        free_proxies.append(f"{ip}:{port}")
+        except Exception:
+            pass
+
+        random.shuffle(free_proxies)
+        url = f"https://www.avito.ru/{slug}/avtomobili"
+        params: dict = {"seller_type": "1", "s": "104"}
+        if p > 1:
+            params["p"] = p
+        if price_min > 0:
+            params["pmin"] = price_min
+        if price_max < 99_000_000:
+            params["pmax"] = price_max
+
+        _headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept-Language": "ru-RU,ru;q=0.9",
+            "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+            "Referer": "https://www.avito.ru/",
+        }
+        for proxy_addr in free_proxies[:10]:
+            proxies = {"http": f"http://{proxy_addr}", "https": f"http://{proxy_addr}"}
+            try:
+                r = _rq.get(url, params=params, headers=_headers, proxies=proxies, timeout=8)
+                if r.status_code == 200 and ('"urlPath"' in r.text or '__NEXT_DATA__' in r.text):
+                    result = _parse_avito_html(r.text, slug, today)
+                    if result:
+                        print(f"  [FreeProxy] {proxy_addr}: {len(result)} объявлений")
+                        return result
+            except Exception:
+                continue
+        return []
+
+    all_methods = [_try_scraperapi, _try_avito_rss, _try_avito_json_api, _try_cs_web, _try_mobile_site, _try_web_html, _try_avito_public_api, _try_free_proxies]
     _ex = _TPE(max_workers=len(all_methods))
     try:
         fut_map = {_ex.submit(m, 1): m for m in all_methods}
