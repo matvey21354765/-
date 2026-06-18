@@ -25,6 +25,19 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
+import analytics
+
+# ── Админы (для /stats) ─────────────────────────────────────────
+def _parse_admin_ids() -> set[int]:
+    ids: set[int] = set()
+    import re as _re
+    for raw in (os.getenv("ADMIN_ID", "749256529"), os.getenv("ADMIN_IDS", "")):
+        for part in _re.findall(r"\d+", str(raw)):
+            ids.add(int(part))
+    return ids
+
+ADMIN_IDS = _parse_admin_ids()
+
 # ── Токен ───────────────────────────────────────────────────────
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8923014188:AAHvNW2B5fin2XCmbVhlaLNjWhLwI3JhZ90")
 SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY", "b317ae63b4d847805e2f91a1dc073b40")
@@ -3314,6 +3327,7 @@ def region_keyboard():
 @dp.message(Command("start"))
 async def cmd_start(msg: Message, state: FSMContext):
     await state.clear()
+    analytics.track("start", uid=msg.from_user.id, username=msg.from_user.username)
     s = load_settings(msg.from_user.id)
     name = msg.from_user.first_name or "друг"
     if s.get("region"):
@@ -3343,6 +3357,18 @@ async def cmd_start(msg: Message, state: FSMContext):
         )
         await msg.answer("📍 Выбери город:", reply_markup=region_keyboard())
         await state.set_state(Setup.region)
+
+
+@dp.message(Command("stats"))
+async def cmd_stats(msg: Message):
+    if msg.from_user.id not in ADMIN_IDS:
+        return  # тихо игнорируем не-админов
+    try:
+        text = analytics.format_stats_text(REGIONS)
+    except Exception as e:
+        await msg.answer(f"Не удалось собрать статистику: {e}")
+        return
+    await msg.answer(text, parse_mode="Markdown")
 
 
 def _notify_keyboard(s: dict) -> InlineKeyboardMarkup:
@@ -4433,6 +4459,10 @@ async def do_search_for_user(uid: int, reply_to):
 
     _search_cache[uid] = suitable
     _save_cache(uid, suitable)
+    analytics.track(
+        "search", uid=uid, region=region, price_min=pmin, price_max=pmax,
+        source=",".join(enabled_sources), results=len(suitable),
+    )
     await reply_to.answer(f"✅ Найдено {len(suitable)} объявлений!\n📈 Сначала самые выгодные (ниже рынка)")
     await send_batch(reply_to.chat.id, uid, 0)
 
@@ -4455,6 +4485,7 @@ async def cb_hide(cb: CallbackQuery):
     skipped = load_skipped(uid)
     skipped.add(url)
     save_skipped(uid, skipped)
+    analytics.track("hide", uid=uid, username=cb.from_user.username)
     await cb.answer("Скрыто")
     await cb.message.delete()
 
@@ -4473,6 +4504,7 @@ async def cb_fav(cb: CallbackQuery):
     if item and url not in [f.get("url") for f in favs]:
         favs.append(item)
         fav_file.write_text(json.dumps(favs, ensure_ascii=False, default=str), encoding="utf-8")
+        analytics.track("favorite", uid=uid, username=cb.from_user.username)
         await cb.answer("⭐ Добавлено в избранное!")
     else:
         await cb.answer("Уже в избранном")
@@ -4903,6 +4935,9 @@ async def main():
     # Единый глобальный монитор — опрашивает всех активных пользователей каждые 2 минуты
     loop.create_task(_global_monitor_loop())
     print(f"  [монитор] глобальный цикл запущен (интервал {GLOBAL_POLL_SEC}с)")
+
+    # Веб-дашборд аналитики — работает параллельно, не блокирует polling
+    await analytics.start_dashboard(REGIONS)
 
     # Прогрев кеша всех городов отключён — массовые запросы при старте
     # провоцируют IP-блокировку Авито. Кэш прогревается органически по мере
