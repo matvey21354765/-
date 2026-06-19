@@ -151,43 +151,24 @@ def analyze_coin(snap: dict) -> Optional[dict]:
     else:
         trend = "NEUTRAL"
 
-    # ── SL / TP from levels and ATR ──────────────────────────────────────────
-    supports = snap["supports"]
-    resistances = snap["resistances"]
+    # ── SL / TP — только на основе ATR (уровни поддержки/сопротивления на 4H
+    # слишком далеко от цены и дают нереалистичные стопы)
+    # SL = 1.5x ATR, TP1 = 1.5:1, TP2 = 2.5:1, TP3 = 4:1
+    sl_dist_pct = min(atr / p * 100 * 1.5, 2.5)   # не шире 2.5% от цены
+    sl_dist_pct = max(sl_dist_pct, 0.5)             # не уже 0.5%
 
     if direction == "LONG":
-        sl = supports[0] - atr * 0.3 if supports else round(p - atr * 2, 2)
-        tp1 = resistances[0] if resistances else round(p + atr * 2, 2)
-        tp2 = resistances[1] if len(resistances) > 1 else round(p + atr * 4, 2)
-        tp3 = resistances[2] if len(resistances) > 2 else round(p + atr * 6, 2)
+        sl  = round(p * (1 - sl_dist_pct / 100), 2)
+        tp1 = round(p * (1 + sl_dist_pct / 100 * 1.5), 2)
+        tp2 = round(p * (1 + sl_dist_pct / 100 * 2.5), 2)
+        tp3 = round(p * (1 + sl_dist_pct / 100 * 4.0), 2)
     else:
-        sl = resistances[0] + atr * 0.3 if resistances else round(p + atr * 2, 2)
-        tp1 = supports[0] if supports else round(p - atr * 2, 2)
-        tp2 = supports[1] if len(supports) > 1 else round(p - atr * 4, 2)
-        tp3 = supports[2] if len(supports) > 2 else round(p - atr * 6, 2)
+        sl  = round(p * (1 + sl_dist_pct / 100), 2)
+        tp1 = round(p * (1 - sl_dist_pct / 100 * 1.5), 2)
+        tp2 = round(p * (1 - sl_dist_pct / 100 * 2.5), 2)
+        tp3 = round(p * (1 - sl_dist_pct / 100 * 4.0), 2)
 
-    sl = round(sl, 2)
-    tp1 = round(tp1, 2)
-    tp2 = round(tp2, 2)
-    tp3 = round(tp3, 2)
-
-    sl_dist = abs(p - sl) / p * 100
-
-    # Жёсткий кэп: SL не дальше 3% от цены, иначе уровни нереалистичны
-    MAX_SL_PCT = 3.0
-    if sl_dist > MAX_SL_PCT:
-        sl_dist_new = min(atr / p * 100 * 1.5, MAX_SL_PCT)  # 1.5x ATR или 3%
-        if direction == "LONG":
-            sl  = round(p * (1 - sl_dist_new / 100), 2)
-            tp1 = round(p * (1 + sl_dist_new / 100 * 1.5), 2)
-            tp2 = round(p * (1 + sl_dist_new / 100 * 2.5), 2)
-            tp3 = round(p * (1 + sl_dist_new / 100 * 4.0), 2)
-        else:
-            sl  = round(p * (1 + sl_dist_new / 100), 2)
-            tp1 = round(p * (1 - sl_dist_new / 100 * 1.5), 2)
-            tp2 = round(p * (1 - sl_dist_new / 100 * 2.5), 2)
-            tp3 = round(p * (1 - sl_dist_new / 100 * 4.0), 2)
-        sl_dist = sl_dist_new
+    sl_dist = sl_dist_pct
     tp1_dist = abs(tp1 - p) / p * 100
     rr = round(tp1_dist / sl_dist, 2) if sl_dist > 0 else 1.5
 
