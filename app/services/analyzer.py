@@ -172,6 +172,22 @@ def analyze_coin(snap: dict) -> Optional[dict]:
     tp3 = round(tp3, 2)
 
     sl_dist = abs(p - sl) / p * 100
+
+    # Жёсткий кэп: SL не дальше 3% от цены, иначе уровни нереалистичны
+    MAX_SL_PCT = 3.0
+    if sl_dist > MAX_SL_PCT:
+        sl_dist_new = min(atr / p * 100 * 1.5, MAX_SL_PCT)  # 1.5x ATR или 3%
+        if direction == "LONG":
+            sl  = round(p * (1 - sl_dist_new / 100), 2)
+            tp1 = round(p * (1 + sl_dist_new / 100 * 1.5), 2)
+            tp2 = round(p * (1 + sl_dist_new / 100 * 2.5), 2)
+            tp3 = round(p * (1 + sl_dist_new / 100 * 4.0), 2)
+        else:
+            sl  = round(p * (1 + sl_dist_new / 100), 2)
+            tp1 = round(p * (1 - sl_dist_new / 100 * 1.5), 2)
+            tp2 = round(p * (1 - sl_dist_new / 100 * 2.5), 2)
+            tp3 = round(p * (1 - sl_dist_new / 100 * 4.0), 2)
+        sl_dist = sl_dist_new
     tp1_dist = abs(tp1 - p) / p * 100
     rr = round(tp1_dist / sl_dist, 2) if sl_dist > 0 else 1.5
 
