@@ -3466,9 +3466,15 @@ def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max
 # ── FSM состояния ────────────────────────────────────────────────
 
 class Setup(StatesGroup):
+    category = State()
+    brand = State()
     region = State()
     price_min = State()
     price_max = State()
+
+
+class TrackBrand(StatesGroup):
+    choosing = State()
 
 
 # ── Бот ─────────────────────────────────────────────────────────
@@ -3499,7 +3505,8 @@ def id_to_url(sid: str) -> str:
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🔍 Найти авто"), KeyboardButton(text="🌐 Глобальный поиск")],
-        [KeyboardButton(text="🔔 Уведомления"), KeyboardButton(text="⭐ Избранное")],
+        [KeyboardButton(text="🆕 Новые сегодня"), KeyboardButton(text="🎯 Следить за маркой")],
+        [KeyboardButton(text="🔔 Уведомления"), KeyboardButton(text="🚗 Мой гараж")],
         [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="❓ Помощь")],
         [KeyboardButton(text="♻️ Сбросить историю")],
     ],
@@ -3516,6 +3523,148 @@ def region_keyboard():
         for slug, name in items[i:i+2]:
             row.append(InlineKeyboardButton(text=name, callback_data=f"region|{slug}"))
         rows.append(row)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+# ── Категории и марки ────────────────────────────────────────────
+
+CATEGORY_LABELS = {
+    "all":      "🚗 Все автомобили",
+    "foreign":  "🌍 Иномарки",
+    "domestic": "🇷🇺 Отечественные",
+    "moto":     "🏍 Мото / Квадро",
+    "misc":     "🔧 Разное",
+}
+
+# Ключевые слова для фильтрации по категории в заголовке объявления
+DOMESTIC_BRANDS = [
+    "ваз", "vaz", "lada", "лада", "газ", "gaz", "уаз", "uaz",
+    "москвич", "moskvich", "нива", "niva", "волга", "volga", "ока", "oka",
+    "иж", "izh",
+]
+
+FOREIGN_BRANDS_LIST = [
+    "kia", "toyota", "chevrolet", "hyundai", "renault", "volkswagen",
+    "ford", "nissan", "mazda", "bmw", "mercedes", "opel", "skoda",
+    "audi", "mitsubishi", "daewoo", "honda", "peugeot", "volvo",
+    "subaru", "suzuki", "lexus", "infiniti", "jeep", "land rover",
+    "porsche", "alfa", "citroen", "seat", "fiat",
+]
+
+FOREIGN_BRANDS_DISPLAY = [
+    ("Kia", "kia"), ("Toyota", "toyota"), ("Chevrolet", "chevrolet"),
+    ("Hyundai", "hyundai"), ("Renault", "renault"), ("Volkswagen", "volkswagen"),
+    ("Ford", "ford"), ("Nissan", "nissan"), ("Mazda", "mazda"),
+    ("BMW", "bmw"), ("Mercedes", "mercedes"), ("Opel", "opel"),
+    ("Skoda", "skoda"), ("Audi", "audi"), ("Mitsubishi", "mitsubishi"),
+    ("Daewoo", "daewoo"), ("Honda", "honda"), ("Peugeot", "peugeot"),
+    ("Volvo", "volvo"), ("Subaru", "subaru"), ("Suzuki", "suzuki"),
+    ("Lexus", "lexus"), ("Infiniti", "infiniti"),
+]
+
+DOMESTIC_BRANDS_DISPLAY = [
+    ("ВАЗ/Lada", "lada"), ("ГАЗ", "gaz"), ("УАЗ", "uaz"),
+    ("Москвич", "moskvich"), ("Нива", "niva"),
+]
+
+# Русские синонимы для брендов (для фильтрации по заголовку)
+BRAND_RU_ALIASES: dict[str, list[str]] = {
+    "bmw": ["бмв", "bmw"],
+    "mercedes": ["мерседес", "mercedes"],
+    "volkswagen": ["фольксваген", "volkswagen", "vw"],
+    "audi": ["ауди", "audi"],
+    "toyota": ["тойота", "toyota"],
+    "kia": ["киа", "kia"],
+    "hyundai": ["хендай", "хундай", "hyundai"],
+    "renault": ["рено", "renault"],
+    "chevrolet": ["шевроле", "chevrolet"],
+    "nissan": ["ниссан", "nissan"],
+    "mazda": ["мазда", "mazda"],
+    "mitsubishi": ["митсубиши", "митсубиси", "mitsubishi"],
+    "opel": ["опель", "opel"],
+    "ford": ["форд", "ford"],
+    "skoda": ["шкода", "skoda"],
+    "honda": ["хонда", "honda"],
+    "subaru": ["субару", "subaru"],
+    "suzuki": ["сузуки", "suzuki"],
+    "peugeot": ["пежо", "peugeot"],
+    "volvo": ["вольво", "volvo"],
+    "lexus": ["лексус", "lexus"],
+    "infiniti": ["инфинити", "infiniti"],
+    "daewoo": ["дэу", "daewoo"],
+    "lada": ["лада", "ваз", "lada", "vaz", "ладa"],
+    "gaz": ["газ", "gaz", "волга", "волгa"],
+    "uaz": ["уаз", "uaz"],
+    "moskvich": ["москвич", "moskvich"],
+    "niva": ["нива", "niva"],
+}
+
+
+def _match_brand(title: str, brand_key: str) -> bool:
+    """Проверяет, содержит ли заголовок объявления указанную марку."""
+    tl = title.lower()
+    aliases = BRAND_RU_ALIASES.get(brand_key.lower(), [brand_key.lower()])
+    return any(a in tl for a in aliases)
+
+
+def _filter_by_category(items: list[dict], category: str, brand: str) -> list[dict]:
+    """Фильтрует список объявлений по категории и марке."""
+    if not category or category == "all":
+        pass  # без фильтра
+    elif category == "domestic":
+        items = [it for it in items if any(k in it.get("title", "").lower() for k in DOMESTIC_BRANDS)]
+    elif category == "foreign":
+        items = [it for it in items if not any(k in it.get("title", "").lower() for k in DOMESTIC_BRANDS)]
+
+    if brand:
+        items = [it for it in items if _match_brand(it.get("title", ""), brand)]
+
+    return items
+
+
+def category_keyboard(damaged_on: bool = False) -> InlineKeyboardMarkup:
+    dmg_text = "⚙️ Битые: вкл" if damaged_on else "⚙️ Битые: выкл"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🚗 Все автомобили", callback_data="cat|all")],
+        [
+            InlineKeyboardButton(text="🌍 Иномарки", callback_data="cat|foreign"),
+            InlineKeyboardButton(text="🇷🇺 Отечественные", callback_data="cat|domestic"),
+        ],
+        [
+            InlineKeyboardButton(text="🏍 Мото / Квадро", callback_data="cat|moto"),
+            InlineKeyboardButton(text="🔧 Разное", callback_data="cat|misc"),
+        ],
+        [InlineKeyboardButton(text=dmg_text, callback_data="cat|toggle_damaged")],
+    ])
+
+
+def brands_keyboard(category: str, prefix: str = "brand") -> InlineKeyboardMarkup:
+    """Клавиатура выбора марки в сетке 2 колонки."""
+    if category == "domestic":
+        brand_list = DOMESTIC_BRANDS_DISPLAY
+    else:
+        brand_list = FOREIGN_BRANDS_DISPLAY
+
+    rows = []
+    for i in range(0, len(brand_list), 2):
+        row = []
+        for name, key in brand_list[i:i+2]:
+            row.append(InlineKeyboardButton(text=name, callback_data=f"{prefix}|{key}"))
+        rows.append(row)
+    rows.append([InlineKeyboardButton(text="🔍 Любая марка", callback_data=f"{prefix}|any")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def track_brands_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура выбора марки для слежения (все марки + отключить)."""
+    all_brands = FOREIGN_BRANDS_DISPLAY + DOMESTIC_BRANDS_DISPLAY
+    rows = []
+    for i in range(0, len(all_brands), 2):
+        row = []
+        for name, key in all_brands[i:i+2]:
+            row.append(InlineKeyboardButton(text=name, callback_data=f"track|{key}"))
+        rows.append(row)
+    rows.append([InlineKeyboardButton(text="❌ Отключить слежку", callback_data="track|off")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -3546,12 +3695,12 @@ async def cmd_start(msg: Message, state: FSMContext):
             f"🔍 Ищу объявления от частных лиц на Авито\n"
             f"📊 Сравниваю цены с рынком и нахожу выгодные\n"
             f"🔔 Могу присылать уведомления когда появится новое выгодное авто\n\n"
-            f"Для начала выбери свой город 👇",
+            f"Шаг 1/4: что ищем? 👇",
             parse_mode="Markdown",
             reply_markup=MAIN_KEYBOARD,
         )
-        await msg.answer("📍 Выбери город:", reply_markup=region_keyboard())
-        await state.set_state(Setup.region)
+        await msg.answer("🔍 Шаг 1/4: Что ищем?", reply_markup=category_keyboard())
+        await state.set_state(Setup.category)
 
 
 @dp.message(Command("stats"))
@@ -3696,7 +3845,54 @@ async def cb_notify_back(cb: CallbackQuery):
 @dp.callback_query(F.data == "change_settings")
 async def cb_change_settings(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
-    await cb.message.answer("📍 Выбери город:", reply_markup=region_keyboard())
+    await cb.message.answer("🔍 Шаг 1/4: Что ищем?", reply_markup=category_keyboard())
+    await state.set_state(Setup.category)
+
+
+# ── FSM: выбор категории ─────────────────────────────────────────
+
+@dp.callback_query(F.data.startswith("cat|"), Setup.category)
+async def cb_category(cb: CallbackQuery, state: FSMContext):
+    value = cb.data.split("|", 1)[1]
+    await cb.answer()
+
+    data = await state.get_data()
+    if value == "toggle_damaged":
+        damaged = not data.get("damaged", False)
+        await state.update_data(damaged=damaged)
+        await cb.message.edit_reply_markup(reply_markup=category_keyboard(damaged_on=damaged))
+        return
+
+    await state.update_data(category=value, brand="")
+    cat_label = CATEGORY_LABELS.get(value, value)
+
+    if value in ("foreign", "domestic"):
+        await cb.message.answer(
+            f"✅ Категория: {cat_label}\n\n🔍 Шаг 2/4: Выбери марку:",
+            reply_markup=brands_keyboard(value),
+        )
+        await state.set_state(Setup.brand)
+    else:
+        await cb.message.answer(
+            f"✅ Категория: {cat_label}\n\n📍 Шаг 3/4: Выбери город:",
+            reply_markup=region_keyboard(),
+        )
+        await state.set_state(Setup.region)
+
+
+# ── FSM: выбор марки ─────────────────────────────────────────────
+
+@dp.callback_query(F.data.startswith("brand|"), Setup.brand)
+async def cb_brand(cb: CallbackQuery, state: FSMContext):
+    brand_key = cb.data.split("|", 1)[1]
+    await cb.answer()
+    brand = "" if brand_key == "any" else brand_key
+    await state.update_data(brand=brand)
+    brand_label = brand.capitalize() if brand else "Любая"
+    await cb.message.answer(
+        f"✅ Марка: {brand_label}\n\n📍 Шаг 3/4: Выбери город:",
+        reply_markup=region_keyboard(),
+    )
     await state.set_state(Setup.region)
 
 
@@ -3707,7 +3903,7 @@ async def cb_region(cb: CallbackQuery, state: FSMContext):
     await cb.answer(f"✅ {REGIONS.get(slug, slug)}")
     await cb.message.answer(
         f"📍 Регион: {REGIONS.get(slug, slug)}\n\n"
-        f"💰 Теперь введи минимальную цену в рублях\n"
+        f"💰 Шаг 4/4: Введи минимальную цену в рублях\n"
         f"(например: 300000 или 0 для любой цены):"
     )
     await state.set_state(Setup.price_min)
@@ -3733,16 +3929,25 @@ async def fsm_price_max(msg: Message, state: FSMContext):
     data = await state.get_data()
     region = data.get("region", "ekaterinburg")
     pmin = data.get("price_min", 0)
+    category = data.get("category", "all")
+    brand = data.get("brand", "")
+    damaged = data.get("damaged", False)
 
     s = load_settings(msg.from_user.id)
-    s.update({"region": region, "price_min": pmin, "price_max": pmax})
+    s.update({
+        "region": region, "price_min": pmin, "price_max": pmax,
+        "category": category, "brand": brand, "damaged": damaged,
+    })
     save_settings(msg.from_user.id, s)
     await state.clear()
 
     region_name = REGIONS.get(region, region)
+    cat_label = CATEGORY_LABELS.get(category, category)
+    brand_label = f" · {brand.capitalize()}" if brand else ""
     await msg.answer(
         f"✅ Настройки сохранены!\n\n"
         f"📍 Регион: {region_name}\n"
+        f"🔍 Категория: {cat_label}{brand_label}\n"
         f"💰 Бюджет: {pmin:,} – {pmax:,} ₽\n\n"
         f"Нажми кнопку чтобы найти авто:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -3755,8 +3960,8 @@ async def fsm_price_max(msg: Message, state: FSMContext):
 @dp.message(F.text == "⚙️ Настройки")
 async def cmd_settings(msg: Message, state: FSMContext):
     await state.clear()
-    await msg.answer("📍 Выбери город:", reply_markup=region_keyboard())
-    await state.set_state(Setup.region)
+    await msg.answer("🔍 Шаг 1/4: Что ищем?", reply_markup=category_keyboard())
+    await state.set_state(Setup.category)
 
 
 ALL_SOURCES = ["drom", "autoru", "avito"]
@@ -3802,6 +4007,94 @@ async def cmd_search(msg: Message):
         return
     enabled = _get_enabled_sources(s)
     await msg.answer("Выбери площадки для поиска:", reply_markup=sources_keyboard(enabled))
+
+
+@dp.message(F.text == "🆕 Новые сегодня")
+async def cmd_new_today(msg: Message):
+    """Поиск свежих объявлений за последние 24 часа, сортировка по дате."""
+    uid = msg.from_user.id
+    s = load_settings(uid)
+    if not s.get("region"):
+        await msg.answer("Сначала настрой поиск: /start")
+        return
+
+    now_ts = time.time()
+    last = _last_search_at.get(uid, 0)
+    wait_left = SEARCH_COOLDOWN_SEC - (now_ts - last)
+    if wait_left > 0:
+        await msg.answer(f"⏳ Подожди {int(wait_left) + 1} сек перед новым поиском.")
+        return
+    _last_search_at[uid] = now_ts
+
+    region = s["region"]
+    pmin = s.get("price_min", 0)
+    pmax = s.get("price_max", 99_000_000)
+    category = s.get("category", "all")
+    brand = s.get("brand", "")
+    region_name = REGIONS.get(region, region)
+
+    await msg.answer(
+        f"🆕 Ищу свежие объявления в {region_name} за последние 24 часа...\n"
+        f"💰 Бюджет: {pmin:,}–{pmax:,} ₽".replace(",", " ")
+    )
+
+    loop = asyncio.get_event_loop()
+    skipped = load_skipped(uid)
+    seen = load_seen(uid)
+
+    # Запускаем Авито с сортировкой по дате
+    items_avito = await loop.run_in_executor(
+        None, lambda: scrape_avito(region, pages=5, price_min=pmin, price_max=pmax, sort_by_date=True)
+    )
+    items = list(items_avito)
+
+    # Дедупликация
+    seen_u: set[str] = set()
+    deduped: list[dict] = []
+    for i in items:
+        u = i.get("url", "")
+        if u and u not in seen_u:
+            seen_u.add(u)
+            deduped.append(i)
+    items = deduped
+
+    # Фильтр: только за последние 24 часа (_days_on_site <= 1)
+    fresh = [it for it in items if it.get("_days_on_site", 0) <= 1]
+
+    suitable = [
+        i for i in fresh
+        if not is_dealer(i)
+        and in_price_range(i, pmin, pmax)
+        and i.get("url")
+        and i["url"] not in skipped
+    ]
+    suitable = _filter_by_category(suitable, category, brand)
+    suitable = rank_by_market_price(suitable)
+    # Сначала сегодняшние (days==0), потом ниже рынка
+    suitable.sort(key=lambda x: (
+        x.get("_days_on_site", 0),
+        0 if x.get("_savings_pct", 0) > 0 else 1,
+        -x.get("_savings_pct", 0),
+        -x.get("_hot_score", 0),
+        x.get("_price_int", 999_999_999),
+    ))
+
+    if not suitable:
+        await msg.answer(
+            f"😔 Свежих объявлений за последние 24 часа не нашлось.\n"
+            f"Попробуй 🔍 Найти авто для более широкого поиска.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+
+    _search_cache[uid] = suitable
+    _save_cache(uid, suitable)
+    analytics.track("new_today", uid=uid, region=region, results=len(suitable))
+    await msg.answer(
+        f"✅ Найдено {len(suitable)} свежих объявлений!\n"
+        f"🟢 Только за последние 24 часа, сначала самые свежие"
+    )
+    await send_batch(msg.chat.id, uid, 0)
 
 
 @dp.message(F.text == "🌐 Глобальный поиск")
@@ -4398,7 +4691,14 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         url = item.get("url", "")
         sid = url_to_id(url)
         days = item.get("_days_on_site", 0)
-        days_str = "сегодня" if days == 0 else f"{days} дн. назад"
+        if days == 0:
+            days_str = "🟢 только что / сегодня"
+        elif days == 1:
+            days_str = "🟡 вчера"
+        elif days <= 3:
+            days_str = f"🟠 {days} дн. назад"
+        else:
+            days_str = f"⚪ {days} дн. назад"
         score = item.get("_hot_score", 0)
         hot_tag = " 🔥" if score >= 15 else " ⭐" if score >= 5 else ""
         source_tag = SOURCE_TAGS.get(item.get("source", ""), "🔵")
@@ -4596,6 +4896,8 @@ async def do_search_for_user(uid: int, reply_to):
     region = s["region"]
     pmin = s.get("price_min", 0)
     pmax = s.get("price_max", 99_000_000)
+    category = s.get("category", "all")
+    brand = s.get("brand", "")
     region_name = REGIONS.get(region, region)
     enabled_sources = _get_enabled_sources(s)
 
@@ -4698,6 +5000,8 @@ async def do_search_for_user(uid: int, reply_to):
         and i["url"] not in skipped
         and i["url"] not in seen
     ]
+    # Фильтр по категории и марке
+    suitable = _filter_by_category(suitable, category, brand)
     suitable = rank_by_market_price(suitable)
     # Сортировка: сначала ниже рынка (по убыванию скидки), затем по рыночной цене.
     suitable.sort(key=lambda x: (
@@ -4718,6 +5022,7 @@ async def do_search_for_user(uid: int, reply_to):
             and i.get("url")
             and i["url"] not in skipped
         ]
+        suitable = _filter_by_category(suitable, category, brand)
         suitable = rank_by_market_price(suitable)
         suitable.sort(key=lambda x: (
             0 if x.get("_savings_pct", 0) > 0 else 1,  # ниже рынка первыми
@@ -4843,22 +5148,61 @@ async def cb_similar(cb: CallbackQuery):
     await cb.message.answer("🔍 Похожие объявления:\n\n" + "\n".join(lines))
 
 
+@dp.message(F.text == "🎯 Следить за маркой")
+async def cmd_track_brand(msg: Message):
+    uid = msg.from_user.id
+    s = load_settings(uid)
+    current = s.get("track_brand", "")
+    current_label = f"Сейчас: *{current.capitalize()}*\n\n" if current else ""
+    await msg.answer(
+        f"🎯 Слежение за маркой\n\n{current_label}"
+        f"Когда появится новое объявление выбранной марки — сразу пришлю уведомление.\n\n"
+        f"Выбери марку:",
+        parse_mode="Markdown",
+        reply_markup=track_brands_keyboard(),
+    )
+
+
+@dp.callback_query(F.data.startswith("track|"))
+async def cb_track_brand(cb: CallbackQuery):
+    await cb.answer()
+    uid = cb.from_user.id
+    brand_key = cb.data.split("|", 1)[1]
+    s = load_settings(uid)
+    if brand_key == "off":
+        s.pop("track_brand", None)
+        save_settings(uid, s)
+        await cb.message.answer("❌ Слежение за маркой отключено.")
+    else:
+        s["track_brand"] = brand_key
+        save_settings(uid, s)
+        # Найдём красивое название
+        all_brands = dict(FOREIGN_BRANDS_DISPLAY + DOMESTIC_BRANDS_DISPLAY)
+        brand_name = next((n for n, k in FOREIGN_BRANDS_DISPLAY + DOMESTIC_BRANDS_DISPLAY if k == brand_key), brand_key.capitalize())
+        await cb.message.answer(
+            f"✅ Слежу за *{brand_name}*\n\n"
+            f"Как только появится новое объявление — пришлю уведомление.",
+            parse_mode="Markdown",
+        )
+
+
 @dp.message(Command("favorites"))
 @dp.message(F.text == "⭐ Избранное")
+@dp.message(F.text == "🚗 Мой гараж")
 async def cmd_favorites(msg: Message):
     uid = msg.from_user.id
     fav_file = user_dir(uid) / "favorites.json"
     if not fav_file.exists():
-        await msg.answer("⭐ У тебя пока нет сохранённых объявлений.")
+        await msg.answer("🚗 Мой гараж пуст — сохраняй объявления кнопкой ⭐ Сохранить.")
         return
     favs = json.loads(fav_file.read_text(encoding="utf-8"))
     if not favs:
-        await msg.answer("⭐ Список избранного пуст.")
+        await msg.answer("🚗 Мой гараж пуст — сохраняй объявления кнопкой ⭐ Сохранить.")
         return
     lines = []
     for it in favs[-20:]:
         lines.append(f"• {it.get('title','')} — {it.get('price','?')}\n  {it.get('url','')}")
-    await msg.answer(f"⭐ Избранное ({len(favs)} шт.):\n\n" + "\n\n".join(lines[-10:]))
+    await msg.answer(f"🚗 Мой гараж ({len(favs)} авто):\n\n" + "\n\n".join(lines[-10:]))
 
 
 @dp.message(Command("test_avito"))
@@ -5092,6 +5436,7 @@ async def _global_monitor_loop():
                         pmin = u.get("price_min", 0)
                         pmax = u.get("price_max", 99_000_000)
                         min_pct = u.get("monitor_min_savings_pct", MONITOR_MIN_SAVINGS_PCT)
+                        track_brand = u.get("track_brand", "")
 
                         seen = load_seen(uid)
                         skipped = load_skipped(uid)
@@ -5119,6 +5464,53 @@ async def _global_monitor_loop():
                              and it.get("_savings_pct", 0) >= min_pct],
                             key=lambda x: -x.get("_savings_pct", 0)
                         )
+
+                        # Уведомления по слежению за маркой (независимо от скидки)
+                        if track_brand:
+                            brand_new = [
+                                it for it in new_items
+                                if it.get("url") in new_urls
+                                and _match_brand(it.get("title", ""), track_brand)
+                            ]
+                            if brand_new:
+                                region_name_tb = REGIONS.get(region, region)
+                                brand_label = next(
+                                    (n for n, k in FOREIGN_BRANDS_DISPLAY + DOMESTIC_BRANDS_DISPLAY if k == track_brand),
+                                    track_brand.capitalize()
+                                )
+                                for it in brand_new[:3]:
+                                    url_tb = it.get("url", "")
+                                    sid_tb = url_to_id(url_tb)
+                                    pct_tb = it.get("_savings_pct", 0)
+                                    market_tb = it.get("_market_price", 0)
+                                    price_line_tb = it.get("price", "—") or "—"
+                                    if market_tb and pct_tb > 0:
+                                        price_line_tb += f" ▼ рынок ~{market_tb:,} ₽ (-{pct_tb}%)".replace(",", " ")
+                                    days_tb = it.get("_days_on_site", 0)
+                                    days_label_tb = "только что" if days_tb == 0 else f"{days_tb} дн. назад"
+                                    caption_tb = (
+                                        f"🔔 Новая {brand_label} в {region_name_tb}!\n"
+                                        f"🚗 {it.get('title', '')}\n"
+                                        f"💰 {price_line_tb}\n"
+                                        f"🕐 Появилось {days_label_tb}"
+                                    )
+                                    kb_tb = InlineKeyboardMarkup(inline_keyboard=[[
+                                        InlineKeyboardButton(text="🔗 Открыть", url=url_tb),
+                                        InlineKeyboardButton(text="⭐ Сохранить", callback_data=f"fav|{sid_tb}|{uid}"),
+                                    ]])
+                                    try:
+                                        photo_tb = it.get("_photo_url", "")
+                                        if photo_tb:
+                                            await bot.send_photo(uid, photo=photo_tb, caption=caption_tb, reply_markup=kb_tb)
+                                        else:
+                                            await bot.send_message(uid, caption_tb, reply_markup=kb_tb)
+                                    except Exception:
+                                        try:
+                                            await bot.send_message(uid, caption_tb, reply_markup=kb_tb)
+                                        except Exception:
+                                            pass
+                                    await asyncio.sleep(0.3)
+
                         if not new_below:
                             # Обновляем seen даже без выгодных — чтобы не дублировать
                             seen.update(it["url"] for it in new_items)
@@ -5128,16 +5520,21 @@ async def _global_monitor_loop():
                         region_name = REGIONS.get(region, region)
                         print(f"  [монитор] uid={uid} регион={region_name}: {len(new_below)} новых выгодных")
 
-                        # Шапка-уведомление
-                        await bot.send_message(
-                            uid,
-                            f"🔔 *{region_name}* — {len(new_below)} новых авто ниже рынка!",
-                            parse_mode="Markdown",
-                        )
-                        # Шлём каждое объявление (максимум 5)
-                        for it in new_below[:5]:
-                            await _send_monitor_item(uid, it)
-                            await asyncio.sleep(0.3)
+                        # Если задан track_brand — фильтруем уведомления о скидках по марке
+                        if track_brand:
+                            new_below = [it for it in new_below if _match_brand(it.get("title", ""), track_brand)]
+
+                        if new_below:
+                            # Шапка-уведомление
+                            await bot.send_message(
+                                uid,
+                                f"🔔 *{region_name}* — {len(new_below)} новых авто ниже рынка!",
+                                parse_mode="Markdown",
+                            )
+                            # Шлём каждое объявление (максимум 5)
+                            for it in new_below[:5]:
+                                await _send_monitor_item(uid, it)
+                                await asyncio.sleep(0.3)
 
                         seen.update(it["url"] for it in new_items)
                         save_seen(uid, seen)
