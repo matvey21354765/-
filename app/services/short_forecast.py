@@ -225,14 +225,6 @@ def _score(df1m: pd.DataFrame, df5m: pd.DataFrame, df15m: pd.DataFrame) -> dict:
     cross_up_15   = m15["cross_up"]
     cross_down_15 = m15["cross_down"]
 
-    has_trigger_bull = cross_up_5m or (srsi_oversold and cross_up_15)
-    has_trigger_bear = cross_down_5m or (srsi_overbought and cross_down_15)
-
-    if both_bull and not has_trigger_bull:
-        return _flat("Тренд вверх, ждём MACD кросс 5м")
-    if both_bear and not has_trigger_bear:
-        return _flat("Тренд вниз, ждём MACD кросс 5м")
-
     # ── ГОЛОСА (max ±14) ─────────────────────────────────────────────────────
     if m5_std["cross_up"]:                                                   macd_vote = 4
     elif m5_std["bullish"] and m5_std["rising"] and m5_std["magnitude"] > 0.05: macd_vote = 2
@@ -263,9 +255,10 @@ def _score(df1m: pd.DataFrame, df5m: pd.DataFrame, df15m: pd.DataFrame) -> dict:
     # ── РЕШЕНИЕ: порог сбалансирован, чтобы сигналы реально выдавались ──────
     # Триггер (MACD кросс 5м или экстремум StochRSI) уже проверен выше —
     # здесь только голоса и базовые тренд/RSI фильтры.
-    if total >= 5 and both_bull and rsi5 < 68 and not majority_bear:
+    # Решение по 5м тренду + голосам (15м добавляет голос, не является жёстким фильтром)
+    if total >= 4 and trend5_bull and rsi5 < 72:
         direction = "UP"
-    elif total <= -5 and both_bear and rsi5 > 32 and not majority_bull:
+    elif total <= -4 and trend5_bear and rsi5 > 28:
         direction = "DOWN"
     else:
         direction = "FLAT"
@@ -307,7 +300,9 @@ def _score(df1m: pd.DataFrame, df5m: pd.DataFrame, df15m: pd.DataFrame) -> dict:
         sigs.append(f"Скор {total:+d}/±12 — нет чёткого сигнала")
 
     atr1   = _atr(df1m)
-    levels = _sl_tp(price, atr1, direction)
+    # Для FLAT считаем уровни по доминирующей стороне (total>0 = UP-like, иначе DOWN-like)
+    _dir_for_levels = direction if direction != "FLAT" else ("UP" if total >= 0 else "DOWN")
+    levels = _sl_tp(price, atr1, _dir_for_levels)
 
     # ── TV-style summary ─────────────────────────────────────────────────────
     # Count each indicator as buy/neutral/sell
@@ -487,8 +482,9 @@ def format_forecast(f: dict) -> str:
         f"  Bollinger: <b>{bb_pct}%</b> — {bb_hint}\n"
     )
 
-    if sl and tp1 and tp2 and direction != "FLAT":
+    if sl and tp1 and tp2:
         tp1_pct = abs(tp1 - price) / price * 100
+        note = "" if direction != "FLAT" else "  <i>(уровни при текущем моменте)</i>\n"
         levels_block = (
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"📍 Вход: <b>{_p(price)}</b>\n"
@@ -496,6 +492,7 @@ def format_forecast(f: dict) -> str:
             f"🎯 TP1: <b>{_p(tp1)}</b>  <i>(+{tp1_pct:.2f}%)</i>\n"
             f"🎯 TP2: <b>{_p(tp2)}</b>  <i>(1:2)</i>\n"
             f"⚡ Плечо: <b>{lev}</b>\n"
+            f"{note}"
         )
     else:
         levels_block = f"━━━━━━━━━━━━━━━━━━━━\n💵 Цена: <b>{_p(price)}</b>\n"
