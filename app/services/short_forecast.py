@@ -410,11 +410,16 @@ async def _forecast_from_db(coin: str) -> dict:
     score     = max(-100.0, min(100.0, score))
     conf      = min(int(abs(score) * 0.45 + 45), 88)
     direction = "UP" if score > 8 else "DOWN" if score < -8 else "FLAT"
+    rsi_val   = sigs[0].rsi_1h if sigs else 50.0
     return {
         "coin": coin, "price": price, "change_24h": change,
         "score": score, "direction": direction, "confidence": conf,
-        "rsi1": sigs[0].rsi_1h if sigs else 50.0,
-        "rsi5": 50.0, "signals": signals_list[:3], "source": "db",
+        "rsi1": rsi_val, "rsi5": rsi_val, "signals": signals_list[:3],
+        "source": "db",
+        # fallback — реальных осцилляторов нет, выставляем None чтобы показать "нет данных"
+        "rsi": None, "macd": None, "macd_signal": None,
+        "adx": None, "bb_pos": None, "stoch": None,
+        "tv_buy": 0, "tv_sell": 0, "tv_neutral": 0, "tv_verdict": "",
     }
 
 
@@ -458,29 +463,34 @@ def format_forecast(f: dict) -> str:
     ) if tv_verdict else ""
 
     # Raw oscillator values
-    rsi    = f.get("rsi", 0.0)
-    macd   = f.get("macd", 0.0)
-    macd_s = f.get("macd_signal", 0.0)
-    adx    = f.get("adx", 0.0)
-    bb_pos = f.get("bb_pos", 0.5)
-    stoch  = f.get("stoch", 0.0)
+    rsi    = f.get("rsi")
+    macd   = f.get("macd")
+    macd_s = f.get("macd_signal")
+    adx    = f.get("adx")
+    bb_pos = f.get("bb_pos")
+    stoch  = f.get("stoch")
 
-    rsi_zone  = "🔴 Перекупл." if rsi >= 70 else "🟢 Перепродан." if rsi <= 30 else "⚪ Нейтрал."
-    macd_hint = "🟢 Бычий" if macd > macd_s else "🔴 Медвежий"
-    adx_hint  = f"💪 Сильный" if adx >= 25 else "〰️ Слабый"
-    bb_pct    = round(bb_pos * 100)
-    bb_hint   = "🔴 Верх" if bb_pos >= 0.8 else "🟢 Низ" if bb_pos <= 0.2 else "⚪ Центр"
-    stoch_zone= "🔴 Перекупл." if stoch >= 80 else "🟢 Перепродан." if stoch <= 20 else "⚪ Нейтрал."
-
-    osc_block = (
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"🔬 <b>Осцилляторы:</b>\n"
-        f"  RSI: <b>{rsi:.1f}</b> — {rsi_zone}\n"
-        f"  MACD: <b>{macd:.4f}</b> — {macd_hint}\n"
-        f"  Stoch RSI: <b>{stoch:.1f}</b> — {stoch_zone}\n"
-        f"  ADX: <b>{adx:.1f}</b> — {adx_hint}\n"
-        f"  Bollinger: <b>{bb_pct}%</b> — {bb_hint}\n"
-    )
+    if rsi is not None:
+        rsi_zone  = "🔴 Перекупл." if rsi >= 70 else "🟢 Перепродан." if rsi <= 30 else "⚪ Нейтрал."
+        macd_hint = "🟢 Бычий" if (macd or 0) > (macd_s or 0) else "🔴 Медвежий"
+        adx_hint  = "💪 Сильный" if (adx or 0) >= 25 else "〰️ Слабый"
+        bb_pct    = round((bb_pos or 0.5) * 100)
+        bb_hint   = "🔴 Верх" if (bb_pos or 0.5) >= 0.8 else "🟢 Низ" if (bb_pos or 0.5) <= 0.2 else "⚪ Центр"
+        stoch_zone= "🔴 Перекупл." if (stoch or 0) >= 80 else "🟢 Перепродан." if (stoch or 0) <= 20 else "⚪ Нейтрал."
+        osc_block = (
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🔬 <b>Осцилляторы:</b>\n"
+            f"  RSI: <b>{rsi:.1f}</b> — {rsi_zone}\n"
+            f"  MACD: <b>{macd:.4f}</b> — {macd_hint}\n"
+            f"  Stoch RSI: <b>{stoch:.1f}</b> — {stoch_zone}\n"
+            f"  ADX: <b>{adx:.1f}</b> — {adx_hint}\n"
+            f"  Bollinger: <b>{bb_pct}%</b> — {bb_hint}\n"
+        )
+    else:
+        osc_block = (
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🔬 <b>Осцилляторы:</b> <i>временно недоступны (сбой источника данных)</i>\n"
+        )
 
     if sl and tp1 and tp2:
         tp1_pct = abs(tp1 - price) / price * 100
@@ -529,40 +539,33 @@ def format_forecast_free(f: dict) -> str:
         return f"${v:,.2f}" if v >= 1000 else f"${v:.4f}" if v >= 1 else f"${v:.6f}"
 
     # Raw oscillator values
-    rsi    = f.get("rsi", 0.0)
-    macd   = f.get("macd", 0.0)
-    macd_s = f.get("macd_signal", 0.0)
-    adx    = f.get("adx", 0.0)
-    bb_pos = f.get("bb_pos", 0.0)   # 0=нижняя граница, 1=верхняя
-    stoch  = f.get("stoch", 0.0)
+    rsi    = f.get("rsi")
+    macd   = f.get("macd")
+    macd_s = f.get("macd_signal")
+    adx    = f.get("adx")
+    bb_pos = f.get("bb_pos")
+    stoch  = f.get("stoch")
 
-    # RSI zone
-    if rsi >= 70:
-        rsi_zone = "🔴 Перекупленность"
-    elif rsi <= 30:
-        rsi_zone = "🟢 Перепроданность"
+    no_osc = rsi is None
+
+    if not no_osc:
+        rsi_zone = "🔴 Перекупленность" if rsi >= 70 else "🟢 Перепроданность" if rsi <= 30 else "⚪ Нейтральная зона"
+        macd_hint = "🟢 Бычье пересечение" if (macd or 0) > (macd_s or 0) else "🔴 Медвежье пересечение"
+        bb_pct = round((bb_pos or 0.5) * 100)
+        bb_hint = "🔴 У верхней границы" if (bb_pos or 0.5) >= 0.8 else "🟢 У нижней границы" if (bb_pos or 0.5) <= 0.2 else "⚪ Середина канала"
+        adx_v = adx or 0
+        adx_hint = f"💪 Сильный тренд ({adx_v:.1f})" if adx_v >= 25 else f"〰️ Слабый тренд ({adx_v:.1f})" if adx_v >= 17 else f"😴 Боковик ({adx_v:.1f})"
+
+    if no_osc:
+        osc_block = "  <i>Осцилляторы временно недоступны</i>\n"
     else:
-        rsi_zone = "⚪ Нейтральная зона"
-
-    # MACD signal
-    macd_hint = "🟢 Бычье пересечение" if macd > macd_s else "🔴 Медвежье пересечение"
-
-    # Bollinger Band position
-    bb_pct = round(bb_pos * 100)
-    if bb_pos >= 0.8:
-        bb_hint = "🔴 У верхней границы"
-    elif bb_pos <= 0.2:
-        bb_hint = "🟢 У нижней границы"
-    else:
-        bb_hint = "⚪ Середина канала"
-
-    # ADX trend strength
-    if adx >= 25:
-        adx_hint = f"💪 Сильный тренд ({adx:.1f})"
-    elif adx >= 17:
-        adx_hint = f"〰️ Слабый тренд ({adx:.1f})"
-    else:
-        adx_hint = f"😴 Боковик ({adx:.1f})"
+        osc_block = (
+            f"  RSI: <b>{rsi:.1f}</b>  — {rsi_zone}\n"
+            f"  MACD: <b>{macd:.4f}</b>  — {macd_hint}\n"
+            f"  Stoch RSI: <b>{stoch:.1f}</b>\n"
+            f"  ADX: {adx_hint}\n"
+            f"  Bollinger: <b>{bb_pct}%</b>  — {bb_hint}\n"
+        )
 
     return (
         f"📊 <b>{coin}/USDT — Осциллятор</b>  ·  {now}\n"
@@ -573,11 +576,7 @@ def format_forecast_free(f: dict) -> str:
         f"  🟢 Покупка: <b>{tv_buy}</b>  ⚪ Нейтр: <b>{tv_neutral}</b>  🔴 Продажа: <b>{tv_sell}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"<b>Осцилляторы:</b>\n"
-        f"  RSI: <b>{rsi:.1f}</b>  — {rsi_zone}\n"
-        f"  MACD: <b>{macd:.4f}</b>  — {macd_hint}\n"
-        f"  Stoch RSI: <b>{stoch:.1f}</b>\n"
-        f"  ADX: {adx_hint}\n"
-        f"  Bollinger: <b>{bb_pct}%</b>  — {bb_hint}\n"
+        f"{osc_block}"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"🔒 <b>Точный сигнал LONG/SHORT + вход + SL/TP</b>\n"
         f"👇 Доступны по подписке"
