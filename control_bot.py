@@ -938,6 +938,200 @@ def scrape_bibika(region: str, pages: int = 3, price_min: int = 0, price_max: in
     return results
 
 
+# ── Парсер Telegram-каналов автопродаж ──────────────────────────
+
+TG_AUTO_CHANNELS = {
+    "ekaterinburg": ["avto_ekb", "prodamavto_ekb", "avtoekb", "kupit_avto_ekb"],
+    "moskva":       ["avto_msk", "prodamavto_msk", "avtomoskva", "kupit_avto_msk"],
+    "spb":          ["avto_spb", "prodamavto_spb", "avtospb"],
+    "novosibirsk":  ["avto_nsk", "prodamavto_nsk"],
+    "kazan":        ["avto_kazan", "prodamavto_kazan"],
+    "krasnodar":    ["avto_krd", "prodamavto_krd"],
+    "chelyabinsk":  ["avto_chel", "prodamavto_chel"],
+    "ufa":          ["avto_ufa", "prodamavto_ufa"],
+    "omsk":         ["avto_omsk", "prodamavto_omsk"],
+    "rostov":       ["avto_rostov", "prodamavto_rostov"],
+}
+
+# Маппинг слагов регионов бота → ключи TG_AUTO_CHANNELS
+_TG_REGION_MAP = {
+    "ekaterinburg": "ekaterinburg",
+    "moscow":       "moskva",
+    "spb":          "spb",
+    "novosibirsk":  "novosibirsk",
+    "kazan":        "kazan",
+    "chelyabinsk":  "chelyabinsk",
+    "ufa":          "ufa",
+    "krasnodar":    "krasnodar",
+    "omsk":         "omsk",
+    "rostov":       "rostov",
+}
+
+_TG_PRICE_RE = re.compile(
+    r"(\d[\d\s]{2,10})\s*(?:₽|тыс\.?\s*р(?:уб)?|руб|р\.)",
+    re.IGNORECASE,
+)
+_TG_YEAR_RE = re.compile(r"\b(19[5-9]\d|20[012]\d)\b")
+_TG_MILEAGE_RE = re.compile(r"(\d[\d\s]{2,6})\s*(?:тыс\.?\s*км|км)", re.IGNORECASE)
+
+
+def _tg_parse_price(text: str) -> int:
+    """Извлекает цену из текста Telegram-объявления."""
+    for m in _TG_PRICE_RE.finditer(text):
+        raw = re.sub(r"\D", "", m.group(1))
+        if not raw:
+            continue
+        val = int(raw)
+        # «тыс.» суффикс — умножаем
+        suffix = m.group(0)[len(m.group(1)):].strip().lower()
+        if "тыс" in suffix:
+            val = val * 1000
+        if 50_000 <= val <= 50_000_000:
+            return val
+    return 0
+
+
+def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict]:
+    """
+    Парсит публичные Telegram-каналы автопродаж для указанного региона.
+    Использует публичный веб-просмотр https://t.me/s/{channel} без API-ключей.
+    """
+    try:
+        import requests as _req
+        from bs4 import BeautifulSoup as _BS
+    except ImportError:
+        return []
+
+    tg_key = _TG_REGION_MAP.get(region, "")
+    channels = TG_AUTO_CHANNELS.get(tg_key, [])
+    if not channels:
+        return []
+
+    results: list[dict] = []
+    today = datetime.date.today()
+    session = _req.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept-Language": "ru-RU,ru;q=0.9",
+        "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+    })
+
+    for channel in channels:
+        try:
+            url = f"https://t.me/s/{channel}"
+            r = session.get(url, timeout=10)
+            if r.status_code != 200:
+                print(f"  [TG {channel}] HTTP {r.status_code}")
+                continue
+
+            soup = _BS(r.text, "lxml")
+            messages = (
+                soup.select("div.tgme_widget_message_wrap")
+                or soup.select("div.tgme_widget_message")
+            )
+            if not messages:
+                print(f"  [TG {channel}] нет сообщений")
+                continue
+
+            print(f"  [TG {channel}] {len(messages)} сообщений")
+
+            for msg_el in messages:
+                try:
+                    # Текст сообщения
+                    text_el = (
+                        msg_el.select_one("div.tgme_widget_message_text")
+                        or msg_el.select_one(".tgme_widget_message_text")
+                    )
+                    if not text_el:
+                        continue
+                    text = text_el.get_text(" ", strip=True)
+                    if len(text) < 20:
+                        continue
+
+                    # Цена
+                    price_int = _tg_parse_price(text)
+                    if not price_int:
+                        continue
+                    if not (price_min <= price_int <= price_max):
+                        continue
+
+                    # URL сообщения из data-post атрибута
+                    msg_wrap = msg_el.find(attrs={"data-post": True})
+                    if not msg_wrap:
+                        msg_wrap = msg_el.select_one("[data-post]")
+                    if msg_wrap:
+                        data_post = msg_wrap.get("data-post", "")
+                        msg_url = f"https://t.me/{data_post}" if data_post else f"https://t.me/{channel}"
+                    else:
+                        msg_url = f"https://t.me/{channel}"
+
+                    # Год выпуска
+                    year_m = _TG_YEAR_RE.search(text)
+                    year = year_m.group(1) if year_m else ""
+
+                    # Марка/модель — первые 2 слова из заглавных
+                    words = [w for w in text.split() if w and (w[0].isupper() or w[0].isdigit())]
+                    brand_model = " ".join(words[:2]) if words else "Авто"
+                    if year:
+                        title = f"{brand_model} {year}"
+                    else:
+                        title = brand_model
+
+                    # Пробег
+                    mileage = 0
+                    km_m = _TG_MILEAGE_RE.search(text)
+                    if km_m:
+                        raw_km = re.sub(r"\D", "", km_m.group(1))
+                        if raw_km:
+                            val_km = int(raw_km)
+                            suffix_km = km_m.group(0)[len(km_m.group(1)):].strip().lower()
+                            if "тыс" in suffix_km:
+                                val_km = val_km * 1000
+                            if 1000 < val_km < 2_000_000:
+                                mileage = val_km
+
+                    # Фото: og:image из мета или первый img в сообщении
+                    photo_url = ""
+                    og_img = soup.select_one("meta[property='og:image']")
+                    if og_img:
+                        photo_url = og_img.get("content", "")
+                    if not photo_url:
+                        img_el = msg_el.select_one("img[src]")
+                        if img_el:
+                            src = img_el.get("src", "")
+                            if src.startswith("http"):
+                                photo_url = src
+
+                    price_str = f"{price_int:,} ₽".replace(",", " ")
+                    item = {
+                        "source": "tg_channel",
+                        "title": title,
+                        "price": price_str,
+                        "url": msg_url,
+                        "date": str(today),
+                        "_photos": 1 if photo_url else 0,
+                        "_days_on_site": 0,
+                        "description": text[:400],
+                        "seller": f"@{channel}",
+                        "_photo_url": photo_url,
+                        "_price_int": price_int,
+                        "mileage": mileage,
+                        "_channel": channel,
+                    }
+                    item["_hot_score"] = hot_score(item)
+                    results.append(item)
+                except Exception as _e:
+                    print(f"  [TG {channel}] ошибка сообщения: {_e}")
+                    continue
+
+        except Exception as e:
+            print(f"  [TG {channel}] ошибка: {e}")
+            continue
+
+    print(f"  [TG каналы] {region}: итого {len(results)} объявлений")
+    return results
+
+
 # ── Парсер Авито ────────────────────────────────────────────────
 
 # Слаги для Авито — городской слаг для URL
@@ -3304,9 +3498,10 @@ def id_to_url(sid: str) -> str:
 
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="🔍 Найти авто"), KeyboardButton(text="🔔 Уведомления")],
-        [KeyboardButton(text="⭐ Избранное"),  KeyboardButton(text="⚙️ Настройки")],
-        [KeyboardButton(text="♻️ Сбросить историю"), KeyboardButton(text="❓ Помощь")],
+        [KeyboardButton(text="🔍 Найти авто"), KeyboardButton(text="🌐 Глобальный поиск")],
+        [KeyboardButton(text="🔔 Уведомления"), KeyboardButton(text="⭐ Избранное")],
+        [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="❓ Помощь")],
+        [KeyboardButton(text="♻️ Сбросить историю")],
     ],
     resize_keyboard=True,
     persistent=True,
@@ -3607,6 +3802,115 @@ async def cmd_search(msg: Message):
         return
     enabled = _get_enabled_sources(s)
     await msg.answer("Выбери площадки для поиска:", reply_markup=sources_keyboard(enabled))
+
+
+@dp.message(F.text == "🌐 Глобальный поиск")
+async def cmd_global_search(msg: Message):
+    """Глобальный поиск: все площадки + Telegram-каналы автопродаж города."""
+    uid = msg.from_user.id
+    s = load_settings(uid)
+    if not s.get("region"):
+        await msg.answer("Сначала настрой поиск: /start")
+        return
+
+    # Лимит частоты
+    now_ts = time.time()
+    last = _last_search_at.get(uid, 0)
+    wait_left = SEARCH_COOLDOWN_SEC - (now_ts - last)
+    if wait_left > 0:
+        await msg.answer(f"⏳ Подожди {int(wait_left) + 1} сек перед новым поиском.")
+        return
+    _last_search_at[uid] = now_ts
+
+    region = s["region"]
+    pmin = s.get("price_min", 0)
+    pmax = s.get("price_max", 99_000_000)
+    region_name = REGIONS.get(region, region)
+
+    await msg.answer(
+        f"🌐 Глобальный поиск в {region_name} ({pmin:,}–{pmax:,} ₽)\n"
+        f"Ищу на всех площадках + TG-каналы автопродаж...".replace(",", " ")
+    )
+
+    loop = asyncio.get_event_loop()
+    skipped = load_skipped(uid)
+    seen = load_seen(uid)
+
+    # Запускаем все источники + TG-каналы параллельно
+    scraper_map = {
+        "drom":   lambda: scrape_drom(region, pages=8, price_min=pmin, price_max=pmax),
+        "autoru": lambda: scrape_autoru(region, pages=4, price_min=pmin, price_max=pmax),
+        "avito":  lambda: scrape_avito(region, pages=10, price_min=pmin, price_max=pmax, sort_by_date=False),
+    }
+    tg_task = loop.run_in_executor(None, lambda: scrape_tg_channels(region, pmin, pmax))
+    tasks = [loop.run_in_executor(None, fn) for fn in scraper_map.values()]
+    all_results = await asyncio.gather(*tasks, tg_task, return_exceptions=True)
+
+    items: list[dict] = []
+    src_names = list(scraper_map.keys())
+    stat_parts: list[str] = []
+    for src, batch in zip(src_names, all_results[:-1]):
+        if isinstance(batch, list):
+            items.extend(batch)
+            if batch:
+                stat_parts.append(f"{SOURCE_TAGS.get(src, src)}: {len(batch)}")
+
+    tg_batch = all_results[-1]
+    if isinstance(tg_batch, list) and tg_batch:
+        items.extend(tg_batch)
+        stat_parts.append(f"📢 TG-каналы: {len(tg_batch)}")
+
+    if stat_parts:
+        await msg.answer("📊 " + " | ".join(stat_parts))
+
+    # Дедупликация
+    seen_u: set[str] = set()
+    deduped: list[dict] = []
+    for i in items:
+        u = i.get("url", "")
+        if u and u not in seen_u:
+            seen_u.add(u)
+            deduped.append(i)
+    items = deduped
+
+    # Парсим цену из текста там где не распарсилась
+    for it in items:
+        if not it.get("_price_int") and it.get("price"):
+            p = parse_price(it["price"])
+            if p and 10_000 < p < 99_000_000:
+                it["_price_int"] = p
+
+    suitable = [
+        i for i in items
+        if not is_dealer(i)
+        and in_price_range(i, pmin, pmax)
+        and i.get("url")
+        and i["url"] not in skipped
+        and i["url"] not in seen
+    ]
+    suitable = rank_by_market_price(suitable)
+    suitable.sort(key=lambda x: (
+        0 if x.get("_savings_pct", 0) > 0 else 1,  # ниже рынка первыми
+        -x.get("_savings_pct", 0),
+        -x.get("_hot_score", 0),
+        x.get("_price_int", 999_999_999),
+    ))
+
+    if not suitable:
+        await msg.answer(
+            f"😔 Не нашёл новых объявлений. Нажми ♻️ Сбросить историю и попробуй снова.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+
+    _search_cache[uid] = suitable
+    _save_cache(uid, suitable)
+    analytics.track(
+        "global_search", uid=uid, region=region, price_min=pmin, price_max=pmax,
+        results=len(suitable),
+    )
+    await msg.answer(f"✅ Найдено {len(suitable)} объявлений (включая TG-каналы)!\n📈 Сначала самые выгодные")
+    await send_batch(msg.chat.id, uid, 0)
 
 
 @dp.callback_query(F.data.startswith("toggle_src|"))
@@ -4049,11 +4353,12 @@ async def _ensure_photo(item: dict) -> None:
 
 
 SOURCE_TAGS = {
-    "autoru": "🟠 Auto.ru",
-    "kolesa": "🟢 Kolesa",
-    "bibika": "🟣 Bibika",
-    "avito":  "🔴 Авито",
-    "drom":   "🔵 Дром",
+    "autoru":     "🟠 Auto.ru",
+    "kolesa":     "🟢 Kolesa",
+    "bibika":     "🟣 Bibika",
+    "avito":      "🔴 Авито",
+    "drom":       "🔵 Дром",
+    "tg_channel": "📢 TG-канал",
 }
 
 # Кеш результатов поиска: uid -> list[dict]
@@ -4239,7 +4544,8 @@ async def send_batch(chat_id: int, uid: int, offset: int):
     # сортировке — пользователю важна цена ниже рынка, а не свежесть.
     batch = rank_by_market_price(batch)
     batch.sort(key=lambda x: (
-        x.get("_junk", 0),            # мусорные (1 000 000 км) — в конец
+        x.get("_junk", 0),                              # мусорные (1 000 000 км) — в конец
+        0 if x.get("_savings_pct", 0) > 0 else 1,      # ниже рынка первыми
         -x.get("_savings_pct", 0),
         -x.get("_hot_score", 0),
         x.get("_price_int", 999_999_999),
@@ -4393,11 +4699,12 @@ async def do_search_for_user(uid: int, reply_to):
         and i["url"] not in seen
     ]
     suitable = rank_by_market_price(suitable)
-    # Сортировка: главное — выгода ниже рынка. Дата не важна — пользователю нужна цена.
+    # Сортировка: сначала ниже рынка (по убыванию скидки), затем по рыночной цене.
     suitable.sort(key=lambda x: (
-        -x.get("_savings_pct", 0),   # больше скидка → выше
+        0 if x.get("_savings_pct", 0) > 0 else 1,  # ниже рынка первыми
+        -x.get("_savings_pct", 0),
         -x.get("_hot_score", 0),
-        x.get("_price_int", 999_999_999)
+        x.get("_price_int", 999_999_999),
     ))
 
     if not suitable and already_seen_count > 0:
@@ -4413,9 +4720,10 @@ async def do_search_for_user(uid: int, reply_to):
         ]
         suitable = rank_by_market_price(suitable)
         suitable.sort(key=lambda x: (
+            0 if x.get("_savings_pct", 0) > 0 else 1,  # ниже рынка первыми
             -x.get("_savings_pct", 0),
             -x.get("_hot_score", 0),
-            x.get("_price_int", 999_999_999)
+            x.get("_price_int", 999_999_999),
         ))
         if suitable:
             await reply_to.answer("♻️ История просмотров сброшена — показываю объявления заново.")
