@@ -462,6 +462,31 @@ def format_forecast(f: dict) -> str:
         f"  Итог: <b>{tv_verdict}</b>\n"
     ) if tv_verdict else ""
 
+    # Raw oscillator values
+    rsi    = f.get("rsi", 0.0)
+    macd   = f.get("macd", 0.0)
+    macd_s = f.get("macd_signal", 0.0)
+    adx    = f.get("adx", 0.0)
+    bb_pos = f.get("bb_pos", 0.5)
+    stoch  = f.get("stoch", 0.0)
+
+    rsi_zone  = "🔴 Перекупл." if rsi >= 70 else "🟢 Перепродан." if rsi <= 30 else "⚪ Нейтрал."
+    macd_hint = "🟢 Бычий" if macd > macd_s else "🔴 Медвежий"
+    adx_hint  = f"💪 Сильный" if adx >= 25 else "〰️ Слабый"
+    bb_pct    = round(bb_pos * 100)
+    bb_hint   = "🔴 Верх" if bb_pos >= 0.8 else "🟢 Низ" if bb_pos <= 0.2 else "⚪ Центр"
+    stoch_zone= "🔴 Перекупл." if stoch >= 80 else "🟢 Перепродан." if stoch <= 20 else "⚪ Нейтрал."
+
+    osc_block = (
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔬 <b>Осцилляторы:</b>\n"
+        f"  RSI: <b>{rsi:.1f}</b> — {rsi_zone}\n"
+        f"  MACD: <b>{macd:.4f}</b> — {macd_hint}\n"
+        f"  Stoch RSI: <b>{stoch:.1f}</b> — {stoch_zone}\n"
+        f"  ADX: <b>{adx:.1f}</b> — {adx_hint}\n"
+        f"  Bollinger: <b>{bb_pct}%</b> — {bb_hint}\n"
+    )
+
     if sl and tp1 and tp2 and direction != "FLAT":
         tp1_pct = abs(tp1 - price) / price * 100
         levels_block = (
@@ -481,6 +506,7 @@ def format_forecast(f: dict) -> str:
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📊 Уверенность: <b>{conf}%</b>  <code>{bar}</code>\n"
         f"{levels_block}"
+        f"{osc_block}"
         f"{tv_block}"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"<b>Сигналы:</b>\n{sigs_text}\n"
