@@ -7,7 +7,6 @@ PROMO_CODES = {
         "DAO1M-8MDD4V30",
         "DAO1M-T9NT3W5U",
         "DAO1M-ZBIKCIDK",
-        "DAO1M-WNNHJ7XV",
         "DAO1M-G0FN9XUY",
         "DAO1M-41IBLJH7",
         "DAO1M-5LXO6QJI",

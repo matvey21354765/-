@@ -460,6 +460,49 @@ async def cmd_reload_promos(msg: Message):
     await msg.answer(f"✅ Загружено {total} промокодов (100x1м + 100x3м + 100x6м)")
 
 
+@router.message(Command("revoke_promo"))
+async def cmd_revoke_promo(msg: Message):
+    """Admin: revoke a promo code and remove the subscription of whoever used it.
+    Usage: /revoke_promo DAO1M-WNNHJ7XV"""
+    if msg.from_user.id not in settings.ADMIN_IDS:
+        return
+    parts = msg.text.strip().split(maxsplit=1)
+    if len(parts) < 2:
+        await msg.answer("Использование: /revoke_promo <КОД>")
+        return
+    code = parts[1].strip().upper()
+    from app.models.database import PromoCode, User, AsyncSessionLocal
+    from sqlalchemy import select
+    async with AsyncSessionLocal() as db:
+        res = await db.execute(select(PromoCode).where(PromoCode.code == code))
+        promo = res.scalar_one_or_none()
+        if not promo:
+            await msg.answer(f"❌ Промокод <code>{code}</code> не найден в БД", parse_mode="HTML")
+            return
+        used_by = promo.used_by
+        promo.is_used = False
+        promo.used_by = None
+        promo.used_at = None
+        if used_by:
+            res2 = await db.execute(select(User).where(User.telegram_id == used_by))
+            user = res2.scalar_one_or_none()
+            if user:
+                user.is_subscribed = False
+                user.subscription_ends_at = None
+                await db.commit()
+                await msg.answer(
+                    f"✅ Промокод <code>{code}</code> отозван.\n"
+                    f"Подписка пользователя <code>{used_by}</code> (@{user.username or '—'}) удалена.",
+                    parse_mode="HTML"
+                )
+                return
+        await db.commit()
+    await msg.answer(
+        f"✅ Промокод <code>{code}</code> сброшен (никем не был использован или пользователь не найден).",
+        parse_mode="HTML"
+    )
+
+
 @router.message(Command("recompute"))
 async def cmd_recompute(msg: Message):
     if msg.from_user.id not in settings.ADMIN_IDS:
