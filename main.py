@@ -44,6 +44,28 @@ async def main():
         total = await save_promo_codes()
         logger.info(f"✅ Seeded {total} promo codes")
 
+    # One-time: revoke @aeon_8 subscription and reset promo DAO1M-WNNHJ7XV
+    try:
+        from app.models.database import User
+        async with AsyncSessionLocal() as db:
+            res = await db.execute(select(User).where(User.username == "aeon_8"))
+            bad_user = res.scalar_one_or_none()
+            if bad_user and bad_user.is_subscribed:
+                bad_user.is_subscribed = False
+                bad_user.subscription_ends_at = None
+                await db.commit()
+                logger.info(f"🚫 Revoked subscription for @aeon_8 (id={bad_user.telegram_id})")
+            res2 = await db.execute(select(PromoCode).where(PromoCode.code == "DAO1M-WNNHJ7XV"))
+            promo = res2.scalar_one_or_none()
+            if promo and promo.is_used:
+                promo.is_used = False
+                promo.used_by = None
+                promo.used_at = None
+                await db.commit()
+                logger.info("🚫 Reset promo code DAO1M-WNNHJ7XV")
+    except Exception as e:
+        logger.warning(f"One-time revoke failed: {e}")
+
     bot = Bot(token=settings.BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
 
