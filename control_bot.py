@@ -52,16 +52,16 @@ _free_proxy_cache: list[str] = []
 _free_proxy_cache_time: float = 0.0
 
 # ── Резидентный прокси для запросов к Авито (опционально) ────────
-# Если задан в .env — все запросы к Авито идут через него (чистый IP,
-# не датацентр). Если не задан — работаем как обычно, напрямую.
+# Поддерживает HTTP и SOCKS5. Протокол задаётся через AVITO_PROXY_PROTOCOL.
 AVITO_PROXY_HOST = os.getenv("AVITO_PROXY_HOST", "")
 AVITO_PROXY_PORT = os.getenv("AVITO_PROXY_PORT", "")
 AVITO_PROXY_USER = os.getenv("AVITO_PROXY_USER", "")
 AVITO_PROXY_PASS = os.getenv("AVITO_PROXY_PASS", "")
+AVITO_PROXY_PROTOCOL = os.getenv("AVITO_PROXY_PROTOCOL", "socks5").lower()  # socks5 или http
 AVITO_PROXIES: "dict[str, str] | None" = None
 if AVITO_PROXY_HOST and AVITO_PROXY_PORT:
     _auth = f"{AVITO_PROXY_USER}:{AVITO_PROXY_PASS}@" if AVITO_PROXY_USER else ""
-    _avito_proxy_url = f"http://{_auth}{AVITO_PROXY_HOST}:{AVITO_PROXY_PORT}"
+    _avito_proxy_url = f"{AVITO_PROXY_PROTOCOL}://{_auth}{AVITO_PROXY_HOST}:{AVITO_PROXY_PORT}"
     AVITO_PROXIES = {"http": _avito_proxy_url, "https": _avito_proxy_url}
 
 # ── Регионы ─────────────────────────────────────────────────────
@@ -1651,7 +1651,7 @@ async def _avito_async_init():
         "args": ["--disable-blink-features=AutomationControlled", "--no-sandbox"],
     }
     if AVITO_PROXY_HOST and AVITO_PROXY_PORT:
-        _proxy = {"server": f"http://{AVITO_PROXY_HOST}:{AVITO_PROXY_PORT}"}
+        _proxy = {"server": f"{AVITO_PROXY_PROTOCOL}://{AVITO_PROXY_HOST}:{AVITO_PROXY_PORT}"}
         if AVITO_PROXY_USER:
             _proxy["username"] = AVITO_PROXY_USER
             _proxy["password"] = AVITO_PROXY_PASS
@@ -3740,10 +3740,9 @@ def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max
                     return r2.text
             except Exception:
                 pass
-            # 2. Headless-браузер — пропускаем если используется прокси:
-            # HTTP-прокси не поддерживает CONNECT-туннель для HTTPS (ERR_TUNNEL_CONNECTION_FAILED)
-            if AVITO_PROXIES:
-                return None
+            # 2. Headless-браузер с прокси (SOCKS5 поддерживает HTTPS, HTTP — нет)
+            if AVITO_PROXIES and AVITO_PROXY_PROTOCOL == "http":
+                return None  # HTTP-прокси не поддерживает CONNECT для HTTPS
             html = _avito_fetch_html(fetch_url)
             if html and _page_has_listings(html):
                 return html
@@ -6527,9 +6526,9 @@ async def main():
         try:
             import requests as _rq
             r = _rq.get("https://api.ipify.org", proxies=AVITO_PROXIES, timeout=10)
-            print(f"  [прокси] ✅ работает, IP: {r.text.strip()}")
+            print(f"  [прокси {AVITO_PROXY_PROTOCOL}] ✅ работает, IP: {r.text.strip()}")
         except Exception as e:
-            print(f"  [прокси] ❌ ошибка: {e}")
+            print(f"  [прокси {AVITO_PROXY_PROTOCOL}] ❌ ошибка: {e}")
 
     loop = asyncio.get_event_loop()
     # Единый глобальный монитор — опрашивает всех активных пользователей каждые 2 минуты
