@@ -1400,9 +1400,20 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                     timeout=8,
                 )
                 items = r.json().get("response", {}).get("items", [])
+                _CAR_KEYWORDS = ["продам", "продаю", "продаётся", "авто", "автомобил", "машин",
+                                  "toyota", "honda", "kia", "hyundai", "nissan", "mazda", "bmw",
+                                  "audi", "mercedes", "lada", "vaz", "haval", "geely", "chery",
+                                  "пробег", "двигател", "кузов", "руль"]
+                _SPAM_KEYWORDS = ["реклама", "закажи", "вступай", "подпишись", "канал", "100% заработок",
+                                  "ставки", "казино", "заработ", "нужна реклама", "подписчик"]
                 for post in items:
                     text = post.get("text", "")
                     if len(text) < 30:
+                        continue
+                    text_low = text.lower()
+                    if any(sp in text_low for sp in _SPAM_KEYWORDS):
+                        continue
+                    if not any(k in text_low for k in _CAR_KEYWORDS):
                         continue
                     price = _parse_price(text)
                     if price > 0 and not (price_min <= price <= price_max):
@@ -1465,6 +1476,14 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                     seen_urls.add(href)
                     parent = a.find_parent()
                     text = parent.get_text(" ", strip=True) if parent else ""
+                    text_low = text.lower()
+                    _VK_SPAM = ["реклама", "подпишись", "заработ", "ставки", "казино",
+                                "нужна реклама", "подписчик", "услуги"]
+                    _VK_CAR = ["продам", "продаю", "продаётся", "авто", "машин", "пробег", "двигател"]
+                    if any(sp in text_low for sp in _VK_SPAM):
+                        continue
+                    if not any(k in text_low for k in _VK_CAR):
+                        continue
                     price = _parse_price(text)
                     if price > 0 and not (price_min <= price <= price_max):
                         continue
@@ -3572,15 +3591,18 @@ def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max
             )
 
         def _try_fetch(fetch_url: str) -> str | None:
-            """Пробуем: быстрый прямой запрос → бесплатный headless-браузер. Принимаем только страницы с объявлениями."""
-            # 1. Прямой запрос — отказ приходит быстро (~1-2 сек)
+            """Пробуем: быстрый прямой запрос → headless-браузер (только без прокси)."""
+            # 1. Прямой запрос через прокси (если есть) или напрямую
             try:
                 r2 = _req.get(fetch_url, timeout=8, headers=_HEADERS, proxies=AVITO_PROXIES)
                 if r2.status_code == 200 and _page_has_listings(r2.text):
                     return r2.text
             except Exception:
                 pass
-            # 2. Headless-браузер (Playwright) — бесплатно, без сторонних платных API
+            # 2. Headless-браузер — пропускаем если используется прокси:
+            # HTTP-прокси не поддерживает CONNECT-туннель для HTTPS (ERR_TUNNEL_CONNECTION_FAILED)
+            if AVITO_PROXIES:
+                return None
             html = _avito_fetch_html(fetch_url)
             if html and _page_has_listings(html):
                 return html
@@ -4476,13 +4498,15 @@ async def cmd_settings(msg: Message, state: FSMContext):
     await state.set_state(Setup.category)
 
 
-ALL_SOURCES = ["drom", "autoru", "avito"]
+ALL_SOURCES = ["drom", "autoru", "avito", "vk", "tg"]
 SOURCE_NAMES = {
     "drom":   "🔵 Дром",
     "autoru": "🟠 Auto.ru",
     "kolesa": "🟢 Kolesa",
     "bibika": "🟣 Bibika",
     "avito":  "🔴 Авито",
+    "vk":     "📘 ВКонтакте",
+    "tg":     "✈️ Telegram",
 }
 
 
@@ -5274,6 +5298,7 @@ SOURCE_TAGS = {
     "avito":      "🔴 Авито",
     "drom":       "🔵 Дром",
     "tg_channel": "📢 TG-канал",
+    "tg":         "✈️ Telegram",
     "vk":         "📘 ВКонтакте",
 }
 
@@ -5548,6 +5573,8 @@ async def do_search_for_user(uid: int, reply_to):
         "drom":   lambda: scrape_drom(region, pages=8, price_min=pmin, price_max=pmax),
         "autoru": lambda: scrape_autoru(region, pages=4, price_min=pmin, price_max=pmax),
         "avito":  lambda: scrape_avito(region, pages=10, price_min=pmin, price_max=pmax, sort_by_date=False),
+        "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
+        "tg":     lambda: scrape_tg_channels(region, pmin, pmax),
     }
     tasks = [loop.run_in_executor(None, scraper_map[src]) for src in enabled_sources if src in scraper_map]
     try:
