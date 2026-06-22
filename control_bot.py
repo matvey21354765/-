@@ -3583,6 +3583,24 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             except Exception:
                 return ""
 
+        def _fetch_alt_engines(q: str, proxy=None) -> str:
+            """Резервные поисковики, когда DDG отдаёт 202/429.
+            Mojeek, Brave, Startpage — все индексируют avito.ru и имеют
+            отдельные счётчики лимитов, поэтому повышают надёжность."""
+            engines = [
+                ("https://www.mojeek.com/search", {"q": q}),
+                ("https://search.brave.com/search", {"q": q, "source": "web"}),
+                ("https://lite.duckduckgo.com/lite/", {"q": q, "kl": "ru-ru"}),
+            ]
+            for eurl, eparams in engines:
+                try:
+                    r = _rq.get(eurl, params=eparams, headers=headers, timeout=10, proxies=proxy)
+                    if r.status_code == 200 and "avito.ru" in r.text and len(r.text) > 2000:
+                        return r.text
+                except Exception:
+                    continue
+            return ""
+
         def _parse_serp(html: str) -> list[dict]:
             import urllib.parse as _upq
             out: list[dict] = []
@@ -3727,6 +3745,11 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                 lite_flag = not lite_flag
                 time.sleep(2)
                 html = _fetch_ddg(q, use_lite=lite_flag, proxy=proxy)
+            if not html:
+                # DDG полностью заблокирован — резервные поисковики (Mojeek/Brave)
+                html = _fetch_alt_engines(q, proxy=None)
+                if html:
+                    print(f"  [alt-engine] {brand}: получены данные через резерв")
             if html:
                 batch = _parse_serp(html)
                 added = 0
@@ -6063,24 +6086,45 @@ async def do_search_for_user(uid: int, reply_to):
                     return False
                 return True
             raw_fallback = avito_raw_cached[1] if avito_raw_cached else []
-            unfiltered = [it for it in raw_fallback if _year_budget_ok_fallback(it, pmax)][:30]
-            if unfiltered:
-                items.extend(unfiltered)
+            # Сначала пробуем показать Авито-объявления В БЮДЖЕТЕ (старые/дешёвые,
+            # прошедшие year-фильтр). Это приоритет — пользователь выбрал Авито.
+            in_budget_avito = [
+                it for it in raw_fallback
+                if _year_budget_ok_fallback(it, pmax)
+                and ((not it.get("_price_int")) or (pmin <= it["_price_int"] <= pmax))
+            ][:30]
+            if in_budget_avito:
+                items.extend(in_budget_avito)
                 await reply_to.answer(
-                    f"🔴 Авито: в бюджете {pmin:,}–{pmax:,} ₽ машин нет.\n"
-                    f"Показываю {len(unfiltered)} объявлений без ограничения цены — "
-                    f"расширь бюджет в настройках поиска."
+                    f"🔴 Авито: показываю {len(in_budget_avito)} подходящих объявлений."
                 )
-        else:
-            # Авито реально не ответил — добавляем Дром
-            print(f"  [fallback] Авито вернул 0 — добавляем Дром")
+
+        # Гарантируем результат: если в бюджете ничего нет — добавляем Дром
+        # (Дром работает с Railway IP, у него реальные цены, фото и описания).
+        avito_now = sum(
+            1 for i in items
+            if i.get("source") == "avito" and not is_dealer(i)
+            and in_price_range(i, pmin, pmax) and i.get("url")
+            and i["url"] not in skipped and i["url"] not in seen
+        )
+        if avito_now == 0:
+            print(f"  [fallback] в бюджете {pmin}-{pmax}₽ на Авито пусто — добавляем Дром")
             try:
                 drom_fallback = await loop.run_in_executor(
                     None, lambda: scrape_drom(region, pages=4, price_min=pmin, price_max=pmax)
                 )
                 if drom_fallback:
                     items.extend(drom_fallback)
-                    await reply_to.answer(f"🔵 Авито недоступен с текущего IP, показываю объявления с Дрома: {len(drom_fallback)}")
+                    if avito_raw_count > 0:
+                        await reply_to.answer(
+                            f"🔴 Авито: в бюджете {pmin:,}–{pmax:,} ₽ подходящих машин нет.\n"
+                            f"🔵 Показываю {len(drom_fallback)} объявлений с Дрома (цена, фото, описание).".replace(",", " ")
+                        )
+                    else:
+                        await reply_to.answer(
+                            f"🔵 Авито временно недоступен — показываю {len(drom_fallback)} объявлений с Дрома "
+                            f"(цена, фото, описание)."
+                        )
             except Exception as e:
                 print(f"  [fallback] Дром ошибка: {e}")
 
