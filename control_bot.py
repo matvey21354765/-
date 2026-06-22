@@ -3070,6 +3070,39 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             print(f"  [ScraperAPI] стр.{p}: {e}")
         return []
 
+    def _try_scraperapi_fast(p: int) -> list[dict]:
+        """Быстрый ScraperAPI БЕЗ JS-рендера — Авито отдаёт __NEXT_DATA__ прямо в HTML,
+        поэтому рендер не нужен. Резидентные IP ScraperAPI Авито не блокирует — самый
+        надёжный метод. Без render укладывается в окно 22с."""
+        if not SCRAPER_API_KEY:
+            return []
+        import requests as _req
+        url = f"https://www.avito.ru/{slug}/avtomobili"
+        params_str = "seller_type=1"
+        if p > 1:
+            params_str += f"&p={p}"
+        if price_min > 0:
+            params_str += f"&pmin={price_min}"
+        if price_max < 99_000_000:
+            params_str += f"&pmax={price_max}"
+        full_url = f"{url}?{params_str}"
+        # Пробуем сначала premium (резидентные RU IP), затем обычный
+        for opts in ({"premium": "true", "country_code": "ru"}, {"country_code": "ru"}):
+            try:
+                r = _req.get("http://api.scraperapi.com", params={
+                    "api_key": SCRAPER_API_KEY, "url": full_url, **opts,
+                }, timeout=14)
+                if r.status_code == 200 and ('"urlPath"' in r.text or '__NEXT_DATA__' in r.text or 'data-marker="item"' in r.text):
+                    result = _parse_avito_html(r.text, slug, today)
+                    if result:
+                        print(f"  [ScraperAPI-fast] стр.{p}: {len(result)} объявлений ({'premium' if 'premium' in opts else 'std'})")
+                        return result
+                else:
+                    print(f"  [ScraperAPI-fast] стр.{p}: HTTP {r.status_code if r else '?'}, нет данных")
+            except Exception as e:
+                print(f"  [ScraperAPI-fast] стр.{p}: {str(e)[:50]}")
+        return []
+
     def _try_curl_cffi(p: int) -> list[dict]:
         """curl_cffi — точная имитация TLS-отпечатка Chrome. Обходит большинство анти-бот систем."""
         try:
@@ -3613,7 +3646,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
     # free_proxies даёт настоящую страницу Авито (десятки объявлений), DuckDuckGo —
     # ещё несколько. Запускаем ВСЁ параллельно и СЛИВАЕМ результаты, а не берём
     # первый ответивший метод (иначе теряем большие пачки, что приходят чуть позже).
-    all_methods = [_try_free_proxies, _try_yandex_snippets, _try_curl_cffi, _try_cs_web, _try_mobile_site, _try_web_html, _try_avito_public_api, _try_avito_rss, _try_googlebot_ua, _try_avito_lite, _try_scraperapi, _try_avito_json_api]
+    all_methods = [_try_scraperapi_fast, _try_free_proxies, _try_yandex_snippets, _try_curl_cffi, _try_cs_web, _try_mobile_site, _try_web_html, _try_avito_public_api, _try_avito_rss, _try_googlebot_ua, _try_avito_lite, _try_scraperapi, _try_avito_json_api]
     _ex = _TPE(max_workers=len(all_methods))
     merged: dict[str, dict] = {}
     _soft_deadline = time.time() + 22
@@ -6751,7 +6784,7 @@ async def main():
         except Exception:
             BOT_USERNAME = "PerekupDriveBot"
     print("✅ Авто-брокер бот запущен!")
-    print("  [ВЕРСИЯ] 2026-06-22-v9 :: прогрев прокси при старте, приоритет рабочих прокси")
+    print("  [ВЕРСИЯ] 2026-06-22-v10 :: быстрый ScraperAPI (резидентные IP) + прогрев прокси")
 
     # Логируем Railway IP (нужен для добавления в whitelist прокси)
     try:
