@@ -3841,12 +3841,12 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
                 items = cached[1]
                 print(f"  [Авито] пусто → устаревший кэш: {len(items)} шт")
 
-    # Фильтр по бюджету в памяти (для стале-кэша с другим бакетом)
-    # Также выбрасываем объявления без цены (_price_int=0) — они не могут
-    # правильно отображаться и проходят через in_price_range по умолчанию.
+    # Фильтр по бюджету в памяти.
+    # Объявления без цены (_price_int=0) — пропускаем через фильтр, чтобы
+    # они всё равно попали в результат (цену запросим при открытии ссылки).
     out = [
         it for it in items
-        if it.get("_price_int", 0) and price_min <= it["_price_int"] <= price_max
+        if (not it.get("_price_int")) or (price_min <= it["_price_int"] <= price_max)
     ]
     return out
 
@@ -5930,17 +5930,34 @@ async def do_search_for_user(uid: int, reply_to):
                 avito_count = len(batch)
                 break
     if avito_count == 0 and avito_enabled and "drom" not in enabled_sources:
-        # Авито вернул 0 — пробуем Дром как fallback в любом случае
-        print(f"  [fallback] Авито вернул 0 — добавляем Дром")
-        try:
-            drom_fallback = await loop.run_in_executor(
-                None, lambda: scrape_drom(region, pages=4, price_min=pmin, price_max=pmax)
-            )
-            if drom_fallback:
-                items.extend(drom_fallback)
-                await reply_to.answer(f"🔵 Авито не ответил, показываю объявления с Дрома: {len(drom_fallback)}")
-        except Exception as e:
-            print(f"  [fallback] Дром ошибка: {e}")
+        # Проверяем: Авито реально не ответил, или ответил но нет машин в бюджете?
+        avito_raw_cached = _AVITO_REGION_CACHE.get(region)
+        avito_raw_count = len(avito_raw_cached[1]) if avito_raw_cached else 0
+        if avito_raw_count > 0:
+            # Авито ответил — просто нет машин в этом бюджете.
+            # Показываем то, что есть (за пределами бюджета), со снятым фильтром,
+            # иначе пользователь думает что бот сломан.
+            print(f"  [fallback] Авито ответил ({avito_raw_count} объявлений), но ни одно не в бюджете {pmin}–{pmax}₽")
+            unfiltered = avito_raw_cached[1][:30] if avito_raw_cached else []
+            if unfiltered:
+                items.extend(unfiltered)
+                await reply_to.answer(
+                    f"🔴 Авито: в бюджете {pmin:,}–{pmax:,} ₽ машин нет.\n"
+                    f"Показываю {len(unfiltered)} объявлений без ограничения цены — "
+                    f"расширь бюджет в настройках поиска."
+                )
+        else:
+            # Авито реально не ответил — добавляем Дром
+            print(f"  [fallback] Авито вернул 0 — добавляем Дром")
+            try:
+                drom_fallback = await loop.run_in_executor(
+                    None, lambda: scrape_drom(region, pages=4, price_min=pmin, price_max=pmax)
+                )
+                if drom_fallback:
+                    items.extend(drom_fallback)
+                    await reply_to.answer(f"🔵 Авито недоступен с текущего IP, показываю объявления с Дрома: {len(drom_fallback)}")
+            except Exception as e:
+                print(f"  [fallback] Дром ошибка: {e}")
 
     dealer_count = sum(1 for i in items if is_dealer(i))
     price_count = sum(1 for i in items if not is_dealer(i) and not in_price_range(i, pmin, pmax))
@@ -6827,7 +6844,7 @@ async def main():
         except Exception:
             BOT_USERNAME = "PerekupDriveBot"
     print("✅ Авто-брокер бот запущен!")
-    print("  [ВЕРСИЯ] 2026-06-22-v13 :: 3 поисковика (Brave+ddglite+DDG) + фон.прогрев кэша для 50-100 юзеров")
+    print("  [ВЕРСИЯ] 2026-06-22-v14 :: умный fallback + показ Авито вне бюджета + no-price items не фильтруются")
 
     # Логируем Railway IP (нужен для добавления в whitelist прокси)
     try:
