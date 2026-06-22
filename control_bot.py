@@ -3802,7 +3802,14 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
     # free_proxies даёт настоящую страницу Авито (десятки объявлений), DuckDuckGo —
     # ещё несколько. Запускаем ВСЁ параллельно и СЛИВАЕМ результаты, а не берём
     # первый ответивший метод (иначе теряем большие пачки, что приходят чуть позже).
-    all_methods = [_try_scraperapi_fast, _try_free_proxies, _try_yandex_snippets, _try_curl_cffi, _try_cs_web, _try_mobile_site, _try_web_html, _try_avito_public_api, _try_avito_rss, _try_googlebot_ua, _try_avito_lite, _try_scraperapi, _try_avito_json_api]
+    if AVITO_PROXIES:
+        # Платный ротирующийся прокси открывает Авито напрямую → используем ТОЛЬКО
+        # прямые методы (реальные цены, фото, описания). DDG/бесплатные прокси/
+        # scraperapi дают объявления без цены — с рабочим прокси они не нужны и
+        # лишь засоряют выдачу машинами без цены и не из бюджета.
+        all_methods = [_try_web_html, _try_cs_web, _try_mobile_site, _try_avito_public_api, _try_avito_json_api, _try_curl_cffi, _try_avito_rss]
+    else:
+        all_methods = [_try_scraperapi_fast, _try_free_proxies, _try_yandex_snippets, _try_curl_cffi, _try_cs_web, _try_mobile_site, _try_web_html, _try_avito_public_api, _try_avito_rss, _try_googlebot_ua, _try_avito_lite, _try_scraperapi, _try_avito_json_api]
     _ex = _TPE(max_workers=len(all_methods))
     merged: dict[str, dict] = {}
     _soft_deadline = time.time() + 35
@@ -3936,7 +3943,14 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
     cache_key = region
     now = time.time()
     cached = _AVITO_REGION_CACHE.get(cache_key)
-    if cached and (now - cached[0]) < _AVITO_REGION_CACHE_TTL:
+    # Если настроен платный прокси, но кэш состоит из старых записей без цены
+    # (DDG-мусор из прошлых версий) — игнорируем кэш и скрейпим заново с ценами.
+    _cache_is_priceless = bool(
+        cached and AVITO_PROXIES
+        and cached[1]
+        and sum(1 for i in cached[1] if i.get("_price_int", 0)) < max(1, len(cached[1]) // 2)
+    )
+    if cached and (now - cached[0]) < _AVITO_REGION_CACHE_TTL and not _cache_is_priceless:
         items = cached[1]
         print(f"  [Авито] кэш {cache_key}: {len(items)} объявлений (возраст {int(now-cached[0])}с)")
     else:
@@ -3968,12 +3982,19 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
                 print(f"  [Авито] пусто → устаревший кэш: {len(items)} шт")
 
     # Фильтр по бюджету в памяти.
-    # Объявления без цены (_price_int=0) — пропускаем через фильтр, чтобы
-    # они всё равно попали в результат (цену запросим при открытии ссылки).
-    out = [
-        it for it in items
-        if (not it.get("_price_int")) or (price_min <= it["_price_int"] <= price_max)
-    ]
+    # С рабочим прокси Авито отдаёт реальные цены, поэтому объявления БЕЗ цены —
+    # это мусор (DDG/устаревший кэш). Требуем цену и строгое попадание в бюджет.
+    if AVITO_PROXIES:
+        out = [
+            it for it in items
+            if it.get("_price_int") and (price_min <= it["_price_int"] <= price_max)
+        ]
+    else:
+        # Без прокси цену часто не достать — пропускаем безценовые как кандидатов.
+        out = [
+            it for it in items
+            if (not it.get("_price_int")) or (price_min <= it["_price_int"] <= price_max)
+        ]
 
     # Fix A: Hard post-merge year/budget filter — eliminates DDG results with
     # price_int=0 that are obviously wrong year/budget combos (e.g. 2025 EXEED
