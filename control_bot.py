@@ -3346,7 +3346,8 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
             "Referer": "https://www.avito.ru/",
         }
-        for proxy_addr in free_proxies[:10]:
+
+        def _try_one(proxy_addr: str) -> list[dict]:
             proxies = {"http": f"http://{proxy_addr}", "https": f"http://{proxy_addr}"}
             try:
                 r = _rq.get(url, params=params, headers=_headers, proxies=proxies, timeout=8)
@@ -3356,7 +3357,27 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                         print(f"  [FreeProxy] {proxy_addr}: {len(result)} объявлений")
                         return result
             except Exception:
-                continue
+                pass
+            return []
+
+        # Пробуем до 16 бесплатных прокси ПАРАЛЛЕЛЬНО и берём первый рабочий —
+        # последовательно это было до 80с, параллельно ~8с.
+        from concurrent.futures import ThreadPoolExecutor as _TPEfp, as_completed as _acfp
+        candidates = free_proxies[:16]
+        if not candidates:
+            return []
+        with _TPEfp(max_workers=min(16, len(candidates))) as _exfp:
+            futs = [_exfp.submit(_try_one, pa) for pa in candidates]
+            try:
+                for fut in _acfp(futs, timeout=12):
+                    try:
+                        res = fut.result()
+                    except Exception:
+                        res = []
+                    if res:
+                        return res
+            except Exception:
+                pass
         return []
 
     def _try_yandex_snippets(p: int) -> list[dict]:
@@ -3389,13 +3410,9 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             price_q = f" до {price_max//1000}тыс"
 
         # Запросы по маркам — так поисковик отдаёт отдельные объявления, а не
-        # страницы-каталоги (общий запрос «продам» возвращает в основном категории).
-        _popular_brands = [
-            "lada", "kia", "hyundai", "toyota", "volkswagen", "nissan",
-            "renault", "ford", "chevrolet", "skoda", "mazda", "mercedes",
-        ]
+        # страницы-каталоги. Мало запросов (6), иначе DuckDuckGo душит нас 202/403.
+        _popular_brands = ["lada", "kia", "hyundai", "toyota", "nissan", "volkswagen"]
         queries = [f"site:avito.ru/{slug}/avtomobili {b}" for b in _popular_brands]
-        queries.append(f"site:avito.ru/{slug}/avtomobili продам частник")
 
         results_out: list[dict] = []
         seen_urls: set[str] = set()
@@ -3487,7 +3504,13 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             else:  # yandex
                 url = "https://yandex.ru/search/"
                 params = {"text": q, "lr": "225", "p": p - 1}
-            routes = [AVITO_PROXIES, None] if AVITO_PROXIES else [None]
+            # DuckDuckGo душит при множестве запросов: один маршрут (прокси) + джиттер,
+            # чтобы не ловить 202/403. Остальные — прокси, затем напрямую.
+            if engine == "duckduckgo":
+                routes = [AVITO_PROXIES] if AVITO_PROXIES else [None]
+                time.sleep(random.uniform(0.2, 1.2))
+            else:
+                routes = [AVITO_PROXIES, None] if AVITO_PROXIES else [None]
             for proxies in routes:
                 try:
                     r = _rq.get(url, params=params, headers=headers, timeout=10, proxies=proxies)
@@ -3567,9 +3590,10 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             print(f"  [duckduckgo] q={q[-20:]!r}: {len(batch)} объявлений")
             return batch
 
-        # Все запросы по маркам — ПАРАЛЛЕЛЬНО (иначе 13 запросов по очереди = слишком долго)
+        # Запросы по маркам параллельно, но всего 3 одновременно — DuckDuckGo
+        # блокирует при большем числе одновременных запросов (202/403).
         from concurrent.futures import ThreadPoolExecutor as _TPE2, as_completed as _ac2
-        with _TPE2(max_workers=8) as _ex2:
+        with _TPE2(max_workers=3) as _ex2:
             futs = [_ex2.submit(_fetch_and_parse, q) for q in queries]
             try:
                 for fut in _ac2(futs, timeout=25):
@@ -3591,38 +3615,42 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             print(f"  [Яндекс/Bing] итого: {len(results_out)} объявлений Авито")
         return results_out
 
-    all_methods = [_try_yandex_snippets, _try_curl_cffi, _try_avito_rss, _try_cs_web, _try_mobile_site, _try_web_html, _try_avito_public_api, _try_free_proxies, _try_googlebot_ua, _try_yandex_search, _try_avito_lite, _try_scraperapi, _try_avito_json_api]
+    # free_proxies даёт настоящую страницу Авито (десятки объявлений), DuckDuckGo —
+    # ещё несколько. Запускаем ВСЁ параллельно и СЛИВАЕМ результаты, а не берём
+    # первый ответивший метод (иначе теряем большие пачки, что приходят чуть позже).
+    all_methods = [_try_free_proxies, _try_yandex_snippets, _try_curl_cffi, _try_cs_web, _try_mobile_site, _try_web_html, _try_avito_public_api, _try_avito_rss, _try_googlebot_ua, _try_avito_lite, _try_scraperapi, _try_avito_json_api]
     _ex = _TPE(max_workers=len(all_methods))
+    merged: dict[str, dict] = {}
+    _soft_deadline = time.time() + 22
     try:
         fut_map = {_ex.submit(m, 1): m for m in all_methods}
-        for fut in _as_completed(fut_map):
+        for fut in _as_completed(fut_map, timeout=32):
             try:
                 b = fut.result()
             except Exception:
                 b = []
-            if b and working_method is None:
-                working_method = fut_map[fut]
-                page1_batch = b
-                print(f"  [Авито API] рабочий метод: {working_method.__name__}")
+            if b:
+                added = 0
+                for it in b:
+                    u = it.get("url")
+                    if u and u not in merged:
+                        merged[u] = it
+                        added += 1
+                if added:
+                    print(f"  [Авито API] {fut_map[fut].__name__}: +{added} (всего {len(merged)})")
+            # достаточно набрали или вышло время — больше не ждём медленные методы
+            if len(merged) >= 40 or (merged and time.time() > _soft_deadline):
                 break
+    except Exception as e:
+        print(f"  [Авито API] пул: {str(e)[:60]}")
     finally:
         _ex.shutdown(wait=False)
 
-    if not working_method:
+    results = list(merged.values())
+    if not results:
         print(f"  [Авито API] стр.1: 0 объявлений")
         return results
-
-    results.extend(page1_batch)
-
-    # Остальные страницы добираем рабочим методом последовательно
-    for p in range(2, pages + 1):
-        batch = working_method(p)
-        results.extend(batch)
-        if not batch:
-            print(f"  [Авито API] стр.{p}: 0 объявлений")
-            break
-        time.sleep(0.5)
-
+    print(f"  [Авито API] объединено {len(results)} объявлений из всех методов")
     return results
 
 
@@ -6621,7 +6649,7 @@ async def main():
         except Exception:
             BOT_USERNAME = "PerekupDriveBot"
     print("✅ Авто-брокер бот запущен!")
-    print("  [ВЕРСИЯ] 2026-06-22-v6 :: Авито DuckDuckGo параллельно по маркам")
+    print("  [ВЕРСИЯ] 2026-06-22-v7 :: Авито: free-proxy(44) + DDG, слияние всех методов")
 
     # Логируем Railway IP (нужен для добавления в whitelist прокси)
     try:
