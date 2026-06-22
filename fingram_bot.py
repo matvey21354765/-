@@ -55,7 +55,6 @@ def add_iq(uid: int, points: int, badge: str = None) -> int:
 
 
 def check_streak(uid: int) -> tuple[int, int]:
-    """Проверяет ежедневный стрик. Возвращает (streak, bonus_iq)."""
     p = get_profile(uid)
     today = date.today()
     last = p.get("last_login")
