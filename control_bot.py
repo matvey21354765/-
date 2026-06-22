@@ -3468,17 +3468,21 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                     or "подтвердите, что запросы" in low)
 
         def _fetch_serp(engine: str, q: str) -> str:
-            """Запрашивает поисковик. Через РФ-прокси (нет капчи для RU IP), затем напрямую."""
-            if engine == "yandex":
-                url = "https://yandex.ru/search/"
-                params = {"text": q, "lr": "225", "p": p - 1}
+            """Запрашивает поисковик. Через РФ-прокси (нет капчи для RU IP), затем напрямую.
+            Bing и DuckDuckGo отдают реальный HTML с результатами без JS — в отличие
+            от Яндекса, который без JavaScript присылает пустой шаблон."""
+            if engine == "bing":
+                url = "https://www.bing.com/search"
+                params = {"q": q, "setlang": "ru", "cc": "RU", "first": (p - 1) * 10}
+            elif engine == "duckduckgo":
+                url = "https://html.duckduckgo.com/html/"
+                params = {"q": q, "kl": "ru-ru", "s": (p - 1) * 30}
             elif engine == "google":
                 url = "https://www.google.com/search"
                 params = {"q": q, "hl": "ru", "num": "20", "start": (p - 1) * 10}
-            else:  # bing
-                url = "https://www.bing.com/search"
-                params = {"q": q, "setlang": "ru", "cc": "RU", "first": (p - 1) * 10}
-            # Сначала через российский прокси — RU IP не получает капчу от Яндекса
+            else:  # yandex
+                url = "https://yandex.ru/search/"
+                params = {"text": q, "lr": "225", "p": p - 1}
             routes = [AVITO_PROXIES, None] if AVITO_PROXIES else [None]
             for proxies in routes:
                 try:
@@ -3498,7 +3502,9 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         for q in queries:
             if len(results_out) >= 15 or time.time() > _deadline:
                 break
-            for search_engine in ["yandex", "bing"]:
+            # Bing и DuckDuckGo первыми — они отдают реальные результаты без JS.
+            # Яндекс последним: через requests он присылает пустой JS-шаблон.
+            for search_engine in ["bing", "duckduckgo", "yandex"]:
                 if time.time() > _deadline:
                     break
                 try:
@@ -3510,6 +3516,16 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                     found_urls = _extract_avito_urls(html)
                     print(f"  [{search_engine}] {len(html):,}б, URL Авито: {len(found_urls)}")
 
+                    # Декодируем HTML для поиска контекста (DuckDuckGo кодирует ссылки
+                    # в uddg=, поэтому по сырому html позицию ссылки не найти)
+                    import urllib.parse as _upq
+                    ctx_html = html
+                    for _ in range(2):
+                        try:
+                            ctx_html = _upq.unquote(ctx_html)
+                        except Exception:
+                            break
+
                     for url in found_urls:
                         clean_url = url.split("?")[0]
                         if clean_url in seen_urls:
@@ -3517,8 +3533,8 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                         seen_urls.add(clean_url)
 
                         # Ищем текст вокруг этого URL (±500 символов) для парсинга цены/заголовка
-                        pos = html.find(url)
-                        context = html[max(0, pos-300):pos+500] if pos >= 0 else ""
+                        pos = ctx_html.find(url)
+                        context = ctx_html[max(0, pos-300):pos+500] if pos >= 0 else ""
                         # Убираем HTML теги
                         context_clean = re.sub(r"<[^>]+>", " ", context)
                         context_clean = re.sub(r"&[a-z]+;", " ", context_clean)
@@ -3537,7 +3553,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                         # Фото: ищем CDN-картинку рядом с объявлением (Яндекс-превью или avito.st —
                         # эти хосты не блокируются, в отличие от самой страницы avito.ru)
                         photo_url = ""
-                        wide = html[max(0, pos-800):pos+1200] if pos >= 0 else ""
+                        wide = ctx_html[max(0, pos-800):pos+1200] if pos >= 0 else ""
                         img_m = re.search(
                             r'(https?:)?//(?:avatars\.mds\.yandex\.net|[a-z0-9.]*avito\.st|[a-z0-9.]*img\.avito[.\w]*)/[^\s"\'<>]+',
                             wide,
@@ -6601,7 +6617,7 @@ async def main():
         except Exception:
             BOT_USERNAME = "PerekupDriveBot"
     print("✅ Авто-брокер бот запущен!")
-    print("  [ВЕРСИЯ] 2026-06-22-v3 :: Авито через Яндекс (decode-all + образец)")
+    print("  [ВЕРСИЯ] 2026-06-22-v4 :: Авито через Bing+DuckDuckGo (Яндекс=JS-шелл)")
 
     # Логируем Railway IP (нужен для добавления в whitelist прокси)
     try:
@@ -6626,29 +6642,30 @@ async def main():
                 print(f"  [Авито тест] HTTP {ra.status_code}, {len(ra.text):,}б, объявления: {'✅ да' if has_listings else '❌ нет (капча/блок)'}")
             except Exception as ea:
                 print(f"  [Авито тест] ❌ {ea}")
-            # Тест Яндекса через прокси — это рабочий путь к Авито (обход блокировки)
-            try:
-                ry = _rq.get("https://yandex.ru/search/",
-                             params={"text": "site:avito.ru/moskva/avtomobili продам", "lr": "225"},
-                             proxies=AVITO_PROXIES, timeout=12,
-                             headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"})
-                low = ry.text[:5000].lower()
-                captcha = "showcaptcha" in low or "/sorry/" in low or "подтвердите" in low
-                import urllib.parse as _up
-                _decoded = ry.text
-                for _ in range(2):
-                    _decoded = _up.unquote(_decoded)
-                n_avito = _decoded.lower().count("avito")
-                n_urls = len(set(re.findall(r'avito\.ru/[a-z0-9_.-]+/avtomobili/[a-z0-9_.%-]*\d{6,}', _decoded, re.I)))
-                print(f"  [Яндекс тест] HTTP {ry.status_code}, капча: {'❌ да' if captcha else 'нет'}, размер: {len(ry.text):,}б, 'avito' встреч: {n_avito}, объявлений: {n_urls}")
-                # Если avito есть в HTML, но объявлений 0 — покажем образец формата
-                if n_avito > 0 and n_urls == 0:
-                    idx = _decoded.lower().find("avito.ru/")
-                    if idx >= 0:
-                        sample = _decoded[idx:idx+120].replace("\n", " ")
-                        print(f"  [Яндекс тест] образец ссылки: {sample}")
-            except Exception as ey:
-                print(f"  [Яндекс тест] ❌ {ey}")
+            # Тест поисковиков через прокси — рабочий путь к Авито в обход блокировки.
+            # Пробуем все три и смотрим, кто реально отдаёт ссылки на объявления.
+            import urllib.parse as _up
+            _ua = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"}
+            _engines = [
+                ("bing", "https://www.bing.com/search", {"q": "site:avito.ru/moskva/avtomobili продам", "cc": "RU"}),
+                ("duckduckgo", "https://html.duckduckgo.com/html/", {"q": "site:avito.ru/moskva/avtomobili продам", "kl": "ru-ru"}),
+                ("yandex", "https://yandex.ru/search/", {"text": "site:avito.ru/moskva/avtomobili продам", "lr": "225"}),
+            ]
+            for _eng, _url, _params in _engines:
+                try:
+                    rt = _rq.get(_url, params=_params, proxies=AVITO_PROXIES, timeout=12, headers=_ua)
+                    _dec = rt.text
+                    for _ in range(2):
+                        _dec = _up.unquote(_dec)
+                    n_avito = _dec.lower().count("avito")
+                    n_urls = len(set(re.findall(r'avito\.ru/[a-z0-9_.-]+/avtomobili/[a-z0-9_.%-]*\d{6,}', _dec, re.I)))
+                    print(f"  [{_eng} тест] HTTP {rt.status_code}, размер: {len(rt.text):,}б, 'avito': {n_avito}, объявлений: {n_urls}")
+                    if n_avito > 0 and n_urls == 0:
+                        idx = _dec.lower().find("avito.ru/")
+                        if idx >= 0:
+                            print(f"  [{_eng} тест] образец: {_dec[idx:idx+110].replace(chr(10), ' ')}")
+                except Exception as ey:
+                    print(f"  [{_eng} тест] ❌ {str(ey)[:80]}")
         except Exception as e:
             print(f"  [прокси {AVITO_PROXY_PROTOCOL}] ❌ ошибка: {e}")
             print(f"  [прокси] Добавь Railway IP в whitelist на сайте провайдера прокси!")
