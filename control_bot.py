@@ -3398,16 +3398,20 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         _price_re = re.compile(r"(\d[\d\s]{2,8})\s*(?:₽|тыс\.?\s*р(?:уб)?\.?|руб\.?)", re.I)
         _year_re = re.compile(r"\b(19[5-9]\d|20[012]\d)\b")
         # URL объявлений Авито. Реальный формат:
-        # avito.ru/{город}/avtomobili/{марка_модель_год}_{ID из 6+ цифр}
-        # ID идёт после "_", путь содержит сегмент /avtomobili/. Город — любой
-        # (фильтруем по нужному slug при добавлении), т.к. ищем по запросу города.
+        # avito.ru/{город}/avtomobili/{марка_модель_год}_{ID из 7+ цифр}
+        # Путь содержит сегмент /avtomobili/ и заканчивается длинным числовым ID.
+        # Город — любой (фильтруем по нужному slug при добавлении).
         _avito_url_re = re.compile(
-            r'(?:https?://)?(?:www\.|m\.)?avito\.ru/[a-z0-9_-]+/avtomobili/[a-z0-9_.-]+_\d{6,}',
+            r'(?:https?://)?(?:www\.|m\.)?avito\.ru/[a-z0-9_.-]+/avtomobili/[a-z0-9_.%-]*\d{6,}',
             re.I,
         )
 
         def _extract_avito_urls(html: str) -> list[str]:
-            """Извлекает URL объявлений Авито из сырого HTML включая редиректы Яндекса."""
+            """
+            Максимально надёжно вытаскивает URL объявлений Авито из выдачи Яндекса.
+            Яндекс прячет ссылки в редиректах /clck/ с двойным URL-кодированием,
+            поэтому раскодируем ВЕСЬ HTML дважды и ищем по нему.
+            """
             import urllib.parse
             found = []
             seen = set()
@@ -3415,29 +3419,25 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             def _add(raw: str):
                 if not raw.startswith("http"):
                     raw = "https://" + raw
-                clean = raw.split("?")[0].rstrip("/")
-                # Оставляем только нужный город (если slug известен) — чтобы
-                # не показывать машины из других городов
+                clean = raw.split("?")[0].split("#")[0].rstrip("/")
                 if slug and f"/{slug}/" not in clean:
                     return
                 if clean not in seen:
                     seen.add(clean)
                     found.append(clean)
 
-            # 1. Прямые URL в HTML
-            for m in _avito_url_re.finditer(html):
-                _add(m.group(0))
-            # 2. URL внутри редиректов Яндекса (jsredir url=..., href=...) — могут быть
-            #    закодированы один или два раза, поэтому раскодируем дважды
-            for enc_m in re.finditer(r'(?:url|href|to)=([^&"\'> ]{15,})', html):
-                token = enc_m.group(1)
-                for _ in range(2):
-                    try:
-                        token = urllib.parse.unquote(token)
-                    except Exception:
-                        break
-                    for m2 in _avito_url_re.finditer(token):
-                        _add(m2.group(0))
+            # Раскодируем весь HTML дважды — обнажает ссылки в редиректах Яндекса
+            decoded = html
+            for _ in range(2):
+                for m in _avito_url_re.finditer(decoded):
+                    _add(m.group(0))
+                try:
+                    nxt = urllib.parse.unquote(decoded)
+                except Exception:
+                    break
+                if nxt == decoded:
+                    break
+                decoded = nxt
             return found
 
         def _parse_price_snip(text: str) -> int:
@@ -6634,9 +6634,18 @@ async def main():
                 low = ry.text[:5000].lower()
                 captcha = "showcaptcha" in low or "/sorry/" in low or "подтвердите" in low
                 import urllib.parse as _up
-                _decoded = _up.unquote(_up.unquote(ry.text))
-                n_urls = len(set(re.findall(r'avito\.ru/[a-z0-9_-]+/avtomobili/[a-z0-9_.-]+_\d{6,}', _decoded, re.I)))
-                print(f"  [Яндекс тест] HTTP {ry.status_code}, капча: {'❌ да' if captcha else 'нет'}, объявлений Авито: {n_urls}")
+                _decoded = ry.text
+                for _ in range(2):
+                    _decoded = _up.unquote(_decoded)
+                n_avito = _decoded.lower().count("avito")
+                n_urls = len(set(re.findall(r'avito\.ru/[a-z0-9_.-]+/avtomobili/[a-z0-9_.%-]*\d{6,}', _decoded, re.I)))
+                print(f"  [Яндекс тест] HTTP {ry.status_code}, капча: {'❌ да' if captcha else 'нет'}, размер: {len(ry.text):,}б, 'avito' встреч: {n_avito}, объявлений: {n_urls}")
+                # Если avito есть в HTML, но объявлений 0 — покажем образец формата
+                if n_avito > 0 and n_urls == 0:
+                    idx = _decoded.lower().find("avito.ru/")
+                    if idx >= 0:
+                        sample = _decoded[idx:idx+120].replace("\n", " ")
+                        print(f"  [Яндекс тест] образец ссылки: {sample}")
             except Exception as ey:
                 print(f"  [Яндекс тест] ❌ {ey}")
         except Exception as e:
