@@ -3929,19 +3929,27 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
     # Fix A: Hard post-merge year/budget filter — eliminates DDG results with
     # price_int=0 that are obviously wrong year/budget combos (e.g. 2025 EXEED
     # in a 0–100k budget search).
+    _title_year_re = re.compile(r'\b(19[5-9]\d|20[012]\d)\b')
+
     def _year_budget_ok(it: dict, pmax: int) -> bool:
         y = it.get("_year") or it.get("year") or 0
         try:
             y = int(str(y)[:4])
         except Exception:
             y = 0
-        if y >= 2023 and pmax < 1_000_000:
+        # Если год не в поле _year — ищем в заголовке (напр. "Granta 1.6 MT, 2026")
+        if y == 0:
+            title = it.get("title", "") + " " + it.get("url", "")
+            ym = _title_year_re.search(title)
+            if ym:
+                y = int(ym.group(1))
+        if y >= 2023 and pmax < 1_500_000:
             return False
-        if y >= 2021 and pmax < 600_000:
+        if y >= 2021 and pmax < 700_000:
             return False
-        if y >= 2019 and pmax < 300_000:
+        if y >= 2019 and pmax < 350_000:
             return False
-        if y >= 2016 and pmax < 150_000:
+        if y >= 2016 and pmax < 200_000:
             return False
         return True
 
@@ -5033,7 +5041,7 @@ async def cmd_new_today(msg: Message):
     suitable = rank_by_market_price(suitable)
     # Ниже рынка — всегда первыми, дата не важна
     suitable.sort(key=lambda x: (
-        0 if x.get("_savings_pct", 0) > 0 else 1,
+        0 if x.get("_savings_pct", 0) > 0 else (1 if x.get("_price_int", 0) > 0 else 2),
         -x.get("_savings_pct", 0),
         -x.get("_hot_score", 0),
         x.get("_price_int", 999_999_999),
@@ -5143,7 +5151,8 @@ async def cmd_global_search(msg: Message):
     ]
     suitable = rank_by_market_price(suitable)
     suitable.sort(key=lambda x: (
-        0 if x.get("_savings_pct", 0) > 0 else 1,  # ниже рынка первыми
+        # 0 = ниже рынка, 1 = по рынку (цена есть), 2 = цена неизвестна
+        0 if x.get("_savings_pct", 0) > 0 else (1 if x.get("_price_int", 0) > 0 else 2),
         -x.get("_savings_pct", 0),
         -x.get("_hot_score", 0),
         x.get("_price_int", 999_999_999),
@@ -5239,7 +5248,7 @@ async def cmd_vk_tg_search(msg: Message):
     ]
     suitable = rank_by_market_price(suitable)
     suitable.sort(key=lambda x: (
-        0 if x.get("_savings_pct", 0) > 0 else 1,
+        0 if x.get("_savings_pct", 0) > 0 else (1 if x.get("_price_int", 0) > 0 else 2),
         -x.get("_savings_pct", 0),
         -x.get("_hot_score", 0),
         x.get("_price_int", 999_999_999),
@@ -6200,7 +6209,8 @@ async def do_search_for_user(uid: int, reply_to):
     suitable = rank_by_market_price(suitable, ref_items=[i for i in items if i.get("_market_ref_only")])
     # Сортировка: сначала ниже рынка (по убыванию скидки), затем по рыночной цене.
     suitable.sort(key=lambda x: (
-        0 if x.get("_savings_pct", 0) > 0 else 1,  # ниже рынка первыми
+        # 0 = ниже рынка, 1 = по рынку (цена есть), 2 = цена неизвестна
+        0 if x.get("_savings_pct", 0) > 0 else (1 if x.get("_price_int", 0) > 0 else 2),
         -x.get("_savings_pct", 0),
         -x.get("_hot_score", 0),
         x.get("_price_int", 999_999_999),
