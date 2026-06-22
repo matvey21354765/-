@@ -3534,6 +3534,14 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             elif engine == "duckduckgo":
                 url = "https://html.duckduckgo.com/html/"
                 params = {"q": q, "kl": "ru-ru", "s": (p - 1) * 30}
+            elif engine == "ddglite":
+                # Лёгкая версия DuckDuckGo — отдельный эндпоинт, отдельный лимит.
+                url = "https://lite.duckduckgo.com/lite/"
+                params = {"q": q, "kl": "ru-ru"}
+            elif engine == "brave":
+                # Brave Search — собственный индекс, работает с датацентр-IP.
+                url = "https://search.brave.com/search"
+                params = {"q": q, "source": "web"}
             elif engine == "google":
                 url = "https://www.google.com/search"
                 params = {"q": q, "hl": "ru", "num": "20", "start": (p - 1) * 10}
@@ -3543,11 +3551,11 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             # Railway IP свободно достаёт поисковики, а РФ-прокси к ним часто
             # вообще не подключается (таймаут на html.duckduckgo.com / bing).
             # Поэтому ПРЯМОЙ маршрут — основной, прокси только как запас.
-            if engine == "duckduckgo":
+            if engine in ("duckduckgo", "ddglite", "brave"):
                 routes = [None]
                 for _pa in list(_working_free_proxies)[:2]:
                     routes.append({"http": f"http://{_pa}", "https": f"http://{_pa}"})
-                time.sleep(random.uniform(0.4, 1.6))
+                time.sleep(random.uniform(0.3, 1.2))
             else:
                 routes = [None, AVITO_PROXIES] if AVITO_PROXIES else [None]
             for proxies in routes:
@@ -3621,24 +3629,30 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                 })
             return out
 
-        def _fetch_and_parse(q: str) -> list[dict]:
-            # DuckDuckGo напрямую с Railway IP отдаёт реальные объявления Авито
-            # (проверено), Bing — запас. Берём первый, который вернул объявления.
-            for engine in ("duckduckgo", "bing"):
+        # Несколько независимых поисковиков (у каждого свой лимит и свой индекс).
+        # Раскидываем запросы по кругу: каждый бренд идёт на свой движок —
+        # так ни один поисковик не упирается в лимит при 50-100 пользователях.
+        _engines_cycle = ["brave", "ddglite", "duckduckgo"]
+
+        def _fetch_and_parse(idx_q: tuple) -> list[dict]:
+            idx, q = idx_q
+            primary = _engines_cycle[idx % len(_engines_cycle)]
+            order = [primary] + [e for e in _engines_cycle if e != primary] + ["bing"]
+            for engine in order:
                 html = _fetch_serp(engine, q)
                 if not html:
                     continue
                 batch = _parse_serp(html)
                 if batch:
-                    print(f"  [{engine}] q={q[-20:]!r}: {len(batch)} объявлений")
+                    print(f"  [{engine}] q={q[-18:]!r}: {len(batch)} объявлений")
                     return batch
             return []
 
-        # Запросы по маркам параллельно, но всего 3 одновременно — DuckDuckGo
-        # блокирует при большем числе одновременных запросов (202/403).
+        # Запросы по маркам параллельно; движки чередуются, поэтому можно
+        # держать 3 одновременно — нагрузка размазана по трём поисковикам.
         from concurrent.futures import ThreadPoolExecutor as _TPE2, as_completed as _ac2
-        with _TPE2(max_workers=2) as _ex2:
-            futs = [_ex2.submit(_fetch_and_parse, q) for q in queries]
+        with _TPE2(max_workers=3) as _ex2:
+            futs = [_ex2.submit(_fetch_and_parse, (i, q)) for i, q in enumerate(queries)]
             try:
                 for fut in _ac2(futs, timeout=25):
                     try:
@@ -6647,37 +6661,50 @@ async def cmd_invite(msg: Message):
 
 
 async def _warmup_cache():
-    """Прогревает кеш Авито для всех городов в фоне при старте бота.
-    Запускает последовательный скрейп каждого города (1 страница, без ценового
-    фильтра) с паузами, чтобы не вызвать 429. Результаты пишутся в
-    _AVITO_REGION_CACHE — пользователи получают данные даже при первом поиске.
+    """Непрерывный фоновый прогрев кэша Авито по всем городам.
+
+    Главная идея для 50-100 пользователей без вложений: данные Авито кэшируются
+    по региону на сутки, поэтому НЕЗАВИСИМО от числа пользователей нам нужен
+    лишь ОДИН успешный скрейп региона в сутки. Этот цикл постоянно обновляет
+    самый «старый» регион, размазывая нагрузку во времени. В итоге любой
+    пользователь почти всегда попадает в уже готовый свежий кэш и получает
+    объявления мгновенно, а поисковики не упираются в лимиты.
+
+    Скрейп идёт через поисковики (DuckDuckGo/Brave/ddglite) + бесплатные прокси,
+    поэтому прямого обращения к avito.ru с заблокированного IP нет и риска 429 нет.
     """
-    await asyncio.sleep(10)  # дождаться полного старта бота
+    await asyncio.sleep(20)  # дождаться старта бота и первого прогрева прокси
     loop = asyncio.get_event_loop()
-    print("  [прогрев] начинаю прогрев кеша всех городов...")
-    for region in list(REGIONS.keys()):
+    print("  [прогрев] непрерывный прогрев кэша запущен")
+    while True:
         try:
-            bucket = _avito_price_bucket(0, 99_000_000)
-            cache_key = f"{region}_{bucket}"
-            cached = _AVITO_REGION_CACHE.get(cache_key)
-            if cached and (time.time() - cached[0]) < _AVITO_REGION_CACHE_TTL:
-                print(f"  [прогрев] {region}: кеш свежий, пропускаем")
+            now = time.time()
+            # Выбираем регион с самым старым (или отсутствующим) кэшем
+            oldest_region = None
+            oldest_age = -1.0
+            for region in REGIONS.keys():
+                cached = _AVITO_REGION_CACHE.get(region)
+                age = (now - cached[0]) if cached else 10 ** 9
+                if age > oldest_age:
+                    oldest_age = age
+                    oldest_region = region
+            if oldest_region is None:
+                await asyncio.sleep(60)
                 continue
-            print(f"  [прогрев] {region}: скрейплю...")
-            # ВАЖНО: без сортировки по дате. Прогрев пишет в ТОТ ЖЕ региональный
-            # кэш, что читает основной поиск пользователя. Если прогревать с
-            # s=104 (по дате), кэш заполнится только сегодняшними объявлениями и
-            # пользователь увидит лишь свежие. Прогреваем релевантными любых дат.
+            # Если даже самый старый кэш ещё свежий (< 6ч) — ждём, не долбим зря
+            if oldest_age < 6 * 3600:
+                await asyncio.sleep(300)
+                continue
+            print(f"  [прогрев] обновляю {oldest_region} (возраст кэша {int(oldest_age)//60} мин)…")
             items = await loop.run_in_executor(
                 None,
-                lambda r=region: scrape_avito(r, pages=2, sort_by_date=False)
+                lambda r=oldest_region: scrape_avito(r, pages=2, sort_by_date=False)
             )
-            print(f"  [прогрев] {region}: {len(items)} объявлений")
-            await asyncio.sleep(8)  # пауза между городами — защита от 429
+            print(f"  [прогрев] {oldest_region}: {len(items)} объявлений в кэше")
         except Exception as e:
-            print(f"  [прогрев] {region}: ошибка {e}")
-            await asyncio.sleep(5)
-    print("  [прогрев] прогрев завершён")
+            print(f"  [прогрев] ошибка: {e}")
+        # Пауза между регионами — размазываем нагрузку на поисковики
+        await asyncio.sleep(600)  # 10 минут между городами
 
 
 def _fetch_all_free_proxies() -> list[str]:
@@ -6800,7 +6827,7 @@ async def main():
         except Exception:
             BOT_USERNAME = "PerekupDriveBot"
     print("✅ Авто-брокер бот запущен!")
-    print("  [ВЕРСИЯ] 2026-06-22-v12 :: DuckDuckGo через несколько IP (обход лимита 202)")
+    print("  [ВЕРСИЯ] 2026-06-22-v13 :: 3 поисковика (Brave+ddglite+DDG) + фон.прогрев кэша для 50-100 юзеров")
 
     # Логируем Railway IP (нужен для добавления в whitelist прокси)
     try:
@@ -6864,10 +6891,12 @@ async def main():
     # Веб-дашборд аналитики — работает параллельно, не блокирует polling
     await analytics.start_dashboard(REGIONS)
 
-    # Прогрев кеша всех городов отключён — массовые запросы при старте
-    # провоцируют IP-блокировку Авито. Кэш прогревается органически по мере
-    # того, как пользователи делают поиск по разным городам.
-    # loop.create_task(_warmup_cache())
+    # Непрерывный фоновый прогрев кэша Авито: данные берутся через поисковики
+    # (не прямой запрос к avito.ru), поэтому риска IP-блокировки нет. Благодаря
+    # суточному кэшу один скрейп региона обслуживает всех пользователей — так
+    # бот тянет 50-100 человек без вложений.
+    loop.create_task(_warmup_cache())
+    print("  [прогрев] фоновый прогрев кэша Авито запущен")
 
     await bot.set_my_commands([
         BotCommand(command="start",     description="🚀 Главное меню"),
