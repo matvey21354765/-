@@ -2771,13 +2771,28 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
     #     где-то в HTML (видно по наличию "urlPath"). Так получаем правильную
     #     цену/фото/описание/продавца ИЗ ОБЪЕКТА КАЖДОГО объявления, а не из окна.
     if '"urlPath"' in text and not results:
-        brace_items = []
-        for m in re.finditer(r'\{"id":\s*\d+', text):
-            start = m.start()
-            depth = 0; in_str = False; esc = False; end = None
-            limit = min(len(text), start + 30000)
-            for i in range(start, limit):
-                c = text[i]
+        def _find_enclosing_object(s: str, pos: int) -> "str | None":
+            """От позиции внутри объекта идём НАЗАД до открывающей { этого объекта,
+            затем ВПЕРЁД (с учётом строк/экранирования) до парной }. Возвращает
+            валидный JSON-объект объявления целиком."""
+            depth = 0
+            i = pos
+            start = None
+            low = max(0, pos - 60000)
+            while i >= low:
+                c = s[i]
+                if c == '}':
+                    depth += 1
+                elif c == '{':
+                    if depth == 0:
+                        start = i; break
+                    depth -= 1
+                i -= 1
+            if start is None:
+                return None
+            d = 0; in_str = False; esc = False
+            for j in range(start, min(len(s), start + 60000)):
+                c = s[j]
                 if esc:
                     esc = False; continue
                 if c == '\\':
@@ -2787,30 +2802,27 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
                 if in_str:
                     continue
                 if c == '{':
-                    depth += 1
+                    d += 1
                 elif c == '}':
-                    depth -= 1
-                    if depth == 0:
-                        end = i + 1; break
-            if not end:
-                continue
-            blob = text[start:end]
-            if '"urlPath"' not in blob:
+                    d -= 1
+                    if d == 0:
+                        return s[start:j + 1]
+            return None
+
+        _seen_b: set = set()
+        for m in re.finditer(r'"urlPath"\s*:\s*"(/[^"]*avtomobili/[^"]+)"', text):
+            blob = _find_enclosing_object(text, m.start())
+            if not blob or '"urlPath"' not in blob:
                 continue
             try:
                 obj = json.loads(blob)
             except Exception:
                 continue
             it = _avito_item_from_json(obj, today)
-            if it and it.get("url"):
-                brace_items.append(it)
-        # дедупликация по url
-        _seen_b: set = set()
-        for it in brace_items:
-            if it["url"] not in _seen_b:
+            if it and it.get("url") and it["url"] not in _seen_b:
                 _seen_b.add(it["url"])
                 results.append(it)
-        print(f"  [Авито] brace-JSON извлёк {len(results)} объявлений с ценой/фото")
+        print(f"  [Авито] brace-JSON (urlPath) извлёк {len(results)} объявлений с ценой/фото")
         if results:
             return results
 
