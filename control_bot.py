@@ -1020,31 +1020,31 @@ def scrape_bibika(region: str, pages: int = 3, price_min: int = 0, price_max: in
 
 # ── ВКонтакте: паблики авто-барахолок по городам ─────────────────
 VK_AUTO_GROUPS = {
-    "ekaterinburg": ["prodamavto96", "avtobaraholka96", "avto96ru", "kupit_avto_ekb_66"],
-    "moskva":       ["avtobaraholkamsk", "prodamavtomsk", "avto_moskva_prodazha"],
-    "spb":          ["prodamavto78", "avtobaraholka_spb", "avtospb_prodazha"],
-    "novosibirsk":  ["avtobaraholka54", "prodamavto54"],
-    "kazan":        ["avtobaraholkakazan", "prodamavtokazan"],
-    "chelyabinsk":  ["avto74chelyabinsk", "prodamavto74"],
-    "ufa":          ["avtobaraholkaufa", "prodamavtoufa"],
-    "krasnodar":    ["avtobaraholkakrd", "prodamavto23"],
-    "omsk":         ["avtobaraholkaomsk", "prodamavto55"],
-    "rostov":       ["avtobaraholkarostov", "prodamavto61"],
+    "ekaterinburg": ["avtoekb", "avtobaraholka96", "prodamavto96", "auto96"],
+    "moskva":       ["avtomoskva", "avtobaraholkamsk", "kupit_avto_msk"],
+    "spb":          ["avto_spb", "avtobaraholkaspb", "prodamavtospb"],
+    "novosibirsk":  ["avtonsk", "avtobaraholka54", "prodamavto54"],
+    "kazan":        ["avtokazan", "avtobaraholkakazan"],
+    "chelyabinsk":  ["avto74", "avtobaraholka74"],
+    "ufa":          ["avtoufa", "avtobaraholkaufa"],
+    "krasnodar":    ["avtokrd", "avtobaraholkakrd"],
+    "omsk":         ["avtoomsk", "avtobaraholkaomsk"],
+    "rostov":       ["avtorostov", "avtobaraholkarostov"],
 }
 
 # ── Парсер Telegram-каналов автопродаж ──────────────────────────
 
 TG_AUTO_CHANNELS = {
-    "ekaterinburg": ["avto_ekb", "prodamavto_ekb", "avtoekb", "kupit_avto_ekb"],
-    "moskva":       ["avto_msk", "prodamavto_msk", "avtomoskva", "kupit_avto_msk"],
-    "spb":          ["avto_spb", "prodamavto_spb", "avtospb"],
-    "novosibirsk":  ["avto_nsk", "prodamavto_nsk"],
-    "kazan":        ["avto_kazan", "prodamavto_kazan"],
-    "krasnodar":    ["avto_krd", "prodamavto_krd"],
-    "chelyabinsk":  ["avto_chel", "prodamavto_chel"],
-    "ufa":          ["avto_ufa", "prodamavto_ufa"],
-    "omsk":         ["avto_omsk", "prodamavto_omsk"],
-    "rostov":       ["avto_rostov", "prodamavto_rostov"],
+    "ekaterinburg": ["avto_ekb", "prodamavto_ekb", "avtoekb", "kupit_avto_ekb", "avto96ekb", "baraholka_avto_ekb"],
+    "moskva":       ["avto_msk", "prodamavto_msk", "avtomoskva", "kupit_avto_msk", "avto_moskva", "cars_msk"],
+    "spb":          ["avto_spb", "prodamavto_spb", "avtospb", "avto78spb", "cars_spb"],
+    "novosibirsk":  ["avto_nsk", "prodamavto_nsk", "avtonsk54", "cars_nsk"],
+    "kazan":        ["avto_kazan", "prodamavto_kazan", "avtokazan16"],
+    "krasnodar":    ["avto_krd", "prodamavto_krd", "avto23krd"],
+    "chelyabinsk":  ["avto_chel", "prodamavto_chel", "avto74chel"],
+    "ufa":          ["avto_ufa", "prodamavto_ufa", "avto02ufa"],
+    "omsk":         ["avto_omsk", "prodamavto_omsk", "avto55omsk"],
+    "rostov":       ["avto_rostov", "prodamavto_rostov", "avto61rostov"],
 }
 
 # Маппинг слагов регионов бота → ключи TG_AUTO_CHANNELS
@@ -1207,6 +1207,7 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
                         "_days_on_site": 0,
                         "description": text[:400],
                         "seller": f"@{channel}",
+                        "_seller_url": f"https://t.me/{channel}",
                         "_photo_url": photo_url,
                         "_price_int": price_int,
                         "mileage": mileage,
@@ -1249,7 +1250,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
 
     session = _req.Session()
     session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
         "Accept-Language": "ru-RU,ru;q=0.9",
         "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
     })
@@ -1319,9 +1320,11 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                     "url": post_url,
                     "_photo_url": photo_url,
                     "description": text[:500],
+                    "source": "vk",
                     "_source": "vk",
                     "_year": int(year_m.group(1)) if year_m else 0,
                     "_days_on_site": 0,
+                    "seller": f"https://vk.com/{slug}",
                 })
             return batch
         except Exception as e:
@@ -1329,9 +1332,9 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
             return []
 
     def _try_vk_mobile(slug: str) -> list[dict]:
-        """Парсит мобильную версию m.vk.com (без токена)."""
+        """Парсит публичную версию vk.com (без токена)."""
         try:
-            url = f"https://m.vk.com/{slug}"
+            url = f"https://vk.com/{slug}"
             r = session.get(url, timeout=12)
             if r.status_code != 200:
                 return []
@@ -1371,9 +1374,11 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                     "url": post_url,
                     "_photo_url": photo_url,
                     "description": text[:500],
+                    "source": "vk",
                     "_source": "vk",
                     "_year": int(year_m.group(1)) if year_m else 0,
                     "_days_on_site": 0,
+                    "seller": f"https://vk.com/{slug}",
                 })
             return batch
         except Exception as e:
@@ -5184,17 +5189,30 @@ async def send_batch(chat_id: int, uid: int, offset: int):
             caption += f"\n\n📝 {_desc}"
 
         source = item.get("source", "")
-        phone_hint = "📞 Позвонить" if source in ("avito", "drom") else "📞 Контакт"
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [
+        seller = item.get("seller", "")
+        if source == "vk":
+            caption += f"\n👤 Продавец: {seller}" if seller else ""
+            row1 = [
+                InlineKeyboardButton(text="📘 Объявление ВК", url=url),
+                InlineKeyboardButton(text="⭐ Сохранить", callback_data=f"fav|{sid}|{uid}"),
+            ]
+        elif source == "tg_channel":
+            caption += f"\n📢 Канал: {seller}" if seller else ""
+            seller_url = item.get("_seller_url", url)
+            row1 = [
+                InlineKeyboardButton(text="💬 Открыть в TG", url=seller_url),
+                InlineKeyboardButton(text="⭐ Сохранить", callback_data=f"fav|{sid}|{uid}"),
+            ]
+        else:
+            row1 = [
                 InlineKeyboardButton(text="🔗 Открыть", url=url),
                 InlineKeyboardButton(text="⭐ Сохранить", callback_data=f"fav|{sid}|{uid}"),
-            ],
-            [
-                InlineKeyboardButton(text="❌ Скрыть", callback_data=f"hide|{sid}|{uid}"),
-                InlineKeyboardButton(text="📋 Похожие", callback_data=f"sim|{sid}|{uid}"),
-            ],
-        ])
+            ]
+        row2 = [
+            InlineKeyboardButton(text="❌ Скрыть", callback_data=f"hide|{sid}|{uid}"),
+            InlineKeyboardButton(text="📋 Похожие", callback_data=f"sim|{sid}|{uid}"),
+        ]
+        kb = InlineKeyboardMarkup(inline_keyboard=[row1, row2])
 
         photo_url = item.get("_photo_url", "")
         if photo_url:
@@ -6144,6 +6162,15 @@ async def main():
     logging.basicConfig(level=logging.WARNING)
     _load_avito_cache()
     print("✅ Авто-брокер бот запущен!")
+
+    # Тест прокси
+    if AVITO_PROXY_HOST:
+        try:
+            import requests as _rq
+            r = _rq.get("https://api.ipify.org", proxies=AVITO_PROXIES, timeout=10)
+            print(f"  [прокси] ✅ работает, IP: {r.text.strip()}")
+        except Exception as e:
+            print(f"  [прокси] ❌ ошибка: {e}")
 
     loop = asyncio.get_event_loop()
     # Единый глобальный монитор — опрашивает всех активных пользователей каждые 2 минуты
