@@ -4111,46 +4111,6 @@ async def fsm_price_max(msg: Message, state: FSMContext):
     )
 
 
-@dp.callback_query(F.data.startswith("price_range|"))
-async def cb_price_range(cb: CallbackQuery, state: FSMContext):
-    parts = cb.data.split("|")
-    if parts[1] == "manual":
-        await cb.answer()
-        await cb.message.answer(
-            "✏️ Введи минимальную цену в рублях\n(например: 300000 или 0 для любой цены):"
-        )
-        await state.set_state(Setup.price_min)
-        return
-    pmin = int(parts[1])
-    pmax = int(parts[2])
-    await cb.answer(f"✅ Бюджет выбран")
-    data = await state.get_data()
-    region = data.get("region", "ekaterinburg")
-    category = data.get("category", "all")
-    brand = data.get("brand", "")
-    damaged = data.get("damaged", False)
-    s = load_settings(cb.from_user.id)
-    s.update({
-        "region": region, "price_min": pmin, "price_max": pmax,
-        "category": category, "brand": brand, "damaged": damaged,
-    })
-    save_settings(cb.from_user.id, s)
-    await state.clear()
-    region_name = REGIONS.get(region, region)
-    cat_label = CATEGORY_LABELS.get(category, category)
-    brand_label = f" · {brand.capitalize()}" if brand else ""
-    await cb.message.answer(
-        f"✅ Настройки сохранены!\n\n"
-        f"📍 Регион: {region_name}\n"
-        f"🔍 Категория: {cat_label}{brand_label}\n"
-        f"💰 Бюджет: {pmin:,} – {pmax:,} ₽\n\n"
-        f"Нажми кнопку чтобы найти авто:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔍 Найти авто", callback_data="do_search")],
-        ])
-    )
-
-
 @dp.message(Command("settings"))
 @dp.message(F.text == "⚙️ Настройки")
 async def cmd_settings(msg: Message, state: FSMContext):
