@@ -52,15 +52,18 @@ _free_proxy_cache: list[str] = []
 _free_proxy_cache_time: float = 0.0
 
 # ── Резидентный прокси для запросов к Авито (опционально) ────────
-# Поддерживает HTTP и SOCKS5. Протокол задаётся через AVITO_PROXY_PROTOCOL.
+# Поддерживает HTTP и SOCKS5. AVITO_PROXY_AUTH=ip — авторизация по IP (без логина).
 AVITO_PROXY_HOST = os.getenv("AVITO_PROXY_HOST", "")
 AVITO_PROXY_PORT = os.getenv("AVITO_PROXY_PORT", "")
 AVITO_PROXY_USER = os.getenv("AVITO_PROXY_USER", "")
 AVITO_PROXY_PASS = os.getenv("AVITO_PROXY_PASS", "")
-AVITO_PROXY_PROTOCOL = os.getenv("AVITO_PROXY_PROTOCOL", "socks5").lower()  # socks5 или http
+AVITO_PROXY_PROTOCOL = os.getenv("AVITO_PROXY_PROTOCOL", "socks5").lower()
+AVITO_PROXY_AUTH = os.getenv("AVITO_PROXY_AUTH", "login").lower()  # "login" или "ip"
 AVITO_PROXIES: "dict[str, str] | None" = None
 if AVITO_PROXY_HOST and AVITO_PROXY_PORT:
-    _auth = f"{AVITO_PROXY_USER}:{AVITO_PROXY_PASS}@" if AVITO_PROXY_USER else ""
+    # При авторизации по IP логин/пароль не нужны (и мешают SOCKS5)
+    _use_auth = AVITO_PROXY_AUTH != "ip" and AVITO_PROXY_USER
+    _auth = f"{AVITO_PROXY_USER}:{AVITO_PROXY_PASS}@" if _use_auth else ""
     _avito_proxy_url = f"{AVITO_PROXY_PROTOCOL}://{_auth}{AVITO_PROXY_HOST}:{AVITO_PROXY_PORT}"
     AVITO_PROXIES = {"http": _avito_proxy_url, "https": _avito_proxy_url}
 
