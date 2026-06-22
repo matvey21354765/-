@@ -1045,6 +1045,17 @@ TG_AUTO_CHANNELS = {
     "ufa":          ["avto_ufa", "prodamavto_ufa", "avto02ufa"],
     "omsk":         ["avto_omsk", "prodamavto_omsk", "avto55omsk"],
     "rostov":       ["avto_rostov", "prodamavto_rostov", "avto61rostov"],
+    "tyumen":       ["avto_tyumen", "prodamavto72", "avto72tyumen", "tyumen_avto", "cars_tyumen"],
+    "samara":       ["avto_samara", "prodamavto63", "avto63samara"],
+    "volgograd":    ["avto_volgograd", "prodamavto34", "avto34vlg"],
+    "perm":         ["avto_perm", "prodamavto59", "avto59perm"],
+    "voronezh":     ["avto_voronezh", "prodamavto36", "avto36vrn"],
+    "saratov":      ["avto_saratov", "prodamavto64", "avto64sar"],
+    "krasnoyarsk":  ["avto_krsk", "prodamavto24", "avto24krsk"],
+    "irkutsk":      ["avto_irkutsk", "prodamavto38", "avto38irk"],
+    "vladivostok":  ["avto_vladivostok", "prodamavto25", "avto25vlad"],
+    "habarovsk":    ["avto_habarovsk", "prodamavto27", "avto27hab"],
+    "nn":           ["avto_nn", "prodamavto52", "avto52nn"],
 }
 
 # Маппинг слагов регионов бота → ключи TG_AUTO_CHANNELS
@@ -1059,6 +1070,17 @@ _TG_REGION_MAP = {
     "krasnodar":    "krasnodar",
     "omsk":         "omsk",
     "rostov":       "rostov",
+    "tyumen":       "tyumen",
+    "samara":       "samara",
+    "volgograd":    "volgograd",
+    "perm":         "perm",
+    "voronezh":     "voronezh",
+    "saratov":      "saratov",
+    "krasnoyarsk":  "krasnoyarsk",
+    "irkutsk":      "irkutsk",
+    "vladivostok":  "vladivostok",
+    "habarovsk":    "habarovsk",
+    "nn":           "nn",
 }
 
 _TG_PRICE_RE = re.compile(
@@ -1322,7 +1344,11 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
     region_name_ru = {
         "ekaterinburg": "Екатеринбург", "moskva": "Москва", "spb": "Петербург",
         "novosibirsk": "Новосибирск", "kazan": "Казань", "chelyabinsk": "Челябинск",
-        "уфа": "Уфа", "krasnodar": "Краснодар", "omsk": "Омск", "rostov": "Ростов",
+        "ufa": "Уфа", "krasnodar": "Краснодар", "omsk": "Омск", "rostov": "Ростов",
+        "tyumen": "Тюмень", "samara": "Самара", "volgograd": "Волгоград",
+        "perm": "Пермь", "voronezh": "Воронеж", "saratov": "Саратов",
+        "krasnoyarsk": "Красноярск", "irkutsk": "Иркутск",
+        "vladivostok": "Владивосток", "habarovsk": "Хабаровск", "nn": "Нижний Новгород",
     }.get(city_key, city_key)
 
     results: list[dict] = []
