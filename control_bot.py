@@ -4664,6 +4664,20 @@ async def cb_src_all(cb: CallbackQuery):
     await cb.message.edit_reply_markup(reply_markup=sources_keyboard(ALL_SOURCES))
 
 
+@dp.callback_query(F.data == "open_settings")
+async def cb_open_settings(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    await state.clear()
+    await cb.message.answer("🔍 Шаг 1/4: Что ищем?", reply_markup=category_keyboard())
+    await state.set_state(Setup.category)
+
+
+@dp.callback_query(F.data == "do_global_search")
+async def cb_do_global_search(cb: CallbackQuery):
+    await cb.answer()
+    await cmd_global_search(cb.message)
+
+
 @dp.callback_query(F.data == "do_search")
 async def cb_do_search(cb: CallbackQuery):
     uid = cb.from_user.id
@@ -5368,23 +5382,17 @@ async def do_search_for_user(uid: int, reply_to):
                 avito_count = len(batch)
                 break
     if avito_count == 0 and avito_enabled and "drom" not in enabled_sources:
-        # Проверяем: если в кэше есть данные по этому региону — Авито был доступен,
-        # просто всё отфильтровалось по бюджету. Не показываем "недоступен".
-        _avito_was_accessible = any(
-            k.startswith(region + "_") or k == region
-            for k in _AVITO_REGION_CACHE
-        )
-        print(f"  [fallback] Авито вернул 0 (accessible={_avito_was_accessible}) — {'фильтрация' if _avito_was_accessible else 'добавляем Дром'}")
-        if not _avito_was_accessible:
-            try:
-                drom_fallback = await loop.run_in_executor(
-                    None, lambda: scrape_drom(region, pages=4, price_min=pmin, price_max=pmax)
-                )
-                if drom_fallback:
-                    items.extend(drom_fallback)
-                    await reply_to.answer(f"🔵 Авито недоступен, показываю объявления с Дрома: {len(drom_fallback)}")
-            except Exception as e:
-                print(f"  [fallback] Дром ошибка: {e}")
+        # Авито вернул 0 — пробуем Дром как fallback в любом случае
+        print(f"  [fallback] Авито вернул 0 — добавляем Дром")
+        try:
+            drom_fallback = await loop.run_in_executor(
+                None, lambda: scrape_drom(region, pages=4, price_min=pmin, price_max=pmax)
+            )
+            if drom_fallback:
+                items.extend(drom_fallback)
+                await reply_to.answer(f"🔵 Авито не ответил, показываю объявления с Дрома: {len(drom_fallback)}")
+        except Exception as e:
+            print(f"  [fallback] Дром ошибка: {e}")
 
     dealer_count = sum(1 for i in items if is_dealer(i))
     price_count = sum(1 for i in items if not is_dealer(i) and not in_price_range(i, pmin, pmax))
@@ -5480,20 +5488,33 @@ async def do_search_for_user(uid: int, reply_to):
                 ])
             )
             return
-        dealer_c = sum(1 for i in items if is_dealer(i))
-        price_filtered_c = sum(1 for i in items if not is_dealer(i) and not in_price_range(i, pmin, pmax))
-        no_price_c = sum(1 for i in items if not is_dealer(i) and not i.get("_price_int") and not i.get("_avito_price_filtered"))
-        wrong_price_c = sum(1 for i in items if not is_dealer(i) and i.get("_price_int", 0) > pmax)
-        sample_prices = [i.get("_price_int", 0) for i in items[:5] if not is_dealer(i)]
-        sample_flags = [i.get("_avito_price_filtered", False) for i in items[:5] if not is_dealer(i)]
-        hint = ""
-        if price_filtered_c > 0:
-            hint = f"\n\nНайдено {price_filtered_c} объявлений вне бюджета. Попробуй расширить диапазон цен: /settings"
+        # Диагностика — почему 0
+        price_range_items = [i for i in items if not is_dealer(i) and in_price_range(i, pmin, pmax) and i.get("url")]
+        price_filtered_c = len(items) - len(price_range_items) - sum(1 for i in items if is_dealer(i))
+        # Посмотрим сколько прошло бы без фильтра категории/марки
+        without_cat_filter = [i for i in price_range_items if i["url"] not in skipped and i["url"] not in seen]
+        with_cat_filter = _filter_by_category(list(without_cat_filter), category, brand)
+
+        hint_parts = []
+        if len(without_cat_filter) > 0 and len(with_cat_filter) == 0:
+            cat_label = CATEGORY_LABELS.get(category, category)
+            brand_label = f" · {brand.capitalize()}" if brand else ""
+            hint_parts.append(
+                f"⚠️ Найдено {len(without_cat_filter)} объявлений, но все отфильтрованы по категории «{cat_label}{brand_label}».\n"
+                f"Попробуй изменить категорию в /settings или выбрать «🚗 Все автомобили»."
+            )
+        elif price_filtered_c > 0:
+            hint_parts.append(f"Найдено {price_filtered_c} объявлений вне бюджета. Попробуй расширить диапазон цен: /settings")
         else:
-            hint = f"\n\nПопробуй расширить диапазон цен: /settings"
+            hint_parts.append("Попробуй «🌐 Глобальный поиск» — ищет по всем площадкам, или «📢 VK + TG Барахолка».")
+
+        hint = "\n\n" + "\n".join(hint_parts)
         await reply_to.answer(
-            f"😔 Не нашёл новых частников в {region_name} по твоему бюджету.{hint}",
-            reply_markup=MAIN_KEYBOARD,
+            f"😔 Не нашёл новых объявлений в {region_name}.{hint}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⚙️ Изменить настройки", callback_data="open_settings")],
+                [InlineKeyboardButton(text="🌐 Глобальный поиск", callback_data="do_global_search")],
+            ])
         )
         return
 
