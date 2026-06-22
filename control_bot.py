@@ -3586,30 +3586,53 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                     ctx_html = _upq.unquote(ctx_html)
                 except Exception:
                     break
+            # Дополнительные паттерны цены: JSON в сниппетах Brave / DDG
+            _price_json_re = re.compile(
+                r'["\']?price["\']?\s*[=:]\s*["\']?(\d{4,9})(?:\.0+)?["\']?', re.I
+            )
             for url in found_urls:
                 clean_url = url.split("?")[0]
                 pos = ctx_html.find(url)
-                context = ctx_html[max(0, pos-200):pos+600] if pos >= 0 else ""
+                context = ctx_html[max(0, pos-400):pos+800] if pos >= 0 else ""
                 context_clean = re.sub(r"<[^>]+>", " ", context)
                 context_clean = re.sub(r"&[a-z]+;", " ", context_clean)
                 context_clean = re.sub(r"\s+", " ", context_clean).strip()
 
+                # Приоритет: обычный парсинг (₽/руб), затем JSON-паттерн из сниппета
                 price_int = _parse_price_snip(context_clean)
+                if not price_int:
+                    for m in _price_json_re.finditer(context_clean):
+                        v = int(m.group(1))
+                        if 30_000 <= v <= 99_000_000:
+                            price_int = v
+                            break
                 if price_int > 0 and not (price_min <= price_int <= price_max):
                     continue
 
                 year_m = _year_re.search(context_clean)
                 year = int(year_m.group(1)) if year_m else 0
 
-                title_src = re.sub(
-                    r'https?://\S+|//\S+|uddg=\S+|rut=\S+|duckduckgo\.com\S*|www\.|avito\.ru\S*',
-                    ' ', context_clean, flags=re.I,
-                )
-                title_src = re.sub(r'\s+', ' ', title_src).strip(" -|·,")
-                title = title_src[:90].strip() or f"Авто на Авито — {slug_ru_name}"
+                # Заголовок: берём из URL-пути (марка_модель_год_пробег),
+                # убираем JSON-мусор и технические параметры URL.
+                url_path = clean_url.split("/avtomobili/")[-1] if "/avtomobili/" in clean_url else ""
+                if url_path:
+                    # Убираем числовой ID в конце, заменяем _ на пробел
+                    url_title = re.sub(r'_\d{6,}$', '', url_path).replace("_", " ").replace("-", " ")
+                    url_title = re.sub(r'\s+', ' ', url_title).strip()
+                    # Первая буква заглавная
+                    title = url_title[:80].title() if url_title else f"Авто на Авито — {slug_ru_name}"
+                else:
+                    # Fallback: из текста сниппета, без URL-мусора и JSON
+                    title_src = re.sub(
+                        r'https?://\S+|//\S+|uddg=\S+|rut=\S+|duckduckgo\.com\S*|www\.|avito\.ru\S*'
+                        r'|["\']?\w+["\']?\s*[:=]\s*["\'][^"\']{1,20}["\']',
+                        ' ', context_clean, flags=re.I,
+                    )
+                    title_src = re.sub(r'\s+', ' ', title_src).strip(" -|·,\"'")
+                    title = title_src[:80].strip() or f"Авто на Авито — {slug_ru_name}"
 
                 photo_url = ""
-                wide = ctx_html[max(0, pos-800):pos+1200] if pos >= 0 else ""
+                wide = ctx_html[max(0, pos-1000):pos+1500] if pos >= 0 else ""
                 img_m = re.search(
                     r'(https?:)?//(?:avatars\.mds\.yandex\.net|[a-z0-9.]*avito\.st|[a-z0-9.]*img\.avito[.\w]*)/[^\s"\'<>]+',
                     wide,
@@ -5991,28 +6014,49 @@ async def do_search_for_user(uid: int, reply_to):
         def _fetch_price_sync(it: dict) -> None:
             try:
                 import requests as _rq
-                r = _rq.get(it["url"], headers={
+                # Сначала пробуем через рабочие бесплатные прокси (у них нет 403 от Авито),
+                # потом AVITO_PROXIES, потом напрямую (обычно 403 с Railway IP).
+                proxies_to_try = []
+                for _pa in list(_working_free_proxies)[:3]:
+                    proxies_to_try.append({"http": f"http://{_pa}", "https": f"http://{_pa}"})
+                if AVITO_PROXIES:
+                    proxies_to_try.append(AVITO_PROXIES)
+                proxies_to_try.append(None)  # напрямую — последний шанс
+                _hdrs = {
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                     "Accept-Language": "ru-RU,ru;q=0.9",
-                }, timeout=6, proxies=AVITO_PROXIES)
-                if r.status_code == 200:
-                    for rx in (_price_re_np2, _price_re_np):
-                        m = rx.search(r.text[:80_000])
-                        if m:
-                            p = int(m.group(1))
-                            if 10_000 < p < 99_000_000:
-                                it["_price_int"] = p
-                                it["price"] = f"{p:,} ₽".replace(",", " ")
-                                break
-                    # Фото тоже берём
-                    if not it.get("_photo_url"):
-                        pm = re.search(
-                            r'((?:https?:)?(?:\\?/){2}[a-z0-9.\-]*avito\.st(?:(?:\\?/)[\w.~\-]+)+\.(?:jpg|jpeg|webp|png|avif))',
-                            r.text[:120_000], re.I,
-                        )
-                        if pm:
-                            raw = pm.group(1).replace("\\/", "/")
-                            it["_photo_url"] = ("https:" + raw) if raw.startswith("//") else raw
+                }
+                for _prx in proxies_to_try:
+                    try:
+                        r = _rq.get(it["url"], headers=_hdrs, timeout=5, proxies=_prx)
+                        if r.status_code != 200:
+                            continue
+                        text = r.text[:120_000]
+                        # Паттерны цены: JSON {"price":{"value":950000}}, JS price:"950000.0"
+                        for rx in (
+                            _price_re_np2,
+                            _price_re_np,
+                            re.compile(r'["\']?price["\']?\s*[=:]\s*["\']?(\d{4,9})(?:\.0+)?["\']?', re.I),
+                        ):
+                            m = rx.search(text)
+                            if m:
+                                p = int(float(m.group(1)))
+                                if 10_000 < p < 99_000_000:
+                                    it["_price_int"] = p
+                                    it["price"] = f"{p:,} ₽".replace(",", " ")
+                                    break
+                        # Фото тоже берём из той же страницы
+                        if not it.get("_photo_url"):
+                            pm = re.search(
+                                r'((?:https?:)?(?:\\?/){2}[a-z0-9.\-]*avito\.st(?:(?:\\?/)[\w.~\-]+)+\.(?:jpg|jpeg|webp|png|avif))',
+                                text, re.I,
+                            )
+                            if pm:
+                                raw = pm.group(1).replace("\\/", "/")
+                                it["_photo_url"] = ("https:" + raw) if raw.startswith("//") else raw
+                        break  # успешный запрос — выходим
+                    except Exception:
+                        continue
             except Exception:
                 pass
 
@@ -6880,7 +6924,7 @@ async def main():
         except Exception:
             BOT_USERNAME = "PerekupDriveBot"
     print("✅ Авто-брокер бот запущен!")
-    print("  [ВЕРСИЯ] 2026-06-22-v15 :: реальная загрузка цены/фото для сниппет-объявлений Авито")
+    print("  [ВЕРСИЯ] 2026-06-22-v16 :: цена из JSON-сниппета + чистый заголовок из URL + прокси для price-fetch")
 
     # Логируем Railway IP (нужен для добавления в whitelist прокси)
     try:
