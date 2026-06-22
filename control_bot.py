@@ -3397,10 +3397,43 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         seen_urls: set[str] = set()
         _price_re = re.compile(r"(\d[\d\s]{2,8})\s*(?:₽|тыс\.?\s*р(?:уб)?\.?|руб\.?)", re.I)
         _year_re = re.compile(r"\b(19[5-9]\d|20[012]\d)\b")
-        # URL объявлений Авито — содержат числовой ID
+        # URL объявлений Авито: прямые, без протокола, и URL-encoded в редиректах
         _avito_url_re = re.compile(
-            rf'https?://(?:www\.)?avito\.ru/{re.escape(slug)}/[a-z0-9_]+-\d{{5,}}'
+            rf'(?:https?://)?(?:www\.)?avito\.ru/{re.escape(slug)}/[a-z0-9_%-]+-\d{{5,}}'
         )
+        _avito_encoded_re = re.compile(
+            rf'avito(?:\.ru|%2Eru|%2Fru)?(?:%2F|/)(?:www%2F)?{re.escape(slug)}(?:%2F|/)([a-z0-9_%.-]+-\d{{5,}})'
+        )
+
+        def _extract_avito_urls(html: str) -> list[str]:
+            """Извлекает URL объявлений Авито из сырого HTML включая редиректы."""
+            import urllib.parse
+            found = []
+            seen = set()
+            # 1. Прямые URL
+            for m in _avito_url_re.finditer(html):
+                raw = m.group(0)
+                if not raw.startswith("http"):
+                    raw = "https://" + raw
+                clean = raw.split("?")[0]
+                if clean not in seen:
+                    seen.add(clean)
+                    found.append(clean)
+            # 2. URL-encoded в параметрах редиректов (Яндекс clck, utm и т.д.)
+            for enc_m in re.finditer(r'(?:url|href)=([^&"\'> ]{20,})', html):
+                try:
+                    decoded = urllib.parse.unquote(enc_m.group(1))
+                    for m2 in _avito_url_re.finditer(decoded):
+                        raw = m2.group(0)
+                        if not raw.startswith("http"):
+                            raw = "https://" + raw
+                        clean = raw.split("?")[0]
+                        if clean not in seen:
+                            seen.add(clean)
+                            found.append(clean)
+                except Exception:
+                    pass
+            return found
 
         def _parse_price_snip(text: str) -> int:
             for m in _price_re.finditer(text):
@@ -3443,9 +3476,9 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                         continue
 
                     html = r.text
-                    # Ищем все URL объявлений Авито прямо в сыром HTML
-                    found_urls = list(dict.fromkeys(_avito_url_re.findall(html)))
-                    print(f"  [Яндекс/Bing] {search_engine}: найдено {len(found_urls)} URL Авито в HTML")
+                    # Ищем все URL объявлений Авито включая редиректы
+                    found_urls = _extract_avito_urls(html)
+                    print(f"  [Яндекс/Bing] {search_engine} HTTP {r.status_code}, {len(html):,}б, URL Авито: {len(found_urls)}")
 
                     for url in found_urls:
                         clean_url = url.split("?")[0]
