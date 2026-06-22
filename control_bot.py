@@ -2965,7 +2965,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         ]
         for url, params in urls_to_try:
             try:
-                r = session.get(url, params=params, headers=mobile_headers, timeout=8, proxies=_avito_proxies())
+                r = session.get(url, params=params, headers=mobile_headers, timeout=20, proxies=_avito_proxies())
                 print(f"  [Авито m.] {url} стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
                 if r.status_code == 200 and ('"urlPath"' in r.text or 'data-marker="item"' in r.text or '__NEXT_DATA__' in r.text):
                     result = _parse_avito_html(r.text, slug, today)
@@ -2988,7 +2988,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         if price_max < 99_000_000:
             params["pmax"] = price_max
         try:
-            r = cs_session.get(url, params=params, timeout=8, proxies=_avito_proxies())
+            r = cs_session.get(url, params=params, timeout=20, proxies=_avito_proxies())
             print(f"  [Авито cs] стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
             if r.status_code == 200 and ('"urlPath"' in r.text or 'data-marker="item"' in r.text):
                 return _parse_avito_html(r.text, slug, today)
@@ -3034,7 +3034,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                     "Authorization": f"Bearer {token}",
                     "x-device-id": f"avito-{random.randint(10**9, 10**10 - 1)}",
                 },
-                timeout=8,
+                timeout=20,
                 proxies=_avito_proxies(),
             )
             print(f"  [Авито pubAPI] стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
@@ -3075,7 +3075,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                     "Accept-Encoding": "gzip, deflate, br",
                     "Referer": "https://www.avito.ru/",
                 },
-                timeout=8,
+                timeout=20,
                 proxies=_avito_proxies(),
             )
             print(f"  [Авито webHTML] стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
@@ -3360,7 +3360,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             }
             for url in urls_to_try:
                 try:
-                    r = _rq.get(url, params=params, headers=hdrs, timeout=8, proxies=_avito_proxies(), allow_redirects=True)
+                    r = _rq.get(url, params=params, headers=hdrs, timeout=20, proxies=_avito_proxies(), allow_redirects=True)
                     print(f"  [Авито lite] {url} стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
                     if r.status_code == 200 and ('"urlPath"' in r.text or '__NEXT_DATA__' in r.text or 'data-marker="item"' in r.text):
                         result = _parse_avito_html(r.text, slug, today)
@@ -7116,7 +7116,11 @@ def _pre_warm_free_proxies_sync() -> None:
 
 
 async def _proxy_warmup_loop() -> None:
-    """Фоновая задача: прогревает кеш прокси каждые 15 минут."""
+    """Фоновая задача: прогревает кеш бесплатных прокси каждые 15 минут.
+    Если настроен платный ротирующийся прокси — бесплатные не нужны, пропускаем."""
+    if AVITO_PROXIES:
+        print("  [прокси-прогрев] платный прокси активен — бесплатные не нужны, прогрев отключён")
+        return
     loop = asyncio.get_event_loop()
     while True:
         try:
