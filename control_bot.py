@@ -1650,12 +1650,16 @@ async def _avito_async_init():
         "headless": True,
         "args": ["--disable-blink-features=AutomationControlled", "--no-sandbox"],
     }
+    # Playwright Chromium не поддерживает SOCKS5 с логином/паролем.
+    # Прокси в браузере используем только если это HTTP или SOCKS5 без авторизации (IP whitelist).
     if AVITO_PROXY_HOST and AVITO_PROXY_PORT:
-        _proxy = {"server": f"{AVITO_PROXY_PROTOCOL}://{AVITO_PROXY_HOST}:{AVITO_PROXY_PORT}"}
-        if AVITO_PROXY_USER:
-            _proxy["username"] = AVITO_PROXY_USER
-            _proxy["password"] = AVITO_PROXY_PASS
-        _launch_kwargs["proxy"] = _proxy
+        _use_browser_proxy = not (AVITO_PROXY_PROTOCOL == "socks5" and AVITO_PROXY_USER)
+        if _use_browser_proxy:
+            _proxy = {"server": f"{AVITO_PROXY_PROTOCOL}://{AVITO_PROXY_HOST}:{AVITO_PROXY_PORT}"}
+            if AVITO_PROXY_USER:
+                _proxy["username"] = AVITO_PROXY_USER
+                _proxy["password"] = AVITO_PROXY_PASS
+            _launch_kwargs["proxy"] = _proxy
     browser = await pw.chromium.launch(**_launch_kwargs)
     context = await browser.new_context(
         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
