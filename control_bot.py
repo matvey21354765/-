@@ -3503,94 +3503,89 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                     print(f"  [{engine}] ошибка маршрута: {str(e)[:80]}")
             return ""
 
-        for q in queries:
-            if len(results_out) >= 15 or time.time() > _deadline:
-                break
-            # DuckDuckGo первым — он реально отдаёт ссылки на объявления Авито.
-            # Bing как запасной. Яндекс убран: через requests это пустой JS-шаблон.
-            for search_engine in ["duckduckgo", "bing"]:
-                if time.time() > _deadline:
-                    break
+        def _parse_serp(html: str) -> list[dict]:
+            """Парсит выдачу поисковика → список объявлений Авито (url+цена+год+фото)."""
+            out: list[dict] = []
+            found_urls = _extract_avito_urls(html)
+            if not found_urls:
+                return out
+            import urllib.parse as _upq
+            ctx_html = html
+            for _ in range(2):
                 try:
-                    html = _fetch_serp(search_engine, q)
-                    if not html:
-                        continue
+                    ctx_html = _upq.unquote(ctx_html)
+                except Exception:
+                    break
+            for url in found_urls:
+                clean_url = url.split("?")[0]
+                pos = ctx_html.find(url)
+                context = ctx_html[max(0, pos-200):pos+600] if pos >= 0 else ""
+                context_clean = re.sub(r"<[^>]+>", " ", context)
+                context_clean = re.sub(r"&[a-z]+;", " ", context_clean)
+                context_clean = re.sub(r"\s+", " ", context_clean).strip()
 
-                    # Ищем все URL объявлений Авито включая редиректы
-                    found_urls = _extract_avito_urls(html)
-                    print(f"  [{search_engine}] {len(html):,}б, URL Авито: {len(found_urls)}")
+                price_int = _parse_price_snip(context_clean)
+                if price_int > 0 and not (price_min <= price_int <= price_max):
+                    continue
 
-                    # Декодируем HTML для поиска контекста (DuckDuckGo кодирует ссылки
-                    # в uddg=, поэтому по сырому html позицию ссылки не найти)
-                    import urllib.parse as _upq
-                    ctx_html = html
-                    for _ in range(2):
-                        try:
-                            ctx_html = _upq.unquote(ctx_html)
-                        except Exception:
-                            break
+                year_m = _year_re.search(context_clean)
+                year = int(year_m.group(1)) if year_m else 0
 
-                    for url in found_urls:
-                        clean_url = url.split("?")[0]
-                        if clean_url in seen_urls:
+                title_src = re.sub(
+                    r'https?://\S+|//\S+|uddg=\S+|rut=\S+|duckduckgo\.com\S*|www\.|avito\.ru\S*',
+                    ' ', context_clean, flags=re.I,
+                )
+                title_src = re.sub(r'\s+', ' ', title_src).strip(" -|·,")
+                title = title_src[:90].strip() or f"Авто на Авито — {slug_ru_name}"
+
+                photo_url = ""
+                wide = ctx_html[max(0, pos-800):pos+1200] if pos >= 0 else ""
+                img_m = re.search(
+                    r'(https?:)?//(?:avatars\.mds\.yandex\.net|[a-z0-9.]*avito\.st|[a-z0-9.]*img\.avito[.\w]*)/[^\s"\'<>]+',
+                    wide,
+                )
+                if img_m:
+                    photo_url = img_m.group(0)
+                    if photo_url.startswith("//"):
+                        photo_url = "https:" + photo_url
+
+                out.append({
+                    "source": "avito", "title": title,
+                    "price": f"{price_int:,} ₽".replace(",", " ") if price_int else "цена не указана",
+                    "_price_int": price_int, "url": clean_url, "_photo_url": photo_url,
+                    "description": context_clean[:400], "seller": "Авито (частник)",
+                    "_year": year, "_days_on_site": 0, "_photos": 1 if photo_url else 0,
+                    "mileage": 0, "_avito_price_filtered": False,
+                })
+            return out
+
+        def _fetch_and_parse(q: str) -> list[dict]:
+            html = _fetch_serp("duckduckgo", q)
+            if not html:
+                return []
+            batch = _parse_serp(html)
+            print(f"  [duckduckgo] q={q[-20:]!r}: {len(batch)} объявлений")
+            return batch
+
+        # Все запросы по маркам — ПАРАЛЛЕЛЬНО (иначе 13 запросов по очереди = слишком долго)
+        from concurrent.futures import ThreadPoolExecutor as _TPE2, as_completed as _ac2
+        with _TPE2(max_workers=8) as _ex2:
+            futs = [_ex2.submit(_fetch_and_parse, q) for q in queries]
+            try:
+                for fut in _ac2(futs, timeout=25):
+                    try:
+                        batch = fut.result()
+                    except Exception:
+                        batch = []
+                    for item in batch:
+                        if item["url"] in seen_urls:
                             continue
-                        seen_urls.add(clean_url)
-
-                        # Ищем текст вокруг этого URL (±500 символов) для парсинга цены/заголовка
-                        pos = ctx_html.find(url)
-                        context = ctx_html[max(0, pos-200):pos+600] if pos >= 0 else ""
-                        # Убираем HTML теги
-                        context_clean = re.sub(r"<[^>]+>", " ", context)
-                        context_clean = re.sub(r"&[a-z]+;", " ", context_clean)
-                        context_clean = re.sub(r"\s+", " ", context_clean).strip()
-
-                        price_int = _parse_price_snip(context_clean)
-                        if price_int > 0 and not (price_min <= price_int <= price_max):
-                            continue
-
-                        year_m = _year_re.search(context_clean)
-                        year = int(year_m.group(1)) if year_m else 0
-
-                        # Заголовок: убираем URL-мусор (uddg=, duckduckgo, ссылки) из контекста
-                        title_src = re.sub(
-                            r'https?://\S+|//\S+|uddg=\S+|rut=\S+|duckduckgo\.com\S*|www\.|avito\.ru\S*',
-                            ' ', context_clean, flags=re.I,
-                        )
-                        title_src = re.sub(r'\s+', ' ', title_src).strip(" -|·,")
-                        title = title_src[:90].strip() or f"Авто на Авито — {slug_ru_name}"
-
-                        # Фото: ищем CDN-картинку рядом с объявлением (Яндекс-превью или avito.st —
-                        # эти хосты не блокируются, в отличие от самой страницы avito.ru)
-                        photo_url = ""
-                        wide = ctx_html[max(0, pos-800):pos+1200] if pos >= 0 else ""
-                        img_m = re.search(
-                            r'(https?:)?//(?:avatars\.mds\.yandex\.net|[a-z0-9.]*avito\.st|[a-z0-9.]*img\.avito[.\w]*)/[^\s"\'<>]+',
-                            wide,
-                        )
-                        if img_m:
-                            photo_url = img_m.group(0)
-                            if photo_url.startswith("//"):
-                                photo_url = "https:" + photo_url
-
-                        results_out.append({
-                            "source": "avito",
-                            "title": title,
-                            "price": f"{price_int:,} ₽".replace(",", " ") if price_int else "цена не указана",
-                            "_price_int": price_int,
-                            "url": clean_url,
-                            "_photo_url": photo_url,
-                            "description": context_clean[:400],
-                            "seller": "Авито (частник)",
-                            "_year": year,
-                            "_days_on_site": 0,
-                            "_photos": 1 if photo_url else 0,
-                            "mileage": 0,
-                            "_avito_price_filtered": False,
-                        })
-                    if results_out:
+                        seen_urls.add(item["url"])
+                        results_out.append(item)
+                    if len(results_out) >= 25:
                         break
-                except Exception as e:
-                    print(f"  [Яндекс/Bing] {search_engine} ошибка: {e}")
+            except Exception as e:
+                print(f"  [duckduckgo] таймаут/ошибка пула: {str(e)[:60]}")
 
         if results_out:
             print(f"  [Яндекс/Bing] итого: {len(results_out)} объявлений Авито")
@@ -6626,7 +6621,7 @@ async def main():
         except Exception:
             BOT_USERNAME = "PerekupDriveBot"
     print("✅ Авто-брокер бот запущен!")
-    print("  [ВЕРСИЯ] 2026-06-22-v5 :: Авито через DuckDuckGo по маркам")
+    print("  [ВЕРСИЯ] 2026-06-22-v6 :: Авито DuckDuckGo параллельно по маркам")
 
     # Логируем Railway IP (нужен для добавления в whitelist прокси)
     try:
