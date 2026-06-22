@@ -3118,7 +3118,9 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         объявления, когда IP не заблокирован.
         """
         url = f"https://www.avito.ru/{slug}/avtomobili"
-        params: dict = {"seller_type": "1"}  # частники, сортировка по дате
+        # seller_type=1 — только частники (без дилеров/салонов),
+        # s=104 — сортировка по дате (свежие сверху).
+        params: dict = {"seller_type": "1", "s": "104"}
         if p > 1:
             params["p"] = p
         if price_min > 0:
@@ -3864,11 +3866,12 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
     # ещё несколько. Запускаем ВСЁ параллельно и СЛИВАЕМ результаты, а не берём
     # первый ответивший метод (иначе теряем большие пачки, что приходят чуть позже).
     if AVITO_PROXIES:
-        # Платный ротирующийся прокси открывает Авито напрямую → используем ТОЛЬКО
-        # прямые методы (реальные цены, фото, описания). DDG/бесплатные прокси/
-        # scraperapi дают объявления без цены — с рабочим прокси они не нужны и
-        # лишь засоряют выдачу машинами без цены и не из бюджета.
-        all_methods = [_try_web_html, _try_cs_web, _try_mobile_site, _try_avito_public_api, _try_avito_json_api, _try_curl_cffi, _try_avito_rss]
+        # Платный прокси открывает Авито напрямую. Используем ТОЛЬКО _try_web_html —
+        # он применяет фильтр бюджета (pmin/pmax) + частники + сортировку по дате
+        # в URL, поэтому Авито сразу отдаёт релевантные объявления с ценами, а не
+        # рекламные новинки дилеров без цены. Остальные методы тянут НЕфильтрованную
+        # страницу (засорена дилерскими промо) — как запасные при 403 на части IP.
+        all_methods = [_try_web_html, _try_avito_public_api]
     else:
         all_methods = [_try_scraperapi_fast, _try_free_proxies, _try_yandex_snippets, _try_curl_cffi, _try_cs_web, _try_mobile_site, _try_web_html, _try_avito_public_api, _try_avito_rss, _try_googlebot_ua, _try_avito_lite, _try_scraperapi, _try_avito_json_api]
     _ex = _TPE(max_workers=len(all_methods))
@@ -4000,32 +4003,37 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
     Парсер Авито. Кэш хранится по РЕГИОНУ (без разбивки по цене), чтобы один
     успешный скрейп покрывал все ценовые диапазоны и не вызывал повторных блокировок.
     """
-    # Единый ключ по региону — не по бюджету
-    cache_key = region
     now = time.time()
+    # С рабочим прокси скрейпим С ФИЛЬТРОМ бюджета в URL (Авито сам отдаёт
+    # релевантные объявления нужной цены, а не рекламные новинки дилеров без
+    # цены). Кэш — по бюджет-слоту. 1000 IP делают частый скрейп безопасным.
+    # Без прокси — старая схема (один кэш на регион, фильтр в памяти).
+    if AVITO_PROXIES:
+        bucket = _avito_price_bucket(price_min, price_max)
+        cache_key = f"{region}_{bucket}"
+        _scrape_pmin, _scrape_pmax = price_min, price_max
+        _cache_ttl = 3 * 3600  # 3 часа — быстрее обновляем при платном прокси
+    else:
+        cache_key = region
+        _scrape_pmin, _scrape_pmax = 0, 99_000_000
+        _cache_ttl = _AVITO_REGION_CACHE_TTL
     cached = _AVITO_REGION_CACHE.get(cache_key)
-    # Если настроен платный прокси, но кэш состоит из старых записей без цены
-    # (DDG-мусор из прошлых версий) — игнорируем кэш и скрейпим заново с ценами.
+    # Игнорируем кэш из старых записей без цены (DDG-мусор прошлых версий).
     _cache_is_priceless = bool(
         cached and AVITO_PROXIES
         and cached[1]
         and sum(1 for i in cached[1] if i.get("_price_int", 0)) < max(1, len(cached[1]) // 2)
     )
-    if cached and (now - cached[0]) < _AVITO_REGION_CACHE_TTL and not _cache_is_priceless:
+    if cached and (now - cached[0]) < _cache_ttl and not _cache_is_priceless:
         items = cached[1]
         print(f"  [Авито] кэш {cache_key}: {len(items)} объявлений (возраст {int(now-cached[0])}с)")
     else:
-        # Скрейпим БЕЗ ценового фильтра — берём все объявления региона сразу,
-        # фильтрация по бюджету происходит в памяти. Это значит один запрос
-        # к Авито покрывает любой бюджет любого пользователя на 8 часов.
-        items = _scrape_avito_raw(region, pages=pages, price_min=0, price_max=99_000_000, sort_by_date=sort_by_date)
+        # Скрейпим с фильтром бюджета (прокси) или без (бесплатный режим).
+        items = _scrape_avito_raw(region, pages=pages, price_min=_scrape_pmin, price_max=_scrape_pmax, sort_by_date=sort_by_date)
         if items:
             _AVITO_REGION_CACHE[cache_key] = (now, items)
-            # Также сохраняем в старые bucket-ключи для обратной совместимости
-            bucket = _avito_price_bucket(price_min, price_max)
-            _AVITO_REGION_CACHE[f"{region}_{bucket}"] = (now, items)
             _save_avito_cache()
-            print(f"  [Авито] скрейп OK: {len(items)} объявлений → кэш на 8ч")
+            print(f"  [Авито] скрейп OK: {len(items)} объявлений → кэш ({cache_key})")
         else:
             # Скрейп вернул 0. Ищем любой кэш региона.
             any_cached: list[dict] = []
