@@ -3097,8 +3097,12 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                     if result:
                         print(f"  [ScraperAPI-fast] стр.{p}: {len(result)} объявлений ({'premium' if 'premium' in opts else 'std'})")
                         return result
+                elif r.status_code in (401, 403):
+                    # Кредиты ScraperAPI кончились / ключ недействителен — нет смысла повторять
+                    print(f"  [ScraperAPI-fast] стр.{p}: HTTP {r.status_code} — кредиты ScraperAPI исчерпаны (пополни на scraperapi.com)")
+                    return []
                 else:
-                    print(f"  [ScraperAPI-fast] стр.{p}: HTTP {r.status_code if r else '?'}, нет данных")
+                    print(f"  [ScraperAPI-fast] стр.{p}: HTTP {r.status_code}, нет данных")
             except Exception as e:
                 print(f"  [ScraperAPI-fast] стр.{p}: {str(e)[:50]}")
         return []
@@ -3438,8 +3442,12 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             price_q = f" до {price_max//1000}тыс"
 
         # Запросы по маркам — так поисковик отдаёт отдельные объявления, а не
-        # страницы-каталоги. Мало запросов (6), иначе DuckDuckGo душит нас 202/403.
-        _popular_brands = ["lada", "kia", "hyundai", "toyota", "nissan", "volkswagen"]
+        # страницы-каталоги. DuckDuckGo напрямую с Railway держит ~3 параллельно;
+        # больше марок = больше объявлений, но при max_workers=3 нагрузка та же.
+        _popular_brands = [
+            "lada", "kia", "hyundai", "toyota", "nissan", "volkswagen",
+            "renault", "ford", "skoda", "bmw", "mercedes", "mazda",
+        ]
         queries = [f"site:avito.ru/{slug}/avtomobili {b}" for b in _popular_brands]
 
         results_out: list[dict] = []
@@ -3532,13 +3540,14 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             else:  # yandex
                 url = "https://yandex.ru/search/"
                 params = {"text": q, "lr": "225", "p": p - 1}
-            # DuckDuckGo душит при множестве запросов: один маршрут (прокси) + джиттер,
-            # чтобы не ловить 202/403. Остальные — прокси, затем напрямую.
+            # Railway IP свободно достаёт поисковики, а РФ-прокси к ним часто
+            # вообще не подключается (таймаут на html.duckduckgo.com / bing).
+            # Поэтому ПРЯМОЙ маршрут — основной, прокси только как запас.
             if engine == "duckduckgo":
-                routes = [AVITO_PROXIES] if AVITO_PROXIES else [None]
-                time.sleep(random.uniform(0.2, 1.2))
+                routes = [None]  # через прокси DuckDuckGo стабильно отваливается
+                time.sleep(random.uniform(0.2, 1.0))
             else:
-                routes = [AVITO_PROXIES, None] if AVITO_PROXIES else [None]
+                routes = [None, AVITO_PROXIES] if AVITO_PROXIES else [None]
             for proxies in routes:
                 try:
                     r = _rq.get(url, params=params, headers=headers, timeout=10, proxies=proxies)
@@ -3611,12 +3620,17 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             return out
 
         def _fetch_and_parse(q: str) -> list[dict]:
-            html = _fetch_serp("duckduckgo", q)
-            if not html:
-                return []
-            batch = _parse_serp(html)
-            print(f"  [duckduckgo] q={q[-20:]!r}: {len(batch)} объявлений")
-            return batch
+            # DuckDuckGo напрямую с Railway IP отдаёт реальные объявления Авито
+            # (проверено), Bing — запас. Берём первый, который вернул объявления.
+            for engine in ("duckduckgo", "bing"):
+                html = _fetch_serp(engine, q)
+                if not html:
+                    continue
+                batch = _parse_serp(html)
+                if batch:
+                    print(f"  [{engine}] q={q[-20:]!r}: {len(batch)} объявлений")
+                    return batch
+            return []
 
         # Запросы по маркам параллельно, но всего 3 одновременно — DuckDuckGo
         # блокирует при большем числе одновременных запросов (202/403).
@@ -6784,7 +6798,7 @@ async def main():
         except Exception:
             BOT_USERNAME = "PerekupDriveBot"
     print("✅ Авто-брокер бот запущен!")
-    print("  [ВЕРСИЯ] 2026-06-22-v10 :: быстрый ScraperAPI (резидентные IP) + прогрев прокси")
+    print("  [ВЕРСИЯ] 2026-06-22-v11 :: DuckDuckGo напрямую (12 марок) — основной путь к Авито")
 
     # Логируем Railway IP (нужен для добавления в whitelist прокси)
     try:
