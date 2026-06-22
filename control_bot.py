@@ -3555,7 +3555,9 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                 routes = [None]
                 for _pa in list(_working_free_proxies)[:2]:
                     routes.append({"http": f"http://{_pa}", "https": f"http://{_pa}"})
-                time.sleep(random.uniform(0.3, 1.2))
+                # ВАЖНО: быстрые параллельные запросы вызывают 202/429.
+                # Пауза 3-5с достаточна, чтобы DDG не заблокировал IP.
+                time.sleep(random.uniform(3.0, 5.0))
             else:
                 routes = [None, AVITO_PROXIES] if AVITO_PROXIES else [None]
             for proxies in routes:
@@ -3652,15 +3654,17 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                 })
             return out
 
-        # Несколько независимых поисковиков (у каждого свой лимит и свой индекс).
-        # Раскидываем запросы по кругу: каждый бренд идёт на свой движок —
-        # так ни один поисковик не упирается в лимит при 50-100 пользователях.
-        _engines_cycle = ["brave", "ddglite", "duckduckgo"]
+        # Стратегия: DDG и ddglite надёжны с паузой 3-5с между запросами.
+        # Brave быстро 429 при серии запросов, поэтому — только как запасной.
+        # Запускаем по 2 запроса одновременно (разные движки), пауза между волнами.
+        _engines_cycle = ["duckduckgo", "ddglite", "duckduckgo", "ddglite",
+                          "duckduckgo", "ddglite", "duckduckgo", "ddglite"]
 
         def _fetch_and_parse(idx_q: tuple) -> list[dict]:
             idx, q = idx_q
             primary = _engines_cycle[idx % len(_engines_cycle)]
-            order = [primary] + [e for e in _engines_cycle if e != primary] + ["bing"]
+            # Если primary вернул 202, пробуем другой
+            order = [primary, "ddglite" if primary == "duckduckgo" else "duckduckgo", "brave"]
             for engine in order:
                 html = _fetch_serp(engine, q)
                 if not html:
@@ -3671,13 +3675,13 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                     return batch
             return []
 
-        # Запросы по маркам параллельно; движки чередуются, поэтому можно
-        # держать 3 одновременно — нагрузка размазана по трём поисковикам.
+        # max_workers=2: одновременно 2 запроса на РАЗНЫЕ движки (DDG + ddglite),
+        # пауза 3-5с в _fetch_serp не даёт каждому движку ловить 202.
         from concurrent.futures import ThreadPoolExecutor as _TPE2, as_completed as _ac2
-        with _TPE2(max_workers=3) as _ex2:
+        with _TPE2(max_workers=2) as _ex2:
             futs = [_ex2.submit(_fetch_and_parse, (i, q)) for i, q in enumerate(queries)]
             try:
-                for fut in _ac2(futs, timeout=25):
+                for fut in _ac2(futs, timeout=55):
                     try:
                         batch = fut.result()
                     except Exception:
@@ -3702,10 +3706,10 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
     all_methods = [_try_scraperapi_fast, _try_free_proxies, _try_yandex_snippets, _try_curl_cffi, _try_cs_web, _try_mobile_site, _try_web_html, _try_avito_public_api, _try_avito_rss, _try_googlebot_ua, _try_avito_lite, _try_scraperapi, _try_avito_json_api]
     _ex = _TPE(max_workers=len(all_methods))
     merged: dict[str, dict] = {}
-    _soft_deadline = time.time() + 22
+    _soft_deadline = time.time() + 35
     try:
         fut_map = {_ex.submit(m, 1): m for m in all_methods}
-        for fut in _as_completed(fut_map, timeout=32):
+        for fut in _as_completed(fut_map, timeout=58):
             try:
                 b = fut.result()
             except Exception:
@@ -5928,7 +5932,7 @@ async def do_search_for_user(uid: int, reply_to):
     }
     tasks = [loop.run_in_executor(None, scraper_map[src]) for src in enabled_sources if src in scraper_map]
     try:
-        results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=45)
+        results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=70)
     except asyncio.TimeoutError:
         results = [[] for _ in tasks]
         await reply_to.answer("⏱ Поиск занял слишком долго, показываю что успели найти...")
@@ -6924,7 +6928,7 @@ async def main():
         except Exception:
             BOT_USERNAME = "PerekupDriveBot"
     print("✅ Авто-брокер бот запущен!")
-    print("  [ВЕРСИЯ] 2026-06-22-v16 :: цена из JSON-сниппета + чистый заголовок из URL + прокси для price-fetch")
+    print("  [ВЕРСИЯ] 2026-06-22-v17 :: DDG пауза 3-5с (стабильный обход 202) + таймауты расширены")
 
     # Логируем Railway IP (нужен для добавления в whitelist прокси)
     try:
