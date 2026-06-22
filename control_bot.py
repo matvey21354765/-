@@ -5948,16 +5948,23 @@ async def send_batch(chat_id: int, uid: int, offset: int):
             item.get("price") or
             (f"{_pi:,} ₽".replace(",", " ") if _pi else "—")
         )
+        # Рыночную цену показываем на КАЖДОЙ машине, где она известна.
         deal_line = ""
-        if item.get("_below_market") and item.get("_market_price"):
-            market = item["_market_price"]
-            pct = item.get("_savings_pct", 0)
-            price_line += f"  🔻 рынок ~{market:,} ₽ (-{pct}%)".replace(",", " ")
-            # Явный сигнал выгоды для перекупа: сколько денег экономия
-            saving = market - (item.get("_price_int", 0) or 0)
-            if saving > 0:
+        market = item.get("_market_price", 0)
+        pct = item.get("_savings_pct", 0)
+        if market and _pi:
+            saving = market - _pi
+            if pct > 0:
+                # Дешевле рынка
+                price_line += f"  🔻 рынок ~{market:,} ₽ (-{pct}%)".replace(",", " ")
                 tier = "🟢 ВЫГОДНО" if pct >= 25 else "🟡 ниже рынка"
-                deal_line = f"\n{tier}: выгода ~{saving:,} ₽".replace(",", " ")
+                deal_line = f"\n{tier}: дешевле рынка на ~{saving:,} ₽".replace(",", " ")
+            elif pct < 0:
+                # Дороже рынка
+                price_line += f"  🔺 рынок ~{market:,} ₽ (+{abs(pct)}%)".replace(",", " ")
+            else:
+                # По рынку
+                price_line += f"  ≈ рынок ~{market:,} ₽".replace(",", " ")
 
         mileage = item.get("mileage", 0)
         mileage_str = ""
@@ -6196,7 +6203,17 @@ async def do_search_for_user(uid: int, reply_to):
                 break
     if avito_count == 0 and avito_enabled and "drom" not in enabled_sources:
         # Проверяем: Авито реально не ответил, или ответил но нет машин в бюджете?
+        # С прокси кэш лежит под ключом region_bucket, без прокси — под region.
         avito_raw_cached = _AVITO_REGION_CACHE.get(region)
+        if not avito_raw_cached and AVITO_PROXIES:
+            _bucket = _avito_price_bucket(pmin, pmax)
+            avito_raw_cached = _AVITO_REGION_CACHE.get(f"{region}_{_bucket}")
+        if not avito_raw_cached:
+            # Берём любой свежий кэш этого региона (любой бюджет-слот).
+            for _k, _v in _AVITO_REGION_CACHE.items():
+                if _k == region or _k.startswith(region + "_"):
+                    if not avito_raw_cached or len(_v[1]) > len(avito_raw_cached[1]):
+                        avito_raw_cached = _v
         avito_raw_count = len(avito_raw_cached[1]) if avito_raw_cached else 0
         if avito_raw_count > 0:
             # Авито ответил — просто нет машин в этом бюджете.
