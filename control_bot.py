@@ -6499,7 +6499,17 @@ async def do_search_for_user(uid: int, reply_to):
         "search", uid=uid, region=region, price_min=pmin, price_max=pmax,
         source=",".join(enabled_sources), results=len(suitable),
     )
-    await reply_to.answer(f"✅ Найдено {len(suitable)} объявлений!\n📈 Сначала самые выгодные (ниже рынка)")
+    _below_cnt = sum(1 for i in suitable if i.get("_savings_pct", 0) > 0)
+    if _below_cnt:
+        await reply_to.answer(
+            f"✅ Найдено {len(suitable)} объявлений!\n"
+            f"🟢 Из них {_below_cnt} НИЖЕ РЫНКА — показываю их первыми, затем по рыночной цене."
+        )
+    else:
+        await reply_to.answer(
+            f"✅ Найдено {len(suitable)} объявлений!\n"
+            f"📊 Ниже рынка сейчас нет — показываю по рыночной цене (от дешёвых к дорогим)."
+        )
     await send_batch(reply_to.chat.id, uid, 0)
 
 
