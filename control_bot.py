@@ -4070,9 +4070,8 @@ async def cmd_new_today(msg: Message):
     ]
     suitable = _filter_by_category(suitable, category, brand)
     suitable = rank_by_market_price(suitable)
-    # Сначала сегодняшние (days==0), потом ниже рынка
+    # Ниже рынка — всегда первыми, дата не важна
     suitable.sort(key=lambda x: (
-        x.get("_days_on_site", 0),
         0 if x.get("_savings_pct", 0) > 0 else 1,
         -x.get("_savings_pct", 0),
         -x.get("_hot_score", 0),
