@@ -3874,12 +3874,23 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         all_methods = [_try_web_html, _try_avito_public_api]
     else:
         all_methods = [_try_scraperapi_fast, _try_free_proxies, _try_yandex_snippets, _try_curl_cffi, _try_cs_web, _try_mobile_site, _try_web_html, _try_avito_public_api, _try_avito_rss, _try_googlebot_ua, _try_avito_lite, _try_scraperapi, _try_avito_json_api]
-    _ex = _TPE(max_workers=len(all_methods))
+    # Список задач (метод, страница). С прокси сканируем НЕСКОЛЬКО страниц
+    # _try_web_html — так находим даже редкие дешёвые машины (0-100к их мало
+    # на первой странице, но они точно есть глубже в выдаче).
+    if AVITO_PROXIES:
+        tasks = [(_try_web_html, p) for p in range(1, 6)] + [(_try_avito_public_api, 1)]
+        _cap = 120
+        _deadline_s = 50
+    else:
+        tasks = [(m, 1) for m in all_methods]
+        _cap = 40
+        _deadline_s = 35
+    _ex = _TPE(max_workers=min(8, len(tasks)))
     merged: dict[str, dict] = {}
-    _soft_deadline = time.time() + 35
+    _soft_deadline = time.time() + _deadline_s
     try:
-        fut_map = {_ex.submit(m, 1): m for m in all_methods}
-        for fut in _as_completed(fut_map, timeout=58):
+        fut_map = {_ex.submit(m, pg): (m, pg) for (m, pg) in tasks}
+        for fut in _as_completed(fut_map, timeout=70):
             try:
                 b = fut.result()
             except Exception:
@@ -3892,9 +3903,10 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                         merged[u] = it
                         added += 1
                 if added:
-                    print(f"  [Авито API] {fut_map[fut].__name__}: +{added} (всего {len(merged)})")
+                    _m, _pg = fut_map[fut]
+                    print(f"  [Авито API] {_m.__name__} стр.{_pg}: +{added} (всего {len(merged)})")
             # достаточно набрали или вышло время — больше не ждём медленные методы
-            if len(merged) >= 40 or (merged and time.time() > _soft_deadline):
+            if len(merged) >= _cap or (merged and time.time() > _soft_deadline):
                 break
     except Exception as e:
         print(f"  [Авито API] пул: {str(e)[:60]}")
