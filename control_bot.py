@@ -6521,6 +6521,14 @@ async def main():
             BOT_USERNAME = "PerekupDriveBot"
     print("✅ Авто-брокер бот запущен!")
 
+    # Логируем Railway IP (нужен для добавления в whitelist прокси)
+    try:
+        import requests as _rq
+        railway_ip = _rq.get("https://api.ipify.org", timeout=5).text.strip()
+        print(f"  [Railway IP] {railway_ip}  ← добавь этот IP в whitelist прокси!")
+    except Exception:
+        pass
+
     # Тест прокси
     if AVITO_PROXY_HOST:
         try:
@@ -6529,6 +6537,7 @@ async def main():
             print(f"  [прокси {AVITO_PROXY_PROTOCOL}] ✅ работает, IP: {r.text.strip()}")
         except Exception as e:
             print(f"  [прокси {AVITO_PROXY_PROTOCOL}] ❌ ошибка: {e}")
+            print(f"  [прокси] Добавь Railway IP в whitelist на сайте провайдера прокси!")
 
     loop = asyncio.get_event_loop()
     # Единый глобальный монитор — опрашивает всех активных пользователей каждые 2 минуты
