@@ -1018,6 +1018,20 @@ def scrape_bibika(region: str, pages: int = 3, price_min: int = 0, price_max: in
     return results
 
 
+# ── ВКонтакте: паблики авто-барахолок по городам ─────────────────
+VK_AUTO_GROUPS = {
+    "ekaterinburg": ["prodamavto96", "avtobaraholka96", "avto96ru", "kupit_avto_ekb_66"],
+    "moskva":       ["avtobaraholkamsk", "prodamavtomsk", "avto_moskva_prodazha"],
+    "spb":          ["prodamavto78", "avtobaraholka_spb", "avtospb_prodazha"],
+    "novosibirsk":  ["avtobaraholka54", "prodamavto54"],
+    "kazan":        ["avtobaraholkakazan", "prodamavtokazan"],
+    "chelyabinsk":  ["avto74chelyabinsk", "prodamavto74"],
+    "ufa":          ["avtobaraholkaufa", "prodamavtoufa"],
+    "krasnodar":    ["avtobaraholkakrd", "prodamavto23"],
+    "omsk":         ["avtobaraholkaomsk", "prodamavto55"],
+    "rostov":       ["avtobaraholkarostov", "prodamavto61"],
+}
+
 # ── Парсер Telegram-каналов автопродаж ──────────────────────────
 
 TG_AUTO_CHANNELS = {
@@ -1209,6 +1223,168 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
             continue
 
     print(f"  [TG каналы] {region}: итого {len(results)} объявлений")
+    return results
+
+
+def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
+    """
+    Парсит публичные паблики ВКонтакте с авто-барахолками города.
+    Использует мобильную версию m.vk.com (рендерит HTML без JS).
+    При наличии VK_TOKEN использует API для надёжности.
+    """
+    try:
+        import requests as _req
+        from bs4 import BeautifulSoup as _BS
+    except ImportError:
+        return []
+
+    vk_key = _TG_REGION_MAP.get(region, "")
+    groups = VK_AUTO_GROUPS.get(vk_key, [])
+    if not groups:
+        return []
+
+    vk_token = os.getenv("VK_TOKEN", "")
+    results: list[dict] = []
+    today = datetime.date.today()
+
+    session = _req.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+        "Accept-Language": "ru-RU,ru;q=0.9",
+        "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+    })
+
+    _vk_price_re = re.compile(
+        r"(\d[\d\s]{2,10})\s*(?:₽|тыс\.?\s*р(?:уб)?\.?|руб\.?|р\.)",
+        re.IGNORECASE,
+    )
+    _vk_year_re = re.compile(r"\b(19[5-9]\d|20[012]\d)\b")
+
+    def _parse_vk_price(text: str) -> int:
+        for m in _vk_price_re.finditer(text):
+            raw = re.sub(r"\D", "", m.group(1))
+            if not raw:
+                continue
+            val = int(raw)
+            suffix = m.group(0)[len(m.group(1)):].strip().lower()
+            if "тыс" in suffix:
+                val *= 1000
+            if 50_000 <= val <= 50_000_000:
+                return val
+        return 0
+
+    def _try_vk_api(slug: str) -> list[dict]:
+        """Парсит через VK API (требует VK_TOKEN)."""
+        if not vk_token:
+            return []
+        try:
+            api_url = "https://api.vk.com/method/wall.get"
+            params = {
+                "domain": slug, "count": 50, "filter": "owner",
+                "access_token": vk_token, "v": "5.131",
+            }
+            r = session.get(api_url, params=params, timeout=10)
+            data = r.json()
+            items_api = data.get("response", {}).get("items", [])
+            batch: list[dict] = []
+            for post in items_api:
+                text = post.get("text", "")
+                if not text or len(text) < 30:
+                    continue
+                kw = ["авто", "машин", "продам", "продаю", "автомоб", "кузов", "двигат", "руль"]
+                if not any(k in text.lower() for k in kw):
+                    continue
+                price = _parse_vk_price(text)
+                if not (price_min <= price <= price_max) and price > 0:
+                    continue
+                year_m = _vk_year_re.search(text)
+                post_id = post.get("id", "")
+                owner_id = post.get("owner_id", "")
+                post_url = f"https://vk.com/wall{owner_id}_{post_id}"
+                # Фото из вложений
+                photo_url = ""
+                for att in post.get("attachments", []):
+                    if att.get("type") == "photo":
+                        ph = att["photo"]
+                        sizes = ph.get("sizes", [])
+                        if sizes:
+                            best = max(sizes, key=lambda s: s.get("width", 0))
+                            photo_url = best.get("url", "")
+                            break
+                title = text[:80].replace("\n", " ").strip()
+                batch.append({
+                    "title": title,
+                    "price": f"{price:,} ₽".replace(",", " ") if price else "цена не указана",
+                    "_price_int": price,
+                    "url": post_url,
+                    "_photo_url": photo_url,
+                    "description": text[:500],
+                    "_source": "vk",
+                    "_year": int(year_m.group(1)) if year_m else 0,
+                    "_days_on_site": 0,
+                })
+            return batch
+        except Exception as e:
+            print(f"  [VK API {slug}] ошибка: {e}")
+            return []
+
+    def _try_vk_mobile(slug: str) -> list[dict]:
+        """Парсит мобильную версию m.vk.com (без токена)."""
+        try:
+            url = f"https://m.vk.com/{slug}"
+            r = session.get(url, timeout=12)
+            if r.status_code != 200:
+                return []
+            soup = _BS(r.text, "lxml")
+            posts = soup.select("div.wall_item") or soup.select("div._post")
+            if not posts:
+                return []
+            batch: list[dict] = []
+            for post in posts[:30]:
+                text_el = post.select_one("div.wall_post_text") or post.select_one("div._post_content")
+                if not text_el:
+                    continue
+                text = text_el.get_text(" ", strip=True)
+                if len(text) < 30:
+                    continue
+                kw = ["авто", "машин", "продам", "продаю", "автомоб", "кузов", "двигат"]
+                if not any(k in text.lower() for k in kw):
+                    continue
+                price = _parse_vk_price(text)
+                if price > 0 and not (price_min <= price <= price_max):
+                    continue
+                link_el = post.select_one("a[href*='/wall']")
+                post_url = ""
+                if link_el:
+                    href = link_el.get("href", "")
+                    post_url = f"https://vk.com{href}" if href.startswith("/") else href
+                if not post_url:
+                    continue
+                img_el = post.select_one("img[src*='userapi']") or post.select_one("img[src*='vk.com']")
+                photo_url = img_el.get("src", "") if img_el else ""
+                year_m = _vk_year_re.search(text)
+                title = text[:80].replace("\n", " ").strip()
+                batch.append({
+                    "title": title,
+                    "price": f"{price:,} ₽".replace(",", " ") if price else "цена не указана",
+                    "_price_int": price,
+                    "url": post_url,
+                    "_photo_url": photo_url,
+                    "description": text[:500],
+                    "_source": "vk",
+                    "_year": int(year_m.group(1)) if year_m else 0,
+                    "_days_on_site": 0,
+                })
+            return batch
+        except Exception as e:
+            print(f"  [VK mobile {slug}] ошибка: {e}")
+            return []
+
+    for slug in groups:
+        batch = _try_vk_api(slug) or _try_vk_mobile(slug)
+        print(f"  [VK {slug}] {len(batch)} объявлений")
+        results.extend(batch)
+
     return results
 
 
@@ -3585,6 +3761,7 @@ def id_to_url(sid: str) -> str:
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🔍 Найти авто"), KeyboardButton(text="🌐 Глобальный поиск")],
+        [KeyboardButton(text="📢 VK + TG Барахолка")],
         [KeyboardButton(text="🆕 Новые сегодня"), KeyboardButton(text="🎯 Следить за маркой")],
         [KeyboardButton(text="🔔 Уведомления"), KeyboardButton(text="🚗 Мой гараж")],
         [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="❓ Помощь")],
@@ -4363,6 +4540,103 @@ async def cmd_global_search(msg: Message):
     await send_batch(msg.chat.id, uid, 0)
 
 
+@dp.message(F.text == "📢 VK + TG Барахолка")
+async def cmd_vk_tg_search(msg: Message):
+    """Поиск в пабликах ВКонтакте и Telegram-каналах автобарахолок города."""
+    uid = msg.from_user.id
+    s = load_settings(uid)
+    if not s.get("region"):
+        await msg.answer("Сначала настрой поиск: /start")
+        return
+
+    now_ts = time.time()
+    last = _last_search_at.get(uid, 0)
+    wait_left = SEARCH_COOLDOWN_SEC - (now_ts - last)
+    if wait_left > 0:
+        await msg.answer(f"⏳ Подожди {int(wait_left) + 1} сек.")
+        return
+    _last_search_at[uid] = now_ts
+
+    region = s["region"]
+    pmin = s.get("price_min", 0)
+    pmax = s.get("price_max", 99_000_000)
+    region_name = REGIONS.get(region, region)
+
+    await msg.answer(
+        f"📢 Ищу в VK пабликах и TG-каналах города {region_name}...\n"
+        f"💰 Бюджет: {pmin:,} – {pmax:,} ₽".replace(",", " ")
+    )
+
+    loop = asyncio.get_event_loop()
+    skipped = load_skipped(uid)
+    seen = load_seen(uid)
+
+    vk_task = loop.run_in_executor(None, lambda: scrape_vk_groups(region, pmin, pmax))
+    tg_task = loop.run_in_executor(None, lambda: scrape_tg_channels(region, pmin, pmax))
+    vk_result, tg_result = await asyncio.gather(vk_task, tg_task, return_exceptions=True)
+
+    items: list[dict] = []
+    stat_parts: list[str] = []
+    if isinstance(vk_result, list) and vk_result:
+        items.extend(vk_result)
+        stat_parts.append(f"📘 VK: {len(vk_result)}")
+    if isinstance(tg_result, list) and tg_result:
+        items.extend(tg_result)
+        stat_parts.append(f"📢 TG: {len(tg_result)}")
+
+    if stat_parts:
+        await msg.answer("📊 " + " | ".join(stat_parts))
+
+    # Дедупликация
+    seen_u: set[str] = set()
+    deduped: list[dict] = []
+    for i in items:
+        u = i.get("url", "")
+        if u and u not in seen_u:
+            seen_u.add(u)
+            deduped.append(i)
+    items = deduped
+
+    # Парсим цену из текста если не распарсилась
+    for it in items:
+        if not it.get("_price_int") and it.get("price"):
+            p = parse_price(it["price"])
+            if p and 10_000 < p < 99_000_000:
+                it["_price_int"] = p
+
+    suitable = [
+        i for i in items
+        if in_price_range(i, pmin, pmax)
+        and i.get("url")
+        and i["url"] not in skipped
+        and i["url"] not in seen
+    ]
+    suitable = rank_by_market_price(suitable)
+    suitable.sort(key=lambda x: (
+        0 if x.get("_savings_pct", 0) > 0 else 1,
+        -x.get("_savings_pct", 0),
+        -x.get("_hot_score", 0),
+        x.get("_price_int", 999_999_999),
+    ))
+
+    if not suitable:
+        await msg.answer(
+            f"😔 Не нашёл объявлений в VK/TG пабликах {region_name}.\n\n"
+            f"💡 Совет: VK паблики иногда закрытые — попробуй «🌐 Глобальный поиск»",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+
+    _search_cache[uid] = suitable
+    _save_cache(uid, suitable)
+    analytics.track("vk_tg_search", uid=uid, region=region, results=len(suitable))
+    await msg.answer(
+        f"✅ Найдено {len(suitable)} объявлений в VK+TG пабликах!\n"
+        f"📈 Сначала самые выгодные"
+    )
+    await send_batch(msg.chat.id, uid, 0)
+
+
 @dp.callback_query(F.data.startswith("toggle_src|"))
 async def cb_toggle_src(cb: CallbackQuery):
     src = cb.data.split("|")[1]
@@ -4809,6 +5083,7 @@ SOURCE_TAGS = {
     "avito":      "🔴 Авито",
     "drom":       "🔵 Дром",
     "tg_channel": "📢 TG-канал",
+    "vk":         "📘 ВКонтакте",
 }
 
 # Кеш результатов поиска: uid -> list[dict]
