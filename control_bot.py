@@ -11,6 +11,7 @@ import re
 import time
 import datetime
 import subprocess
+import hashlib
 from pathlib import Path
 import os
 
@@ -19,6 +20,7 @@ from aiogram.types import (
     Message, CallbackQuery,
     InlineKeyboardMarkup, InlineKeyboardButton,
     ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
+    BotCommand,
 )
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -219,6 +221,84 @@ def load_seen(uid: int) -> set:
 def save_seen(uid: int, seen: set):
     f = user_dir(uid) / "seen.json"
     f.write_text(json.dumps(list(seen), ensure_ascii=False), encoding="utf-8")
+
+
+# ── Реферальная система ──────────────────────────────────────────
+REFERRALS_FILE = Path("data/referrals.json")
+
+def _load_referrals() -> dict:
+    try:
+        REFERRALS_FILE.parent.mkdir(exist_ok=True)
+        if REFERRALS_FILE.exists():
+            return json.loads(REFERRALS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+def _save_referrals(data: dict):
+    try:
+        REFERRALS_FILE.parent.mkdir(exist_ok=True)
+        REFERRALS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+def get_referral_bonus_days(uid: int) -> int:
+    """Returns total bonus days accumulated by this user."""
+    data = _load_referrals()
+    entry = data.get(str(uid), {})
+    return entry.get("bonus_days", 0)
+
+def _get_or_create_referral(uid: int) -> dict:
+    """Gets or creates referral entry for user."""
+    data = _load_referrals()
+    key = str(uid)
+    if key not in data:
+        import random as _random
+        import string as _string
+        code = "".join(_random.choices(_string.ascii_uppercase + _string.digits, k=6))
+        data[key] = {"code": code, "invited": [], "bonus_days": 0}
+        _save_referrals(data)
+    return data[key]
+
+def _record_referral(new_uid: int, inviter_uid: int):
+    """Records that new_uid was invited by inviter_uid."""
+    data = _load_referrals()
+    inviter_key = str(inviter_uid)
+    new_key = str(new_uid)
+    
+    # Don't record if already has an inviter
+    if data.get(new_key, {}).get("inviter"):
+        return
+    
+    # Ensure inviter exists
+    if inviter_key not in data:
+        _get_or_create_referral(inviter_uid)
+        data = _load_referrals()
+    
+    # Ensure new user exists
+    if new_key not in data:
+        import random as _random
+        import string as _string
+        code = "".join(_random.choices(_string.ascii_uppercase + _string.digits, k=6))
+        data[new_key] = {"code": code, "invited": [], "bonus_days": 0}
+    
+    # Record inviter for new user
+    data[new_key]["inviter"] = inviter_uid
+    
+    # Add to inviter's invited list
+    invited_list = data[inviter_key].get("invited", [])
+    if new_uid not in invited_list:
+        invited_list.append(new_uid)
+        data[inviter_key]["invited"] = invited_list
+        
+        # Give +3 days bonus per invited friend
+        data[inviter_key]["bonus_days"] = data[inviter_key].get("bonus_days", 0) + 3
+        
+        # Milestone: 10 friends = +30 extra days
+        if len(invited_list) == 10:
+            data[inviter_key]["bonus_days"] = data[inviter_key].get("bonus_days", 0) + 30
+    
+    _save_referrals(data)
 
 
 def load_skipped(uid: int) -> set:
@@ -2490,7 +2570,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         объявления, когда IP не заблокирован.
         """
         url = f"https://www.avito.ru/{slug}/avtomobili"
-        params: dict = {"seller_type": "1", "s": "104"}  # частники, сортировка по дате
+        params: dict = {"seller_type": "1"}  # частники, сортировка по дате
         if p > 1:
             params["p"] = p
         if price_min > 0:
@@ -2615,7 +2695,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         except ImportError:
             return []
         url = f"https://www.avito.ru/{slug}/avtomobili"
-        params: dict = {"seller_type": "1", "s": "104"}
+        params: dict = {"seller_type": "1"}
         if p > 1:
             params["p"] = p
         if price_min > 0:
@@ -2873,7 +2953,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
 
         random.shuffle(free_proxies)
         url = f"https://www.avito.ru/{slug}/avtomobili"
-        params: dict = {"seller_type": "1", "s": "104"}
+        params: dict = {"seller_type": "1"}
         if p > 1:
             params["p"] = p
         if price_min > 0:
@@ -3508,11 +3588,12 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
         [KeyboardButton(text="🆕 Новые сегодня"), KeyboardButton(text="🎯 Следить за маркой")],
         [KeyboardButton(text="🔔 Уведомления"), KeyboardButton(text="🚗 Мой гараж")],
         [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="❓ Помощь")],
-        [KeyboardButton(text="♻️ Сбросить историю")],
+        [KeyboardButton(text="🤝 Пригласить друга"), KeyboardButton(text="♻️ Сбросить историю")],
     ],
     resize_keyboard=True,
     persistent=True,
 )
+
 
 
 def region_keyboard():
@@ -3672,6 +3753,19 @@ def track_brands_keyboard() -> InlineKeyboardMarkup:
 async def cmd_start(msg: Message, state: FSMContext):
     await state.clear()
     analytics.track("start", uid=msg.from_user.id, username=msg.from_user.username)
+    # Handle referral parameter
+    text_parts = (msg.text or "").split()
+    if len(text_parts) > 1:
+        param = text_parts[1]
+        if param.startswith("ref_"):
+            try:
+                inviter_uid = int(param[4:])
+                if inviter_uid != msg.from_user.id:
+                    _record_referral(msg.from_user.id, inviter_uid)
+                    await msg.answer("🎁 Тебя пригласил друг! Ты получаешь 3 дня расширенного доступа.")
+            except Exception:
+                pass
+    _get_or_create_referral(msg.from_user.id)
     s = load_settings(msg.from_user.id)
     name = msg.from_user.first_name or "друг"
     if s.get("region"):
@@ -3896,6 +3990,28 @@ async def cb_brand(cb: CallbackQuery, state: FSMContext):
     await state.set_state(Setup.region)
 
 
+def price_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🌑 до 100 000 ₽", callback_data="price_range:0:100000"),
+            InlineKeyboardButton(text="💵 100–300 тыс", callback_data="price_range:100000:300000"),
+        ],
+        [
+            InlineKeyboardButton(text="💵 300–500 тыс", callback_data="price_range:300000:500000"),
+            InlineKeyboardButton(text="💵 500т–1 млн", callback_data="price_range:500000:1000000"),
+        ],
+        [
+            InlineKeyboardButton(text="💎 1–3 млн", callback_data="price_range:1000000:3000000"),
+            InlineKeyboardButton(text="💎 3–5 млн", callback_data="price_range:3000000:5000000"),
+        ],
+        [
+            InlineKeyboardButton(text="👑 от 5 млн", callback_data="price_range:5000000:99000000"),
+            InlineKeyboardButton(text="🔄 Любая цена", callback_data="price_range:0:99000000"),
+        ],
+        [InlineKeyboardButton(text="✏️ Ввести вручную", callback_data="price_manual")],
+    ])
+
+
 @dp.callback_query(F.data.startswith("region|"))
 async def cb_region(cb: CallbackQuery, state: FSMContext):
     slug = cb.data.split("|", 1)[1]
@@ -3903,10 +4019,49 @@ async def cb_region(cb: CallbackQuery, state: FSMContext):
     await cb.answer(f"✅ {REGIONS.get(slug, slug)}")
     await cb.message.answer(
         f"📍 Регион: {REGIONS.get(slug, slug)}\n\n"
-        f"💰 Шаг 4/4: Введи минимальную цену в рублях\n"
-        f"(например: 300000 или 0 для любой цены):"
+        f"💰 Шаг 4/4: Выбери диапазон цен:",
+        reply_markup=price_keyboard()
     )
     await state.set_state(Setup.price_min)
+
+
+@dp.callback_query(F.data.startswith("price_range:"), Setup.price_min)
+async def cb_price_range(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    parts = cb.data.split(":")
+    pmin = int(parts[1])
+    pmax = int(parts[2])
+    data = await state.get_data()
+    region = data.get("region", "ekaterinburg")
+    category = data.get("category", "all")
+    brand = data.get("brand", "")
+    damaged = data.get("damaged", False)
+    settings = load_settings(cb.from_user.id)
+    settings.update({"region": region, "price_min": pmin, "price_max": pmax, "category": category, "brand": brand, "damaged": damaged})
+    save_settings(cb.from_user.id, settings)
+    await state.clear()
+    region_name = REGIONS.get(region, region)
+    cat_label = CATEGORY_LABELS.get(category, category)
+    brand_label = f" · {brand.capitalize()}" if brand else ""
+    await cb.message.answer(
+        f"✅ Настройки сохранены!\n\n"
+        f"📍 Регион: {region_name}\n"
+        f"🔍 Категория: {cat_label}{brand_label}\n"
+        f"💰 Бюджет: {pmin:,} – {pmax:,} ₽\n\n"
+        f"Нажми кнопку чтобы найти авто:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔍 Найти авто", callback_data="do_search")],
+        ])
+    )
+
+
+@dp.callback_query(F.data == "price_manual", Setup.price_min)
+async def cb_price_manual(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    await cb.message.answer(
+        "💰 Шаг 4/4: Введи минимальную цену в рублях\n"
+        "(например: 300000 или 0 для любой цены):"
+    )
 
 
 @dp.message(Setup.price_min)
@@ -3945,6 +4100,46 @@ async def fsm_price_max(msg: Message, state: FSMContext):
     cat_label = CATEGORY_LABELS.get(category, category)
     brand_label = f" · {brand.capitalize()}" if brand else ""
     await msg.answer(
+        f"✅ Настройки сохранены!\n\n"
+        f"📍 Регион: {region_name}\n"
+        f"🔍 Категория: {cat_label}{brand_label}\n"
+        f"💰 Бюджет: {pmin:,} – {pmax:,} ₽\n\n"
+        f"Нажми кнопку чтобы найти авто:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔍 Найти авто", callback_data="do_search")],
+        ])
+    )
+
+
+@dp.callback_query(F.data.startswith("price_range|"))
+async def cb_price_range(cb: CallbackQuery, state: FSMContext):
+    parts = cb.data.split("|")
+    if parts[1] == "manual":
+        await cb.answer()
+        await cb.message.answer(
+            "✏️ Введи минимальную цену в рублях\n(например: 300000 или 0 для любой цены):"
+        )
+        await state.set_state(Setup.price_min)
+        return
+    pmin = int(parts[1])
+    pmax = int(parts[2])
+    await cb.answer(f"✅ Бюджет выбран")
+    data = await state.get_data()
+    region = data.get("region", "ekaterinburg")
+    category = data.get("category", "all")
+    brand = data.get("brand", "")
+    damaged = data.get("damaged", False)
+    s = load_settings(cb.from_user.id)
+    s.update({
+        "region": region, "price_min": pmin, "price_max": pmax,
+        "category": category, "brand": brand, "damaged": damaged,
+    })
+    save_settings(cb.from_user.id, s)
+    await state.clear()
+    region_name = REGIONS.get(region, region)
+    cat_label = CATEGORY_LABELS.get(category, category)
+    brand_label = f" · {brand.capitalize()}" if brand else ""
+    await cb.message.answer(
         f"✅ Настройки сохранены!\n\n"
         f"📍 Регион: {region_name}\n"
         f"🔍 Категория: {cat_label}{brand_label}\n"
@@ -5033,6 +5228,20 @@ async def do_search_for_user(uid: int, reply_to):
             await reply_to.answer("♻️ История просмотров сброшена — показываю объявления заново.")
 
     if not suitable:
+        items_in_seen_count = sum(
+            1 for i in items
+            if not is_dealer(i) and in_price_range(i, pmin, pmax)
+            and i.get("url") and i["url"] in seen
+        )
+        if items_in_seen_count > 0:
+            await reply_to.answer(
+                f"👀 Авито нашёл {items_in_seen_count} объявлений, но все уже показывались раньше. "
+                f"Нажми 🔄 Сбросить историю чтобы увидеть снова.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔄 Сбросить историю", callback_data="reset_seen")],
+                ])
+            )
+            return
         dealer_c = sum(1 for i in items if is_dealer(i))
         price_filtered_c = sum(1 for i in items if not is_dealer(i) and not in_price_range(i, pmin, pmax))
         no_price_c = sum(1 for i in items if not is_dealer(i) and not i.get("_price_int") and not i.get("_avito_price_filtered"))
@@ -5292,6 +5501,20 @@ async def cmd_reset(msg: Message):
     await msg.answer(
         "♻️ История сброшена! Теперь нажми 🔍 *Найти авто* — покажу все доступные объявления заново.",
         parse_mode="Markdown",
+        reply_markup=MAIN_KEYBOARD,
+    )
+
+
+@dp.callback_query(F.data == "reset_seen")
+async def cb_reset_seen(cb: CallbackQuery):
+    uid = cb.from_user.id
+    save_seen(uid, set())
+    save_skipped(uid, set())
+    if uid in _search_cache:
+        del _search_cache[uid]
+    await cb.answer("✅ История сброшена!")
+    await cb.message.answer(
+        "✅ История сброшена! Теперь запусти поиск заново.",
         reply_markup=MAIN_KEYBOARD,
     )
 
@@ -5597,6 +5820,33 @@ async def cmd_monitor(msg: Message):
         )
 
 
+BOT_USERNAME = os.getenv("BOT_USERNAME", "PerekupDriveBot")
+
+
+@dp.message(Command("invite"))
+@dp.message(F.text == "🤝 Пригласить друга")
+async def cmd_invite(msg: Message):
+    uid = msg.from_user.id
+    entry = _get_or_create_referral(uid)
+    data = _load_referrals()
+    entry = data.get(str(uid), {})
+    invited_count = len(entry.get("invited", []))
+    bonus_days = entry.get("bonus_days", 0)
+    ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{uid}"
+    await msg.answer(
+        f"🎁 *Бонус за друзей*\n\n"
+        f"За каждого друга, который зарегистрируется по твоей ссылке, ты получишь +3 дня доступа к PerekupDrive.\n\n"
+        f"👥 Приглашено: {invited_count} друзей\n"
+        f"🎁 Бонус накоплен: +{bonus_days} дней\n\n"
+        f"📲 Твоя реф. ссылка:\n{ref_link}\n\n"
+        f"👆 Поделись ссылкой — и оба получите бонус!",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📤 Поделиться ссылкой", url=f"https://t.me/share/url?url={ref_link}&text=Найди+авто+ниже+рынка!")],
+        ])
+    )
+
+
 async def _warmup_cache():
     """Прогревает кеш Авито для всех городов в фоне при старте бота.
     Запускает последовательный скрейп каждого города (1 страница, без ценового
@@ -5649,6 +5899,16 @@ async def main():
     # того, как пользователи делают поиск по разным городам.
     # loop.create_task(_warmup_cache())
 
+    await bot.set_my_commands([
+        BotCommand(command="start", description="🚀 Главное меню"),
+        BotCommand(command="search", description="🔍 Поиск авто"),
+        BotCommand(command="new", description="🆕 Новые сегодня"),
+        BotCommand(command="favorites", description="🚗 Мой гараж"),
+        BotCommand(command="invite", description="🤝 Пригласить друга"),
+        BotCommand(command="settings", description="⚙️ Настройки"),
+        BotCommand(command="stats", description="📊 Статистика (admin)"),
+        BotCommand(command="help", description="❓ Помощь"),
+    ])
     await dp.start_polling(bot)
 
 
