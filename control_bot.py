@@ -3948,8 +3948,8 @@ def _load_avito_cache():
     try:
         raw = json.loads(_AVITO_CACHE_FILE.read_text(encoding="utf-8"))
         # Версионирование кэша: отбрасываем старые форматы без version=2
-        if not isinstance(raw, dict) or raw.get("version") != 3:
-            print(f"  [Авито] кэш устарел (нет version=3) — сбрасываем")
+        if not isinstance(raw, dict) or raw.get("version") != 4:
+            print(f"  [Авито] кэш устарел (нет version=4) — сбрасываем")
             return
         data = raw.get("data", {})
         now = time.time()
@@ -3969,7 +3969,7 @@ def _save_avito_cache():
     """Сохраняет кэш Авито на диск."""
     try:
         _AVITO_CACHE_FILE.write_text(
-            json.dumps({"version": 3, "data": _AVITO_REGION_CACHE}, ensure_ascii=False), encoding="utf-8"
+            json.dumps({"version": 4, "data": _AVITO_REGION_CACHE}, ensure_ascii=False), encoding="utf-8"
         )
     except Exception as e:
         print(f"  [Авито] не удалось сохранить кэш: {e}")
