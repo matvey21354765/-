@@ -50,6 +50,9 @@ AVITO_CLIENT_SECRET = os.getenv("AVITO_CLIENT_SECRET", "")
 _avito_oauth_token: "dict | None" = None  # {"token": "...", "expires_at": timestamp}
 _free_proxy_cache: list[str] = []
 _free_proxy_cache_time: float = 0.0
+# Прокси, проверенные и реально дающие доступ к Авито (обновляются при старте и каждые 15 мин)
+_working_free_proxies: list[str] = []
+_working_free_proxies_time: float = 0.0
 
 # ── Резидентный прокси для запросов к Авито (опционально) ────────
 # Поддерживает HTTP и SOCKS5. AVITO_PROXY_AUTH=ip — авторизация по IP (без логина).
@@ -3300,37 +3303,29 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
     def _try_free_proxies(p: int) -> list[dict]:
         """Пробуем бесплатные российские прокси из публичных списков."""
         import requests as _rq
-        global _free_proxy_cache, _free_proxy_cache_time
+        global _free_proxy_cache, _free_proxy_cache_time, _working_free_proxies, _working_free_proxies_time
+
+        # Если кеш пустой — быстро получаем минимальный список (не ждём прогрев)
         if time.time() - _free_proxy_cache_time > 600 or not _free_proxy_cache:
-            free_proxies_fresh: list[str] = []
+            fresh: list[str] = []
             try:
                 r = _rq.get(
                     "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=3000&country=RU&ssl=yes&anonymity=all",
                     timeout=5,
                 )
                 if r.status_code == 200:
-                    free_proxies_fresh += [ln.strip() for ln in r.text.splitlines() if ln.strip()]
+                    fresh += [ln.strip() for ln in r.text.splitlines() if ln.strip()]
             except Exception:
                 pass
-            if free_proxies_fresh:
-                _free_proxy_cache = free_proxies_fresh
+            if fresh:
+                _free_proxy_cache = fresh
                 _free_proxy_cache_time = time.time()
-        free_proxies = list(_free_proxy_cache)
-        # Источник 2: проверенный список из geonode
-        try:
-            r2 = _rq.get(
-                "https://proxylist.geonode.com/api/proxy-list?limit=20&country=RU&protocols=https,http&sort_by=lastChecked&sort_type=desc",
-                timeout=5,
-            )
-            if r2.status_code == 200:
-                for item in r2.json().get("data", []):
-                    ip = item.get("ip", ""); port = item.get("port", "")
-                    if ip and port:
-                        free_proxies.append(f"{ip}:{port}")
-        except Exception:
-            pass
 
-        random.shuffle(free_proxies)
+        # Рабочие прокси (проверенные прогревом) идут первыми
+        priority = list(_working_free_proxies)
+        rest = [x for x in _free_proxy_cache if x not in set(priority)]
+        random.shuffle(rest)
+        free_proxies = priority + rest
         url = f"https://www.avito.ru/{slug}/avtomobili"
         params: dict = {"seller_type": "1"}
         if p > 1:
@@ -6636,6 +6631,113 @@ async def _warmup_cache():
     print("  [прогрев] прогрев завершён")
 
 
+def _fetch_all_free_proxies() -> list[str]:
+    """Собирает бесплатные прокси из нескольких источников."""
+    import requests as _rq
+    found: list[str] = []
+    sources = [
+        "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=3000&country=RU&ssl=yes&anonymity=all",
+        "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=5000&country=RU,UA,BY&ssl=yes&anonymity=elite",
+        "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=5000&country=RU",
+        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
+        "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt",
+    ]
+    for src in sources:
+        try:
+            r = _rq.get(src, timeout=6)
+            if r.status_code == 200:
+                for ln in r.text.splitlines():
+                    addr = ln.strip()
+                    if addr and ":" in addr and not addr.startswith("#"):
+                        found.append(addr)
+        except Exception:
+            pass
+    try:
+        r2 = _rq.get(
+            "https://proxylist.geonode.com/api/proxy-list?limit=50&country=RU&protocols=https,http&sort_by=lastChecked&sort_type=desc",
+            timeout=6,
+        )
+        if r2.status_code == 200:
+            for item in r2.json().get("data", []):
+                ip = item.get("ip", ""); port = item.get("port", "")
+                if ip and port:
+                    found.append(f"{ip}:{port}")
+    except Exception:
+        pass
+    seen: set[str] = set()
+    deduped = []
+    for p in found:
+        if p not in seen:
+            seen.add(p)
+            deduped.append(p)
+    return deduped
+
+
+def _pre_warm_free_proxies_sync() -> None:
+    """Тестирует бесплатные прокси против Авито и кеширует рабочие. Блокирующая функция."""
+    global _free_proxy_cache, _free_proxy_cache_time, _working_free_proxies, _working_free_proxies_time
+    import requests as _rq
+    from concurrent.futures import ThreadPoolExecutor as _TPEw, as_completed as _acw
+
+    print("  [прокси-прогрев] получаем список прокси...")
+    all_proxies = _fetch_all_free_proxies()
+    if not all_proxies:
+        print("  [прокси-прогрев] ❌ не удалось получить ни одного прокси")
+        return
+    random.shuffle(all_proxies)
+    candidates = all_proxies[:80]  # тестируем до 80 штук
+    print(f"  [прокси-прогрев] тестируем {len(candidates)} прокси против Авито...")
+
+    test_url = "https://www.avito.ru/moskva/avtomobili"
+    test_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept-Language": "ru-RU,ru;q=0.9",
+    }
+
+    def _test_one(addr: str) -> tuple[bool, str]:
+        proxies = {"http": f"http://{addr}", "https": f"http://{addr}"}
+        try:
+            r = _rq.get(test_url, headers=test_headers, proxies=proxies, timeout=9)
+            ok = r.status_code == 200 and ('"urlPath"' in r.text or '__NEXT_DATA__' in r.text or 'data-marker="item"' in r.text)
+            return ok, addr
+        except Exception:
+            return False, addr
+
+    working: list[str] = []
+    with _TPEw(max_workers=30) as ex:
+        futs = [ex.submit(_test_one, a) for a in candidates]
+        try:
+            for fut in _acw(futs, timeout=20):
+                try:
+                    ok, addr = fut.result()
+                    if ok:
+                        working.append(addr)
+                        print(f"  [прокси-прогрев] ✅ {addr}")
+                        if len(working) >= 10:
+                            break
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    _free_proxy_cache = all_proxies
+    _free_proxy_cache_time = time.time()
+    _working_free_proxies = working
+    _working_free_proxies_time = time.time()
+    print(f"  [прокси-прогрев] найдено {len(working)} рабочих прокси из {len(candidates)} проверенных")
+
+
+async def _proxy_warmup_loop() -> None:
+    """Фоновая задача: прогревает кеш прокси каждые 15 минут."""
+    loop = asyncio.get_event_loop()
+    while True:
+        try:
+            await loop.run_in_executor(None, _pre_warm_free_proxies_sync)
+        except Exception as e:
+            print(f"  [прокси-прогрев] ошибка: {e}")
+        await asyncio.sleep(900)  # 15 минут
+
+
 async def main():
     global BOT_USERNAME
     logging.basicConfig(level=logging.WARNING)
@@ -6649,7 +6751,7 @@ async def main():
         except Exception:
             BOT_USERNAME = "PerekupDriveBot"
     print("✅ Авто-брокер бот запущен!")
-    print("  [ВЕРСИЯ] 2026-06-22-v8 :: Авито работает (44), фикс фото-регекса")
+    print("  [ВЕРСИЯ] 2026-06-22-v9 :: прогрев прокси при старте, приоритет рабочих прокси")
 
     # Логируем Railway IP (нужен для добавления в whitelist прокси)
     try:
@@ -6706,6 +6808,9 @@ async def main():
     # Единый глобальный монитор — опрашивает всех активных пользователей каждые 2 минуты
     loop.create_task(_global_monitor_loop())
     print(f"  [монитор] глобальный цикл запущен (интервал {GLOBAL_POLL_SEC}с)")
+    # Прогрев кеша бесплатных прокси — тестирует их против Авито и кеширует рабочие
+    loop.create_task(_proxy_warmup_loop())
+    print("  [прокси-прогрев] запущен фоновый прогрев кеша прокси")
 
     # Веб-дашборд аналитики — работает параллельно, не блокирует polling
     await analytics.start_dashboard(REGIONS)
