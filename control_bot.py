@@ -1186,6 +1186,10 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
         r"(\d[\d\s]{2,10})\s*(?:₽|тыс\.?\s*р(?:уб)?\.?|руб\.?|р\.)",
         re.IGNORECASE,
     )
+    _tg_price_ctx_re = re.compile(
+        r"(?:цен[аеу]|стоимост[ьи]|прошу|продам за|отдам за)\s*[:\-]?\s*(\d[\d\s]{2,7})(?:\s*(?:тыс|т\.р|т\.\s*р))?",
+        re.IGNORECASE,
+    )
     _tg_year_re = re.compile(r"\b(19[5-9]\d|20[012]\d)\b")
 
     def _parse_price(text: str) -> int:
@@ -1196,6 +1200,18 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
             val = int(raw)
             suffix = m.group(0)[len(m.group(1)):].strip().lower()
             if "тыс" in suffix:
+                val *= 1000
+            if 50_000 <= val <= 50_000_000:
+                return val
+        for m in _tg_price_ctx_re.finditer(text):
+            raw = re.sub(r"\D", "", m.group(1))
+            if not raw:
+                continue
+            val = int(raw)
+            full = m.group(0).lower()
+            if any(s in full for s in ("тыс", "т.р")):
+                val *= 1000
+            if val < 1000:
                 val *= 1000
             if 50_000 <= val <= 50_000_000:
                 return val
@@ -1262,64 +1278,99 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
             print(f"  [TG {channel}] {e}")
             return []
 
-    def _try_yandex_tg(keywords: str) -> list[dict]:
-        """Ищет посты в TG через Яндекс: site:t.me + ключевые слова."""
+    def _try_ddg_tg(keywords: str) -> list[dict]:
+        """Ищет посты продажи авто в TG через DuckDuckGo (работает с Railway IP)."""
         try:
-            query = f"site:t.me продам авто {keywords} {region_name_ru}"
-            r = session.get(
-                "https://yandex.ru/search/",
-                params={"text": query, "lr": "2"},
-                headers={"User-Agent": "Mozilla/5.0 (compatible; YandexBot/3.0)"},
-                timeout=8,
-            )
-            if r.status_code != 200:
-                return []
-            soup = _BS(r.text, "lxml")
-            links = soup.select("a[href*='t.me/']")
+            import urllib.parse as _upq
+            _tg_url_re = re.compile(r'https?://t\.me/[a-zA-Z0-9_/]+(?:\d+)?', re.I)
+            queries = [
+                f"site:t.me продам авто {region_name_ru}",
+                f"site:t.me автомобил {region_name_ru} частн",
+            ]
             batch = []
-            seen_urls = set()
-            for a in links[:20]:
-                href = a.get("href", "")
-                if "t.me/" not in href:
-                    continue
-                # Нормализуем ссылку
-                if href.startswith("//"):
-                    href = "https:" + href
-                if not href.startswith("http"):
-                    continue
-                if href in seen_urls:
-                    continue
-                seen_urls.add(href)
-                # Текст вокруг ссылки
-                parent = a.find_parent()
-                text = parent.get_text(" ", strip=True) if parent else a.get_text(strip=True)
-                price = _parse_price(text)
-                if price > 0 and not (price_min <= price <= price_max):
-                    continue
-                year_m = _tg_year_re.search(text)
-                title = text[:80].replace("\n", " ").strip() or "Объявление из TG"
-                batch.append({
-                    "title": title,
-                    "price": f"{price:,} ₽".replace(",", " ") if price else "цена не указана",
-                    "_price_int": price,
-                    "url": href,
-                    "_photo_url": "",
-                    "description": text[:300],
-                    "source": "tg",
-                    "seller": "Telegram",
-                    "_seller_url": href,
-                    "_year": int(year_m.group(1)) if year_m else 0,
-                    "_days_on_site": 0,
-                })
+            seen_urls: set[str] = set()
+            for q in queries:
+                time.sleep(random.uniform(2.0, 3.5))
+                for use_lite in (False, True):
+                    url = "https://lite.duckduckgo.com/lite/" if use_lite else "https://html.duckduckgo.com/html/"
+                    try:
+                        r = session.get(url, params={"q": q, "kl": "ru-ru"}, timeout=10)
+                        if r.status_code != 200 or len(r.text) < 1000:
+                            continue
+                        html = r.text
+                        # Декодируем дважды (DDG оборачивает ссылки)
+                        for _ in range(2):
+                            try:
+                                html = _upq.unquote(html)
+                            except Exception:
+                                break
+                        for m in _tg_url_re.finditer(html):
+                            href = m.group(0)
+                            # Пропускаем ссылки на каналы без ID поста (только /channel)
+                            if href in seen_urls:
+                                continue
+                            seen_urls.add(href)
+                            # Контекст вокруг ссылки
+                            pos = html.find(m.group(0))
+                            ctx = html[max(0, pos-300):pos+500]
+                            ctx = re.sub(r"<[^>]+>", " ", ctx)
+                            ctx = re.sub(r"\s+", " ", ctx).strip()
+                            price = _parse_price(ctx)
+                            if price > 0 and not (price_min <= price <= price_max):
+                                continue
+                            year_m2 = _tg_year_re.search(ctx)
+                            title = ctx[:80].replace("\n", " ").strip() or f"Авто {region_name_ru} TG"
+                            batch.append({
+                                "title": title,
+                                "price": f"{price:,} ₽".replace(",", " ") if price else "цена не указана",
+                                "_price_int": price,
+                                "url": href,
+                                "_photo_url": "",
+                                "description": ctx[:400],
+                                "source": "tg",
+                                "seller": "Telegram",
+                                "_seller_url": href,
+                                "_year": int(year_m2.group(1)) if year_m2 else 0,
+                                "_days_on_site": 0,
+                            })
+                        if batch:
+                            break
+                    except Exception:
+                        continue
+                if len(batch) >= 10:
+                    break
+            print(f"  [TG DDG] {len(batch)} результатов")
             return batch
         except Exception as e:
-            print(f"  [TG Яндекс] {e}")
+            print(f"  [TG DDG] {e}")
             return []
 
-    # 1. Пробуем все каналы параллельно
+    # Также ищем TG-каналы города через DDG и пробуем подписаться
+    def _discover_tg_channels() -> list[str]:
+        """Находит реальные TG-каналы авто для города через DDG."""
+        try:
+            import urllib.parse as _upq
+            q = f"телеграм канал продажа авто {region_name_ru} t.me"
+            time.sleep(random.uniform(2.0, 3.0))
+            r = session.get("https://html.duckduckgo.com/html/", params={"q": q, "kl": "ru-ru"}, timeout=10)
+            if r.status_code != 200:
+                return []
+            html = _upq.unquote(r.text)
+            found = re.findall(r't\.me/([a-zA-Z][a-zA-Z0-9_]{3,31})(?![/\d])', html)
+            unique = list(dict.fromkeys(found))[:8]
+            print(f"  [TG discover] найдено каналов: {unique}")
+            return unique
+        except Exception:
+            return []
+
+
+    # 1. Пробуем все каналы параллельно + открываем новые через DDG
+    discovered = _discover_tg_channels()
+    combined_channels = list(dict.fromkeys(all_channels + discovered))
+
     from concurrent.futures import ThreadPoolExecutor, as_completed
     with ThreadPoolExecutor(max_workers=6) as ex:
-        futs = {ex.submit(_try_channel, ch): ch for ch in all_channels}
+        futs = {ex.submit(_try_channel, ch): ch for ch in combined_channels}
         for fut in as_completed(futs, timeout=20):
             try:
                 batch = fut.result()
@@ -1329,12 +1380,12 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
             except Exception:
                 pass
 
-    # 2. Если мало результатов — ищем через Яндекс
+    # 2. Если мало результатов — ищем через DDG (работает с Railway IP)
     if len(results) < 5:
-        yandex_batch = _try_yandex_tg("продам авто")
-        if yandex_batch:
-            results.extend(yandex_batch)
-            print(f"  [TG Яндекс] {len(yandex_batch)} результатов")
+        ddg_batch = _try_ddg_tg("продам авто")
+        if ddg_batch:
+            results.extend(ddg_batch)
+            print(f"  [TG DDG итого] {len(ddg_batch)} результатов")
 
     return results
 
@@ -1373,9 +1424,15 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
         r"(\d[\d\s]{2,10})\s*(?:₽|тыс\.?\s*р(?:уб)?\.?|руб\.?|р\.)",
         re.IGNORECASE,
     )
+    # Число рядом с ценовым словом: "цена 150000", "прошу 95 000", "стоимость 80тыс"
+    _vk_price_ctx_re = re.compile(
+        r"(?:цен[аеу]|стоимост[ьи]|прошу|продам за|отдам за)\s*[:\-]?\s*(\d[\d\s]{2,7})(?:\s*(?:тыс|т\.р|т\.\s*р))?",
+        re.IGNORECASE,
+    )
     _vk_year_re = re.compile(r"\b(19[5-9]\d|20[012]\d)\b")
 
     def _parse_price(text: str) -> int:
+        # Сначала ищем с явным символом валюты
         for m in _vk_price_re.finditer(text):
             raw = re.sub(r"\D", "", m.group(1))
             if not raw:
@@ -1383,6 +1440,19 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
             val = int(raw)
             suffix = m.group(0)[len(m.group(1)):].strip().lower()
             if "тыс" in suffix:
+                val *= 1000
+            if 50_000 <= val <= 50_000_000:
+                return val
+        # Затем ищем число рядом с ценовым словом
+        for m in _vk_price_ctx_re.finditer(text):
+            raw = re.sub(r"\D", "", m.group(1))
+            if not raw:
+                continue
+            val = int(raw)
+            full = m.group(0).lower()
+            if any(s in full for s in ("тыс", "т.р")):
+                val *= 1000
+            if val < 1000:  # вероятно тысячи без суффикса: "цена 95" → 95000
                 val *= 1000
             if 50_000 <= val <= 50_000_000:
                 return val
@@ -3576,12 +3646,26 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                 })
             return out
 
-        # 12 марок — наиболее популярные в России
-        _all_brands = [
-            "lada", "kia", "hyundai", "toyota", "nissan", "volkswagen",
-            "renault", "ford", "skoda", "bmw", "mercedes", "mazda",
-            "chevrolet", "mitsubishi", "honda", "opel",
-        ]
+        # Список марок зависит от бюджета
+        if price_max <= 200_000:
+            # Дешёвые авто: старые народные марки
+            _all_brands = [
+                "lada", "ваз", "daewoo", "chevrolet nexia", "chevrolet lacetti",
+                "nissan", "toyota", "mitsubishi", "ford", "opel",
+                "hyundai", "kia", "renault", "honda", "mazda", "volkswagen",
+            ]
+        elif price_max <= 500_000:
+            _all_brands = [
+                "lada", "kia", "hyundai", "toyota", "nissan", "renault",
+                "volkswagen", "ford", "opel", "chevrolet", "mitsubishi",
+                "honda", "mazda", "skoda", "daewoo", "bmw", "mercedes",
+            ]
+        else:
+            _all_brands = [
+                "lada", "kia", "hyundai", "toyota", "nissan", "volkswagen",
+                "renault", "ford", "skoda", "bmw", "mercedes", "mazda",
+                "chevrolet", "mitsubishi", "honda", "opel",
+            ]
 
         results_out: list[dict] = []
         seen_urls: set[str] = set()
