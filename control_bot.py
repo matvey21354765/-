@@ -767,6 +767,23 @@ def scrape_autoru(region: str, pages: int = 5, price_min: int = 0, price_max: in
         if price_max < 99_000_000:
             html_url += f"&price_to={price_max}"
 
+        # Метод 0: ПРЯМОЙ запрос через платный ротирующийся прокси (РФ IP) —
+        # Auto.ru, как и Авито, открывается с российского резидентного IP.
+        # Тянем HTML-страницу и парсим __INITIAL_STATE__. Это основной метод.
+        if not batch and AVITO_PROXIES:
+            try:
+                r0 = _req.get(html_url, headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language": "ru-RU,ru;q=0.9",
+                    "Referer": f"https://auto.ru/{slug}/cars/used/",
+                }, timeout=25, proxies=_avito_proxies())
+                print(f"  [Auto.ru] прокси HTML стр.{p}: HTTP {r0.status_code}, {len(r0.text):,}б")
+                if r0.status_code == 200 and len(r0.text) > 50_000:
+                    batch = _autoru_parse_html(r0.text, today)
+            except Exception as e:
+                print(f"  [Auto.ru] прокси HTML: {str(e)[:50]}")
+
         # Метод 1: ScraperAPI render=true — JS выполняется, __INITIAL_STATE__ заполняется
         if not batch and SCRAPER_API_KEY:
             try:
@@ -3117,7 +3134,10 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         в той же сессии и парсим __NEXT_DATA__/карточки — это реально отдаёт
         объявления, когда IP не заблокирован.
         """
-        url = f"https://www.avito.ru/{slug}/avtomobili"
+        # Если задана марка — добавляем её в путь URL, чтобы Авито сразу отдавал
+        # только эту марку (точнее и больше, чем фильтрация в памяти).
+        _brand_path = f"/{brand}" if brand and brand != "any" else ""
+        url = f"https://www.avito.ru/{slug}/avtomobili{_brand_path}"
         # seller_type=1 — только частники (без дилеров/салонов),
         # s=104 — сортировка по дате (свежие сверху).
         params: dict = {"seller_type": "1", "s": "104"}
@@ -4023,7 +4043,7 @@ def _avito_price_bucket(price_min: int, price_max: int) -> str:
     return f"{lo}_{hi}"
 
 
-def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int = 99_000_000, sort_by_date: bool = False) -> list[dict]:
+def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int = 99_000_000, sort_by_date: bool = False, brand: str = "") -> list[dict]:
     """
     Парсер Авито. Кэш хранится по РЕГИОНУ (без разбивки по цене), чтобы один
     успешный скрейп покрывал все ценовые диапазоны и не вызывал повторных блокировок.
@@ -4035,11 +4055,11 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
     # Без прокси — старая схема (один кэш на регион, фильтр в памяти).
     if AVITO_PROXIES:
         bucket = _avito_price_bucket(price_min, price_max)
-        cache_key = f"{region}_{bucket}"
+        cache_key = f"{region}_{bucket}" + (f"_{brand}" if brand else "")
         _scrape_pmin, _scrape_pmax = price_min, price_max
         _cache_ttl = 3 * 3600  # 3 часа — быстрее обновляем при платном прокси
     else:
-        cache_key = region
+        cache_key = region + (f"_{brand}" if brand else "")
         _scrape_pmin, _scrape_pmax = 0, 99_000_000
         _cache_ttl = _AVITO_REGION_CACHE_TTL
     cached = _AVITO_REGION_CACHE.get(cache_key)
@@ -4054,7 +4074,7 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
         print(f"  [Авито] кэш {cache_key}: {len(items)} объявлений (возраст {int(now-cached[0])}с)")
     else:
         # Скрейпим с фильтром бюджета (прокси) или без (бесплатный режим).
-        items = _scrape_avito_raw(region, pages=pages, price_min=_scrape_pmin, price_max=_scrape_pmax, sort_by_date=sort_by_date)
+        items = _scrape_avito_raw(region, pages=pages, price_min=_scrape_pmin, price_max=_scrape_pmax, sort_by_date=sort_by_date, brand=brand)
         if items:
             _AVITO_REGION_CACHE[cache_key] = (now, items)
             _save_avito_cache()
@@ -4121,7 +4141,7 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
     return out
 
 
-def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max: int = 99_000_000, sort_by_date: bool = False) -> list[dict]:
+def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max: int = 99_000_000, sort_by_date: bool = False, brand: str = "") -> list[dict]:
     """
     Бесплатный парсер Авито. Стратегия (порядок попыток):
     1. _avito_api_fetch: cloudscraper+Android UA, m.avito.ru, публичный API, веб-API —
@@ -4683,10 +4703,6 @@ def category_keyboard(damaged_on: bool = False) -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton(text="🌍 Иномарки", callback_data="cat|foreign"),
             InlineKeyboardButton(text="🇷🇺 Отечественные", callback_data="cat|domestic"),
-        ],
-        [
-            InlineKeyboardButton(text="🏍 Мото / Квадро", callback_data="cat|moto"),
-            InlineKeyboardButton(text="🔧 Разное", callback_data="cat|misc"),
         ],
         [InlineKeyboardButton(text=dmg_text, callback_data="cat|toggle_damaged")],
     ])
@@ -6196,7 +6212,7 @@ async def do_search_for_user(uid: int, reply_to):
     scraper_map = {
         "drom":   lambda: scrape_drom(region, pages=8, price_min=pmin, price_max=pmax),
         "autoru": lambda: scrape_autoru(region, pages=4, price_min=pmin, price_max=pmax),
-        "avito":  lambda: scrape_avito(region, pages=10, price_min=pmin, price_max=pmax, sort_by_date=False),
+        "avito":  lambda: scrape_avito(region, pages=10, price_min=pmin, price_max=pmax, sort_by_date=False, brand=(brand if brand and brand != "any" else "")),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
         "tg":     lambda: scrape_tg_channels(region, pmin, pmax),
     }
