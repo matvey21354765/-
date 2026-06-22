@@ -3611,9 +3611,6 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                 if price_int > 0 and not (price_min <= price_int <= price_max):
                     continue
 
-                year_m = _year_re.search(context_clean)
-                year = int(year_m.group(1)) if year_m else 0
-
                 url_path = clean_url.split("/avtomobili/")[-1] if "/avtomobili/" in clean_url else ""
                 if url_path:
                     url_title = re.sub(r'_\d{6,}$', '', url_path).replace("_", " ").replace("-", " ")
@@ -3624,6 +3621,19 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                         ' ', context_clean, flags=re.I,
                     )
                     title = re.sub(r'\s+', ' ', title_src).strip(" -|·,")[:80] or f"Авто на Авито — {slug_ru_name}"
+
+                # Год: сначала из URL-пути (точнее), потом из сниппета
+                year_m = _year_re.search(url_path) or _year_re.search(context_clean)
+                year = int(year_m.group(1)) if year_m else 0
+
+                # Ранняя фильтрация: новые авто 2022+ не могут стоить < 800k
+                if year >= 2022 and price_max < 800_000:
+                    continue
+                if year >= 2020 and price_max < 400_000:
+                    continue
+                # Авто 2018+ вряд ли в бюджете 100k
+                if year >= 2018 and price_max < 150_000:
+                    continue
 
                 photo_url = ""
                 wide = ctx_html[max(0, pos-1000):pos+1500] if pos >= 0 else ""
@@ -3678,17 +3688,20 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         proxy_idx = 0
         lite_flag = False  # чередуем html/lite
 
-        # Ценовые подсказки для поиска — помогают DDG найти релевантные объявления
-        _price_hint = ""
-        if price_max <= 400_000:
-            _price_hint = f" до {price_max // 1000}тыс"
-        elif price_max <= 1_000_000:
-            _price_hint = f" до {price_max // 1000}тыс"
+        # Год и ценовые подсказки для поиска — смещают DDG к нужному сегменту
+        _price_hint = f" до {price_max // 1000}тыс" if price_max < 10_000_000 else ""
+        _year_hint = ""
+        if price_max <= 150_000:
+            _year_hint = " 2000 2005 2010"  # старые авто
+        elif price_max <= 300_000:
+            _year_hint = " 2008 2012 2015"
+        elif price_max <= 600_000:
+            _year_hint = " 2012 2016 2018"
 
         for brand in _all_brands:
             if len(results_out) >= 40:
                 break
-            q = f"site:avito.ru/{slug}/avtomobili {brand}{_price_hint}"
+            q = f"site:avito.ru/{slug}/avtomobili {brand}{_price_hint}{_year_hint}"
             # Пауза 3-5с между запросами — критично для обхода DDG rate-limit
             time.sleep(random.uniform(3.5, 5.5))
             proxy = proxy_pool[proxy_idx % len(proxy_pool)]
