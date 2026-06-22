@@ -453,6 +453,250 @@ DETECTIVE_CASES = [
 _DETECTIVE_IDX: dict[int, int] = {}  # uid → номер текущего дела
 
 
+# ─── 📹 ВИДЕО-УРОКИ ───────────────────────────────────────────────────────────
+# Реальные YouTube-видео по финансовой грамотности + конспект
+
+VIDEO_LESSONS = [
+    {
+        "title": "💰 Как работает личный бюджет",
+        "desc": (
+            "📌 <b>Ключевые идеи урока:</b>\n\n"
+            "• Бюджет — это план, а не ограничение\n"
+            "• Записывай расходы хотя бы 1 месяц — увидишь «дыры»\n"
+            "• Правило 50/30/20: нужды / желания / накопления\n"
+            "• Автоматизируй накопления — переводи % сразу в день зарплаты\n\n"
+            "🎯 <b>Задание:</b> посчитай свои расходы за последнюю неделю по категориям"
+        ),
+        "url": "https://www.youtube.com/watch?v=HQzoZfc3GwQ",
+        "duration": "12 мин",
+        "tag": "Бюджет",
+    },
+    {
+        "title": "📈 Что такое инвестиции и с чего начать",
+        "desc": (
+            "📌 <b>Ключевые идеи урока:</b>\n\n"
+            "• Инвестиции — это деньги, работающие на тебя\n"
+            "• Депозит — самый простой старт (но не самый доходный)\n"
+            "• ETF — корзина акций, идеально для новичка\n"
+            "• Главное правило: не инвестируй деньги, которые могут понадобиться\n"
+            "• Сложный процент: 10 000₽ под 15% = 40 000₽ через 10 лет\n\n"
+            "🎯 <b>Задание:</b> открой демо-счёт на любом брокере и купи 1 ETF"
+        ),
+        "url": "https://www.youtube.com/watch?v=W6pVMXmUmMk",
+        "duration": "15 мин",
+        "tag": "Инвестиции",
+    },
+    {
+        "title": "🛡 Финансовая подушка безопасности",
+        "desc": (
+            "📌 <b>Ключевые идеи урока:</b>\n\n"
+            "• Подушка = 3–6 месяцев твоих расходов\n"
+            "• Хранится в доступном месте: накопительный счёт или короткий депозит\n"
+            "• НЕ инвестируется — это не для роста, это для защиты\n"
+            "• Начни с 1 000₽ в месяц — главное привычка\n\n"
+            "🎯 <b>Задание:</b> посчитай сколько тебе нужно на 3 месяца расходов"
+        ),
+        "url": "https://www.youtube.com/watch?v=7eoaQzLz-Xk",
+        "duration": "8 мин",
+        "tag": "Подушка",
+    },
+    {
+        "title": "💳 Кредиты и кредитные карты: как не попасть в ловушку",
+        "desc": (
+            "📌 <b>Ключевые идеи урока:</b>\n\n"
+            "• Кредит — это твои будущие доходы, потраченные сегодня\n"
+            "• Микрозаймы: 1% в день = 365% годовых. Никогда!\n"
+            "• Кредитка: используй льготный период, гаси полностью\n"
+            "• Ипотека ≠ плохо, если ставка ниже инфляции + рост жилья\n"
+            "• Правило: кредит только на активы или образование\n\n"
+            "🎯 <b>Задание:</b> посчитай реальную переплату по любому кредиту"
+        ),
+        "url": "https://www.youtube.com/watch?v=PHe0bXAIuk0",
+        "duration": "11 мин",
+        "tag": "Кредиты",
+    },
+    {
+        "title": "₿ Криптовалюта: что нужно знать перед входом",
+        "desc": (
+            "📌 <b>Ключевые идеи урока:</b>\n\n"
+            "• Крипта — высокорискованный актив, не основа портфеля\n"
+            "• Максимальная доля крипты в портфеле новичка: 5–10%\n"
+            "• BTC и ETH — наименее рискованные из крипты\n"
+            "• DYOR: Do Your Own Research — не верь хайпу\n"
+            "• Храни на холодном кошельке, не на бирже\n\n"
+            "🎯 <b>Задание:</b> изучи концепцию «белой бумаги» (whitepaper) Bitcoin"
+        ),
+        "url": "https://www.youtube.com/watch?v=1YyAzVmP9xQ",
+        "duration": "18 мин",
+        "tag": "Крипта",
+    },
+    {
+        "title": "🧾 Налоги для начинающего инвестора",
+        "desc": (
+            "📌 <b>Ключевые идеи урока:</b>\n\n"
+            "• С прибыли от инвестиций платится НДФЛ 13%\n"
+            "• ИИС (тип А): возврат 13% от взноса до 52 000₽ в год\n"
+            "• ИИС (тип Б): не платишь налог с прибыли совсем\n"
+            "• Дивиденды облагаются налогом автоматически\n"
+            "• Брокер — твой налоговый агент: сам считает и платит\n\n"
+            "🎯 <b>Задание:</b> узнай что такое ИИС и открой его"
+        ),
+        "url": "https://www.youtube.com/watch?v=1K2xCB5cVRk",
+        "duration": "14 мин",
+        "tag": "Налоги",
+    },
+]
+
+_VIDEO_WATCHED: dict[int, set] = {}  # uid → set of watched video indices
+
+
+def videos_menu_kb() -> InlineKeyboardMarkup:
+    rows = []
+    for i, v in enumerate(VIDEO_LESSONS):
+        rows.append([Btn(text=f"▶️ {v['tag']}: {v['title']}", callback_data=f"video_{i}")])
+    rows.append([Btn(text="« Главное меню", callback_data="main_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def video_kb(idx: int) -> InlineKeyboardMarkup:
+    v = VIDEO_LESSONS[idx]
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [Btn(text=f"▶️ Смотреть на YouTube ({v['duration']})", url=v["url"])],
+        [Btn(text="✅ Я посмотрел — дай IQ!", callback_data=f"video_done_{idx}")],
+        [Btn(text="← Все уроки", callback_data="videos_menu")],
+        [Btn(text="« Главное меню", callback_data="main_menu")],
+    ])
+
+
+# ─── 🧬 ТЕСТ: КТО ТЫ КАК ИНВЕСТОР? ──────────────────────────────────────────
+
+INVESTOR_TEST = [
+    {
+        "q": "У тебя 100 000₽. Что делаешь?",
+        "opts": [
+            ("Кладу на депозит — надёжно и понятно", "C"),
+            ("Делю: часть на депозит, часть в ETF", "M"),
+            ("Покупаю акции роста — хочу больше", "A"),
+            ("Вкладываю в крипту — там реальные иксы", "S"),
+        ],
+    },
+    {
+        "q": "Твои инвестиции упали на 20%. Реакция?",
+        "opts": [
+            ("Продаю всё — лучше зафиксировать убыток", "C"),
+            ("Жду восстановления — рынок цикличен", "M"),
+            ("Докупаю — это распродажа!", "A"),
+            ("Перекладываю в другой актив", "S"),
+        ],
+    },
+    {
+        "q": "Какой горизонт инвестирования тебе ближе?",
+        "opts": [
+            ("До 1 года — деньги могут понадобиться", "C"),
+            ("3–5 лет — средний срок", "M"),
+            ("7–10 лет — готов ждать", "A"),
+            ("Хочу заработать уже завтра", "S"),
+        ],
+    },
+    {
+        "q": "Ты слышишь про актив, который вырос на 500% за год. Что делаешь?",
+        "opts": [
+            ("Игнорирую — скорее всего это пузырь", "C"),
+            ("Изучаю фундаментал перед покупкой", "M"),
+            ("Вкладываю небольшую часть портфеля", "A"),
+            ("Беру кредит и закупаюсь на всё", "S"),
+        ],
+    },
+    {
+        "q": "Что для тебя важнее?",
+        "opts": [
+            ("Не потерять то, что есть", "C"),
+            ("Баланс между ростом и надёжностью", "M"),
+            ("Максимальная доходность даже с риском", "A"),
+            ("Быстро разбогатеть любой ценой", "S"),
+        ],
+    },
+    {
+        "q": "Сколько времени готов тратить на анализ инвестиций?",
+        "opts": [
+            ("0 — хочу «вложил и забыл»", "C"),
+            ("1–2 часа в месяц — посматривать", "M"),
+            ("Несколько часов в неделю — мне интересно", "A"),
+            ("Слежу за рынком каждый день", "S"),
+        ],
+    },
+]
+
+INVESTOR_TYPES = {
+    "C": {
+        "name": "🛡 Консерватор",
+        "desc": (
+            "Ты ценишь надёжность и предсказуемость.\n\n"
+            "<b>Твой идеальный портфель:</b>\n"
+            "• 60% — банковский депозит / накопительный счёт\n"
+            "• 30% — ОФЗ (государственные облигации)\n"
+            "• 10% — ETF на широкий рынок\n\n"
+            "<b>Риски:</b> инфляция может «съесть» доходность\n"
+            "<b>Совет:</b> хотя бы 10–20% вложи в ETF — долгосрочно это обгоняет депозит"
+        ),
+        "badge": "🛡",
+    },
+    "M": {
+        "name": "⚖️ Умеренный инвестор",
+        "desc": (
+            "Ты ищешь баланс между ростом и безопасностью. Это лучшая позиция!\n\n"
+            "<b>Твой идеальный портфель:</b>\n"
+            "• 30% — депозит / облигации (подушка)\n"
+            "• 50% — ETF на индексы (S&P500, MOEX)\n"
+            "• 20% — отдельные акции / секторные ETF\n\n"
+            "<b>Риски:</b> умеренные просадки в кризис\n"
+            "<b>Совет:</b> ребалансируй портфель раз в год"
+        ),
+        "badge": "⚖️",
+    },
+    "A": {
+        "name": "🚀 Агрессивный инвестор",
+        "desc": (
+            "Ты готов к риску ради высокой доходности. Уважаю!\n\n"
+            "<b>Твой идеальный портфель:</b>\n"
+            "• 10% — депозит (минимальная подушка)\n"
+            "• 40% — акции роста (tech, biotech)\n"
+            "• 35% — ETF развивающихся рынков\n"
+            "• 15% — крипта (BTC/ETH)\n\n"
+            "<b>Риски:</b> можешь потерять 40–50% в кризис\n"
+            "<b>Совет:</b> диверсификация спасёт от катастрофы"
+        ),
+        "badge": "🚀",
+    },
+    "S": {
+        "name": "🎰 Спекулянт",
+        "desc": (
+            "Ты хочешь быстрого результата — это опасно, но честно!\n\n"
+            "<b>Реальность спекулянта:</b>\n"
+            "• 90% трейдеров теряют деньги в долгосроке\n"
+            "• Крипта и плечи могут обнулить счёт за день\n"
+            "• Новостной трейдинг требует профессиональных знаний\n\n"
+            "<b>Если всё же хочешь спекулировать:</b>\n"
+            "• Выдели «игровые» деньги — не больше 5% капитала\n"
+            "• Всегда ставь стоп-лосс\n"
+            "• Основной капитал — в надёжных инструментах\n\n"
+            "<b>Совет:</b> начни с симулятора (бумажная торговля)"
+        ),
+        "badge": "🎰",
+    },
+}
+
+
+class InvestorTestState(StatesGroup):
+    answering = State()
+
+
+def investor_test_kb(q_idx: int) -> InlineKeyboardMarkup:
+    q = INVESTOR_TEST[q_idx]
+    rows = [[Btn(text=opt, callback_data=f"itest_{q_idx}_{t}")] for opt, t in q["opts"]]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def detective_kb(case_idx: int) -> InlineKeyboardMarkup:
     case = DETECTIVE_CASES[case_idx]
     rows = [[Btn(text=opt, callback_data=f"det_{case_idx}_{i}")] for i, opt in enumerate(case["opts"])]
@@ -468,9 +712,11 @@ def main_kb() -> InlineKeyboardMarkup:
         [Btn(text="🎰 Инвестиционный симулятор",    callback_data="invest_start")],
         [Btn(text="🗺 Финансовый квест",             callback_data="quest_start")],
         [Btn(text="🔍 Финансовый детектив",          callback_data="detective_start")],
+        [Btn(text="📹 Видео-уроки",                  callback_data="videos_menu")],
+        [Btn(text="🧬 Тест: кто ты как инвестор?",  callback_data="investor_test_start")],
         [Btn(text="💰 Калькулятор бюджета",          callback_data="budget_start")],
-        [Btn(text="💡 Советы по экономии",           callback_data="tips_menu")],
-        [Btn(text="📖 Словарь инвестора",            callback_data="glossary_menu")],
+        [Btn(text="💡 Советы",  callback_data="tips_menu"),
+         Btn(text="📖 Словарь", callback_data="glossary_menu")],
         [Btn(text="👤 Мой Финансовый IQ",            callback_data="profile"),
          Btn(text="🏆 Рейтинг",                     callback_data="leaderboard")],
     ])
@@ -520,11 +766,13 @@ async def cmd_start(msg: Message, state: FSMContext):
     await msg.answer(
         f"👋 Привет, <b>{name}</b>!{streak_text}\n\n"
         "Я — <b>ФинГрам</b>, твой личный тренер по финансовой грамотности 💸\n\n"
-        "🆕 <b>Новые механики:</b>\n"
+        "📚 <b>Что умею:</b>\n"
         "  🎰 <b>Симулятор</b> — вложи 100 000₽ и прожи 4 инвестиционных года\n"
         "  🗺 <b>Квест</b> — RPG-сценарий с реальными финансовыми выборами\n"
         "  🔍 <b>Детектив</b> — найди ошибки в чужом бюджете\n"
-        "  🏆 <b>Рейтинг</b> — соревнуйся с другими по Финансовому IQ\n\n"
+        "  📹 <b>Видео-уроки</b> — 6 тем с конспектом и заданиями\n"
+        "  🧬 <b>Тест инвестора</b> — узнай свой психотип\n"
+        "  🏆 <b>Рейтинг</b> — соревнуйся с другими по IQ\n\n"
         "Выбери раздел 👇",
         reply_markup=main_kb(), parse_mode="HTML"
     )
@@ -931,6 +1179,147 @@ async def cb_detective_answer(call: CallbackQuery, state: FSMContext):
         ]),
         parse_mode="HTML"
     )
+    await call.answer()
+
+
+# ─── 📹 ВИДЕО-УРОКИ ───────────────────────────────────────────────────────────
+
+@router.callback_query(F.data == "videos_menu")
+async def cb_videos_menu(call: CallbackQuery):
+    uid = call.from_user.id
+    watched = _VIDEO_WATCHED.get(uid, set())
+    total = len(VIDEO_LESSONS)
+    done = len(watched)
+    await call.message.edit_text(
+        f"📹 <b>Видео-уроки по финансам</b>\n\n"
+        f"Прогресс: <b>{done}/{total}</b> уроков просмотрено\n"
+        f"За каждый урок +20 IQ 🎓\n\n"
+        "Выбери тему 👇",
+        reply_markup=videos_menu_kb(), parse_mode="HTML"
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("video_") & ~F.data.startswith("video_done_"))
+async def cb_video_open(call: CallbackQuery):
+    idx = int(call.data.split("_")[1])
+    v = VIDEO_LESSONS[idx]
+    uid = call.from_user.id
+    watched = _VIDEO_WATCHED.get(uid, set())
+    already = idx in watched
+    status = "✅ Ты уже смотрел этот урок" if already else "👆 Нажми кнопку выше, посмотри видео, затем отметь"
+
+    await call.message.edit_text(
+        f"📹 <b>{v['title']}</b>  ·  {v['duration']}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{v['desc']}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"<i>{status}</i>",
+        reply_markup=video_kb(idx), parse_mode="HTML",
+        disable_web_page_preview=True
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("video_done_"))
+async def cb_video_done(call: CallbackQuery):
+    idx = int(call.data.split("_")[2])
+    uid = call.from_user.id
+    if uid not in _VIDEO_WATCHED:
+        _VIDEO_WATCHED[uid] = set()
+    already = idx in _VIDEO_WATCHED[uid]
+    if not already:
+        _VIDEO_WATCHED[uid].add(idx)
+        add_iq(uid, 20)
+        iq_text = "+20 IQ начислено! 🎓"
+    else:
+        iq_text = "IQ за этот урок уже получен ✅"
+
+    watched = _VIDEO_WATCHED[uid]
+    total = len(VIDEO_LESSONS)
+    done = len(watched)
+
+    if done == total:
+        add_iq(uid, 50, "🎓")
+        bonus_text = "\n\n🏅 <b>Бонус: ты прошёл все уроки! +50 IQ и бейдж 🎓</b>"
+    else:
+        bonus_text = f"\nПросмотрено: {done}/{total} уроков"
+
+    await call.answer(iq_text, show_alert=True)
+    await call.message.edit_reply_markup(
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [Btn(text=f"▶️ Смотреть снова на YouTube", url=VIDEO_LESSONS[idx]["url"])],
+            [Btn(text="← Все уроки", callback_data="videos_menu")],
+            [Btn(text="« Главное меню", callback_data="main_menu")],
+        ])
+    )
+
+
+# ─── 🧬 ТЕСТ: КТО ТЫ КАК ИНВЕСТОР? ──────────────────────────────────────────
+
+@router.callback_query(F.data == "investor_test_start")
+async def cb_investor_test_start(call: CallbackQuery, state: FSMContext):
+    await state.set_state(InvestorTestState.answering)
+    await state.update_data(q=0, scores={"C": 0, "M": 0, "A": 0, "S": 0})
+    q = INVESTOR_TEST[0]
+    await call.message.edit_text(
+        f"🧬 <b>Тест: Кто ты как инвестор?</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Вопрос 1/{len(INVESTOR_TEST)}\n\n"
+        f"<b>{q['q']}</b>",
+        reply_markup=investor_test_kb(0), parse_mode="HTML"
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("itest_"), InvestorTestState.answering)
+async def cb_investor_test_answer(call: CallbackQuery, state: FSMContext):
+    parts = call.data.split("_")
+    q_idx, inv_type = int(parts[1]), parts[2]
+    data = await state.get_data()
+    if data.get("q") != q_idx:
+        await call.answer()
+        return
+
+    scores = data["scores"]
+    scores[inv_type] = scores.get(inv_type, 0) + 1
+    next_q = q_idx + 1
+
+    if next_q >= len(INVESTOR_TEST):
+        await state.clear()
+        result_type = max(scores, key=scores.get)
+        result = INVESTOR_TYPES[result_type]
+        add_iq(call.from_user.id, 35, result["badge"])
+
+        # Подробный разбор по всем типам
+        breakdown = "  ".join(
+            f"{INVESTOR_TYPES[t]['name'].split()[0]} {s}" for t, s in scores.items()
+        )
+
+        await call.message.edit_text(
+            f"🧬 <b>Тест завершён!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"Ты — <b>{result['name']}</b>\n\n"
+            f"{result['desc']}\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"📊 Распределение ответов: {breakdown}\n\n"
+            f"⚡ +35 IQ и бейдж {result['badge']}!",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [Btn(text="🔄 Пройти снова", callback_data="investor_test_start")],
+                [Btn(text="🎰 Симулятор по моей стратегии", callback_data="invest_start")],
+                [Btn(text="« Главное меню", callback_data="main_menu")],
+            ]),
+            parse_mode="HTML"
+        )
+    else:
+        await state.update_data(q=next_q, scores=scores)
+        q = INVESTOR_TEST[next_q]
+        await call.message.edit_text(
+            f"🧬 <b>Тест: Кто ты как инвестор?</b>\n"
+            f"Вопрос {next_q + 1}/{len(INVESTOR_TEST)}\n\n"
+            f"<b>{q['q']}</b>",
+            reply_markup=investor_test_kb(next_q), parse_mode="HTML"
+        )
     await call.answer()
 
 
