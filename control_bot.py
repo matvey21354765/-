@@ -2659,7 +2659,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         ]
         for url, params in urls_to_try:
             try:
-                r = session.get(url, params=params, headers=mobile_headers, timeout=15, proxies=AVITO_PROXIES)
+                r = session.get(url, params=params, headers=mobile_headers, timeout=8, proxies=AVITO_PROXIES)
                 print(f"  [Авито m.] {url} стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
                 if r.status_code == 200 and ('"urlPath"' in r.text or 'data-marker="item"' in r.text or '__NEXT_DATA__' in r.text):
                     result = _parse_avito_html(r.text, slug, today)
@@ -2682,7 +2682,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         if price_max < 99_000_000:
             params["pmax"] = price_max
         try:
-            r = cs_session.get(url, params=params, timeout=25, proxies=AVITO_PROXIES)
+            r = cs_session.get(url, params=params, timeout=8, proxies=AVITO_PROXIES)
             print(f"  [Авито cs] стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
             if r.status_code == 200 and ('"urlPath"' in r.text or 'data-marker="item"' in r.text):
                 return _parse_avito_html(r.text, slug, today)
@@ -2981,7 +2981,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                 params["pmin"] = price_min
             if price_max < 99_000_000:
                 params["pmax"] = price_max
-            r = _rq.get(url, params=params, timeout=10, headers={
+            r = _rq.get(url, params=params, timeout=8, headers={
                 "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
                 "Accept": "text/html,*/*;q=0.8",
                 "Accept-Language": "ru",
@@ -3017,7 +3017,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             }
             for url in urls_to_try:
                 try:
-                    r = _rq.get(url, params=params, headers=hdrs, timeout=12, proxies=AVITO_PROXIES, allow_redirects=True)
+                    r = _rq.get(url, params=params, headers=hdrs, timeout=8, proxies=AVITO_PROXIES, allow_redirects=True)
                     print(f"  [Авито lite] {url} стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
                     if r.status_code == 200 and ('"urlPath"' in r.text or '__NEXT_DATA__' in r.text or 'data-marker="item"' in r.text):
                         result = _parse_avito_html(r.text, slug, today)
@@ -5378,7 +5378,11 @@ async def do_search_for_user(uid: int, reply_to):
         "avito":  lambda: scrape_avito(region, pages=10, price_min=pmin, price_max=pmax, sort_by_date=False),
     }
     tasks = [loop.run_in_executor(None, scraper_map[src]) for src in enabled_sources if src in scraper_map]
-    results = await asyncio.gather(*tasks)
+    try:
+        results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=45)
+    except asyncio.TimeoutError:
+        results = [[] for _ in tasks]
+        await reply_to.answer("⏱ Поиск занял слишком долго, показываю что успели найти...")
 
     items = []
     stat_parts = []
@@ -5536,16 +5540,22 @@ async def do_search_for_user(uid: int, reply_to):
         )
         return
 
-    # Предзагружаем фото+описание для первых 10 объявлений заранее
-    first_batch = suitable[:10]
-    sem_pre = asyncio.Semaphore(8)
+    # Предзагружаем фото+описание для первых 5 объявлений (быстрее старт)
+    first_batch = suitable[:5]
+    sem_pre = asyncio.Semaphore(5)
     async def _pre(it):
         async with sem_pre:
             try:
-                await asyncio.wait_for(_ensure_photo(it), timeout=40)
+                await asyncio.wait_for(_ensure_photo(it), timeout=8)
             except Exception:
                 pass
-    await asyncio.gather(*[_pre(it) for it in first_batch])
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*[_pre(it) for it in first_batch]),
+            timeout=15  # максимум 15 сек на предзагрузку
+        )
+    except asyncio.TimeoutError:
+        pass
 
     # После загрузки цен — выкидываем всё, что осталось без цены или вышло за бюджет
     suitable = [
@@ -6097,7 +6107,7 @@ async def cmd_monitor(msg: Message):
         )
 
 
-BOT_USERNAME = os.getenv("BOT_USERNAME", "PerekupDriveBot")
+BOT_USERNAME = os.getenv("BOT_USERNAME", "")
 
 
 @dp.message(Command("invite"))
@@ -6159,8 +6169,17 @@ async def _warmup_cache():
 
 
 async def main():
+    global BOT_USERNAME
     logging.basicConfig(level=logging.WARNING)
     _load_avito_cache()
+    # Подтягиваем username бота автоматически
+    if not BOT_USERNAME:
+        try:
+            me = await bot.get_me()
+            BOT_USERNAME = me.username or "PerekupDriveBot"
+            print(f"  [бот] username: @{BOT_USERNAME}")
+        except Exception:
+            BOT_USERNAME = "PerekupDriveBot"
     print("✅ Авто-брокер бот запущен!")
 
     # Тест прокси
