@@ -3622,17 +3622,23 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                     )
                     title = re.sub(r'\s+', ' ', title_src).strip(" -|·,")[:80] or f"Авто на Авито — {slug_ru_name}"
 
-                # Год: сначала из URL-пути (точнее), потом из сниппета
-                year_m = _year_re.search(url_path) or _year_re.search(context_clean)
-                year = int(year_m.group(1)) if year_m else 0
+                # Fix C: Extract year from URL path first (more reliable than snippet)
+                year_from_url = 0
+                if url_path:
+                    ym_url = re.search(r'\b(19[5-9]\d|20[012]\d)\b', url_path)
+                    if ym_url:
+                        year_from_url = int(ym_url.group(1))
+                year_m = _year_re.search(context_clean)
+                year = year_from_url or (int(year_m.group(1)) if year_m else 0)
 
-                # Ранняя фильтрация: новые авто 2022+ не могут стоить < 800k
-                if year >= 2022 and price_max < 800_000:
+                # Hard filter: impossible year/budget combos
+                if year >= 2023 and price_max < 1_000_000:
                     continue
-                if year >= 2020 and price_max < 400_000:
+                if year >= 2021 and price_max < 600_000:
                     continue
-                # Авто 2018+ вряд ли в бюджете 100k
-                if year >= 2018 and price_max < 150_000:
+                if year >= 2019 and price_max < 300_000:
+                    continue
+                if year >= 2016 and price_max < 150_000:
                     continue
 
                 photo_url = ""
@@ -3658,11 +3664,12 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
 
         # Список марок зависит от бюджета
         if price_max <= 200_000:
-            # Дешёвые авто: старые народные марки
+            # Fix D: For cheap budgets, use specific cheap model names to avoid DDG
+            # returning expensive Chinese brands (EXEED, Tank, Haval, Geely, Chery etc.)
             _all_brands = [
-                "lada", "ваз", "daewoo", "chevrolet nexia", "chevrolet lacetti",
-                "nissan", "toyota", "mitsubishi", "ford", "opel",
-                "hyundai", "kia", "renault", "honda", "mazda", "volkswagen",
+                "lada", "ваз", "daewoo nexia", "daewoo matiz", "chevrolet lacetti",
+                "nissan almera", "toyota corolla", "hyundai accent", "kia rio",
+                "ford focus", "opel astra", "renault logan", "volkswagen polo",
             ]
         elif price_max <= 500_000:
             _all_brands = [
@@ -3911,6 +3918,27 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
         it for it in items
         if (not it.get("_price_int")) or (price_min <= it["_price_int"] <= price_max)
     ]
+
+    # Fix A: Hard post-merge year/budget filter — eliminates DDG results with
+    # price_int=0 that are obviously wrong year/budget combos (e.g. 2025 EXEED
+    # in a 0–100k budget search).
+    def _year_budget_ok(it: dict, pmax: int) -> bool:
+        y = it.get("_year") or it.get("year") or 0
+        try:
+            y = int(str(y)[:4])
+        except Exception:
+            y = 0
+        if y >= 2023 and pmax < 1_000_000:
+            return False
+        if y >= 2021 and pmax < 600_000:
+            return False
+        if y >= 2019 and pmax < 300_000:
+            return False
+        if y >= 2016 and pmax < 150_000:
+            return False
+        return True
+
+    out = [it for it in out if it.get("_price_int", 0) > 0 or _year_budget_ok(it, price_max)]
     return out
 
 
@@ -6001,7 +6029,25 @@ async def do_search_for_user(uid: int, reply_to):
             # Показываем то, что есть (за пределами бюджета), со снятым фильтром,
             # иначе пользователь думает что бот сломан.
             print(f"  [fallback] Авито ответил ({avito_raw_count} объявлений), но ни одно не в бюджете {pmin}–{pmax}₽")
-            unfiltered = avito_raw_cached[1][:30] if avito_raw_cached else []
+            # Fix E: Apply year/budget filter even for fallback — never show 2025 luxury
+            # cars in response to a 100k budget search.
+            def _year_budget_ok_fallback(it: dict, _pmax: int) -> bool:
+                y = it.get("_year") or it.get("year") or 0
+                try:
+                    y = int(str(y)[:4])
+                except Exception:
+                    y = 0
+                if y >= 2023 and _pmax < 1_000_000:
+                    return False
+                if y >= 2021 and _pmax < 600_000:
+                    return False
+                if y >= 2019 and _pmax < 300_000:
+                    return False
+                if y >= 2016 and _pmax < 150_000:
+                    return False
+                return True
+            raw_fallback = avito_raw_cached[1] if avito_raw_cached else []
+            unfiltered = [it for it in raw_fallback if _year_budget_ok_fallback(it, pmax)][:30]
             if unfiltered:
                 items.extend(unfiltered)
                 await reply_to.answer(
