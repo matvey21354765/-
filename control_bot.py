@@ -3352,7 +3352,148 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                 continue
         return []
 
-    all_methods = [_try_curl_cffi, _try_scraperapi, _try_avito_rss, _try_avito_json_api, _try_cs_web, _try_mobile_site, _try_web_html, _try_avito_public_api, _try_free_proxies, _try_googlebot_ua, _try_yandex_search, _try_avito_lite]
+    def _try_yandex_snippets(p: int) -> list[dict]:
+        """
+        Ищет объявления Авито через Яндекс и парсит СНИППЕТЫ — без единого запроса к avito.ru.
+        Работает с любого IP (в т.ч. Railway датацентр).
+        """
+        if p > 3:
+            return []
+        try:
+            import requests as _rq
+            from bs4 import BeautifulSoup as _BS4
+        except ImportError:
+            return []
+
+        slug_ru_name = {
+            "ekaterinburg": "Екатеринбург", "moskva": "Москва", "spb": "Санкт-Петербург",
+            "novosibirsk": "Новосибирск", "kazan": "Казань", "chelyabinsk": "Челябинск",
+            "ufa": "Уфа", "krasnodar": "Краснодар", "omsk": "Омск",
+            "rostov-na-donu": "Ростов", "tyumen": "Тюмень", "perm": "Пермь",
+            "krasnoyarsk": "Красноярск", "voronezh": "Воронеж", "samara": "Самара",
+            "saratov": "Саратов", "irkutsk": "Иркутск", "vladivostok": "Владивосток",
+            "habarovsk": "Хабаровск", "nizhniy_novgorod": "Нижний Новгород",
+        }.get(slug, slug)
+
+        price_q = ""
+        if price_min > 0 and price_max < 99_000_000:
+            price_q = f" от {price_min//1000}тыс до {price_max//1000}тыс руб"
+        elif price_max < 99_000_000:
+            price_q = f" до {price_max//1000}тыс руб"
+
+        queries = [
+            f"site:avito.ru/{slug}/avtomobili продам авто частник{price_q}",
+            f"avito.ru {slug_ru_name} продам авто частник{price_q}",
+        ]
+
+        results_out: list[dict] = []
+        seen_urls: set[str] = set()
+        _price_re = re.compile(r"(\d[\d\s]{2,8})\s*(?:₽|тыс\.?\s*р(?:уб)?\.?|руб\.?)", re.I)
+        _year_re = re.compile(r"\b(19[5-9]\d|20[012]\d)\b")
+
+        def _parse_price_snip(text: str) -> int:
+            for m in _price_re.finditer(text):
+                raw = re.sub(r"\D", "", m.group(1))
+                if not raw:
+                    continue
+                val = int(raw)
+                suffix = m.group(0)[len(m.group(1)):].strip().lower()
+                if "тыс" in suffix:
+                    val *= 1000
+                if 50_000 <= val <= 50_000_000:
+                    return val
+            return 0
+
+        for q in queries:
+            if len(results_out) >= 20:
+                break
+            for lr in ["54", "2", "43"]:  # Екб, Мск, Новосиб — Яндекс регион
+                try:
+                    r = _rq.get(
+                        "https://yandex.ru/search/",
+                        params={"text": q, "lr": lr, "p": p - 1},
+                        headers={
+                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                            "Accept-Language": "ru-RU,ru;q=0.9",
+                            "Accept": "text/html,*/*;q=0.8",
+                        },
+                        timeout=10,
+                    )
+                    if r.status_code != 200:
+                        continue
+                    soup = _BS4(r.text, "lxml")
+                    # Ищем все результаты поиска Яндекса
+                    for item_el in soup.select("li.serp-item, div.serp-item, div[data-cid]"):
+                        # Ссылка на объявление Авито
+                        link_el = item_el.select_one("a[href*='avito.ru']")
+                        if not link_el:
+                            continue
+                        href = link_el.get("href", "")
+                        # Фильтруем только страницы объявлений (содержат числовой ID)
+                        if not re.search(rf'avito\.ru/{re.escape(slug)}/[a-z]', href):
+                            continue
+                        # Нормализуем URL
+                        if href.startswith("//"):
+                            href = "https:" + href
+                        if "avito.ru" not in href:
+                            continue
+                        # Убираем параметры Яндекса (редирект)
+                        clean_url = re.sub(r'\?.*', '', href)
+                        if clean_url in seen_urls:
+                            continue
+                        seen_urls.add(clean_url)
+
+                        # Заголовок
+                        title_el = (item_el.select_one("h2") or
+                                    item_el.select_one(".organic__title") or
+                                    item_el.select_one(".title"))
+                        title = title_el.get_text(" ", strip=True) if title_el else ""
+
+                        # Сниппет/описание
+                        snip_el = (item_el.select_one(".text-container") or
+                                   item_el.select_one(".organic__text") or
+                                   item_el.select_one(".serp-item__text"))
+                        snip = snip_el.get_text(" ", strip=True) if snip_el else ""
+
+                        full_text = title + " " + snip
+
+                        # Цена из сниппета
+                        price_int = _parse_price_snip(full_text)
+                        if price_int > 0 and not (price_min <= price_int <= price_max):
+                            continue
+
+                        # Год
+                        year_m = _year_re.search(full_text)
+                        year = int(year_m.group(1)) if year_m else 0
+
+                        if not title:
+                            title = f"Объявление Авито — {slug_ru_name}"
+
+                        results_out.append({
+                            "source": "avito",
+                            "title": title[:120],
+                            "price": f"{price_int:,} ₽".replace(",", " ") if price_int else "цена не указана",
+                            "_price_int": price_int,
+                            "url": clean_url,
+                            "_photo_url": "",
+                            "description": snip[:400],
+                            "seller": "Авито (частник)",
+                            "_year": year,
+                            "_days_on_site": 0,
+                            "_photos": 0,
+                            "mileage": 0,
+                            "_avito_price_filtered": False,
+                        })
+                    if results_out:
+                        break  # нашли — не меняем регион
+                except Exception as e:
+                    print(f"  [Яндекс Авито] q={q!r}: {e}")
+
+        if results_out:
+            print(f"  [Яндекс Авито] {len(results_out)} объявлений из сниппетов Яндекса")
+        return results_out
+
+    all_methods = [_try_yandex_snippets, _try_curl_cffi, _try_avito_rss, _try_cs_web, _try_mobile_site, _try_web_html, _try_avito_public_api, _try_free_proxies, _try_googlebot_ua, _try_yandex_search, _try_avito_lite, _try_scraperapi, _try_avito_json_api]
     _ex = _TPE(max_workers=len(all_methods))
     try:
         fut_map = {_ex.submit(m, 1): m for m in all_methods}
