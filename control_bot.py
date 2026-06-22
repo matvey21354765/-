@@ -3631,14 +3631,14 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                 year_m = _year_re.search(context_clean)
                 year = year_from_url or (int(year_m.group(1)) if year_m else 0)
 
-                # Hard filter: impossible year/budget combos
-                if year >= 2023 and price_max < 1_000_000:
+                # Hard filter: only obviously impossible year/budget combos.
+                # Thresholds relaxed — DDG often shows older cars that are valid,
+                # and over-filtering leads to 0 results for cheap budgets.
+                if year >= 2024 and price_max < 2_000_000:
                     continue
-                if year >= 2021 and price_max < 600_000:
+                if year >= 2022 and price_max < 800_000:
                     continue
-                if year >= 2019 and price_max < 300_000:
-                    continue
-                if year >= 2016 and price_max < 150_000:
+                if year >= 2020 and price_max < 400_000:
                     continue
 
                 photo_url = ""
@@ -3705,12 +3705,19 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         elif price_max <= 600_000:
             _year_hint = " 2012 2016 2018"
 
+        # Тайм-лимит для всего DDG-цикла: максимум 45 секунд
+        _ddg_deadline = time.time() + 45
+
         for brand in _all_brands:
             if len(results_out) >= 40:
                 break
+            if time.time() > _ddg_deadline:
+                print(f"  [ddg] тайм-лимит 45с, остановка на {brand}")
+                break
             q = f"site:avito.ru/{slug}/avtomobili {brand}{_price_hint}{_year_hint}"
-            # Пауза 3-5с между запросами — критично для обхода DDG rate-limit
-            time.sleep(random.uniform(3.5, 5.5))
+            # Пауза 2-3.5с между запросами — достаточно для обхода DDG rate-limit,
+            # но не так долго, чтобы вылезти за тайм-лимит scrape_avito.
+            time.sleep(random.uniform(2.0, 3.5))
             proxy = proxy_pool[proxy_idx % len(proxy_pool)]
             html = _fetch_ddg(q, use_lite=lite_flag, proxy=proxy)
             if not html:
