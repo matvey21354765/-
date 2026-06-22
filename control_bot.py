@@ -62,12 +62,38 @@ AVITO_PROXY_USER = os.getenv("AVITO_PROXY_USER", "")
 AVITO_PROXY_PASS = os.getenv("AVITO_PROXY_PASS", "")
 AVITO_PROXY_PROTOCOL = os.getenv("AVITO_PROXY_PROTOCOL", "socks5").lower()
 AVITO_PROXY_AUTH = os.getenv("AVITO_PROXY_AUTH", "login").lower()  # "login" или "ip"
+# Диапазон портов для ротации IP (напр. pool.proxys.world:10000-10999 = 1000 IP).
+# Каждый запрос берёт случайный порт → каждый раз новый IP, баны Авито исключены.
+AVITO_PROXY_PORT_MIN = os.getenv("AVITO_PROXY_PORT_MIN", "")
+AVITO_PROXY_PORT_MAX = os.getenv("AVITO_PROXY_PORT_MAX", "")
+
+_AVITO_PROXY_PORTS: list[int] = []
+if AVITO_PROXY_PORT_MIN and AVITO_PROXY_PORT_MAX:
+    try:
+        _AVITO_PROXY_PORTS = list(range(int(AVITO_PROXY_PORT_MIN), int(AVITO_PROXY_PORT_MAX) + 1))
+    except Exception:
+        _AVITO_PROXY_PORTS = []
+
+
+def _avito_proxies() -> "dict[str, str] | None":
+    """Возвращает прокси-словарь со СЛУЧАЙНЫМ портом из пула (ротация IP).
+    Если пул портов не задан — возвращает статический AVITO_PROXIES."""
+    if AVITO_PROXY_HOST and _AVITO_PROXY_PORTS:
+        port = random.choice(_AVITO_PROXY_PORTS)
+        use_auth = AVITO_PROXY_AUTH != "ip" and AVITO_PROXY_USER
+        auth = f"{AVITO_PROXY_USER}:{AVITO_PROXY_PASS}@" if use_auth else ""
+        url = f"{AVITO_PROXY_PROTOCOL}://{auth}{AVITO_PROXY_HOST}:{port}"
+        return {"http": url, "https": url}
+    return AVITO_PROXIES
+
+
 AVITO_PROXIES: "dict[str, str] | None" = None
-if AVITO_PROXY_HOST and AVITO_PROXY_PORT:
+if AVITO_PROXY_HOST and (AVITO_PROXY_PORT or _AVITO_PROXY_PORTS):
     # При авторизации по IP логин/пароль не нужны (и мешают SOCKS5)
     _use_auth = AVITO_PROXY_AUTH != "ip" and AVITO_PROXY_USER
     _auth = f"{AVITO_PROXY_USER}:{AVITO_PROXY_PASS}@" if _use_auth else ""
-    _avito_proxy_url = f"{AVITO_PROXY_PROTOCOL}://{_auth}{AVITO_PROXY_HOST}:{AVITO_PROXY_PORT}"
+    _repr_port = AVITO_PROXY_PORT or (str(_AVITO_PROXY_PORTS[0]) if _AVITO_PROXY_PORTS else "")
+    _avito_proxy_url = f"{AVITO_PROXY_PROTOCOL}://{_auth}{AVITO_PROXY_HOST}:{_repr_port}"
     AVITO_PROXIES = {"http": _avito_proxy_url, "https": _avito_proxy_url}
 
 # ── Регионы ─────────────────────────────────────────────────────
@@ -2939,7 +2965,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         ]
         for url, params in urls_to_try:
             try:
-                r = session.get(url, params=params, headers=mobile_headers, timeout=8, proxies=AVITO_PROXIES)
+                r = session.get(url, params=params, headers=mobile_headers, timeout=8, proxies=_avito_proxies())
                 print(f"  [Авито m.] {url} стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
                 if r.status_code == 200 and ('"urlPath"' in r.text or 'data-marker="item"' in r.text or '__NEXT_DATA__' in r.text):
                     result = _parse_avito_html(r.text, slug, today)
@@ -2962,7 +2988,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         if price_max < 99_000_000:
             params["pmax"] = price_max
         try:
-            r = cs_session.get(url, params=params, timeout=8, proxies=AVITO_PROXIES)
+            r = cs_session.get(url, params=params, timeout=8, proxies=_avito_proxies())
             print(f"  [Авито cs] стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
             if r.status_code == 200 and ('"urlPath"' in r.text or 'data-marker="item"' in r.text):
                 return _parse_avito_html(r.text, slug, today)
@@ -3009,7 +3035,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                     "x-device-id": f"avito-{random.randint(10**9, 10**10 - 1)}",
                 },
                 timeout=8,
-                proxies=AVITO_PROXIES,
+                proxies=_avito_proxies(),
             )
             print(f"  [Авито pubAPI] стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
             if r.status_code == 200:
@@ -3050,7 +3076,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                     "Referer": "https://www.avito.ru/",
                 },
                 timeout=8,
-                proxies=AVITO_PROXIES,
+                proxies=_avito_proxies(),
             )
             print(f"  [Авито webHTML] стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
             if r.status_code == 200 and ('"urlPath"' in r.text or 'data-marker="item"' in r.text):
@@ -3074,7 +3100,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                 r = session.get(
                     rss_url, timeout=8,
                     headers={"User-Agent": "Mozilla/5.0 (compatible; Feedfetcher-Google; +http://www.google.com/feedfetcher.html)", "Accept": "application/rss+xml,*/*"},
-                    proxies=AVITO_PROXIES,
+                    proxies=_avito_proxies(),
                 )
                 print(f"  [Авито RSS] {rss_url}: HTTP {r.status_code}")
                 if r.status_code == 200 and ("<rss" in r.text or "<channel" in r.text):
@@ -3303,7 +3329,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                 "Accept": "text/html,*/*;q=0.8",
                 "Accept-Language": "ru",
                 "From": "googlebot(at)googlebot.com",
-            }, proxies=AVITO_PROXIES)
+            }, proxies=_avito_proxies())
             print(f"  [Googlebot UA] стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
             if r.status_code == 200 and ('"urlPath"' in r.text or '__NEXT_DATA__' in r.text):
                 return _parse_avito_html(r.text, slug, today)
@@ -3334,7 +3360,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             }
             for url in urls_to_try:
                 try:
-                    r = _rq.get(url, params=params, headers=hdrs, timeout=8, proxies=AVITO_PROXIES, allow_redirects=True)
+                    r = _rq.get(url, params=params, headers=hdrs, timeout=8, proxies=_avito_proxies(), allow_redirects=True)
                     print(f"  [Авито lite] {url} стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
                     if r.status_code == 200 and ('"urlPath"' in r.text or '__NEXT_DATA__' in r.text or 'data-marker="item"' in r.text):
                         result = _parse_avito_html(r.text, slug, today)
@@ -4051,7 +4077,7 @@ def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max
             """Пробуем: быстрый прямой запрос → headless-браузер (только без прокси)."""
             # 1. Прямой запрос через прокси (если есть) или напрямую
             try:
-                r2 = _req.get(fetch_url, timeout=8, headers=_HEADERS, proxies=AVITO_PROXIES)
+                r2 = _req.get(fetch_url, timeout=8, headers=_HEADERS, proxies=_avito_proxies())
                 if r2.status_code == 200 and _page_has_listings(r2.text):
                     return r2.text
             except Exception:
@@ -4304,7 +4330,7 @@ def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max
                 # Прямой запрос первой — бесплатно и быстро, при неудаче — headless-браузер
                 fb_text = ""
                 try:
-                    r_direct = _req_fb.get(fallback_url, timeout=8, headers=_HEADERS, proxies=AVITO_PROXIES)
+                    r_direct = _req_fb.get(fallback_url, timeout=8, headers=_HEADERS, proxies=_avito_proxies())
                     if r_direct.status_code == 200 and ('"urlPath"' in r_direct.text or 'data-marker="item"' in r_direct.text):
                         fb_text = r_direct.text
                 except Exception:
@@ -5700,7 +5726,7 @@ async def _ensure_photo(item: dict) -> None:
                             "Accept": "text/html,application/xhtml+xml,*/*;q=0.9",
                             "Accept-Language": "ru-RU,ru;q=0.9",
                             "Referer": "https://www.avito.ru/",
-                        }, proxies=AVITO_PROXIES)
+                        }, proxies=_avito_proxies())
                         if r.status_code == 200 and len(r.text) > 5000:
                             res = _extract_from_page(r.text)
                             if res[0] or res[1]:
@@ -5709,7 +5735,7 @@ async def _ensure_photo(item: dict) -> None:
                         pass
                     # 2. Пробуем мобильный URL
                     try:
-                        r = _req.get(mobile_url, timeout=10, headers=_MOB_HDR, proxies=AVITO_PROXIES)
+                        r = _req.get(mobile_url, timeout=10, headers=_MOB_HDR, proxies=_avito_proxies())
                         if r.status_code == 200 and len(r.text) > 5000:
                             res = _extract_from_page(r.text)
                             if res[0] or res[1]:
@@ -5718,7 +5744,7 @@ async def _ensure_photo(item: dict) -> None:
                         pass
                     # 3. Десктопный URL
                     try:
-                        r = _req.get(url, timeout=10, headers=_HDR, proxies=AVITO_PROXIES)
+                        r = _req.get(url, timeout=10, headers=_HDR, proxies=_avito_proxies())
                         if r.status_code == 200 and len(r.text) > 5000:
                             res = _extract_from_page(r.text)
                             if res[0] or res[1]:
@@ -5731,7 +5757,7 @@ async def _ensure_photo(item: dict) -> None:
                         cs = cloudscraper.create_scraper(
                             browser={"browser": "chrome", "platform": "android", "mobile": True}
                         )
-                        r = cs.get(mobile_url, timeout=12, proxies=AVITO_PROXIES)
+                        r = cs.get(mobile_url, timeout=12, proxies=_avito_proxies())
                         if r.status_code == 200 and len(r.text) > 3000:
                             res = _extract_from_page(r.text)
                             if res[0] or res[1]:
@@ -5900,7 +5926,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                         from curl_cffi import requests as _cffi
                         r = _cffi.get(photo_url, impersonate="chrome124", timeout=12,
                                       headers={"Referer": "https://www.avito.ru/"},
-                                      proxies=AVITO_PROXIES)
+                                      proxies=_avito_proxies())
                         if r.status_code == 200 and len(r.content) > 3_000:
                             return r.content
                     except Exception:
@@ -5911,7 +5937,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                             "Referer": "https://www.avito.ru/",
                             "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-                        }, proxies=AVITO_PROXIES)
+                        }, proxies=_avito_proxies())
                         if r2.status_code == 200 and len(r2.content) > 3_000:
                             return r2.content
                     except Exception:
@@ -6181,10 +6207,12 @@ async def do_search_for_user(uid: int, reply_to):
             try:
                 import requests as _rq
                 proxies_to_try = []
+                # Платный ротирующийся прокси — в приоритете (разные IP, реальные цены)
+                if AVITO_PROXIES:
+                    for _ in range(3):
+                        proxies_to_try.append(_avito_proxies())
                 for _pa in list(_working_free_proxies)[:3]:
                     proxies_to_try.append({"http": f"http://{_pa}", "https": f"http://{_pa}"})
-                if AVITO_PROXIES:
-                    proxies_to_try.append(AVITO_PROXIES)
                 proxies_to_try.append(None)
                 _hdrs = {
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -6551,7 +6579,7 @@ async def cmd_test_avito(msg: Message):
         r_direct = _req.get(url, headers={
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "Accept-Language": "ru-RU,ru;q=0.9",
-        }, timeout=15, proxies=AVITO_PROXIES)
+        }, timeout=15, proxies=_avito_proxies())
         await msg.answer(_stat(r_direct, "Прямой запрос"))
         # Пример распознанного объявления — видно, извлеклись ли цена и фото
         sample_items = _parse_avito_html(r_direct.text, slug, datetime.date.today())
@@ -7125,12 +7153,12 @@ async def main():
     if AVITO_PROXY_HOST:
         try:
             import requests as _rq
-            r = _rq.get("https://api.ipify.org", proxies=AVITO_PROXIES, timeout=10)
+            r = _rq.get("https://api.ipify.org", proxies=_avito_proxies(), timeout=10)
             print(f"  [прокси {AVITO_PROXY_PROTOCOL}] ✅ работает, IP: {r.text.strip()}")
             # Сразу проверяем доступ к Авито
             try:
                 ra = _rq.get("https://www.avito.ru/krasnoyarsk/avtomobili",
-                             proxies=AVITO_PROXIES, timeout=10,
+                             proxies=_avito_proxies(), timeout=10,
                              headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"})
                 has_listings = '"urlPath"' in ra.text or 'data-marker="item"' in ra.text
                 print(f"  [Авито тест] HTTP {ra.status_code}, {len(ra.text):,}б, объявления: {'✅ да' if has_listings else '❌ нет (капча/блок)'}")
@@ -7147,7 +7175,7 @@ async def main():
             ]
             for _eng, _url, _params in _engines:
                 try:
-                    rt = _rq.get(_url, params=_params, proxies=AVITO_PROXIES, timeout=12, headers=_ua)
+                    rt = _rq.get(_url, params=_params, proxies=_avito_proxies(), timeout=12, headers=_ua)
                     _dec = rt.text
                     for _ in range(2):
                         _dec = _up.unquote(_dec)
