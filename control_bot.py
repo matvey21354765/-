@@ -3762,7 +3762,10 @@ async def cmd_start(msg: Message, state: FSMContext):
                 inviter_uid = int(param[4:])
                 if inviter_uid != msg.from_user.id:
                     _record_referral(msg.from_user.id, inviter_uid)
-                    await msg.answer("🎁 Тебя пригласил друг! Ты получаешь 3 дня расширенного доступа.")
+                    await msg.answer(
+                        "🎁 Тебя пригласил друг! Добро пожаловать в PerekupDrive!\n"
+                        "Ищи авто ниже рынка и успей первым 🚗💨"
+                    )
             except Exception:
                 pass
     _get_or_create_referral(msg.from_user.id)
@@ -5860,14 +5863,14 @@ async def main():
     # loop.create_task(_warmup_cache())
 
     await bot.set_my_commands([
-        BotCommand(command="start", description="🚀 Главное меню"),
-        BotCommand(command="search", description="🔍 Поиск авто"),
-        BotCommand(command="new", description="🆕 Новые сегодня"),
+        BotCommand(command="start",     description="🚀 Главное меню"),
+        BotCommand(command="search",    description="🔍 Найти авто"),
+        BotCommand(command="new",       description="🆕 Новые сегодня"),
         BotCommand(command="favorites", description="🚗 Мой гараж"),
-        BotCommand(command="invite", description="🤝 Пригласить друга"),
-        BotCommand(command="settings", description="⚙️ Настройки"),
-        BotCommand(command="stats", description="📊 Статистика (admin)"),
-        BotCommand(command="help", description="❓ Помощь"),
+        BotCommand(command="invite",    description="🤝 Пригласить друга"),
+        BotCommand(command="settings",  description="⚙️ Настройки"),
+        BotCommand(command="help",      description="❓ Помощь"),
+        BotCommand(command="stats",     description="📊 Статистика"),
     ])
     await dp.start_polling(bot)
 
