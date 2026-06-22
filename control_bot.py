@@ -3361,14 +3361,14 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
 
     def _try_yandex_snippets(p: int) -> list[dict]:
         """
-        Ищет объявления Авито через Яндекс и парсит СНИППЕТЫ — без единого запроса к avito.ru.
-        Работает с любого IP (в т.ч. Railway датацентр).
+        Ищет объявления Авито через Яндекс — без единого запроса к avito.ru.
+        Использует чистый regex для надёжного парсинга любой версии Яндекса.
+        Работает с любого IP (Railway датацентр не блокирует Яндекс).
         """
-        if p > 3:
+        if p > 2:
             return []
         try:
             import requests as _rq
-            from bs4 import BeautifulSoup as _BS4
         except ImportError:
             return []
 
@@ -3384,19 +3384,23 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
 
         price_q = ""
         if price_min > 0 and price_max < 99_000_000:
-            price_q = f" от {price_min//1000}тыс до {price_max//1000}тыс руб"
+            price_q = f" от {price_min//1000}тыс до {price_max//1000}тыс"
         elif price_max < 99_000_000:
-            price_q = f" до {price_max//1000}тыс руб"
+            price_q = f" до {price_max//1000}тыс"
 
         queries = [
-            f"site:avito.ru/{slug}/avtomobili продам авто частник{price_q}",
-            f"avito.ru {slug_ru_name} продам авто частник{price_q}",
+            f"site:avito.ru/{slug}/avtomobili продам{price_q}",
+            f"avito {slug_ru_name} продам автомобиль частник{price_q}",
         ]
 
         results_out: list[dict] = []
         seen_urls: set[str] = set()
         _price_re = re.compile(r"(\d[\d\s]{2,8})\s*(?:₽|тыс\.?\s*р(?:уб)?\.?|руб\.?)", re.I)
         _year_re = re.compile(r"\b(19[5-9]\d|20[012]\d)\b")
+        # URL объявлений Авито — содержат числовой ID
+        _avito_url_re = re.compile(
+            rf'https?://(?:www\.)?avito\.ru/{re.escape(slug)}/[a-z0-9_]+-\d{{5,}}'
+        )
 
         def _parse_price_snip(text: str) -> int:
             for m in _price_re.finditer(text):
@@ -3411,79 +3415,70 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                     return val
             return 0
 
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept-Language": "ru-RU,ru;q=0.9",
+            "Accept": "text/html,*/*;q=0.8",
+        }
+
         for q in queries:
-            if len(results_out) >= 20:
+            if len(results_out) >= 15:
                 break
-            for lr in ["54", "2", "43"]:  # Екб, Мск, Новосиб — Яндекс регион
+            for search_engine in ["yandex", "bing"]:
                 try:
-                    r = _rq.get(
-                        "https://yandex.ru/search/",
-                        params={"text": q, "lr": lr, "p": p - 1},
-                        headers={
-                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                            "Accept-Language": "ru-RU,ru;q=0.9",
-                            "Accept": "text/html,*/*;q=0.8",
-                        },
-                        timeout=10,
-                    )
+                    if search_engine == "yandex":
+                        r = _rq.get(
+                            "https://yandex.ru/search/",
+                            params={"text": q, "lr": "225", "p": p - 1},
+                            headers=headers, timeout=10,
+                        )
+                    else:
+                        r = _rq.get(
+                            "https://www.bing.com/search",
+                            params={"q": q, "setlang": "ru", "cc": "RU", "first": (p-1)*10},
+                            headers=headers, timeout=10,
+                        )
                     if r.status_code != 200:
+                        print(f"  [Яндекс/Bing] {search_engine} HTTP {r.status_code}")
                         continue
-                    soup = _BS4(r.text, "lxml")
-                    # Ищем все результаты поиска Яндекса
-                    for item_el in soup.select("li.serp-item, div.serp-item, div[data-cid]"):
-                        # Ссылка на объявление Авито
-                        link_el = item_el.select_one("a[href*='avito.ru']")
-                        if not link_el:
-                            continue
-                        href = link_el.get("href", "")
-                        # Фильтруем только страницы объявлений (содержат числовой ID)
-                        if not re.search(rf'avito\.ru/{re.escape(slug)}/[a-z]', href):
-                            continue
-                        # Нормализуем URL
-                        if href.startswith("//"):
-                            href = "https:" + href
-                        if "avito.ru" not in href:
-                            continue
-                        # Убираем параметры Яндекса (редирект)
-                        clean_url = re.sub(r'\?.*', '', href)
+
+                    html = r.text
+                    # Ищем все URL объявлений Авито прямо в сыром HTML
+                    found_urls = list(dict.fromkeys(_avito_url_re.findall(html)))
+                    print(f"  [Яндекс/Bing] {search_engine}: найдено {len(found_urls)} URL Авито в HTML")
+
+                    for url in found_urls:
+                        clean_url = url.split("?")[0]
                         if clean_url in seen_urls:
                             continue
                         seen_urls.add(clean_url)
 
-                        # Заголовок
-                        title_el = (item_el.select_one("h2") or
-                                    item_el.select_one(".organic__title") or
-                                    item_el.select_one(".title"))
-                        title = title_el.get_text(" ", strip=True) if title_el else ""
+                        # Ищем текст вокруг этого URL (±500 символов) для парсинга цены/заголовка
+                        pos = html.find(url)
+                        context = html[max(0, pos-300):pos+500] if pos >= 0 else ""
+                        # Убираем HTML теги
+                        context_clean = re.sub(r"<[^>]+>", " ", context)
+                        context_clean = re.sub(r"&[a-z]+;", " ", context_clean)
+                        context_clean = re.sub(r"\s+", " ", context_clean).strip()
 
-                        # Сниппет/описание
-                        snip_el = (item_el.select_one(".text-container") or
-                                   item_el.select_one(".organic__text") or
-                                   item_el.select_one(".serp-item__text"))
-                        snip = snip_el.get_text(" ", strip=True) if snip_el else ""
-
-                        full_text = title + " " + snip
-
-                        # Цена из сниппета
-                        price_int = _parse_price_snip(full_text)
+                        price_int = _parse_price_snip(context_clean)
                         if price_int > 0 and not (price_min <= price_int <= price_max):
                             continue
 
-                        # Год
-                        year_m = _year_re.search(full_text)
+                        year_m = _year_re.search(context_clean)
                         year = int(year_m.group(1)) if year_m else 0
 
-                        if not title:
-                            title = f"Объявление Авито — {slug_ru_name}"
+                        # Заголовок — первые осмысленные слова контекста
+                        title = context_clean[:100].strip() or f"Авто на Авито — {slug_ru_name}"
 
                         results_out.append({
                             "source": "avito",
-                            "title": title[:120],
+                            "title": title,
                             "price": f"{price_int:,} ₽".replace(",", " ") if price_int else "цена не указана",
                             "_price_int": price_int,
                             "url": clean_url,
                             "_photo_url": "",
-                            "description": snip[:400],
+                            "description": context_clean[:400],
                             "seller": "Авито (частник)",
                             "_year": year,
                             "_days_on_site": 0,
@@ -3492,12 +3487,12 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                             "_avito_price_filtered": False,
                         })
                     if results_out:
-                        break  # нашли — не меняем регион
+                        break
                 except Exception as e:
-                    print(f"  [Яндекс Авито] q={q!r}: {e}")
+                    print(f"  [Яндекс/Bing] {search_engine} ошибка: {e}")
 
         if results_out:
-            print(f"  [Яндекс Авито] {len(results_out)} объявлений из сниппетов Яндекса")
+            print(f"  [Яндекс/Bing] итого: {len(results_out)} объявлений Авито")
         return results_out
 
     all_methods = [_try_yandex_snippets, _try_curl_cffi, _try_avito_rss, _try_cs_web, _try_mobile_site, _try_web_html, _try_avito_public_api, _try_free_proxies, _try_googlebot_ua, _try_yandex_search, _try_avito_lite, _try_scraperapi, _try_avito_json_api]
