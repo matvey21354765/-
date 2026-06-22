@@ -342,12 +342,19 @@ def in_price_range(item: dict, price_min: int, price_max: int) -> bool:
     p = item.get("_price_int") or parse_price(item.get("price", ""))
     if p:
         return price_min <= p <= price_max
-    # Цена ещё неизвестна. Раньше такие объявления отбрасывались (если не было
-    # флага _avito_price_filtered) — из-за этого при сбое парсинга цены до
-    # пользователя не доходило НИ ОДНО объявление ("не нашёл частников").
-    # Теперь пропускаем их как кандидатов: реальная цена догружается в
-    # _ensure_photo, а финальная отсечка по бюджету делается в send_batch,
-    # где у объявления уже есть _price_int.
+    # Цена неизвестна. Пытаемся исключить заведомо дорогие машины по году.
+    # Новые авто (2022+) стоят от ~1 млн ₽. Если бюджет до 800k — не показываем.
+    year = item.get("year") or item.get("_year") or 0
+    try:
+        year = int(str(year)[:4])
+    except Exception:
+        year = 0
+    if year >= 2022 and price_max < 800_000:
+        return False
+    if year >= 2020 and price_max < 400_000:
+        return False
+    # Пропускаем как кандидата: реальная цена нужна, но лучше показать
+    # объявление с "—", чем потерять реальную выгодную машину.
     return True
 
 
@@ -3587,10 +3594,17 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         proxy_idx = 0
         lite_flag = False  # чередуем html/lite
 
+        # Ценовые подсказки для поиска — помогают DDG найти релевантные объявления
+        _price_hint = ""
+        if price_max <= 400_000:
+            _price_hint = f" до {price_max // 1000}тыс"
+        elif price_max <= 1_000_000:
+            _price_hint = f" до {price_max // 1000}тыс"
+
         for brand in _all_brands:
             if len(results_out) >= 40:
                 break
-            q = f"site:avito.ru/{slug}/avtomobili {brand}"
+            q = f"site:avito.ru/{slug}/avtomobili {brand}{_price_hint}"
             # Пауза 3-5с между запросами — критично для обхода DDG rate-limit
             time.sleep(random.uniform(3.5, 5.5))
             proxy = proxy_pool[proxy_idx % len(proxy_pool)]
