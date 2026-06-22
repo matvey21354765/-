@@ -3234,7 +3234,7 @@ def _scrape_avito_direct(slug: str, pages: int, price_min: int, price_max: int, 
 # Кэш результатов Авито по региону — резко снижает число запросов к Авито
 # (а значит и риск блокировки 429), когда много пользователей ищут подряд.
 _AVITO_REGION_CACHE: dict[str, tuple[float, list[dict]]] = {}
-_AVITO_REGION_CACHE_TTL = 8 * 60 * 60  # 8 часов (было 4)
+_AVITO_REGION_CACHE_TTL = 24 * 60 * 60  # 24 часа — дольше кэш = меньше блокировок
 _AVITO_CACHE_FILE = Path("avito_region_cache.json")
 
 
