@@ -377,15 +377,17 @@ def _car_group_key(title: str) -> str:
     return f"{brand_model} {year}".strip()
 
 
-def rank_by_market_price(items: list[dict]) -> list[dict]:
+def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None) -> list[dict]:
     """
     Вычисляет рыночную цену по медиане внутри группы марка+модель+год (по всем площадкам).
+    ref_items — дополнительные записи только для расчёта медианы (например, Дром-данные).
     Устанавливает _savings_pct: сколько % ниже рынка. Чем больше — тем выгоднее.
     """
     from statistics import median
 
+    all_for_median = list(items) + (ref_items or [])
     groups: dict[str, list[int]] = {}
-    for it in items:
+    for it in all_for_median:
         p = it.get("_price_int", 0)
         if p > 0:
             key = _car_group_key(it.get("title", ""))
@@ -3414,11 +3416,14 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
 
     def _try_yandex_snippets(p: int) -> list[dict]:
         """
-        Ищет объявления Авито через Яндекс — без единого запроса к avito.ru.
-        Использует чистый regex для надёжного парсинга любой версии Яндекса.
-        Работает с любого IP (Railway датацентр не блокирует Яндекс).
+        Ищет объявления Авито через DuckDuckGo (html + lite).
+        Стратегия основана на живых тестах с Railway IP:
+        - DDG html с паузой 3-5с = 10-20 объявлений за запрос
+        - DDG lite = отдельный rate-limit счётчик, резерв
+        - Чередование html/lite снижает вероятность 202
+        - 12 марок × до 20 объявлений = потенциально 100+ объявлений
         """
-        if p > 2:
+        if p > 1:
             return []
         try:
             import requests as _rq
@@ -3431,48 +3436,20 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             "ufa": "Уфа", "krasnodar": "Краснодар", "omsk": "Омск",
             "rostov-na-donu": "Ростов", "tyumen": "Тюмень", "perm": "Пермь",
             "krasnoyarsk": "Красноярск", "voronezh": "Воронеж", "samara": "Самара",
-            "saratov": "Саратов", "irkutsk": "Иркутск", "vladivostok": "Владивосток",
-            "habarovsk": "Хабаровск", "nizhniy_novgorod": "Нижний Новгород",
         }.get(slug, slug)
 
-        price_q = ""
-        if price_min > 0 and price_max < 99_000_000:
-            price_q = f" от {price_min//1000}тыс до {price_max//1000}тыс"
-        elif price_max < 99_000_000:
-            price_q = f" до {price_max//1000}тыс"
-
-        # Запросы по маркам — так поисковик отдаёт отдельные объявления, а не
-        # страницы-каталоги. DuckDuckGo напрямую с Railway держит ~3 параллельно;
-        # больше марок = больше объявлений, но при max_workers=3 нагрузка та же.
-        _popular_brands = [
-            "lada", "kia", "hyundai", "toyota", "nissan",
-            "volkswagen", "renault", "ford",
-        ]
-        queries = [f"site:avito.ru/{slug}/avtomobili {b}" for b in _popular_brands]
-
-        results_out: list[dict] = []
-        seen_urls: set[str] = set()
-        _price_re = re.compile(r"(\d[\d\s]{2,8})\s*(?:₽|тыс\.?\s*р(?:уб)?\.?|руб\.?)", re.I)
-        _year_re = re.compile(r"\b(19[5-9]\d|20[012]\d)\b")
-        # URL объявлений Авито. Реальный формат:
-        # avito.ru/{город}/avtomobili/{марка_модель_год}_{ID из 7+ цифр}
-        # Путь содержит сегмент /avtomobili/ и заканчивается длинным числовым ID.
-        # Город — любой (фильтруем по нужному slug при добавлении).
         _avito_url_re = re.compile(
             r'(?:https?://)?(?:www\.|m\.)?avito\.ru/[a-z0-9_.-]+/avtomobili/[a-z0-9_.%-]*\d{6,}',
             re.I,
         )
+        _price_re = re.compile(r"(\d[\d\s]{2,8})\s*(?:₽|тыс\.?\s*р(?:уб)?\.?|руб\.?)", re.I)
+        _price_json_re = re.compile(r'["\']?price["\']?\s*[=:]\s*["\']?(\d{4,9})(?:\.0+)?["\']?', re.I)
+        _year_re = re.compile(r"\b(19[5-9]\d|20[012]\d)\b")
 
         def _extract_avito_urls(html: str) -> list[str]:
-            """
-            Максимально надёжно вытаскивает URL объявлений Авито из выдачи Яндекса.
-            Яндекс прячет ссылки в редиректах /clck/ с двойным URL-кодированием,
-            поэтому раскодируем ВЕСЬ HTML дважды и ищем по нему.
-            """
             import urllib.parse
             found = []
             seen = set()
-
             def _add(raw: str):
                 if not raw.startswith("http"):
                     raw = "https://" + raw
@@ -3482,8 +3459,6 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                 if clean not in seen:
                     seen.add(clean)
                     found.append(clean)
-
-            # Раскодируем весь HTML дважды — обнажает ссылки в редиректах Яндекса
             decoded = html
             for _ in range(2):
                 for m in _avito_url_re.finditer(decoded):
@@ -3516,82 +3491,31 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
         }
 
-        _deadline = time.time() + 28  # жёсткий бюджет метода, чтобы не упереться в 45с-кап
+        def _is_blocked(text: str, status: int) -> bool:
+            return status == 202 or status == 429 or (status != 200) or len(text) < 2000
 
-        def _is_captcha(html: str) -> bool:
-            low = html[:5000].lower()
-            return ("showcaptcha" in low or "checkbox captcha" in low
-                    or "/sorry/" in low or "are you a robot" in low
-                    or "подтвердите, что запросы" in low)
-
-        def _fetch_serp(engine: str, q: str) -> str:
-            """Запрашивает поисковик. Через РФ-прокси (нет капчи для RU IP), затем напрямую.
-            Bing и DuckDuckGo отдают реальный HTML с результатами без JS — в отличие
-            от Яндекса, который без JavaScript присылает пустой шаблон."""
-            if engine == "bing":
-                url = "https://www.bing.com/search"
-                params = {"q": q, "setlang": "ru", "cc": "RU", "first": (p - 1) * 10}
-            elif engine == "duckduckgo":
-                url = "https://html.duckduckgo.com/html/"
-                params = {"q": q, "kl": "ru-ru", "s": (p - 1) * 30}
-            elif engine == "ddglite":
-                # Лёгкая версия DuckDuckGo — отдельный эндпоинт, отдельный лимит.
-                url = "https://lite.duckduckgo.com/lite/"
-                params = {"q": q, "kl": "ru-ru"}
-            elif engine == "brave":
-                # Brave Search — собственный индекс, работает с датацентр-IP.
-                url = "https://search.brave.com/search"
-                params = {"q": q, "source": "web"}
-            elif engine == "google":
-                url = "https://www.google.com/search"
-                params = {"q": q, "hl": "ru", "num": "20", "start": (p - 1) * 10}
-            else:  # yandex
-                url = "https://yandex.ru/search/"
-                params = {"text": q, "lr": "225", "p": p - 1}
-            # Railway IP свободно достаёт поисковики, а РФ-прокси к ним часто
-            # вообще не подключается (таймаут на html.duckduckgo.com / bing).
-            # Поэтому ПРЯМОЙ маршрут — основной, прокси только как запас.
-            if engine in ("duckduckgo", "ddglite", "brave"):
-                routes = [None]
-                for _pa in list(_working_free_proxies)[:2]:
-                    routes.append({"http": f"http://{_pa}", "https": f"http://{_pa}"})
-                # ВАЖНО: быстрые параллельные запросы вызывают 202/429.
-                # Пауза 3-5с достаточна, чтобы DDG не заблокировал IP.
-                time.sleep(random.uniform(3.0, 5.0))
-            else:
-                routes = [None, AVITO_PROXIES] if AVITO_PROXIES else [None]
-            for proxies in routes:
-                try:
-                    r = _rq.get(url, params=params, headers=headers, timeout=10, proxies=proxies)
-                    via = "прокси" if proxies else "напрямую"
-                    if r.status_code != 200:
-                        print(f"  [{engine} {via}] HTTP {r.status_code}")
-                        continue
-                    if _is_captcha(r.text):
-                        print(f"  [{engine} {via}] капча — пробуем другой маршрут")
-                        continue
-                    return r.text
-                except Exception as e:
-                    print(f"  [{engine}] ошибка маршрута: {str(e)[:80]}")
-            return ""
+        def _fetch_ddg(q: str, use_lite: bool, proxy=None) -> str:
+            """Один запрос к DDG html или lite. Возвращает HTML или ''."""
+            url = "https://lite.duckduckgo.com/lite/" if use_lite else "https://html.duckduckgo.com/html/"
+            params = {"q": q, "kl": "ru-ru"}
+            try:
+                r = _rq.get(url, params=params, headers=headers, timeout=10, proxies=proxy)
+                if _is_blocked(r.text, r.status_code):
+                    return ""
+                return r.text
+            except Exception:
+                return ""
 
         def _parse_serp(html: str) -> list[dict]:
-            """Парсит выдачу поисковика → список объявлений Авито (url+цена+год+фото)."""
-            out: list[dict] = []
-            found_urls = _extract_avito_urls(html)
-            if not found_urls:
-                return out
             import urllib.parse as _upq
+            out: list[dict] = []
             ctx_html = html
             for _ in range(2):
                 try:
                     ctx_html = _upq.unquote(ctx_html)
                 except Exception:
                     break
-            # Дополнительные паттерны цены: JSON в сниппетах Brave / DDG
-            _price_json_re = re.compile(
-                r'["\']?price["\']?\s*[=:]\s*["\']?(\d{4,9})(?:\.0+)?["\']?', re.I
-            )
+            found_urls = _extract_avito_urls(ctx_html)
             for url in found_urls:
                 clean_url = url.split("?")[0]
                 pos = ctx_html.find(url)
@@ -3600,7 +3524,6 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                 context_clean = re.sub(r"&[a-z]+;", " ", context_clean)
                 context_clean = re.sub(r"\s+", " ", context_clean).strip()
 
-                # Приоритет: обычный парсинг (₽/руб), затем JSON-паттерн из сниппета
                 price_int = _parse_price_snip(context_clean)
                 if not price_int:
                     for m in _price_json_re.finditer(context_clean):
@@ -3614,24 +3537,16 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                 year_m = _year_re.search(context_clean)
                 year = int(year_m.group(1)) if year_m else 0
 
-                # Заголовок: берём из URL-пути (марка_модель_год_пробег),
-                # убираем JSON-мусор и технические параметры URL.
                 url_path = clean_url.split("/avtomobili/")[-1] if "/avtomobili/" in clean_url else ""
                 if url_path:
-                    # Убираем числовой ID в конце, заменяем _ на пробел
                     url_title = re.sub(r'_\d{6,}$', '', url_path).replace("_", " ").replace("-", " ")
-                    url_title = re.sub(r'\s+', ' ', url_title).strip()
-                    # Первая буква заглавная
-                    title = url_title[:80].title() if url_title else f"Авто на Авито — {slug_ru_name}"
+                    title = re.sub(r'\s+', ' ', url_title).strip()[:80].title()
                 else:
-                    # Fallback: из текста сниппета, без URL-мусора и JSON
                     title_src = re.sub(
-                        r'https?://\S+|//\S+|uddg=\S+|rut=\S+|duckduckgo\.com\S*|www\.|avito\.ru\S*'
-                        r'|["\']?\w+["\']?\s*[:=]\s*["\'][^"\']{1,20}["\']',
+                        r'https?://\S+|//\S+|uddg=\S+|rut=\S+|duckduckgo\.com\S*|www\.|avito\.ru\S*',
                         ' ', context_clean, flags=re.I,
                     )
-                    title_src = re.sub(r'\s+', ' ', title_src).strip(" -|·,\"'")
-                    title = title_src[:80].strip() or f"Авто на Авито — {slug_ru_name}"
+                    title = re.sub(r'\s+', ' ', title_src).strip(" -|·,")[:80] or f"Авто на Авито — {slug_ru_name}"
 
                 photo_url = ""
                 wide = ctx_html[max(0, pos-1000):pos+1500] if pos >= 0 else ""
@@ -3654,50 +3569,60 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                 })
             return out
 
-        # Стратегия: DDG и ddglite надёжны с паузой 3-5с между запросами.
-        # Brave быстро 429 при серии запросов, поэтому — только как запасной.
-        # Запускаем по 2 запроса одновременно (разные движки), пауза между волнами.
-        _engines_cycle = ["duckduckgo", "ddglite", "duckduckgo", "ddglite",
-                          "duckduckgo", "ddglite", "duckduckgo", "ddglite"]
+        # 12 марок — наиболее популярные в России
+        _all_brands = [
+            "lada", "kia", "hyundai", "toyota", "nissan", "volkswagen",
+            "renault", "ford", "skoda", "bmw", "mercedes", "mazda",
+            "chevrolet", "mitsubishi", "honda", "opel",
+        ]
 
-        def _fetch_and_parse(idx_q: tuple) -> list[dict]:
-            idx, q = idx_q
-            primary = _engines_cycle[idx % len(_engines_cycle)]
-            # Если primary вернул 202, пробуем другой
-            order = [primary, "ddglite" if primary == "duckduckgo" else "duckduckgo", "brave"]
-            for engine in order:
-                html = _fetch_serp(engine, q)
-                if not html:
-                    continue
+        results_out: list[dict] = []
+        seen_urls: set[str] = set()
+
+        # Подготавливаем список прокси для ротации IP (снижает вероятность 202)
+        proxy_pool = [None]  # начинаем без прокси (Railway IP)
+        for _pa in list(_working_free_proxies)[:4]:
+            proxy_pool.append({"http": f"http://{_pa}", "https": f"http://{_pa}"})
+
+        proxy_idx = 0
+        lite_flag = False  # чередуем html/lite
+
+        for brand in _all_brands:
+            if len(results_out) >= 40:
+                break
+            q = f"site:avito.ru/{slug}/avtomobili {brand}"
+            # Пауза 3-5с между запросами — критично для обхода DDG rate-limit
+            time.sleep(random.uniform(3.5, 5.5))
+            proxy = proxy_pool[proxy_idx % len(proxy_pool)]
+            html = _fetch_ddg(q, use_lite=lite_flag, proxy=proxy)
+            if not html:
+                # 202/блок — сразу пробуем через прокси и другой endpoint
+                proxy_idx += 1
+                proxy = proxy_pool[proxy_idx % len(proxy_pool)]
+                lite_flag = not lite_flag
+                time.sleep(2)
+                html = _fetch_ddg(q, use_lite=lite_flag, proxy=proxy)
+            if html:
                 batch = _parse_serp(html)
-                if batch:
-                    print(f"  [{engine}] q={q[-18:]!r}: {len(batch)} объявлений")
-                    return batch
-            return []
-
-        # max_workers=2: одновременно 2 запроса на РАЗНЫЕ движки (DDG + ddglite),
-        # пауза 3-5с в _fetch_serp не даёт каждому движку ловить 202.
-        from concurrent.futures import ThreadPoolExecutor as _TPE2, as_completed as _ac2
-        with _TPE2(max_workers=2) as _ex2:
-            futs = [_ex2.submit(_fetch_and_parse, (i, q)) for i, q in enumerate(queries)]
-            try:
-                for fut in _ac2(futs, timeout=55):
-                    try:
-                        batch = fut.result()
-                    except Exception:
-                        batch = []
-                    for item in batch:
-                        if item["url"] in seen_urls:
-                            continue
-                        seen_urls.add(item["url"])
-                        results_out.append(item)
-                    if len(results_out) >= 25:
-                        break
-            except Exception as e:
-                print(f"  [duckduckgo] таймаут/ошибка пула: {str(e)[:60]}")
+                added = 0
+                for it in batch:
+                    if it["url"] not in seen_urls:
+                        seen_urls.add(it["url"])
+                        results_out.append(it)
+                        added += 1
+                eng = "ddglite" if lite_flag else "ddg"
+                if added:
+                    print(f"  [{eng}] {brand}: +{added} (итого={len(results_out)})")
+                else:
+                    print(f"  [{eng}] {brand}: 0 объявлений для {slug}")
+            else:
+                print(f"  [ddg] {brand}: заблокирован (202/429), пропускаем")
+            # Чередуем движок и ротируем прокси
+            lite_flag = not lite_flag
+            proxy_idx += 1
 
         if results_out:
-            print(f"  [Яндекс/Bing] итого: {len(results_out)} объявлений Авито")
+            print(f"  [DDG итого] {len(results_out)} объявлений Авито")
         return results_out
 
     # free_proxies даёт настоящую страницу Авито (десятки объявлений), DuckDuckGo —
@@ -6007,8 +5932,9 @@ async def do_search_for_user(uid: int, reply_to):
                 it["_price_int"] = p
 
     # Для объявлений где цена всё ещё неизвестна — пробуем вытащить из __NEXT_DATA__
-    # на странице объявления (параллельно, 10 сек). Сниппеты поисковиков часто не
-    # содержат цену, поэтому запрашиваем настоящую страницу Авито через прокси/напрямую.
+    # на странице объявления. ВНИМАНИЕ: Railway IP получает 403 от avito.ru напрямую,
+    # бесплатные прокси тоже блокируются Авито. Поэтому эта попытка редко успешна,
+    # но оставляем как резерв на случай если прокси всё же пустит.
     no_price = [i for i in items if not is_dealer(i) and not i.get("_price_int") and i.get("url") and i["url"] not in skipped]
     if no_price:
         loop2 = asyncio.get_event_loop()
@@ -6018,14 +5944,12 @@ async def do_search_for_user(uid: int, reply_to):
         def _fetch_price_sync(it: dict) -> None:
             try:
                 import requests as _rq
-                # Сначала пробуем через рабочие бесплатные прокси (у них нет 403 от Авито),
-                # потом AVITO_PROXIES, потом напрямую (обычно 403 с Railway IP).
                 proxies_to_try = []
                 for _pa in list(_working_free_proxies)[:3]:
                     proxies_to_try.append({"http": f"http://{_pa}", "https": f"http://{_pa}"})
                 if AVITO_PROXIES:
                     proxies_to_try.append(AVITO_PROXIES)
-                proxies_to_try.append(None)  # напрямую — последний шанс
+                proxies_to_try.append(None)
                 _hdrs = {
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                     "Accept-Language": "ru-RU,ru;q=0.9",
@@ -6036,7 +5960,6 @@ async def do_search_for_user(uid: int, reply_to):
                         if r.status_code != 200:
                             continue
                         text = r.text[:120_000]
-                        # Паттерны цены: JSON {"price":{"value":950000}}, JS price:"950000.0"
                         for rx in (
                             _price_re_np2,
                             _price_re_np,
@@ -6049,7 +5972,6 @@ async def do_search_for_user(uid: int, reply_to):
                                     it["_price_int"] = p
                                     it["price"] = f"{p:,} ₽".replace(",", " ")
                                     break
-                        # Фото тоже берём из той же страницы
                         if not it.get("_photo_url"):
                             pm = re.search(
                                 r'((?:https?:)?(?:\\?/){2}[a-z0-9.\-]*avito\.st(?:(?:\\?/)[\w.~\-]+)+\.(?:jpg|jpeg|webp|png|avif))',
@@ -6058,7 +5980,7 @@ async def do_search_for_user(uid: int, reply_to):
                             if pm:
                                 raw = pm.group(1).replace("\\/", "/")
                                 it["_photo_url"] = ("https:" + raw) if raw.startswith("//") else raw
-                        break  # успешный запрос — выходим
+                        break
                     except Exception:
                         continue
             except Exception:
@@ -6073,6 +5995,27 @@ async def do_search_for_user(uid: int, reply_to):
                     pass
         await asyncio.gather(*[_fetch_price(it) for it in no_price[:30]])
 
+    # Дополняем рыночными данными из Дрома: Дром работает с Railway IP без блокировок
+    # и содержит те же машины с ценами. Даже если Авито-объявление без цены — медиана
+    # по марке/модели/году из Дрома позволяет rank_by_market_price найти «ниже рынка».
+    avito_items_in_result = [i for i in items if i.get("source") == "avito"]
+    drom_items_in_result = [i for i in items if i.get("source") == "drom"]
+    if avito_items_in_result and not drom_items_in_result:
+        # Авито есть, Дрома нет — тихо загружаем рыночные цены с Дрома для медианы.
+        try:
+            _drom_ref = await loop.run_in_executor(
+                None, lambda: scrape_drom(region, pages=3, price_min=0, price_max=99_000_000)
+            )
+            if _drom_ref:
+                # Добавляем Дром-данные ТОЛЬКО для расчёта рынка, не показываем их.
+                # Помечаем флагом, чтобы не попали в результаты.
+                for _dr in _drom_ref:
+                    _dr["_market_ref_only"] = True
+                items = items + _drom_ref
+                print(f"  [рынок] добавлено {len(_drom_ref)} Дром-записей для расчёта медианы")
+        except Exception:
+            pass
+
     already_seen_count = sum(
         1 for i in items
         if not is_dealer(i) and in_price_range(i, pmin, pmax)
@@ -6082,6 +6025,7 @@ async def do_search_for_user(uid: int, reply_to):
     suitable = [
         i for i in items
         if not is_dealer(i)
+        and not i.get("_market_ref_only")
         and in_price_range(i, pmin, pmax)
         and i.get("url")
         and i["url"] not in skipped
@@ -6089,7 +6033,7 @@ async def do_search_for_user(uid: int, reply_to):
     ]
     # Фильтр по категории и марке
     suitable = _filter_by_category(suitable, category, brand)
-    suitable = rank_by_market_price(suitable)
+    suitable = rank_by_market_price(suitable, ref_items=[i for i in items if i.get("_market_ref_only")])
     # Сортировка: сначала ниже рынка (по убыванию скидки), затем по рыночной цене.
     suitable.sort(key=lambda x: (
         0 if x.get("_savings_pct", 0) > 0 else 1,  # ниже рынка первыми
@@ -6105,12 +6049,13 @@ async def do_search_for_user(uid: int, reply_to):
         suitable = [
             i for i in items
             if not is_dealer(i)
+            and not i.get("_market_ref_only")
             and in_price_range(i, pmin, pmax)
             and i.get("url")
             and i["url"] not in skipped
         ]
         suitable = _filter_by_category(suitable, category, brand)
-        suitable = rank_by_market_price(suitable)
+        suitable = rank_by_market_price(suitable, ref_items=[i for i in items if i.get("_market_ref_only")])
         suitable.sort(key=lambda x: (
             0 if x.get("_savings_pct", 0) > 0 else 1,  # ниже рынка первыми
             -x.get("_savings_pct", 0),
