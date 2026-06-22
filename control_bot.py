@@ -5979,17 +5979,51 @@ async def do_search_for_user(uid: int, reply_to):
             if p and 10_000 < p < 99_000_000:
                 it["_price_int"] = p
 
-    # Для объявлений где цена всё ещё неизвестна — быстро загружаем (параллельно, 8 сек)
+    # Для объявлений где цена всё ещё неизвестна — пробуем вытащить из __NEXT_DATA__
+    # на странице объявления (параллельно, 10 сек). Сниппеты поисковиков часто не
+    # содержат цену, поэтому запрашиваем настоящую страницу Авито через прокси/напрямую.
     no_price = [i for i in items if not is_dealer(i) and not i.get("_price_int") and i.get("url") and i["url"] not in skipped]
     if no_price:
-        sem_price = asyncio.Semaphore(10)
+        loop2 = asyncio.get_event_loop()
+        _price_re_np = re.compile(r'"price"\s*:\s*\{\s*"value"\s*:\s*(\d+)', re.I)
+        _price_re_np2 = re.compile(r'"priceDetailed".*?"value"\s*:\s*(\d+)', re.I | re.S)
+
+        def _fetch_price_sync(it: dict) -> None:
+            try:
+                import requests as _rq
+                r = _rq.get(it["url"], headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                    "Accept-Language": "ru-RU,ru;q=0.9",
+                }, timeout=6, proxies=AVITO_PROXIES)
+                if r.status_code == 200:
+                    for rx in (_price_re_np2, _price_re_np):
+                        m = rx.search(r.text[:80_000])
+                        if m:
+                            p = int(m.group(1))
+                            if 10_000 < p < 99_000_000:
+                                it["_price_int"] = p
+                                it["price"] = f"{p:,} ₽".replace(",", " ")
+                                break
+                    # Фото тоже берём
+                    if not it.get("_photo_url"):
+                        pm = re.search(
+                            r'((?:https?:)?(?:\\?/){2}[a-z0-9.\-]*avito\.st(?:(?:\\?/)[\w.~\-]+)+\.(?:jpg|jpeg|webp|png|avif))',
+                            r.text[:120_000], re.I,
+                        )
+                        if pm:
+                            raw = pm.group(1).replace("\\/", "/")
+                            it["_photo_url"] = ("https:" + raw) if raw.startswith("//") else raw
+            except Exception:
+                pass
+
+        sem_price = asyncio.Semaphore(8)
         async def _fetch_price(it):
             async with sem_price:
                 try:
-                    await asyncio.wait_for(_ensure_photo(it), timeout=5)
+                    await asyncio.wait_for(loop2.run_in_executor(None, _fetch_price_sync, it), timeout=7)
                 except Exception:
                     pass
-        await asyncio.gather(*[_fetch_price(it) for it in no_price[:100]])
+        await asyncio.gather(*[_fetch_price(it) for it in no_price[:30]])
 
     already_seen_count = sum(
         1 for i in items
@@ -6100,10 +6134,12 @@ async def do_search_for_user(uid: int, reply_to):
     except asyncio.TimeoutError:
         pass
 
-    # После загрузки цен — выкидываем всё, что осталось без цены или вышло за бюджет
+    # После загрузки цен — выкидываем только те, у кого цена ИЗВЕСТНА и вышла за бюджет.
+    # Объявления без цены (_price_int=0) — оставляем: пользователь откроет ссылку и проверит.
+    # Это критично для объявлений из поисковых сниппетов — там цена в HTML не всегда есть.
     suitable = [
         i for i in suitable
-        if i.get("_price_int", 0) and pmin <= i["_price_int"] <= pmax
+        if (not i.get("_price_int")) or (pmin <= i["_price_int"] <= pmax)
     ]
     if not suitable:
         await reply_to.answer("😔 Не нашёл объявлений в твоём бюджете. Попробуй расширить диапазон цен: /settings")
@@ -6844,7 +6880,7 @@ async def main():
         except Exception:
             BOT_USERNAME = "PerekupDriveBot"
     print("✅ Авто-брокер бот запущен!")
-    print("  [ВЕРСИЯ] 2026-06-22-v14 :: умный fallback + показ Авито вне бюджета + no-price items не фильтруются")
+    print("  [ВЕРСИЯ] 2026-06-22-v15 :: реальная загрузка цены/фото для сниппет-объявлений Авито")
 
     # Логируем Railway IP (нужен для добавления в whitelist прокси)
     try:
