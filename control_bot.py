@@ -3885,8 +3885,19 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         tasks = [(m, 1) for m in all_methods]
         _cap = 40
         _deadline_s = 35
+    def _listing_key(u: str) -> str:
+        """Канонический ключ объявления — числовой ID в конце urlPath.
+        Авито повторяет рекламные объявления на каждой странице с тем же ID,
+        даже если в URL есть лишние параметры. Дедупим по ID."""
+        if not u:
+            return ""
+        base = u.split("?")[0].rstrip("/")
+        m = re.search(r'(\d{6,})$', base)
+        return m.group(1) if m else base
+
     _ex = _TPE(max_workers=min(8, len(tasks)))
     merged: dict[str, dict] = {}
+    _seen_keys: set = set()
     _soft_deadline = time.time() + _deadline_s
     try:
         fut_map = {_ex.submit(m, pg): (m, pg) for (m, pg) in tasks}
@@ -3899,7 +3910,9 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                 added = 0
                 for it in b:
                     u = it.get("url")
-                    if u and u not in merged:
+                    key = _listing_key(u)
+                    if u and key and key not in _seen_keys:
+                        _seen_keys.add(key)
                         merged[u] = it
                         added += 1
                 if added:
