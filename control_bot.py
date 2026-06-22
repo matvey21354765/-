@@ -3451,34 +3451,59 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "Accept-Language": "ru-RU,ru;q=0.9",
-            "Accept": "text/html,*/*;q=0.8",
+            "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
         }
 
+        _deadline = time.time() + 28  # жёсткий бюджет метода, чтобы не упереться в 45с-кап
+
+        def _is_captcha(html: str) -> bool:
+            low = html[:5000].lower()
+            return ("showcaptcha" in low or "checkbox captcha" in low
+                    or "/sorry/" in low or "are you a robot" in low
+                    or "подтвердите, что запросы" in low)
+
+        def _fetch_serp(engine: str, q: str) -> str:
+            """Запрашивает поисковик. Через РФ-прокси (нет капчи для RU IP), затем напрямую."""
+            if engine == "yandex":
+                url = "https://yandex.ru/search/"
+                params = {"text": q, "lr": "225", "p": p - 1}
+            elif engine == "google":
+                url = "https://www.google.com/search"
+                params = {"q": q, "hl": "ru", "num": "20", "start": (p - 1) * 10}
+            else:  # bing
+                url = "https://www.bing.com/search"
+                params = {"q": q, "setlang": "ru", "cc": "RU", "first": (p - 1) * 10}
+            # Сначала через российский прокси — RU IP не получает капчу от Яндекса
+            routes = [AVITO_PROXIES, None] if AVITO_PROXIES else [None]
+            for proxies in routes:
+                try:
+                    r = _rq.get(url, params=params, headers=headers, timeout=10, proxies=proxies)
+                    via = "прокси" if proxies else "напрямую"
+                    if r.status_code != 200:
+                        print(f"  [{engine} {via}] HTTP {r.status_code}")
+                        continue
+                    if _is_captcha(r.text):
+                        print(f"  [{engine} {via}] капча — пробуем другой маршрут")
+                        continue
+                    return r.text
+                except Exception as e:
+                    print(f"  [{engine}] ошибка маршрута: {str(e)[:80]}")
+            return ""
+
         for q in queries:
-            if len(results_out) >= 15:
+            if len(results_out) >= 15 or time.time() > _deadline:
                 break
             for search_engine in ["yandex", "bing"]:
+                if time.time() > _deadline:
+                    break
                 try:
-                    if search_engine == "yandex":
-                        r = _rq.get(
-                            "https://yandex.ru/search/",
-                            params={"text": q, "lr": "225", "p": p - 1},
-                            headers=headers, timeout=10,
-                        )
-                    else:
-                        r = _rq.get(
-                            "https://www.bing.com/search",
-                            params={"q": q, "setlang": "ru", "cc": "RU", "first": (p-1)*10},
-                            headers=headers, timeout=10,
-                        )
-                    if r.status_code != 200:
-                        print(f"  [Яндекс/Bing] {search_engine} HTTP {r.status_code}")
+                    html = _fetch_serp(search_engine, q)
+                    if not html:
                         continue
 
-                    html = r.text
                     # Ищем все URL объявлений Авито включая редиректы
                     found_urls = _extract_avito_urls(html)
-                    print(f"  [Яндекс/Bing] {search_engine} HTTP {r.status_code}, {len(html):,}б, URL Авито: {len(found_urls)}")
+                    print(f"  [{search_engine}] {len(html):,}б, URL Авито: {len(found_urls)}")
 
                     for url in found_urls:
                         clean_url = url.split("?")[0]
@@ -3504,18 +3529,31 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                         # Заголовок — первые осмысленные слова контекста
                         title = context_clean[:100].strip() or f"Авто на Авито — {slug_ru_name}"
 
+                        # Фото: ищем CDN-картинку рядом с объявлением (Яндекс-превью или avito.st —
+                        # эти хосты не блокируются, в отличие от самой страницы avito.ru)
+                        photo_url = ""
+                        wide = html[max(0, pos-800):pos+1200] if pos >= 0 else ""
+                        img_m = re.search(
+                            r'(https?:)?//(?:avatars\.mds\.yandex\.net|[a-z0-9.]*avito\.st|[a-z0-9.]*img\.avito[.\w]*)/[^\s"\'<>]+',
+                            wide,
+                        )
+                        if img_m:
+                            photo_url = img_m.group(0)
+                            if photo_url.startswith("//"):
+                                photo_url = "https:" + photo_url
+
                         results_out.append({
                             "source": "avito",
                             "title": title,
                             "price": f"{price_int:,} ₽".replace(",", " ") if price_int else "цена не указана",
                             "_price_int": price_int,
                             "url": clean_url,
-                            "_photo_url": "",
+                            "_photo_url": photo_url,
                             "description": context_clean[:400],
                             "seller": "Авито (частник)",
                             "_year": year,
                             "_days_on_site": 0,
-                            "_photos": 0,
+                            "_photos": 1 if photo_url else 0,
                             "mileage": 0,
                             "_avito_price_filtered": False,
                         })
@@ -6582,6 +6620,18 @@ async def main():
                 print(f"  [Авито тест] HTTP {ra.status_code}, {len(ra.text):,}б, объявления: {'✅ да' if has_listings else '❌ нет (капча/блок)'}")
             except Exception as ea:
                 print(f"  [Авито тест] ❌ {ea}")
+            # Тест Яндекса через прокси — это рабочий путь к Авито (обход блокировки)
+            try:
+                ry = _rq.get("https://yandex.ru/search/",
+                             params={"text": "site:avito.ru/moskva/avtomobili продам", "lr": "225"},
+                             proxies=AVITO_PROXIES, timeout=12,
+                             headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"})
+                low = ry.text[:5000].lower()
+                captcha = "showcaptcha" in low or "/sorry/" in low or "подтвердите" in low
+                n_urls = len(re.findall(r'avito\.ru/[a-z-]+/[a-z0-9_-]+-\d{5,}', ry.text))
+                print(f"  [Яндекс тест] HTTP {ry.status_code}, капча: {'❌ да' if captcha else 'нет'}, URL Авито: {n_urls}")
+            except Exception as ey:
+                print(f"  [Яндекс тест] ❌ {ey}")
         except Exception as e:
             print(f"  [прокси {AVITO_PROXY_PROTOCOL}] ❌ ошибка: {e}")
             print(f"  [прокси] Добавь Railway IP в whitelist на сайте провайдера прокси!")
