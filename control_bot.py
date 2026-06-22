@@ -4693,9 +4693,28 @@ async def cb_notify_toggle(cb: CallbackQuery):
     if enabled:
         _start_monitor(uid)
         region_name = REGIONS.get(s.get("region", ""), s.get("region", ""))
+        # Сеем seen текущим каталогом региона: чтобы НЕ завалить пользователя
+        # всем существующим бэклогом, а присылать ТОЛЬКО реально новые авто,
+        # которые появятся ПОСЛЕ включения мониторинга.
+        try:
+            region_slug = s.get("region", "")
+            loop = asyncio.get_event_loop()
+            existing = await loop.run_in_executor(
+                None, lambda: scrape_avito(region_slug, pages=2, sort_by_date=False)
+            )
+            if existing:
+                seen = load_seen(uid)
+                seen.update(it["url"] for it in existing if it.get("url"))
+                save_seen(uid, seen)
+                print(f"  [монитор] uid={uid}: seed seen {len(existing)} текущих объявлений")
+        except Exception as e:
+            print(f"  [монитор] seed seen ошибка: {e}")
         await cb.message.answer(
-            f"✅ *Мониторинг включён!*\n\nБуду присылать новые авто в {region_name} ниже рынка.\n"
-            f"Интервал: каждые {s.get('monitor_interval_min', 5)} мин.",
+            f"✅ *Мониторинг включён!*\n\n"
+            f"🔔 Как только на Авито появится *новое* авто в {region_name} "
+            f"*ниже рынка* — сразу пришлю уведомление с ценой, фото и описанием.\n\n"
+            f"Проверяю каждые ~2 минуты. Текущие объявления показывать не буду — "
+            f"только свежие, которые выложат после включения.",
             parse_mode="Markdown",
             reply_markup=_notify_keyboard(s),
         )
@@ -6751,9 +6770,10 @@ async def _global_monitor_loop():
                         if not new_items:
                             continue
 
-                        # Считаем рыночную цену
+                        # Считаем рыночную цену по ВСЕМУ каталогу региона (raw) —
+                        # чем больше выборка, тем точнее медиана и «ниже рынка».
                         cached = _search_cache.get(uid) or _load_cache(uid)
-                        pool = rank_by_market_price(cached + new_items)
+                        pool = rank_by_market_price(raw + cached + new_items)
                         new_urls = {x["url"] for x in new_items}
 
                         new_below = sorted(
