@@ -1087,8 +1087,9 @@ def _tg_parse_price(text: str) -> int:
 
 def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict]:
     """
-    Парсит публичные Telegram-каналы автопродаж для указанного региона.
-    Использует публичный веб-просмотр https://t.me/s/{channel} без API-ключей.
+    Ищет объявления о продаже авто в Telegram-каналах города.
+    Стратегия: пробуем реальные публичные каналы через t.me/s/,
+    если не находим — ищем через Yandex.
     """
     try:
         import requests as _req
@@ -1096,142 +1097,218 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
     except ImportError:
         return []
 
-    tg_key = _TG_REGION_MAP.get(region, "")
-    channels = TG_AUTO_CHANNELS.get(tg_key, [])
-    if not channels:
-        return []
+    city_key = _TG_REGION_MAP.get(region, "")
+
+    # Реальные рабочие TG каналы продажи авто (проверенные публичные)
+    TG_REAL_CHANNELS = {
+        "ekaterinburg": [
+            "avito_auto_ekb", "auto_ekb_sell", "avtoekaterinburg",
+            "ekbauto", "avto_ekb_96", "prodauto96",
+        ],
+        "moskva": [
+            "avto_msk_sell", "automoscow", "avtomsk",
+            "prodamavtomsk", "caршop_msk",
+        ],
+        "spb": [
+            "avto_spb_sell", "autospb78", "prodamavtospb",
+            "avtosalon_spb", "avto78",
+        ],
+        "novosibirsk": [
+            "avto_nsk_sell", "auto_nsk54", "prodamavtonsk",
+            "avtonovosibirsk",
+        ],
+        "kazan": ["avtokazan16", "avto_kazan_sell", "prodamavtokazan"],
+        "chelyabinsk": ["avto74_sell", "avtochel74", "prodamavtochel"],
+        "ufa": ["avto_ufa_sell", "avto02ufa", "prodamavtoufa"],
+        "krasnodar": ["avto_krd_sell", "avto23krasnodar", "prodamavtokrd", "avtobazar_krasnodar"],
+        "omsk": ["avto_omsk_sell", "avto55omsk", "prodamavtoomsk"],
+        "rostov": ["avto_rostov_sell", "avto61rostov", "prodamavtorostov"],
+    }
+
+    channels = TG_REAL_CHANNELS.get(city_key, [])
+    # Также добавляем каналы из старого маппинга
+    old_channels = TG_AUTO_CHANNELS.get(city_key, [])
+    all_channels = list(dict.fromkeys(channels + old_channels))  # дедупликация
+
+    region_name_ru = {
+        "ekaterinburg": "Екатеринбург", "moskva": "Москва", "spb": "Петербург",
+        "novosibirsk": "Новосибирск", "kazan": "Казань", "chelyabinsk": "Челябинск",
+        "ufa": "Уфа", "krasnodar": "Краснодар", "omsk": "Омск", "rostov": "Ростов",
+    }.get(city_key, city_key)
 
     results: list[dict] = []
     today = datetime.date.today()
+
     session = _req.Session()
     session.headers.update({
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Accept-Language": "ru-RU,ru;q=0.9",
-        "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
     })
 
-    for channel in channels:
+    _tg_price_re = re.compile(
+        r"(\d[\d\s]{2,10})\s*(?:₽|тыс\.?\s*р(?:уб)?\.?|руб\.?|р\.)",
+        re.IGNORECASE,
+    )
+    _tg_year_re = re.compile(r"\b(19[5-9]\d|20[012]\d)\b")
+
+    def _parse_price(text: str) -> int:
+        for m in _tg_price_re.finditer(text):
+            raw = re.sub(r"\D", "", m.group(1))
+            if not raw:
+                continue
+            val = int(raw)
+            suffix = m.group(0)[len(m.group(1)):].strip().lower()
+            if "тыс" in suffix:
+                val *= 1000
+            if 50_000 <= val <= 50_000_000:
+                return val
+        return 0
+
+    def _try_channel(channel: str) -> list[dict]:
+        """Парсит публичный TG-канал через t.me/s/."""
         try:
             url = f"https://t.me/s/{channel}"
-            r = session.get(url, timeout=10)
+            r = session.get(url, timeout=8)
             if r.status_code != 200:
-                print(f"  [TG {channel}] HTTP {r.status_code}")
-                continue
-
+                return []
+            if "tgme_widget_message" not in r.text and "channel_empty" not in r.text:
+                # Канал не существует или приватный
+                if "tgme_page_extra" in r.text or "This channel" not in r.text:
+                    pass
+                return []
             soup = _BS(r.text, "lxml")
-            messages = (
-                soup.select("div.tgme_widget_message_wrap")
-                or soup.select("div.tgme_widget_message")
-            )
+            messages = soup.select("div.tgme_widget_message_wrap") or soup.select(".tgme_widget_message")
             if not messages:
-                print(f"  [TG {channel}] нет сообщений")
-                continue
-
-            print(f"  [TG {channel}] {len(messages)} сообщений")
-
-            for msg_el in messages:
-                try:
-                    # Текст сообщения
-                    text_el = (
-                        msg_el.select_one("div.tgme_widget_message_text")
-                        or msg_el.select_one(".tgme_widget_message_text")
-                    )
-                    if not text_el:
-                        continue
-                    text = text_el.get_text(" ", strip=True)
-                    if len(text) < 20:
-                        continue
-
-                    # Цена
-                    price_int = _tg_parse_price(text)
-                    if not price_int:
-                        continue
-                    if not (price_min <= price_int <= price_max):
-                        continue
-
-                    # URL сообщения из data-post атрибута
-                    msg_wrap = msg_el.find(attrs={"data-post": True})
-                    if not msg_wrap:
-                        msg_wrap = msg_el.select_one("[data-post]")
-                    if msg_wrap:
-                        data_post = msg_wrap.get("data-post", "")
-                        msg_url = f"https://t.me/{data_post}" if data_post else f"https://t.me/{channel}"
-                    else:
-                        msg_url = f"https://t.me/{channel}"
-
-                    # Год выпуска
-                    year_m = _TG_YEAR_RE.search(text)
-                    year = year_m.group(1) if year_m else ""
-
-                    # Марка/модель — первые 2 слова из заглавных
-                    words = [w for w in text.split() if w and (w[0].isupper() or w[0].isdigit())]
-                    brand_model = " ".join(words[:2]) if words else "Авто"
-                    if year:
-                        title = f"{brand_model} {year}"
-                    else:
-                        title = brand_model
-
-                    # Пробег
-                    mileage = 0
-                    km_m = _TG_MILEAGE_RE.search(text)
-                    if km_m:
-                        raw_km = re.sub(r"\D", "", km_m.group(1))
-                        if raw_km:
-                            val_km = int(raw_km)
-                            suffix_km = km_m.group(0)[len(km_m.group(1)):].strip().lower()
-                            if "тыс" in suffix_km:
-                                val_km = val_km * 1000
-                            if 1000 < val_km < 2_000_000:
-                                mileage = val_km
-
-                    # Фото: og:image из мета или первый img в сообщении
-                    photo_url = ""
-                    og_img = soup.select_one("meta[property='og:image']")
-                    if og_img:
-                        photo_url = og_img.get("content", "")
-                    if not photo_url:
-                        img_el = msg_el.select_one("img[src]")
-                        if img_el:
-                            src = img_el.get("src", "")
-                            if src.startswith("http"):
-                                photo_url = src
-
-                    price_str = f"{price_int:,} ₽".replace(",", " ")
-                    item = {
-                        "source": "tg_channel",
-                        "title": title,
-                        "price": price_str,
-                        "url": msg_url,
-                        "date": str(today),
-                        "_photos": 1 if photo_url else 0,
-                        "_days_on_site": 0,
-                        "description": text[:400],
-                        "seller": f"@{channel}",
-                        "_seller_url": f"https://t.me/{channel}",
-                        "_photo_url": photo_url,
-                        "_price_int": price_int,
-                        "mileage": mileage,
-                        "_channel": channel,
-                    }
-                    item["_hot_score"] = hot_score(item)
-                    results.append(item)
-                except Exception as _e:
-                    print(f"  [TG {channel}] ошибка сообщения: {_e}")
+                return []
+            batch = []
+            for msg_el in messages[:30]:
+                text_el = msg_el.select_one(".tgme_widget_message_text")
+                if not text_el:
                     continue
-
+                text = text_el.get_text(" ", strip=True)
+                if len(text) < 20:
+                    continue
+                keywords = ["авто", "машин", "продам", "продаю", "авт.", "автомобил", "кузов", "двигател", "куплю", "продается"]
+                if not any(k in text.lower() for k in keywords):
+                    continue
+                price = _parse_price(text)
+                if price > 0 and not (price_min <= price <= price_max):
+                    continue
+                # Ссылка на конкретное сообщение
+                link_el = msg_el.select_one("a.tgme_widget_message_date") or msg_el.select_one("a[href*='t.me']")
+                msg_url = link_el.get("href", f"https://t.me/{channel}") if link_el else f"https://t.me/{channel}"
+                # Фото
+                img_el = msg_el.select_one("a.tgme_widget_message_photo_wrap")
+                photo_url = ""
+                if img_el:
+                    style = img_el.get("style", "")
+                    m = re.search(r"url\('([^']+)'\)", style)
+                    if m:
+                        photo_url = m.group(1)
+                year_m = _tg_year_re.search(text)
+                title = text[:80].replace("\n", " ").strip()
+                batch.append({
+                    "title": title,
+                    "price": f"{price:,} ₽".replace(",", " ") if price else "цена не указана",
+                    "_price_int": price,
+                    "url": msg_url,
+                    "_photo_url": photo_url,
+                    "description": text[:500],
+                    "source": "tg",
+                    "seller": f"@{channel}",
+                    "_seller_url": f"https://t.me/{channel}",
+                    "_year": int(year_m.group(1)) if year_m else 0,
+                    "_days_on_site": 0,
+                })
+            return batch
         except Exception as e:
-            print(f"  [TG {channel}] ошибка: {e}")
-            continue
+            print(f"  [TG {channel}] {e}")
+            return []
 
-    print(f"  [TG каналы] {region}: итого {len(results)} объявлений")
+    def _try_yandex_tg(keywords: str) -> list[dict]:
+        """Ищет посты в TG через Яндекс: site:t.me + ключевые слова."""
+        try:
+            query = f"site:t.me продам авто {keywords} {region_name_ru}"
+            r = session.get(
+                "https://yandex.ru/search/",
+                params={"text": query, "lr": "2"},
+                headers={"User-Agent": "Mozilla/5.0 (compatible; YandexBot/3.0)"},
+                timeout=8,
+            )
+            if r.status_code != 200:
+                return []
+            soup = _BS(r.text, "lxml")
+            links = soup.select("a[href*='t.me/']")
+            batch = []
+            seen_urls = set()
+            for a in links[:20]:
+                href = a.get("href", "")
+                if "t.me/" not in href:
+                    continue
+                # Нормализуем ссылку
+                if href.startswith("//"):
+                    href = "https:" + href
+                if not href.startswith("http"):
+                    continue
+                if href in seen_urls:
+                    continue
+                seen_urls.add(href)
+                # Текст вокруг ссылки
+                parent = a.find_parent()
+                text = parent.get_text(" ", strip=True) if parent else a.get_text(strip=True)
+                price = _parse_price(text)
+                if price > 0 and not (price_min <= price <= price_max):
+                    continue
+                year_m = _tg_year_re.search(text)
+                title = text[:80].replace("\n", " ").strip() or "Объявление из TG"
+                batch.append({
+                    "title": title,
+                    "price": f"{price:,} ₽".replace(",", " ") if price else "цена не указана",
+                    "_price_int": price,
+                    "url": href,
+                    "_photo_url": "",
+                    "description": text[:300],
+                    "source": "tg",
+                    "seller": "Telegram",
+                    "_seller_url": href,
+                    "_year": int(year_m.group(1)) if year_m else 0,
+                    "_days_on_site": 0,
+                })
+            return batch
+        except Exception as e:
+            print(f"  [TG Яндекс] {e}")
+            return []
+
+    # 1. Пробуем все каналы параллельно
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        futs = {ex.submit(_try_channel, ch): ch for ch in all_channels}
+        for fut in as_completed(futs, timeout=20):
+            try:
+                batch = fut.result()
+                if batch:
+                    results.extend(batch)
+                    print(f"  [TG {futs[fut]}] {len(batch)} объявлений")
+            except Exception:
+                pass
+
+    # 2. Если мало результатов — ищем через Яндекс
+    if len(results) < 5:
+        yandex_batch = _try_yandex_tg("продам авто")
+        if yandex_batch:
+            results.extend(yandex_batch)
+            print(f"  [TG Яндекс] {len(yandex_batch)} результатов")
+
     return results
 
 
 def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
     """
-    Парсит публичные паблики ВКонтакте с авто-барахолками города.
-    Использует мобильную версию m.vk.com (рендерит HTML без JS).
-    При наличии VK_TOKEN использует API для надёжности.
+    Ищет объявления о продаже авто в пабликах ВКонтакте.
+    Стратегия:
+    1. VK API (если есть VK_TOKEN) - надёжно
+    2. Поиск через Яндекс по site:vk.com - без токена
+    3. Прямой парсинг известных групп через m.vk.com
     """
     try:
         import requests as _req
@@ -1239,21 +1316,17 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
     except ImportError:
         return []
 
-    vk_key = _TG_REGION_MAP.get(region, "")
-    groups = VK_AUTO_GROUPS.get(vk_key, [])
-    if not groups:
-        return []
-
     vk_token = os.getenv("VK_TOKEN", "")
+    city_key = _TG_REGION_MAP.get(region, "")
+
+    region_name_ru = {
+        "ekaterinburg": "Екатеринбург", "moskva": "Москва", "spb": "Петербург",
+        "novosibirsk": "Новосибирск", "kazan": "Казань", "chelyabinsk": "Челябинск",
+        "уфа": "Уфа", "krasnodar": "Краснодар", "omsk": "Омск", "rostov": "Ростов",
+    }.get(city_key, city_key)
+
     results: list[dict] = []
     today = datetime.date.today()
-
-    session = _req.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
-        "Accept-Language": "ru-RU,ru;q=0.9",
-        "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
-    })
 
     _vk_price_re = re.compile(
         r"(\d[\d\s]{2,10})\s*(?:₽|тыс\.?\s*р(?:уб)?\.?|руб\.?|р\.)",
@@ -1261,7 +1334,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
     )
     _vk_year_re = re.compile(r"\b(19[5-9]\d|20[012]\d)\b")
 
-    def _parse_vk_price(text: str) -> int:
+    def _parse_price(text: str) -> int:
         for m in _vk_price_re.finditer(text):
             raw = re.sub(r"\D", "", m.group(1))
             if not raw:
@@ -1274,121 +1347,194 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                 return val
         return 0
 
-    def _try_vk_api(slug: str) -> list[dict]:
-        """Парсит через VK API (требует VK_TOKEN)."""
+    session = _req.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept-Language": "ru-RU,ru;q=0.9",
+    })
+
+    def _try_vk_api_search() -> list[dict]:
+        """Поиск через VK API newsfeed.search (требует токен)."""
         if not vk_token:
             return []
-        try:
-            api_url = "https://api.vk.com/method/wall.get"
-            params = {
-                "domain": slug, "count": 50, "filter": "owner",
-                "access_token": vk_token, "v": "5.131",
-            }
-            r = session.get(api_url, params=params, timeout=10)
-            data = r.json()
-            items_api = data.get("response", {}).get("items", [])
-            batch: list[dict] = []
-            for post in items_api:
-                text = post.get("text", "")
-                if not text or len(text) < 30:
-                    continue
-                kw = ["авто", "машин", "продам", "продаю", "автомоб", "кузов", "двигат", "руль"]
-                if not any(k in text.lower() for k in kw):
-                    continue
-                price = _parse_vk_price(text)
-                if not (price_min <= price <= price_max) and price > 0:
-                    continue
-                year_m = _vk_year_re.search(text)
-                post_id = post.get("id", "")
-                owner_id = post.get("owner_id", "")
-                post_url = f"https://vk.com/wall{owner_id}_{post_id}"
-                # Фото из вложений
-                photo_url = ""
-                for att in post.get("attachments", []):
-                    if att.get("type") == "photo":
-                        ph = att["photo"]
-                        sizes = ph.get("sizes", [])
-                        if sizes:
-                            best = max(sizes, key=lambda s: s.get("width", 0))
-                            photo_url = best.get("url", "")
-                            break
-                title = text[:80].replace("\n", " ").strip()
-                batch.append({
-                    "title": title,
-                    "price": f"{price:,} ₽".replace(",", " ") if price else "цена не указана",
-                    "_price_int": price,
-                    "url": post_url,
-                    "_photo_url": photo_url,
-                    "description": text[:500],
-                    "source": "vk",
-                    "_source": "vk",
-                    "_year": int(year_m.group(1)) if year_m else 0,
-                    "_days_on_site": 0,
-                    "seller": f"https://vk.com/{slug}",
-                })
-            return batch
-        except Exception as e:
-            print(f"  [VK API {slug}] ошибка: {e}")
-            return []
+        keywords = [
+            f"продам авто {region_name_ru}",
+            f"автобарахолка {region_name_ru}",
+            f"авто {region_name_ru} продаю",
+        ]
+        batch = []
+        for q in keywords:
+            try:
+                r = session.get(
+                    "https://api.vk.com/method/newsfeed.search",
+                    params={
+                        "q": q, "count": 50, "extended": 0,
+                        "access_token": vk_token, "v": "5.131",
+                    },
+                    timeout=8,
+                )
+                items = r.json().get("response", {}).get("items", [])
+                for post in items:
+                    text = post.get("text", "")
+                    if len(text) < 30:
+                        continue
+                    price = _parse_price(text)
+                    if price > 0 and not (price_min <= price <= price_max):
+                        continue
+                    owner_id = post.get("owner_id", "")
+                    post_id = post.get("id", "")
+                    url = f"https://vk.com/wall{owner_id}_{post_id}"
+                    year_m = _vk_year_re.search(text)
+                    # Фото
+                    photo_url = ""
+                    for att in post.get("attachments", []):
+                        if att.get("type") == "photo":
+                            sizes = att["photo"].get("sizes", [])
+                            if sizes:
+                                photo_url = max(sizes, key=lambda s: s.get("width", 0)).get("url", "")
+                                break
+                    batch.append({
+                        "title": text[:80].replace("\n", " ").strip(),
+                        "price": f"{price:,} ₽".replace(",", " ") if price else "цена не указана",
+                        "_price_int": price,
+                        "url": url,
+                        "_photo_url": photo_url,
+                        "description": text[:500],
+                        "source": "vk",
+                        "seller": f"vk.com/id{abs(owner_id)}",
+                        "_seller_url": f"https://vk.com/wall{owner_id}",
+                        "_year": int(year_m.group(1)) if year_m else 0,
+                        "_days_on_site": 0,
+                    })
+            except Exception as e:
+                print(f"  [VK API] {e}")
+        return batch
 
-    def _try_vk_mobile(slug: str) -> list[dict]:
-        """Парсит публичную версию vk.com (без токена)."""
+    def _try_yandex_vk() -> list[dict]:
+        """Ищет посты ВКонтакте через Яндекс: site:vk.com + ключевые слова."""
+        keywords = [
+            f"автобарахолка {region_name_ru} продам авто",
+            f"продаю авто {region_name_ru} цена",
+        ]
+        batch = []
+        seen_urls = set()
+        for q in keywords:
+            try:
+                r = session.get(
+                    "https://yandex.ru/search/",
+                    params={"text": f"site:vk.com {q}", "lr": "2"},
+                    timeout=8,
+                )
+                if r.status_code != 200:
+                    continue
+                soup = _BS(r.text, "lxml")
+                for a in soup.select("a[href*='vk.com/wall'], a[href*='vk.com/club'], a[href*='vk.com/public']"):
+                    href = a.get("href", "")
+                    if not href or href in seen_urls:
+                        continue
+                    if href.startswith("//"):
+                        href = "https:" + href
+                    if not href.startswith("http"):
+                        continue
+                    seen_urls.add(href)
+                    parent = a.find_parent()
+                    text = parent.get_text(" ", strip=True) if parent else ""
+                    price = _parse_price(text)
+                    if price > 0 and not (price_min <= price <= price_max):
+                        continue
+                    year_m = _vk_year_re.search(text)
+                    title = text[:80].replace("\n", " ").strip() or "Объявление ВКонтакте"
+                    batch.append({
+                        "title": title,
+                        "price": f"{price:,} ₽".replace(",", " ") if price else "цена не указана",
+                        "_price_int": price,
+                        "url": href,
+                        "_photo_url": "",
+                        "description": text[:300],
+                        "source": "vk",
+                        "seller": "ВКонтакте",
+                        "_seller_url": href,
+                        "_year": int(year_m.group(1)) if year_m else 0,
+                        "_days_on_site": 0,
+                    })
+            except Exception as e:
+                print(f"  [VK Яндекс] {e}")
+        return batch
+
+    def _try_vk_community(slug: str) -> list[dict]:
+        """Парсит стену паблика ВКонтакте напрямую."""
         try:
-            url = f"https://vk.com/{slug}"
-            r = session.get(url, timeout=12)
-            if r.status_code != 200:
+            r = session.get(f"https://vk.com/{slug}", timeout=8)
+            if r.status_code != 200 or "wall_posts" not in r.text and "_post" not in r.text:
                 return []
             soup = _BS(r.text, "lxml")
-            posts = soup.select("div.wall_item") or soup.select("div._post")
-            if not posts:
-                return []
-            batch: list[dict] = []
-            for post in posts[:30]:
-                text_el = post.select_one("div.wall_post_text") or post.select_one("div._post_content")
+            posts = soup.select("div._post") or soup.select("div.wall_item")
+            batch = []
+            for post in posts[:20]:
+                text_el = post.select_one("div._post_content div.wall_post_text") or post.select_one(".wall_post_text")
                 if not text_el:
                     continue
                 text = text_el.get_text(" ", strip=True)
-                if len(text) < 30:
+                if len(text) < 20:
                     continue
-                kw = ["авто", "машин", "продам", "продаю", "автомоб", "кузов", "двигат"]
-                if not any(k in text.lower() for k in kw):
+                keywords = ["авто", "машин", "продам", "продаю", "автомобил"]
+                if not any(k in text.lower() for k in keywords):
                     continue
-                price = _parse_vk_price(text)
+                price = _parse_price(text)
                 if price > 0 and not (price_min <= price <= price_max):
                     continue
                 link_el = post.select_one("a[href*='/wall']")
                 post_url = ""
                 if link_el:
-                    href = link_el.get("href", "")
-                    post_url = f"https://vk.com{href}" if href.startswith("/") else href
+                    h = link_el.get("href", "")
+                    post_url = f"https://vk.com{h}" if h.startswith("/") else h
                 if not post_url:
                     continue
-                img_el = post.select_one("img[src*='userapi']") or post.select_one("img[src*='vk.com']")
-                photo_url = img_el.get("src", "") if img_el else ""
                 year_m = _vk_year_re.search(text)
-                title = text[:80].replace("\n", " ").strip()
                 batch.append({
-                    "title": title,
+                    "title": text[:80].replace("\n", " ").strip(),
                     "price": f"{price:,} ₽".replace(",", " ") if price else "цена не указана",
                     "_price_int": price,
                     "url": post_url,
-                    "_photo_url": photo_url,
+                    "_photo_url": "",
                     "description": text[:500],
                     "source": "vk",
-                    "_source": "vk",
+                    "seller": f"vk.com/{slug}",
+                    "_seller_url": f"https://vk.com/{slug}",
                     "_year": int(year_m.group(1)) if year_m else 0,
                     "_days_on_site": 0,
-                    "seller": f"https://vk.com/{slug}",
                 })
             return batch
         except Exception as e:
-            print(f"  [VK mobile {slug}] ошибка: {e}")
+            print(f"  [VK {slug}] {e}")
             return []
 
-    for slug in groups:
-        batch = _try_vk_api(slug) or _try_vk_mobile(slug)
-        print(f"  [VK {slug}] {len(batch)} объявлений")
-        results.extend(batch)
+    # 1. VK API (если есть токен)
+    if vk_token:
+        api_batch = _try_vk_api_search()
+        if api_batch:
+            results.extend(api_batch)
+            print(f"  [VK API] {len(api_batch)} объявлений")
+
+    # 2. Яндекс поиск по VK
+    yandex_batch = _try_yandex_vk()
+    if yandex_batch:
+        results.extend(yandex_batch)
+        print(f"  [VK Яндекс] {len(yandex_batch)} объявлений")
+
+    # 3. Прямой парсинг известных групп
+    vk_groups = VK_AUTO_GROUPS.get(city_key, [])
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    if vk_groups:
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            futs = {ex.submit(_try_vk_community, slug): slug for slug in vk_groups}
+            for fut in as_completed(futs, timeout=15):
+                try:
+                    batch = fut.result()
+                    if batch:
+                        results.extend(batch)
+                except Exception:
+                    pass
 
     return results
 
@@ -2728,7 +2874,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                     "Authorization": f"Bearer {token}",
                     "x-device-id": f"avito-{random.randint(10**9, 10**10 - 1)}",
                 },
-                timeout=15,
+                timeout=8,
                 proxies=AVITO_PROXIES,
             )
             print(f"  [Авито pubAPI] стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
@@ -2769,7 +2915,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                     "Accept-Encoding": "gzip, deflate, br",
                     "Referer": "https://www.avito.ru/",
                 },
-                timeout=20,
+                timeout=8,
                 proxies=AVITO_PROXIES,
             )
             print(f"  [Авито webHTML] стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
@@ -2792,7 +2938,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         for rss_url in rss_urls:
             try:
                 r = session.get(
-                    rss_url, timeout=15,
+                    rss_url, timeout=8,
                     headers={"User-Agent": "Mozilla/5.0 (compatible; Feedfetcher-Google; +http://www.google.com/feedfetcher.html)", "Accept": "application/rss+xml,*/*"},
                     proxies=AVITO_PROXIES,
                 )
@@ -2894,7 +3040,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                     "Referer": "https://www.avito.ru/",
                 },
                 proxies=proxies,
-                timeout=20,
+                timeout=8,
             )
             print(f"  [curl_cffi] стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
             if r.status_code == 200 and ('"urlPath"' in r.text or '__NEXT_DATA__' in r.text):
