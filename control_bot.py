@@ -2708,11 +2708,11 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
         v = _find_price_in_window(window)
         if v:
             price_map[upath] = v
-        # Ищем фото CDN Авито — могут быть //img.avito.st/... (без схемы) или https://...
-        # Только реальные фото объявлений: img.avito.st/image/...
+        # Ищем фото CDN Авито — любой хост *.avito.st с картинкой. Учитываем
+        # экранированные слэши (\/) и спецсимволы (~) в JSON-ответе.
         img_m = re.search(
-            r'((?:https?:)?(?:\\?/){2}(?:[a-z0-9-]+\.)?(?:img|images)\.avito\.st(?:\\?/)images?(?:\\?/)[^"\']+\.(?:jpg|jpeg|webp|png))',
-            window
+            r'((?:https?:)?(?:\\?/){2}[a-z0-9.\-]*avito\.st(?:(?:\\?/)[\w.~\-]+)+\.(?:jpg|jpeg|webp|png|avif))',
+            window, re.I,
         )
         if img_m:
             raw_url = img_m.group(1).replace("\\/", "/")
@@ -6649,7 +6649,7 @@ async def main():
         except Exception:
             BOT_USERNAME = "PerekupDriveBot"
     print("✅ Авто-брокер бот запущен!")
-    print("  [ВЕРСИЯ] 2026-06-22-v7 :: Авито: free-proxy(44) + DDG, слияние всех методов")
+    print("  [ВЕРСИЯ] 2026-06-22-v8 :: Авито работает (44), фикс фото-регекса")
 
     # Логируем Railway IP (нужен для добавления в whitelist прокси)
     try:
