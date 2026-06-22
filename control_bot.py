@@ -2765,6 +2765,55 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
     if results:
         return results
 
+    # 2.5 НАДЁЖНЫЙ МЕТОД: извлекаем полный JSON-объект КАЖДОГО объявления методом
+    #     балансировки скобок и парсим его через _avito_item_from_json. Работает
+    #     даже когда Авито убрал __NEXT_DATA__ — данные всё равно лежат как JSON
+    #     где-то в HTML (видно по наличию "urlPath"). Так получаем правильную
+    #     цену/фото/описание/продавца ИЗ ОБЪЕКТА КАЖДОГО объявления, а не из окна.
+    if '"urlPath"' in text and not results:
+        brace_items = []
+        for m in re.finditer(r'\{"id":\s*\d+', text):
+            start = m.start()
+            depth = 0; in_str = False; esc = False; end = None
+            limit = min(len(text), start + 30000)
+            for i in range(start, limit):
+                c = text[i]
+                if esc:
+                    esc = False; continue
+                if c == '\\':
+                    esc = True; continue
+                if c == '"':
+                    in_str = not in_str; continue
+                if in_str:
+                    continue
+                if c == '{':
+                    depth += 1
+                elif c == '}':
+                    depth -= 1
+                    if depth == 0:
+                        end = i + 1; break
+            if not end:
+                continue
+            blob = text[start:end]
+            if '"urlPath"' not in blob:
+                continue
+            try:
+                obj = json.loads(blob)
+            except Exception:
+                continue
+            it = _avito_item_from_json(obj, today)
+            if it and it.get("url"):
+                brace_items.append(it)
+        # дедупликация по url
+        _seen_b: set = set()
+        for it in brace_items:
+            if it["url"] not in _seen_b:
+                _seen_b.add(it["url"])
+                results.append(it)
+        print(f"  [Авито] brace-JSON извлёк {len(results)} объявлений с ценой/фото")
+        if results:
+            return results
+
     # 3. Regex по "urlPath" + "title" прямо в тексте скриптов
     has_urlpath = '"urlPath"' in text
     print(f"  [Авито] в тексте: urlPath={has_urlpath}, размер={len(text):,}")
