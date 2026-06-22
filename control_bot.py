@@ -3445,8 +3445,8 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         # страницы-каталоги. DuckDuckGo напрямую с Railway держит ~3 параллельно;
         # больше марок = больше объявлений, но при max_workers=3 нагрузка та же.
         _popular_brands = [
-            "lada", "kia", "hyundai", "toyota", "nissan", "volkswagen",
-            "renault", "ford", "skoda", "bmw", "mercedes", "mazda",
+            "lada", "kia", "hyundai", "toyota", "nissan",
+            "volkswagen", "renault", "ford",
         ]
         queries = [f"site:avito.ru/{slug}/avtomobili {b}" for b in _popular_brands]
 
@@ -3544,8 +3544,10 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             # вообще не подключается (таймаут на html.duckduckgo.com / bing).
             # Поэтому ПРЯМОЙ маршрут — основной, прокси только как запас.
             if engine == "duckduckgo":
-                routes = [None]  # через прокси DuckDuckGo стабильно отваливается
-                time.sleep(random.uniform(0.2, 1.0))
+                routes = [None]
+                for _pa in list(_working_free_proxies)[:2]:
+                    routes.append({"http": f"http://{_pa}", "https": f"http://{_pa}"})
+                time.sleep(random.uniform(0.4, 1.6))
             else:
                 routes = [None, AVITO_PROXIES] if AVITO_PROXIES else [None]
             for proxies in routes:
@@ -3635,7 +3637,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         # Запросы по маркам параллельно, но всего 3 одновременно — DuckDuckGo
         # блокирует при большем числе одновременных запросов (202/403).
         from concurrent.futures import ThreadPoolExecutor as _TPE2, as_completed as _ac2
-        with _TPE2(max_workers=3) as _ex2:
+        with _TPE2(max_workers=2) as _ex2:
             futs = [_ex2.submit(_fetch_and_parse, q) for q in queries]
             try:
                 for fut in _ac2(futs, timeout=25):
@@ -6798,7 +6800,7 @@ async def main():
         except Exception:
             BOT_USERNAME = "PerekupDriveBot"
     print("✅ Авто-брокер бот запущен!")
-    print("  [ВЕРСИЯ] 2026-06-22-v11 :: DuckDuckGo напрямую (12 марок) — основной путь к Авито")
+    print("  [ВЕРСИЯ] 2026-06-22-v12 :: DuckDuckGo через несколько IP (обход лимита 202)")
 
     # Логируем Railway IP (нужен для добавления в whitelist прокси)
     try:
