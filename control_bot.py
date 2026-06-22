@@ -3388,10 +3388,14 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         elif price_max < 99_000_000:
             price_q = f" до {price_max//1000}тыс"
 
-        queries = [
-            f"site:avito.ru/{slug}/avtomobili продам{price_q}",
-            f"avito {slug_ru_name} продам автомобиль частник{price_q}",
+        # Запросы по маркам — так поисковик отдаёт отдельные объявления, а не
+        # страницы-каталоги (общий запрос «продам» возвращает в основном категории).
+        _popular_brands = [
+            "lada", "kia", "hyundai", "toyota", "volkswagen", "nissan",
+            "renault", "ford", "chevrolet", "skoda", "mazda", "mercedes",
         ]
+        queries = [f"site:avito.ru/{slug}/avtomobili {b}" for b in _popular_brands]
+        queries.append(f"site:avito.ru/{slug}/avtomobili продам частник")
 
         results_out: list[dict] = []
         seen_urls: set[str] = set()
@@ -3502,9 +3506,9 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         for q in queries:
             if len(results_out) >= 15 or time.time() > _deadline:
                 break
-            # Bing и DuckDuckGo первыми — они отдают реальные результаты без JS.
-            # Яндекс последним: через requests он присылает пустой JS-шаблон.
-            for search_engine in ["bing", "duckduckgo", "yandex"]:
+            # DuckDuckGo первым — он реально отдаёт ссылки на объявления Авито.
+            # Bing как запасной. Яндекс убран: через requests это пустой JS-шаблон.
+            for search_engine in ["duckduckgo", "bing"]:
                 if time.time() > _deadline:
                     break
                 try:
@@ -3534,7 +3538,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
 
                         # Ищем текст вокруг этого URL (±500 символов) для парсинга цены/заголовка
                         pos = ctx_html.find(url)
-                        context = ctx_html[max(0, pos-300):pos+500] if pos >= 0 else ""
+                        context = ctx_html[max(0, pos-200):pos+600] if pos >= 0 else ""
                         # Убираем HTML теги
                         context_clean = re.sub(r"<[^>]+>", " ", context)
                         context_clean = re.sub(r"&[a-z]+;", " ", context_clean)
@@ -3547,8 +3551,13 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                         year_m = _year_re.search(context_clean)
                         year = int(year_m.group(1)) if year_m else 0
 
-                        # Заголовок — первые осмысленные слова контекста
-                        title = context_clean[:100].strip() or f"Авто на Авито — {slug_ru_name}"
+                        # Заголовок: убираем URL-мусор (uddg=, duckduckgo, ссылки) из контекста
+                        title_src = re.sub(
+                            r'https?://\S+|//\S+|uddg=\S+|rut=\S+|duckduckgo\.com\S*|www\.|avito\.ru\S*',
+                            ' ', context_clean, flags=re.I,
+                        )
+                        title_src = re.sub(r'\s+', ' ', title_src).strip(" -|·,")
+                        title = title_src[:90].strip() or f"Авто на Авито — {slug_ru_name}"
 
                         # Фото: ищем CDN-картинку рядом с объявлением (Яндекс-превью или avito.st —
                         # эти хосты не блокируются, в отличие от самой страницы avito.ru)
@@ -6617,7 +6626,7 @@ async def main():
         except Exception:
             BOT_USERNAME = "PerekupDriveBot"
     print("✅ Авто-брокер бот запущен!")
-    print("  [ВЕРСИЯ] 2026-06-22-v4 :: Авито через Bing+DuckDuckGo (Яндекс=JS-шелл)")
+    print("  [ВЕРСИЯ] 2026-06-22-v5 :: Авито через DuckDuckGo по маркам")
 
     # Логируем Railway IP (нужен для добавления в whitelist прокси)
     try:
