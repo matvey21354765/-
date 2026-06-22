@@ -3698,7 +3698,10 @@ def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max
     if api_results:
         print(f"  [Авито] API-метод дал {len(api_results)} объявлений")
         return api_results
-    print(f"  [Авито] API-методы не дали результатов, переходим к Playwright")
+    # Все параллельные методы не дали результатов — браузер тоже не поможет,
+    # т.к. Авито блокирует тот же IP. Возвращаем пустой список быстро.
+    print(f"  [Авито] все методы вернули 0 — блокировка IP или прокси не помог")
+    return []
 
     def _build_url(p: int) -> str:
         qs_parts = ["seller_type=1"]  # только частники
@@ -6536,12 +6539,21 @@ async def main():
     except Exception:
         pass
 
-    # Тест прокси
+    # Тест прокси + тест доступа к Авито через прокси
     if AVITO_PROXY_HOST:
         try:
             import requests as _rq
             r = _rq.get("https://api.ipify.org", proxies=AVITO_PROXIES, timeout=10)
             print(f"  [прокси {AVITO_PROXY_PROTOCOL}] ✅ работает, IP: {r.text.strip()}")
+            # Сразу проверяем доступ к Авито
+            try:
+                ra = _rq.get("https://www.avito.ru/krasnoyarsk/avtomobili",
+                             proxies=AVITO_PROXIES, timeout=10,
+                             headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"})
+                has_listings = '"urlPath"' in ra.text or 'data-marker="item"' in ra.text
+                print(f"  [Авито тест] HTTP {ra.status_code}, {len(ra.text):,}б, объявления: {'✅ да' if has_listings else '❌ нет (капча/блок)'}")
+            except Exception as ea:
+                print(f"  [Авито тест] ❌ {ea}")
         except Exception as e:
             print(f"  [прокси {AVITO_PROXY_PROTOCOL}] ❌ ошибка: {e}")
             print(f"  [прокси] Добавь Railway IP в whitelist на сайте провайдера прокси!")
