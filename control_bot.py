@@ -6601,6 +6601,7 @@ async def main():
         except Exception:
             BOT_USERNAME = "PerekupDriveBot"
     print("✅ Авто-брокер бот запущен!")
+    print("  [ВЕРСИЯ] 2026-06-22-v3 :: Авито через Яндекс (decode-all + образец)")
 
     # Логируем Railway IP (нужен для добавления в whitelist прокси)
     try:
