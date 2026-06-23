@@ -1950,7 +1950,8 @@ def _avito_price_from_item(it: dict) -> tuple[str, int]:
                     return r_str, r_int
         return "", 0
 
-    for key in ("priceDetailed", "price", "priceInfo", "priceMicro"):
+    for key in ("priceDetailed", "price", "priceInfo", "priceMicro", "priceValue",
+                "salePrice", "discountedPrice", "finalPrice", "currentPrice"):
         info = it.get(key)
         if not info:
             continue
@@ -1958,7 +1959,7 @@ def _avito_price_from_item(it: dict) -> tuple[str, int]:
             return f"{int(info):,} ₽".replace(",", " "), int(info)
         if isinstance(info, dict):
             # Сначала ищем valueText — самый надёжный источник цены
-            vt = info.get("valueText") or info.get("text") or ""
+            vt = info.get("valueText") or info.get("text") or info.get("displayValue") or ""
             if vt and isinstance(vt, str):
                 digits = re.sub(r"[^\d]", "", vt)
                 if digits and 10_000 < int(digits) < 99_000_000:
@@ -1966,6 +1967,31 @@ def _avito_price_from_item(it: dict) -> tuple[str, int]:
             r_str, r_int = _find_price_in_obj(info)
             if r_int:
                 return r_str, r_int
+    # Deep search: некоторые форматы хранят цену не в стандартных ключах
+    def _deep_price_search(obj, depth=0):
+        if depth > 8 or not isinstance(obj, dict):
+            return "", 0
+        for k, v in obj.items():
+            lk = k.lower()
+            if any(x in lk for x in ("price", "cost", "amount", "sum", "стоим", "цен")):
+                if isinstance(v, (int, float)) and 10_000 < v < 99_000_000:
+                    return f"{int(v):,} ₽".replace(",", " "), int(v)
+                if isinstance(v, str):
+                    d = re.sub(r"[^\d]", "", v)
+                    if d and 10_000 < int(d) < 99_000_000:
+                        return v, int(d)
+                if isinstance(v, dict):
+                    rs, ri = _find_price_in_obj(v, 0)
+                    if ri:
+                        return rs, ri
+            elif isinstance(v, dict):
+                rs, ri = _deep_price_search(v, depth + 1)
+                if ri:
+                    return rs, ri
+        return "", 0
+    r_str, r_int = _deep_price_search(it)
+    if r_int:
+        return r_str, r_int
     return "", 0
 
 
@@ -2827,15 +2853,51 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
             return None
 
         _seen_b: set = set()
+        _price_re_blob = re.compile(
+            r'"(?:priceDetailed|price|priceInfo|priceMicro)"\s*:\s*\{[^}]{0,300}"(?:valueText|value)"\s*:\s*"?(\d[\d\s]{3,10})"?'
+            r'|"(?:valueText|displayValue)"\s*:\s*"([\d\s]{4,12}\s*(?:₽|руб))"'
+            r'|"value"\s*:\s*(\d{5,8})\b'
+        )
         for m in re.finditer(r'"urlPath"\s*:\s*"(/[^"]*avtomobili/[^"]+)"', text):
             blob = _find_enclosing_object(text, m.start())
             if not blob or '"urlPath"' not in blob:
                 continue
+            # Получаем URL и title прямо из blob regex — не зависим от полного json.loads
+            _up_m = re.search(r'"urlPath"\s*:\s*"(/[^"]+)"', blob)
+            _ti_m = re.search(r'"title"\s*:\s*"([^"]{5,120})"', blob)
+            if not _up_m:
+                continue
+            _raw_url = "https://www.avito.ru" + _up_m.group(1)
+            if _raw_url in _seen_b:
+                continue
+            it = None
             try:
                 obj = json.loads(blob)
+                it = _avito_item_from_json(obj, today)
             except Exception:
-                continue
-            it = _avito_item_from_json(obj, today)
+                pass
+            # Если json.loads провалился или _avito_item_from_json не нашёл цену —
+            # пробуем вытащить цену напрямую регулярным выражением из blob-текста.
+            if it is None and _ti_m:
+                _price_int_b = 0
+                for _pm in _price_re_blob.finditer(blob):
+                    _raw_p = next((g for g in _pm.groups() if g), "")
+                    _digits = re.sub(r"[^\d]", "", _raw_p)
+                    if _digits and 10_000 < int(_digits) < 99_000_000:
+                        _price_int_b = int(_digits)
+                        break
+                if _price_int_b:
+                    _title_b = _ti_m.group(1)
+                    it = {
+                        "source": "avito", "title": _title_b,
+                        "price": f"{_price_int_b:,} ₽".replace(",", " "),
+                        "url": _raw_url, "date": str(today),
+                        "_photos": 0, "_days_on_site": 0,
+                        "description": "", "seller": "", "_photo_url": "",
+                        "_price_int": _price_int_b, "mileage": 0,
+                        "_avito_price_filtered": True,
+                    }
+                    it["_hot_score"] = hot_score(it)
             if it and it.get("url") and it["url"] not in _seen_b:
                 _seen_b.add(it["url"])
                 results.append(it)
@@ -3147,25 +3209,44 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             params["pmin"] = price_min
         if price_max < 99_000_000:
             params["pmax"] = price_max
-        try:
-            r = session.get(
-                url,
-                params=params,
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    "Accept-Language": "ru-RU,ru;q=0.9",
-                    "Accept-Encoding": "gzip, deflate, br",
-                    "Referer": "https://www.avito.ru/",
-                },
-                timeout=20,
-                proxies=_avito_proxies(),
-            )
-            print(f"  [Авито webHTML] стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
-            if r.status_code == 200 and ('"urlPath"' in r.text or 'data-marker="item"' in r.text):
-                return _parse_avito_html(r.text, slug, today)
-        except Exception as e:
-            print(f"  [Авито webHTML] стр.{p}: {e}")
+        # Часть IP в пуле может быть в бане у Авито (403). Ретраим со СВЕЖИМ IP
+        # до 6 раз — при 1000 ротирующихся IP почти всегда найдётся рабочий.
+        _uas = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        ]
+        for attempt in range(6):
+            _hdrs = {
+                "User-Agent": _uas[attempt % len(_uas)],
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.5",
+                "Accept-Encoding": "gzip, deflate, br",
+                "Referer": "https://www.avito.ru/",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+            }
+            try:
+                r = session.get(url, params=params, headers=_hdrs, timeout=25, proxies=_avito_proxies())
+                print(f"  [Авито webHTML] стр.{p} попытка {attempt+1}: HTTP {r.status_code}, {len(r.text):,}б")
+                if r.status_code == 200 and ('"urlPath"' in r.text or 'data-marker="item"' in r.text):
+                    res = _parse_avito_html(r.text, slug, today)
+                    if res:
+                        return res
+                    # Страница получена, но парсер вернул 0 — пробуем следующий IP
+                    print(f"  [Авито webHTML] стр.{p} попытка {attempt+1}: парсер 0 объявлений, ретрай")
+                if r.status_code in (403, 429, 503):
+                    time.sleep(random.uniform(0.3, 0.8))
+                    continue  # IP в бане — пробуем другой
+                elif r.status_code == 200:
+                    time.sleep(random.uniform(0.2, 0.5))
+                    continue  # парсер дал 0 — пробуем другой IP
+                break  # иной код — не ретраим
+            except Exception as e:
+                print(f"  [Авито webHTML] стр.{p} попытка {attempt+1}: {str(e)[:60]}")
+                time.sleep(random.uniform(0.2, 0.5))
+                continue
         return []
 
     def _try_avito_rss(p: int) -> list[dict]:
@@ -3174,9 +3255,15 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             return []
         import xml.etree.ElementTree as ET
 
+        _brand_rss = f"/{brand}" if brand and brand != "any" else ""
+        _price_params = ""
+        if price_min > 0:
+            _price_params += f"&pmin={price_min}"
+        if price_max < 99_000_000:
+            _price_params += f"&pmax={price_max}"
         rss_urls = [
-            f"https://www.avito.ru/{slug}/avtomobili?output_type=rss&seller_type=1",
-            f"https://www.avito.ru/{slug}/avtomobili?output_type=rss",
+            f"https://www.avito.ru/{slug}/avtomobili{_brand_rss}?output_type=rss&seller_type=1&s=104{_price_params}",
+            f"https://www.avito.ru/{slug}/avtomobili?output_type=rss{_price_params}",
         ]
         for rss_url in rss_urls:
             try:
@@ -3886,21 +3973,20 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
     # ещё несколько. Запускаем ВСЁ параллельно и СЛИВАЕМ результаты, а не берём
     # первый ответивший метод (иначе теряем большие пачки, что приходят чуть позже).
     if AVITO_PROXIES:
-        # Платный прокси открывает Авито напрямую. Используем ТОЛЬКО _try_web_html —
-        # он применяет фильтр бюджета (pmin/pmax) + частники + сортировку по дате
-        # в URL, поэтому Авито сразу отдаёт релевантные объявления с ценами, а не
-        # рекламные новинки дилеров без цены. Остальные методы тянут НЕфильтрованную
-        # страницу (засорена дилерскими промо) — как запасные при 403 на части IP.
-        all_methods = [_try_web_html, _try_avito_public_api]
+        # Платный прокси. Основной метод — _try_web_html (8 страниц с фильтром цены).
+        # Резервные методы: мобильный сайт, RSS, Googlebot UA — если часть IP забанена.
+        all_methods = [_try_web_html, _try_avito_lite, _try_avito_rss, _try_googlebot_ua, _try_avito_public_api]
     else:
         all_methods = [_try_scraperapi_fast, _try_free_proxies, _try_yandex_snippets, _try_curl_cffi, _try_cs_web, _try_mobile_site, _try_web_html, _try_avito_public_api, _try_avito_rss, _try_googlebot_ua, _try_avito_lite, _try_scraperapi, _try_avito_json_api]
-    # Список задач (метод, страница). С прокси сканируем НЕСКОЛЬКО страниц
-    # _try_web_html — так находим даже редкие дешёвые машины (0-100к их мало
-    # на первой странице, но они точно есть глубже в выдаче).
+    # Список задач. С прокси — 8 страниц десктоп + 3 страницы мобайл + RSS + Googlebot.
     if AVITO_PROXIES:
-        tasks = [(_try_web_html, p) for p in range(1, 6)] + [(_try_avito_public_api, 1)]
-        _cap = 120
-        _deadline_s = 50
+        tasks = (
+            [(_try_web_html, p) for p in range(1, 9)] +
+            [(_try_avito_lite, p) for p in range(1, 4)] +
+            [(_try_avito_rss, 1), (_try_googlebot_ua, 1), (_try_avito_public_api, 1)]
+        )
+        _cap = 180
+        _deadline_s = 65
     else:
         tasks = [(m, 1) for m in all_methods]
         _cap = 40
