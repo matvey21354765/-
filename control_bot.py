@@ -1098,64 +1098,105 @@ VK_AUTO_GROUPS = {
     "ekaterinburg": [
         "avtobaraholka96", "prodamavto96", "avto_ekb96", "ekbauto", "club_avto_ekb",
         "autobazar_ekb", "avtomobileekb", "club196avto", "avto_yekb", "prodamavtoe96",
+        "avtodo100_ekb", "avto_do300_ekb", "avto_do500_ekb", "srochno_avto96",
+        "avtobazar96", "kupit_avto_ekb", "avto96_prodazha", "ekb_auto_sell",
+        "avto_ur", "avto_sverdlovsk", "avtorynok_ekb", "deshevo_avto96",
     ],
     "moskva": [
         "avtobaraholkamsk", "prodamavtomsk", "autobazar_msk", "avtoclub77",
         "moscowcars", "kupit_avto_msk", "avto_moskva77", "avtomoskva77",
+        "avtodo100_msk", "avto_do300_msk", "srochno_avto77", "avto_bazar_msk",
+        "avtorynok_msk", "deshevo_avto77", "avto_msk_prodazha", "buy_car_msk",
+        "avtodo500_msk", "avto77_sell",
     ],
     "spb": [
         "avtobaraholkaspb", "prodamavtospb", "autobazar_spb", "avto78spb",
         "avtoclub78", "spbavto78", "prodamavtopiter",
+        "avtodo100_spb", "avto_do300_spb", "srochno_avto78", "avto78_prodazha",
+        "avtorynok_spb", "deshevo_avto78", "spb_auto_sell",
     ],
     "novosibirsk": [
         "avtobaraholka54", "prodamavto54", "autobazar_nsk", "avtonsk54",
         "avto_novosibirsk", "club54avto", "nsk_avto54",
+        "avtodo100_nsk", "avto_do300_nsk", "srochno_avto54", "nsk_auto_sell",
+        "avtorynok_nsk", "deshevo_avto54",
     ],
     "kazan": [
         "avtobaraholkakazan", "prodamavtokazan", "avtoclub16", "kazan_avto16",
         "autobazar_kazan", "avto_kazan16",
+        "avtodo100_kazan", "avto_do300_kazan", "srochno_avto16", "kazan_auto_sell",
+        "avtorynok_kazan", "deshevo_avto16",
     ],
     "chelyabinsk": [
         "avtobaraholka74", "prodamavto74", "avto74chel", "autobazar_chel",
         "club74avto", "avtoclub74",
+        "avtodo100_chel", "avto_do300_74", "srochno_avto74", "chel_auto_sell",
+        "avtorynok_chel", "deshevo_avto74",
     ],
     "ufa": [
         "avtobaraholkaufa", "prodamavtoufa", "avto02ufa", "autobazar_ufa",
         "avtoclub02", "ufa_avto02",
+        "avtodo100_ufa", "avto_do300_ufa", "srochno_avto02", "ufa_auto_sell",
+        "avtorynok_ufa", "deshevo_avto02",
     ],
     "krasnodar": [
         "avtobaraholkakrd", "prodamavtokrd", "avto23krd", "autobazar_krasnodar",
         "avtoclub23", "krasnodar_avto23", "kuban_avto",
+        "avtodo100_krd", "avto_do300_krd", "srochno_avto23", "krd_auto_sell",
+        "avtorynok_krd", "deshevo_avto23", "kuban_avto_sell",
     ],
     "omsk": [
         "avtobaraholkaomsk", "prodamavtoomsk", "avto55omsk", "autobazar_omsk",
         "club55avto", "omsk_avto55",
+        "avtodo100_omsk", "avto_do300_omsk", "srochno_avto55", "omsk_auto_sell",
+        "avtorynok_omsk", "deshevo_avto55",
     ],
     "rostov": [
         "avtobaraholkarostov", "prodamavtorostov", "avto61rostov", "autobazar_rostov",
         "avtoclub61", "rostov_avto61",
+        "avtodo100_rostov", "avto_do300_61", "srochno_avto61", "rostov_auto_sell",
+        "avtorynok_rostov", "deshevo_avto61",
     ],
     "tyumen": [
         "avtobaraholkatyumen", "prodamavtotmn", "avto72tyumen", "autobazar_tyumen",
         "tyumen_avto72",
+        "avtodo100_tmn", "avto_do300_tmn", "srochno_avto72", "tmn_auto_sell",
+        "avtorynok_tmn", "deshevo_avto72", "tyumen_auto_sell",
     ],
     "samara": [
         "avtobaraholkasamara", "prodamavtosmr", "avto63samara", "autobazar_samara",
         "samara_avto63",
+        "avtodo100_samara", "avto_do300_63", "srochno_avto63", "samara_auto_sell",
+        "avtorynok_samara", "deshevo_avto63",
     ],
     "krasnoyarsk": [
         "avtobaraholkakrs", "prodamavtokrs", "avto24krsk", "autobazar_krs",
         "krasnoyarsk_avto24",
+        "avtodo100_krs", "avto_do300_24", "srochno_avto24", "krs_auto_sell",
+        "avtorynok_krs", "deshevo_avto24",
     ],
     "nn": [
-        "avtobaraholkann", "prodamavtonn", "avto52nn", "autobazar_nn",
-        "nn_avto52",
+        "avtobaraholkann", "prodamavtonn", "avto52nn", "autobazar_nn", "nn_avto52",
+        "avtodo100_nn", "avto_do300_nn", "srochno_avto52", "nn_auto_sell",
+        "avtorynok_nn", "deshevo_avto52",
     ],
     "perm": [
         "avtobaraholkaperm", "prodamavtoperm", "avto59perm", "autobazar_perm",
+        "avtodo100_perm", "avto_do300_perm", "srochno_avto59", "perm_auto_sell",
+        "avtorynok_perm", "deshevo_avto59",
     ],
     "voronezh": [
         "avtobaraholkavrn", "prodamavtovrn", "avto36voronezh", "autobazar_vrn",
+        "avtodo100_vrn", "avto_do300_vrn", "srochno_avto36", "vrn_auto_sell",
+        "avtorynok_vrn", "deshevo_avto36",
+    ],
+    "irkutsk": [
+        "avtobaraholka38", "prodamavto38", "avto38irkutsk", "autobazar_irkutsk",
+        "avtodo100_irk", "irkutsk_auto_sell", "avtorynok_irkutsk",
+    ],
+    "volgograd": [
+        "avtobaraholka34", "prodamavto34", "avto34vgd", "autobazar_vgd",
+        "avtodo100_vgd", "volgograd_auto_sell", "avtorynok_vgd",
     ],
 }
 
@@ -1166,88 +1207,110 @@ TG_AUTO_CHANNELS = {
         "avto_ekb", "prodamavto_ekb", "avtoekb", "kupit_avto_ekb", "avto96ekb",
         "baraholka_avto_ekb", "avtobazar_ekb", "ekb_avto96", "avto_yekaterinburg",
         "prodamauto96", "avto_baraholka96", "ekbauto2024",
+        "avtodo100_ekb", "avto_do300ekb", "srochno_avto96", "avto_ur96",
+        "avtomobile96", "avto_sverdl", "car_ekb", "avto_ekb_96",
     ],
     "moskva": [
         "avto_msk", "prodamavto_msk", "avtomoskva", "kupit_avto_msk", "avto_moskva",
         "cars_msk", "avtobazar_msk", "prodamauto_msk", "avto_baraholka_msk",
         "moscowcars2024", "avto77msk", "moskva_avto77",
+        "avtodo100_msk", "avto_do300msk", "srochno_avto77", "avtomsk77",
+        "car_moscow", "avto_msk77", "avtorynok77",
     ],
     "spb": [
         "avto_spb", "prodamavto_spb", "avtospb", "avto78spb", "cars_spb",
         "avtobazar_spb", "prodamauto_spb", "avto_baraholka_spb", "spb_avto78",
         "avto78_prodazha", "spbauto2024",
+        "avtodo100_spb", "avto_do300spb", "srochno_avto78", "car_spb78",
     ],
     "novosibirsk": [
         "avto_nsk", "prodamavto_nsk", "avtonsk54", "cars_nsk", "avtobazar_nsk",
         "prodamauto_nsk", "avto_baraholka54", "nsk_avto54", "novosibirsk_avto",
+        "avtodo100_nsk", "avto_do300nsk", "srochno_avto54", "car_nsk54",
+        "avtorynok_nsk",
     ],
     "kazan": [
         "avto_kazan", "prodamavto_kazan", "avtokazan16", "avtobazar_kazan",
         "kazan_avto16", "prodamauto_kazan", "avto_baraholka_kazan",
+        "avtodo100_kazan", "avto_do300kazan", "srochno_avto16", "car_kazan16",
     ],
     "krasnodar": [
         "avto_krd", "prodamavto_krd", "avto23krd", "avtobazar_krasnodar",
         "krasnodar_avto23", "prodamauto_krd", "avto_baraholka_krd", "kuban_cars",
+        "avtodo100_krd", "avto_do300krd", "srochno_avto23", "car_krd23",
+        "avto_kuban", "kuban_avto_sell",
     ],
     "chelyabinsk": [
         "avto_chel", "prodamavto_chel", "avto74chel", "avtobazar_chel",
         "chel_avto74", "prodamauto_chel", "avto_baraholka74",
+        "avtodo100_chel", "avto_do300chel", "srochno_avto74", "car_chel74",
     ],
     "ufa": [
         "avto_ufa", "prodamavto_ufa", "avto02ufa", "avtobazar_ufa",
         "ufa_avto02", "prodamauto_ufa", "avto_baraholka_ufa",
+        "avtodo100_ufa", "avto_do300ufa", "srochno_avto02", "car_ufa02",
     ],
     "omsk": [
         "avto_omsk", "prodamavto_omsk", "avto55omsk", "avtobazar_omsk",
         "omsk_avto55", "prodamauto_omsk", "avto_baraholka55",
+        "avtodo100_omsk", "avto_do300omsk", "srochno_avto55", "car_omsk55",
     ],
     "rostov": [
         "avto_rostov", "prodamavto_rostov", "avto61rostov", "avtobazar_rostov",
         "rostov_avto61", "prodamauto_rostov", "avto_baraholka_rostov",
+        "avtodo100_rostov", "avto_do300rostov", "srochno_avto61", "car_rostov61",
     ],
     "tyumen": [
         "avto_tyumen", "prodamavto72", "avto72tyumen", "tyumen_avto", "cars_tyumen",
         "avtobazar_tyumen", "prodamauto72", "avto_baraholka72",
+        "avtodo100_tmn", "avto_do300tmn", "srochno_avto72", "car_tyumen72",
+        "avto_tmn72", "tyumen_car_sell",
     ],
     "samara": [
         "avto_samara", "prodamavto63", "avto63samara", "avtobazar_samara",
         "samara_avto63", "prodamauto63", "avto_baraholka63",
+        "avtodo100_samara", "avto_do300samara", "srochno_avto63", "car_samara63",
     ],
     "volgograd": [
         "avto_volgograd", "prodamavto34", "avto34vlg", "avtobazar_volgograd",
         "volgograd_avto34", "prodamauto34",
+        "avtodo100_vgd", "avto_do300vgd", "srochno_avto34", "car_vgd34",
     ],
     "perm": [
         "avto_perm", "prodamavto59", "avto59perm", "avtobazar_perm",
         "perm_avto59", "prodamauto59", "avto_baraholka59",
+        "avtodo100_perm", "avto_do300perm", "srochno_avto59", "car_perm59",
     ],
     "voronezh": [
         "avto_voronezh", "prodamavto36", "avto36vrn", "avtobazar_voronezh",
         "voronezh_avto36", "prodamauto36",
+        "avtodo100_vrn", "avto_do300vrn", "srochno_avto36", "car_vrn36",
     ],
     "saratov": [
         "avto_saratov", "prodamavto64", "avto64sar", "avtobazar_saratov",
-        "saratov_avto64",
+        "saratov_avto64", "avtodo100_sar", "car_saratov64",
     ],
     "krasnoyarsk": [
         "avto_krsk", "prodamavto24", "avto24krsk", "avtobazar_krs",
         "krasnoyarsk_avto24", "prodamauto24",
+        "avtodo100_krs", "avto_do300krs", "srochno_avto24", "car_krs24",
     ],
     "irkutsk": [
         "avto_irkutsk", "prodamavto38", "avto38irk", "avtobazar_irkutsk",
-        "irkutsk_avto38",
+        "irkutsk_avto38", "avtodo100_irk", "avto_do300irk", "car_irkutsk38",
     ],
     "vladivostok": [
         "avto_vladivostok", "prodamavto25", "avto25vlad", "avtobazar_vlad",
-        "vladivostok_avto25",
+        "vladivostok_avto25", "avtodo100_vlad", "car_vlad25",
     ],
     "habarovsk": [
         "avto_habarovsk", "prodamavto27", "avto27hab", "avtobazar_hab",
-        "habarovsk_avto27",
+        "habarovsk_avto27", "avtodo100_hab", "car_hab27",
     ],
     "nn": [
         "avto_nn", "prodamavto52", "avto52nn", "avtobazar_nn",
         "nn_avto52", "prodamauto52", "avto_baraholka52",
+        "avtodo100_nn", "avto_do300nn", "srochno_avto52", "car_nn52",
     ],
 }
 
@@ -1342,6 +1405,14 @@ _SOCIAL_REJECT_KEYWORDS = [
     "не проходят ссылк", "поддержку, развитие", "поддержку развитие",
     "доска объявлений", "барахолка", "обратная связь бота", "бот поддержки",
     "вступить в группу", "вступить в чат",
+    # Новости о ценах на топливо/бензин — не продажа авто
+    "цены на бензин", "стоимость бензина", "цена бензина", "бензин подорожа",
+    "бензин подешев", "цены на топливо", "цены на азс", "заправка дорожает",
+    "лихорадит цены", "горожане обсуждают", "цены на нефть",
+    "аи-92", "аи-95", "аи-98", "дизельное топлив",
+    # Другие новости и нерелевантный контент
+    "читайте также", "подробнее на сайте", "источник:", "по данным",
+    "сообщает корреспондент", "по информации", "как сообщает",
 ]
 
 def _is_car_sale_social(text: str) -> bool:
@@ -7094,10 +7165,12 @@ async def send_batch(chat_id: int, uid: int, offset: int):
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[nav_row]) if nav_row else MAIN_KEYBOARD,
         )
 
-    # Сохраняем показанные в seen
+    # Сохраняем показанные в seen (кап 2000 — удаляем старые если превышено)
     seen = load_seen(uid)
     for item in batch:
         seen.add(item.get("url", ""))
+    if len(seen) > 2000:
+        seen = set(list(seen)[-1500:])  # оставляем последние 1500
     save_seen(uid, seen)
 
 
@@ -7398,8 +7471,9 @@ async def do_search_for_user(uid: int, reply_to):
         and in_price_range(i, pmin, pmax)
         and i.get("url")
         and i["url"] not in skipped
+        and i["url"] not in seen  # не показываем уже просмотренные
     ]
-    print(f"  [фильтр] после in_price_range: {len(suitable)}/{_before} (бюджет {pmin}-{pmax})")
+    print(f"  [фильтр] после in_price_range+seen: {len(suitable)}/{_before} (бюджет {pmin}-{pmax})")
     # Для отладки: показываем какие цены НЕ прошли
     _bad_price = [i for i in items if not i.get("_market_ref_only") and i.get("url") and i["url"] not in skipped and not in_price_range(i, pmin, pmax)]
     if _bad_price:
