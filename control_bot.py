@@ -7329,29 +7329,35 @@ async def do_search_for_user(uid: int, reply_to):
     for it in suitable:
         if is_dealer(it):
             it["_is_dealer"] = True
-    # Сортировка:
-    # 1. Сегодня + ниже рынка (самые свежие выгодные)
-    # 2. Любая дата + ниже рынка (по убыванию скидки)
-    # 3. По рыночной цене (любая дата)
-    # 4. Цена неизвестна
+    # Логика сортировки:
+    # Главный критерий — ВЫГОДА (% ниже рынка). Свежесть важна только при одинаковой выгоде.
+    # Правило: старое объявление -20% рынка лучше сегодняшнего +5% рынка.
+    # НО: среди одинаково выгодных — сегодняшнее идёт первым.
+    # Дилеры — всегда после частников на том же уровне выгоды.
     def _sort_key(x):
-        pct = x.get("_savings_pct", 0)
+        pct = x.get("_savings_pct", 0)           # положительный = ниже рынка
         days = x.get("_days_on_site", 999)
-        is_today = days <= 1
-        below = pct > 0
         dealer = x.get("_is_dealer", False)
         price = x.get("_price_int", 999_999_999)
-        # Частники — первые, дилеры — после (но дилер ниже рынка — выше дилера по рынку)
-        dealer_penalty = 10 if dealer else 0
-        if below and is_today:
-            tier = 0 + dealer_penalty
-        elif below:
-            tier = 1 + dealer_penalty
-        elif price > 0:
-            tier = 2 + dealer_penalty
+        dealer_penalty = 5 if dealer else 0
+
+        # Ярусы выгоды (не зависят от свежести)
+        if pct >= 20:
+            value_tier = 0   # сильно ниже рынка (≥20%)
+        elif pct >= 10:
+            value_tier = 1   # заметно ниже рынка (10–20%)
+        elif pct > 0:
+            value_tier = 2   # немного ниже рынка (0–10%)
+        elif pct == 0 and price > 0:
+            value_tier = 3   # по рынку
+        elif pct < 0:
+            value_tier = 4   # выше рынка — в конец
         else:
-            tier = 3 + dealer_penalty
-        return (tier, -pct, days, price)
+            value_tier = 5   # цена неизвестна
+
+        # Внутри яруса: сначала свежие, потом старые
+        # Но выгода всегда важнее: объявление -15% / 30 дней будет выше -2% / сегодня
+        return (value_tier + dealer_penalty, -pct, days, price)
     suitable.sort(key=_sort_key)
 
     if not suitable and already_seen_count > 0:
