@@ -699,6 +699,30 @@ def scrape_drom(region: str, pages: int = 15, price_min: int = 0, price_max: int
                             )
                         if img_m:
                             photo_url = img_m.group(0).replace("\\/", "/")
+                    # 4. noscript — Drom SSR кладёт реальный img в <noscript>
+                    if not photo_url:
+                        for ns in card.find_all("noscript"):
+                            ns_html = str(ns)
+                            _nm = re.search(
+                                r'https?://[^"\'<\s\\]{10,}\.(?:jpg|jpeg|webp|png)',
+                                ns_html
+                            )
+                            if _nm:
+                                _cand = _nm.group(0).replace("\\/", "/")
+                                if any(d in _cand for d in _DROM_CDN) or "drom" in _cand:
+                                    photo_url = _cand
+                                    break
+                    # 5. JSON в script-тегах карточки (React hydration data)
+                    if not photo_url:
+                        for script_el in card.find_all("script"):
+                            sc = script_el.string or ""
+                            _sm = re.search(
+                                r'https?://(?:s\.auto|static|st|storage|photo|img)\.drom\.ru/[^"\'\s\\]{10,}\.(?:jpg|jpeg|webp|png)',
+                                sc
+                            )
+                            if _sm:
+                                photo_url = _sm.group(0).replace("\\/", "/")
+                                break
 
                     if title and item_url:
                         price_int = parse_price(price) or 0
@@ -4098,6 +4122,31 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                 print(f"  [Авито m.] {url} стр.{p}: {e}")
         return []
 
+    def _try_cffi_web(p: int) -> list[dict]:
+        """curl_cffi Chrome impersonation — обходит TLS fingerprinting Авито без прокси."""
+        try:
+            from curl_cffi import requests as _cffi
+            _brand_path = f"/{brand}" if brand and brand != "any" else ""
+            url = f"https://www.avito.ru/{slug}/avtomobili{_brand_path}"
+            params: dict = {"seller_type": "1"}
+            if p > 1:
+                params["p"] = p
+            if price_min > 0:
+                params["pmin"] = price_min
+            if price_max < 99_000_000:
+                params["pmax"] = price_max
+            r = _cffi.get(url, params=params, impersonate="chrome124", timeout=18, headers={
+                "Accept": "text/html,application/xhtml+xml,*/*;q=0.9",
+                "Accept-Language": "ru-RU,ru;q=0.9",
+                "Referer": "https://www.avito.ru/",
+            })
+            print(f"  [Авито cffi] стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
+            if r.status_code == 200 and ('"urlPath"' in r.text or 'data-marker="item"' in r.text or '__NEXT_DATA__' in r.text):
+                return _parse_avito_html(r.text, slug, today)
+        except Exception as e:
+            print(f"  [Авито cffi] стр.{p}: {str(e)[:80]}")
+        return []
+
     def _try_cs_web(p: int) -> list[dict]:
         """cloudscraper + Android UA — обходит JS-challenge без headless-браузера."""
         if not cs_session:
@@ -4967,7 +5016,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         # Резервные методы: мобильный сайт, RSS, Googlebot UA — если часть IP забанена.
         all_methods = [_try_web_html, _try_avito_lite, _try_avito_rss, _try_googlebot_ua, _try_avito_public_api]
     else:
-        all_methods = [_try_scraperapi_fast, _try_free_proxies, _try_yandex_snippets, _try_curl_cffi, _try_cs_web, _try_mobile_site, _try_web_html, _try_avito_public_api, _try_avito_rss, _try_googlebot_ua, _try_avito_lite, _try_scraperapi, _try_avito_json_api]
+        all_methods = [_try_scraperapi_fast, _try_free_proxies, _try_yandex_snippets, _try_cffi_web, _try_curl_cffi, _try_cs_web, _try_mobile_site, _try_web_html, _try_avito_public_api, _try_avito_rss, _try_googlebot_ua, _try_avito_lite, _try_scraperapi, _try_avito_json_api]
     # Список задач. С прокси — 12 страниц десктоп + 4 страницы мобайл + RSS + Googlebot.
     if AVITO_PROXIES:
         tasks = (
@@ -6435,7 +6484,7 @@ async def cmd_settings(msg: Message, state: FSMContext):
     await state.set_state(Setup.category)
 
 
-ALL_SOURCES = ["drom", "autoru", "avito", "vk", "tg"]
+ALL_SOURCES = ["drom", "autoru", "avito", "kolesa", "vk", "tg"]
 SOURCE_NAMES = {
     "drom":   "🔵 Дром",
     "autoru": "🟠 Auto.ru",
@@ -7709,6 +7758,7 @@ async def do_search_for_user(uid: int, reply_to):
         "drom":   lambda: scrape_drom(region, pages=8, price_min=pmin, price_max=pmax),
         "autoru": lambda: scrape_autoru(region, pages=5, price_min=pmin, price_max=pmax),
         "avito":  lambda: scrape_avito(region, pages=8, price_min=pmin, price_max=pmax, sort_by_date=False, brand=(brand if brand and brand != "any" else "")),
+        "kolesa": lambda: scrape_kolesa(region, pages=5, price_min=pmin, price_max=pmax),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
         "tg":     lambda: scrape_tg_channels(region, pmin, pmax),
     }
