@@ -6643,6 +6643,22 @@ async def send_batch(chat_id: int, uid: int, offset: int):
 
     async def _send_item(item: dict):
         url = item.get("url", "")
+        # Если нет описания — быстро догружаем со страницы
+        if not item.get("description") and url:
+            try:
+                loop_s = asyncio.get_event_loop()
+                details = await asyncio.wait_for(
+                    loop_s.run_in_executor(None, _fetch_and_check, url, item.get("source", "")),
+                    timeout=6
+                )
+                if details is None:
+                    return  # продано — пропускаем
+                if details.get("description"):
+                    item["description"] = details["description"]
+                if details.get("_photo_url") and not item.get("_photo_url"):
+                    item["_photo_url"] = details["_photo_url"]
+            except Exception:
+                pass
         sid = url_to_id(url)
         days = item.get("_days_on_site", 0)
         _date_known = item.get("_date_known", False) or item.get("date", "") == str(datetime.date.today())
@@ -6871,9 +6887,9 @@ async def do_search_for_user(uid: int, reply_to):
     loop = asyncio.get_event_loop()
 
     scraper_map = {
-        "drom":   lambda: scrape_drom(region, pages=15, price_min=pmin, price_max=pmax),
-        "autoru": lambda: scrape_autoru(region, pages=12, price_min=pmin, price_max=pmax),
-        "avito":  lambda: scrape_avito(region, pages=10, price_min=pmin, price_max=pmax, sort_by_date=False, brand=(brand if brand and brand != "any" else "")),
+        "drom":   lambda: scrape_drom(region, pages=5, price_min=pmin, price_max=pmax),
+        "autoru": lambda: scrape_autoru(region, pages=5, price_min=pmin, price_max=pmax),
+        "avito":  lambda: scrape_avito(region, pages=5, price_min=pmin, price_max=pmax, sort_by_date=False, brand=(brand if brand and brand != "any" else "")),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
         "tg":     lambda: scrape_tg_channels(region, pmin, pmax),
     }
@@ -7241,22 +7257,41 @@ async def do_search_for_user(uid: int, reply_to):
         )
         return
 
-    # Предзагружаем фото+описание для первых 5 объявлений (быстрее старт)
-    first_batch = suitable[:5]
-    sem_pre = asyncio.Semaphore(5)
-    async def _pre(it):
+    # Проверяем первые 15 объявлений: убираем проданные, загружаем фото+описание
+    check_batch = suitable[:15]
+    rest_batch = suitable[15:]
+    loop_pre = asyncio.get_event_loop()
+    sem_pre = asyncio.Semaphore(8)
+
+    async def _check_item(it: dict) -> dict | None:
+        """Возвращает None если объявление снято/продано, иначе обогащённый item."""
         async with sem_pre:
             try:
-                await asyncio.wait_for(_ensure_photo(it), timeout=8)
+                details = await asyncio.wait_for(
+                    loop_pre.run_in_executor(None, _fetch_and_check, it["url"], it.get("source", "")),
+                    timeout=8
+                )
+                if details is None:
+                    return None  # снято с продажи
+                it["_enriched"] = True
+                if details.get("_photo_url"):
+                    it["_photo_url"] = details["_photo_url"]
+                if details.get("description") and not it.get("description"):
+                    it["description"] = details["description"]
+                return it
             except Exception:
-                pass
-    try:
-        await asyncio.wait_for(
-            asyncio.gather(*[_pre(it) for it in first_batch]),
-            timeout=15  # максимум 15 сек на предзагрузку
-        )
-    except asyncio.TimeoutError:
-        pass
+                return it  # при ошибке сети — оставляем объявление
+
+    checked = await asyncio.wait_for(
+        asyncio.gather(*[_check_item(it) for it in check_batch]),
+        timeout=20
+    ) if check_batch else []
+
+    active = [it for it in checked if it is not None]
+    sold_count = len(check_batch) - len(active)
+    if sold_count:
+        print(f"  [фильтр] убрано {sold_count} проданных объявлений из первых {len(check_batch)}")
+    suitable = active + rest_batch
 
     # После загрузки цен — выкидываем только те, у кого цена ИЗВЕСТНА и вышла за бюджет.
     # Объявления без цены (_price_int=0) — оставляем: пользователь откроет ссылку и проверит.
