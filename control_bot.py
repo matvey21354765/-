@@ -5384,8 +5384,8 @@ async def cmd_global_search(msg: Message):
 
     # Запускаем все источники + TG-каналы параллельно
     scraper_map = {
-        "drom":   lambda: scrape_drom(region, pages=8, price_min=pmin, price_max=pmax),
-        "autoru": lambda: scrape_autoru(region, pages=4, price_min=pmin, price_max=pmax),
+        "drom":   lambda: scrape_drom(region, pages=15, price_min=pmin, price_max=pmax),
+        "autoru": lambda: scrape_autoru(region, pages=8, price_min=pmin, price_max=pmax),
         "avito":  lambda: scrape_avito(region, pages=10, price_min=pmin, price_max=pmax, sort_by_date=False),
     }
     tg_task = loop.run_in_executor(None, lambda: scrape_tg_channels(region, pmin, pmax))
@@ -6210,7 +6210,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
     #    Мусорные объявления (пробег ~1 000 000 км) уводим в конец.
     candidates: list[dict] = []
     cursor = offset
-    while len(candidates) < 14 and cursor < total and cursor < offset + 60:
+    while len(candidates) < 28 and cursor < total and cursor < offset + 120:
         it = items[cursor]
         cursor += 1
         p = it.get("_price_int") or parse_price(it.get("price", ""))
@@ -6221,10 +6221,10 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         candidates.append(it)
 
     # 2. Дозагружаем фото/описание только для отобранных кандидатов
-    #    (макс. 12), с низкой параллельностью.
-    await asyncio.gather(*[_prefetch(it) for it in candidates[:12]])
+    #    (макс. 20), с низкой параллельностью.
+    await asyncio.gather(*[_prefetch(it) for it in candidates[:20]])
 
-    batch = candidates[:12]
+    batch = candidates[:20]
 
     # Пересчитываем рыночное сравнение после загрузки цен и сортируем СТРОГО по
     # выгоде: максимальная скидка от рынка. Дата (_days_on_site) НЕ участвует в
@@ -6237,7 +6237,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         -x.get("_hot_score", 0),
         x.get("_price_int", 999_999_999),
     ))
-    batch = batch[:10]
+    batch = batch[:20]
     for item in batch:
         await _send_item(item)
         await asyncio.sleep(0.05)
@@ -6296,8 +6296,8 @@ async def do_search_for_user(uid: int, reply_to):
     loop = asyncio.get_event_loop()
 
     scraper_map = {
-        "drom":   lambda: scrape_drom(region, pages=8, price_min=pmin, price_max=pmax),
-        "autoru": lambda: scrape_autoru(region, pages=4, price_min=pmin, price_max=pmax),
+        "drom":   lambda: scrape_drom(region, pages=15, price_min=pmin, price_max=pmax),
+        "autoru": lambda: scrape_autoru(region, pages=8, price_min=pmin, price_max=pmax),
         "avito":  lambda: scrape_avito(region, pages=10, price_min=pmin, price_max=pmax, sort_by_date=False, brand=(brand if brand and brand != "any" else "")),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
         "tg":     lambda: scrape_tg_channels(region, pmin, pmax),
