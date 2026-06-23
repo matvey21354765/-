@@ -5193,7 +5193,7 @@ def _match_brand(title: str, brand_key: str) -> bool:
 _MOTO_KEYWORDS = [
     "скутер", "мотоцикл", "мопед", "квадроцикл", "питбайк", "мотобайк",
     "scooter", "moto", "motorcycle", "atv", "квадро", "enduro", "эндуро",
-    "питбайк", "мотик", "байк", "vespa", "yamaha ybr", "honda cbr",
+    "питбайк", "мотик", "vespa", "yamaha ybr", "honda cbr",
     "kawasaki", "suzuki gsx", "yamaha r1", "yamaha r6", "ktm",
     "2-колесный", "двухколесный", "снегоход", "гидроцикл",
     "кубов", "куб.см", "cc ",
@@ -5228,7 +5228,7 @@ def _filter_by_category(items: list[dict], category: str, brand: str) -> list[di
     elif category == "foreign":
         items = [it for it in items if not any(k in it.get("title", "").lower() for k in DOMESTIC_BRANDS)]
 
-    if brand:
+    if brand and brand != "any":
         items = [it for it in items if _match_brand(it.get("title", ""), brand)]
 
     return items
@@ -6877,12 +6877,23 @@ async def do_search_for_user(uid: int, reply_to):
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
         "tg":     lambda: scrape_tg_channels(region, pmin, pmax),
     }
-    tasks = [loop.run_in_executor(None, scraper_map[src]) for src in enabled_sources if src in scraper_map]
-    try:
-        results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=70)
-    except asyncio.TimeoutError:
-        results = [[] for _ in tasks]
+    futures = [loop.run_in_executor(None, scraper_map[src]) for src in enabled_sources if src in scraper_map]
+    done, pending = await asyncio.wait(futures, timeout=70)
+    if pending:
+        for f in pending:
+            f.cancel()
         await reply_to.answer("⏱ Поиск занял слишком долго, показываю что успели найти...")
+    tasks = futures
+    results = []
+    for f in futures:
+        if f in done:
+            try:
+                results.append(f.result())
+            except Exception as e:
+                print(f"  [скрапер] ошибка: {e}")
+                results.append([])
+        else:
+            results.append([])
 
     items = []
     stat_parts = []
@@ -7084,7 +7095,7 @@ async def do_search_for_user(uid: int, reply_to):
                     await asyncio.wait_for(loop2.run_in_executor(None, _fetch_price_sync, it), timeout=7)
                 except Exception:
                     pass
-        await asyncio.gather(*[_fetch_price(it) for it in no_price[:30]])
+        await asyncio.gather(*[_fetch_price(it) for it in no_price[:5]])
 
     # Дополняем рыночными данными из Дрома: Дром работает с Railway IP без блокировок
     # и содержит те же машины с ценами. Даже если Авито-объявление без цены — медиана
