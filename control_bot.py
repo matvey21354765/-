@@ -7860,10 +7860,10 @@ async def do_search_for_user(uid: int, reply_to):
     suitable = _filter_by_category(suitable, category, brand)
     print(f"  [фильтр] после category({category}/{brand}): {len(suitable)}")
 
-    # Если после фильтра seen осталось мало (<25), но всего объявлений много —
+    # Если после фильтра seen осталось мало (<40), но всего объявлений много —
     # добавляем ранее просмотренные в конец, чтобы пользователь видел полный список.
     # Свежие (непросмотренные) идут первыми, затем уже показанные.
-    MIN_RESULTS = 25
+    MIN_RESULTS = 40
     if len(suitable) < MIN_RESULTS:
         seen_items = [
             i for i in items
@@ -8042,15 +8042,18 @@ async def do_search_for_user(uid: int, reply_to):
         source=",".join(enabled_sources), results=len(suitable),
     )
     _below_cnt = sum(1 for i in suitable if i.get("_savings_pct", 0) > 0)
+    _fresh_cnt = sum(1 for i in suitable if not i.get("_already_seen"))
+    _seen_cnt = len(suitable) - _fresh_cnt
+    _seen_note = f"\n♻️ Из них {_seen_cnt} показывал раньше — они в конце списка." if _seen_cnt else ""
     if _below_cnt:
         await reply_to.answer(
             f"✅ Найдено {len(suitable)} объявлений!\n"
-            f"🟢 Из них {_below_cnt} НИЖЕ РЫНКА — показываю их первыми, затем по рыночной цене."
+            f"🟢 Из них {_below_cnt} НИЖЕ РЫНКА — показываю их первыми, затем по рыночной цене.{_seen_note}"
         )
     else:
         await reply_to.answer(
             f"✅ Найдено {len(suitable)} объявлений!\n"
-            f"📊 Ниже рынка сейчас нет — показываю по рыночной цене (от дешёвых к дорогим)."
+            f"📊 Ниже рынка сейчас нет — показываю по рыночной цене (от дешёвых к дорогим).{_seen_note}"
         )
     await send_batch(reply_to.chat.id, uid, 0)
 
