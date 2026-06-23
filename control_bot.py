@@ -1165,6 +1165,34 @@ def _tg_parse_price(text: str) -> int:
     return 0
 
 
+_SOCIAL_SALE_KEYWORDS = ["продам", "продаю", "продаётся", "продается", "куплю", "в продаже", "выставил на продажу"]
+_SOCIAL_CAR_IDENTIFIERS = [
+    "авто", "автомобил", "машин", "пробег", "двигател", "кузов", "тыс.км", "тыс км",
+    "toyota", "honda", "kia", "hyundai", "nissan", "mazda", "bmw", "audi", "mercedes",
+    "lada", "ваз", "vaz", "haval", "geely", "chery", "skoda", "volkswagen", "vw",
+    "renault", "peugeot", "ford", "opel", "chevrolet", "mitsubishi", "subaru",
+    "lexus", "infiniti", "volvo", "land rover", "jeep", "suzuki", "datsun",
+    "changan", "exeed", "omoda", "tank", "jaecoo", "byd", "lixiang",
+]
+_SOCIAL_REJECT_KEYWORDS = [
+    "квартир", "комнат", "сдаётся", "сдается", "сдам", "аренд", "съём", "съем",
+    "перевозк", "пассажирск", "грузоперевозк", "рейс", "маршрут",
+    "лайфхак", "новост", "зафиксировал", "камер зафиксир", "нарушени",
+    "штраф", "гибдд фиксир", "корги", "собак", "животн",
+    "реклам", "подпишись", "заработ", "казино", "ставк",
+    "пресс-релиз", "подписчик",
+]
+
+def _is_car_sale_social(text: str) -> bool:
+    """Возвращает True только если текст — объявление о продаже/покупке авто (для VK/TG)."""
+    tl = text.lower()
+    if any(rk in tl for rk in _SOCIAL_REJECT_KEYWORDS):
+        return False
+    has_sale = any(sk in tl for sk in _SOCIAL_SALE_KEYWORDS)
+    has_car = any(ck in tl for ck in _SOCIAL_CAR_IDENTIFIERS)
+    return has_sale and has_car
+
+
 def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict]:
     """
     Ищет объявления о продаже авто в Telegram-каналах города.
@@ -1331,10 +1359,11 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
                 text = text_el.get_text(" ", strip=True)
                 if len(text) < 20:
                     continue
-                keywords = ["авто", "машин", "продам", "продаю", "авт.", "автомобил", "кузов", "двигател", "продается", "пробег", "куплю", "срочно", "торг", "ниже рынка", "лада", "toyota", "honda", "kia", "hyundai", "nissan", "mazda", "bmw", "audi", "mercedes", "haval", "geely", "chery", "vaz", "ваз"]
                 _below_market_kw = ["срочно", "торг", "ниже рынка", "дешево", "срочная продажа", "перекупам", "ниже рыночной", "торгуюсь", "уступлю"]
                 text_lower = text.lower()
-                if not any(k in text_lower for k in keywords):
+                if not _is_car_sale_social(text):
+                    continue
+                if _is_moto(text[:200]):
                     continue
                 # Повышаем score для объявлений ниже рынка
                 _is_below = any(k in text_lower for k in _below_market_kw)
@@ -1526,6 +1555,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
     )
     _vk_year_re = re.compile(r"\b(19[5-9]\d|20[012]\d)\b")
 
+
     def _parse_price(text: str) -> int:
         # Сначала ищем с явным символом валюты
         for m in _vk_price_re.finditer(text):
@@ -1583,20 +1613,13 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                     timeout=8,
                 )
                 items = r.json().get("response", {}).get("items", [])
-                _CAR_KEYWORDS = ["продам", "продаю", "продаётся", "авто", "автомобил", "машин",
-                                  "toyota", "honda", "kia", "hyundai", "nissan", "mazda", "bmw",
-                                  "audi", "mercedes", "lada", "vaz", "haval", "geely", "chery",
-                                  "пробег", "двигател", "кузов", "руль"]
-                _SPAM_KEYWORDS = ["реклама", "закажи", "вступай", "подпишись", "канал", "100% заработок",
-                                  "ставки", "казино", "заработ", "нужна реклама", "подписчик"]
                 for post in items:
                     text = post.get("text", "")
                     if len(text) < 30:
                         continue
-                    text_low = text.lower()
-                    if any(sp in text_low for sp in _SPAM_KEYWORDS):
+                    if not _is_car_sale_social(text):
                         continue
-                    if not any(k in text_low for k in _CAR_KEYWORDS):
+                    if _is_moto(text[:200]):
                         continue
                     price = _parse_price(text)
                     if price > 0 and not (price_min <= price <= price_max):
@@ -1659,13 +1682,9 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                     seen_urls.add(href)
                     parent = a.find_parent()
                     text = parent.get_text(" ", strip=True) if parent else ""
-                    text_low = text.lower()
-                    _VK_SPAM = ["реклама", "подпишись", "заработ", "ставки", "казино",
-                                "нужна реклама", "подписчик", "услуги"]
-                    _VK_CAR = ["продам", "продаю", "продаётся", "авто", "машин", "пробег", "двигател"]
-                    if any(sp in text_low for sp in _VK_SPAM):
+                    if not _is_car_sale_social(text):
                         continue
-                    if not any(k in text_low for k in _VK_CAR):
+                    if _is_moto(text[:200]):
                         continue
                     price = _parse_price(text)
                     if price > 0 and not (price_min <= price <= price_max):
@@ -1705,8 +1724,9 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                 text = text_el.get_text(" ", strip=True)
                 if len(text) < 20:
                     continue
-                keywords = ["авто", "машин", "продам", "продаю", "автомобил"]
-                if not any(k in text.lower() for k in keywords):
+                if not _is_car_sale_social(text):
+                    continue
+                if _is_moto(text[:200]):
                     continue
                 price = _parse_price(text)
                 if price > 0 and not (price_min <= price <= price_max):
