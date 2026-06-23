@@ -2222,15 +2222,25 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
             price_str = f"{price_int:,} ₽".replace(",", " ")
 
         # РЕАЛЬНОЕ описание объявления продавца из JSON поисковой выдачи.
-        _desc_real = (
-            it.get("description") or
-            it.get("descriptionFull") or
-            it.get("shortDescription") or
-            (it.get("item", {}).get("description") if isinstance(it.get("item"), dict) else "") or ""
-        )
-        if isinstance(_desc_real, str):
-            _desc_real = _desc_real.strip()
-        else:
+        def _find_desc_in_obj(obj, depth=0) -> str:
+            """Рекурсивно ищет описание в любом месте JSON-объекта."""
+            if depth > 6 or not isinstance(obj, dict):
+                return ""
+            for k in ("description", "descriptionFull", "shortDescription",
+                      "text", "body", "content", "fullDescription", "advertDescription"):
+                v = obj.get(k)
+                if isinstance(v, str) and len(v) > 30:
+                    return v.strip()
+            for k in ("item", "advert", "data", "offer"):
+                v = obj.get(k)
+                if isinstance(v, dict):
+                    r = _find_desc_in_obj(v, depth + 1)
+                    if r:
+                        return r
+            return ""
+
+        _desc_real = _find_desc_in_obj(it)
+        if not _desc_real:
             _desc_real = ""
         # _desc_synthetic=True означает, что описание собрано нами из заголовка/
         # параметров, а НЕ взято из текста объявления. В этом случае _ensure_photo
@@ -2248,7 +2258,7 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
                     if pname and pval and str(pval) not in ("0", ""):
                         desc_parts.append(f"{pname}: {pval}")
             if desc_parts:
-                _desc_raw = " · ".join(desc_parts[:6])
+                _desc_raw = " · ".join(desc_parts[:8])
                 _desc_synthetic = True
         # Гарантия: если описания всё ещё нет — синтезируем из заголовка,
         # чтобы карточка никогда не была пустой (год · объём · КПП · пробег).
@@ -3289,7 +3299,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                 "Connection": "keep-alive",
             }
             try:
-                r = session.get(url, params=params, headers=_hdrs, timeout=25, proxies=_avito_proxies())
+                r = session.get(url, params=params, headers=_hdrs, timeout=15, proxies=_avito_proxies())
                 print(f"  [Авито webHTML] стр.{p} попытка {attempt+1}: HTTP {r.status_code}, {len(r.text):,}б")
                 if r.status_code == 200 and ('"urlPath"' in r.text or 'data-marker="item"' in r.text):
                     res = _parse_avito_html(r.text, slug, today)
@@ -3591,7 +3601,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             }
             for url in urls_to_try:
                 try:
-                    r = _rq.get(url, params=params, headers=hdrs, timeout=20, proxies=_avito_proxies(), allow_redirects=True)
+                    r = _rq.get(url, params=params, headers=hdrs, timeout=12, proxies=_avito_proxies(), allow_redirects=True)
                     print(f"  [Авито lite] {url} стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
                     if r.status_code == 200 and ('"urlPath"' in r.text or '__NEXT_DATA__' in r.text or 'data-marker="item"' in r.text):
                         result = _parse_avito_html(r.text, slug, today)
@@ -6169,8 +6179,8 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         if not item.get("description") and item.get("title"):
             item["description"] = _avito_desc_from_title(item["title"], item.get("mileage", 0))
         if item.get("description"):
-            _desc = item["description"][:180].strip()
-            if len(item["description"]) > 180:
+            _desc = item["description"][:350].strip()
+            if len(item["description"]) > 350:
                 _desc += "…"
             caption += f"\n\n📝 {_desc}"
 
@@ -6251,21 +6261,18 @@ async def send_batch(chat_id: int, uid: int, offset: int):
     _pmin = s.get("price_min", 0)
     _pmax = s.get("price_max", 99_000_000)
     # Низкая параллельность + увеличенный таймаут: Авито агрессивно отдаёт 429
-    # при веерных параллельных запросах со страниц объявлений. 3 одновременных
-    # запроса с 12-сек таймаутом надёжнее, чем 10 по 6 сек — и мы дозагружаем
-    # ТОЛЬКО те ~10 карточек, что реально показываем, а не все подряд.
-    sem = asyncio.Semaphore(3)
+    # Увеличена параллельность: 6 одновременных запросов с 6-сек таймаутом
+    # вместо 3×12 — итоговое время ожидания вдвое меньше.
+    sem = asyncio.Semaphore(6)
 
     async def _prefetch(it):
-        # Если фото уже есть И описание реальное (не синтезированное из заголовка) —
-        # страницу объявления не трогаем. Иначе дозагружаем недостающее
-        # (настоящее описание и/или фото) через _ensure_photo.
-        _real_desc = bool(it.get("description")) and not it.get("_desc_synthetic")
-        if it.get("_photo_url") and _real_desc:
+        # Если фото уже есть — страницу объявления не грузим для скорости.
+        # Описание синтезируем из заголовка если реальное не пришло из парсера.
+        if it.get("_photo_url"):
             return
         async with sem:
             try:
-                await asyncio.wait_for(_ensure_photo(it), timeout=12)
+                await asyncio.wait_for(_ensure_photo(it), timeout=6)
             except Exception:
                 pass
 
