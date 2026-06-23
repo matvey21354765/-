@@ -5039,8 +5039,11 @@ async def _is_subscribed(user_id: int) -> bool:
     try:
         member = await bot.get_chat_member(REQUIRED_CHANNEL, user_id)
         return member.status not in ("left", "kicked", "banned")
-    except Exception:
-        return True  # если не удалось проверить — пропускаем
+    except Exception as e:
+        print(f"  [подписка] ошибка проверки {user_id}: {e}")
+        # Если бот не админ канала — get_chat_member вернёт ошибку.
+        # В этом случае НЕ пропускаем (False), чтобы не обходить проверку.
+        return False
 
 def _subscribe_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -5345,7 +5348,26 @@ async def cmd_start(msg: Message, state: FSMContext):
     _get_or_create_referral(msg.from_user.id)
     s = load_settings(msg.from_user.id)
     name = msg.from_user.first_name or "друг"
-    if s.get("region"):
+    is_new_user = not s.get("region")
+
+    if is_new_user:
+        # Новый пользователь — красивое приветствие
+        await msg.answer(
+            f"👋 *Добро пожаловать в PerekupDrive, {name}!*\n\n"
+            f"Ты получил *7 дней полного доступа*.\n"
+            f"Всё бесплатно, без ограничений.\n\n"
+            f"🎯 *Что сделать прямо сейчас:*\n\n"
+            f"1️⃣ Настроить поиск по всем площадкам (Авито, Дром, Авто.ру, ВК, Telegram) под свои параметры.\n\n"
+            f"2️⃣ Сохранить интересные авто в Избранное.\n\n"
+            f"3️⃣ Включить поискового агента — бот сам пришлёт новые объявления.\n\n"
+            f"👇 Начнём с настройки поиска:",
+            parse_mode="Markdown",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        await msg.answer("🔍 Шаг 1/4: Что ищем?", reply_markup=category_keyboard())
+        await state.set_state(Setup.category)
+    else:
+        # Старый пользователь — быстрое приветствие с параметрами
         region_name = REGIONS.get(s["region"], s["region"])
         pmin = s.get("price_min", 0)
         pmax = s.get("price_max", 99_000_000)
@@ -5360,18 +5382,6 @@ async def cmd_start(msg: Message, state: FSMContext):
             parse_mode="Markdown",
             reply_markup=MAIN_KEYBOARD,
         )
-    else:
-        await msg.answer(
-            f"👋 Привет, {name}! Я *PerekupDrive* — бот для поиска авто ниже рыночной цены.\n\n"
-            f"🔍 Ищу объявления от частных лиц на Авито\n"
-            f"📊 Сравниваю цены с рынком и нахожу выгодные\n"
-            f"🔔 Могу присылать уведомления когда появится новое выгодное авто\n\n"
-            f"Шаг 1/4: что ищем? 👇",
-            parse_mode="Markdown",
-            reply_markup=MAIN_KEYBOARD,
-        )
-        await msg.answer("🔍 Шаг 1/4: Что ищем?", reply_markup=category_keyboard())
-        await state.set_state(Setup.category)
 
 
 @dp.message(Command("stats"))
