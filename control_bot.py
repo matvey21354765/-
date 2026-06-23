@@ -5250,8 +5250,17 @@ async def cmd_start(msg: Message, state: FSMContext):
                 if inviter_uid != msg.from_user.id:
                     _record_referral(msg.from_user.id, inviter_uid)
                     await msg.answer(
-                        "🎁 Тебя пригласил друг! Добро пожаловать в PerekupDrive!\n"
-                        "Ищи авто ниже рынка и успей первым 🚗💨"
+                        "👋 *Добро пожаловать в PerekupDrive!*\n\n"
+                        "Ты получил *7 дней полного доступа*.\n"
+                        "Всё бесплатно, без ограничений.\n\n"
+                        "🎯 *Что сделать прямо сейчас:*\n\n"
+                        "1️⃣ Настроить поиск по всем площадкам (Авито, Дром, Авто.ру, ВК, Telegram) под свои параметры.\n\n"
+                        "2️⃣ Сохранить 3 интересных авто в Избранное.\n\n"
+                        "3️⃣ Включить поискового агента — бот сам пришлёт новые объявления.",
+                        parse_mode="Markdown",
+                        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                            [InlineKeyboardButton(text="▶️ Начать поиск", callback_data="open_settings")],
+                        ]),
                     )
             except Exception:
                 pass
