@@ -7973,7 +7973,7 @@ async def main():
     loop.create_task(_warmup_cache())
     print("  [прогрев] фоновый прогрев кэша Авито запущен")
 
-    await bot.set_my_commands([
+    public_commands = [
         BotCommand(command="start",     description="🚀 Главное меню"),
         BotCommand(command="search",    description="🔍 Найти авто"),
         BotCommand(command="new",       description="🆕 Новые сегодня"),
@@ -7981,8 +7981,20 @@ async def main():
         BotCommand(command="invite",    description="🤝 Пригласить друга"),
         BotCommand(command="settings",  description="⚙️ Настройки"),
         BotCommand(command="help",      description="❓ Помощь"),
+    ]
+    admin_commands = public_commands + [
         BotCommand(command="stats",     description="📊 Статистика"),
-    ])
+        BotCommand(command="dashboard", description="📈 Дашборд аналитики"),
+    ]
+    # Обычным пользователям — только публичные команды
+    await bot.set_my_commands(public_commands)
+    # Администраторам — расширенный список (виден только им)
+    from aiogram.types import BotCommandScopeChat
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=admin_id))
+        except Exception:
+            pass
     await dp.start_polling(bot)
 
 
