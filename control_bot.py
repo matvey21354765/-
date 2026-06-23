@@ -4837,10 +4837,39 @@ def _match_brand(title: str, brand_key: str) -> bool:
     return any(a in tl for a in aliases)
 
 
+_MOTO_KEYWORDS = [
+    "скутер", "мотоцикл", "мопед", "квадроцикл", "питбайк", "мотобайк",
+    "scooter", "moto", "motorcycle", "atv", "квадро", "enduro", "эндуро",
+    "питбайк", "мотик", "байк", "vespa", "yamaha ybr", "honda cbr",
+    "kawasaki", "suzuki gsx", "yamaha r1", "yamaha r6", "ktm",
+    "2-колесный", "двухколесный", "снегоход", "гидроцикл",
+    "кубов", "куб.см", "cc ",
+]
+
+def _is_moto(title: str) -> bool:
+    """Возвращает True если объявление о мото/скутере а не об автомобиле."""
+    tl = title.lower()
+    # Исключаем только если НЕТ явных маркеров автомобиля
+    car_markers = ["автомобил", "легковой", "внедорожник", "кроссовер", "седан",
+                   "хэтчбек", "универсал", "минивэн", "пикап", "кабриолет",
+                   "лада", "vaz", "ваз", "газ", "уаз",
+                   "toyota", "honda accord", "honda cr", "honda hr", "honda fit",
+                   "kia", "hyundai", "nissan", "mazda", "bmw", "audi",
+                   "mercedes", "volkswagen", "skoda", "opel", "ford", "renault",
+                   "haval", "geely", "chery", "changan", "lixiang", "exeed"]
+    has_car = any(k in tl for k in car_markers)
+    if has_car:
+        return False
+    return any(k in tl for k in _MOTO_KEYWORDS)
+
+
 def _filter_by_category(items: list[dict], category: str, brand: str) -> list[dict]:
-    """Фильтрует список объявлений по категории и марке."""
+    """Фильтрует список объявлений по категории и марке. Всегда исключает мото/скутеры."""
+    # Всегда убираем скутеры/мотоциклы из поиска авто
+    items = [it for it in items if not _is_moto(it.get("title", ""))]
+
     if not category or category == "all":
-        pass  # без фильтра
+        pass  # без фильтра по марке
     elif category == "domestic":
         items = [it for it in items if any(k in it.get("title", "").lower() for k in DOMESTIC_BRANDS)]
     elif category == "foreign":
@@ -6480,14 +6509,26 @@ async def do_search_for_user(uid: int, reply_to):
     dealer_count = sum(1 for i in items if is_dealer(i))
     price_count = sum(1 for i in items if not is_dealer(i) and not in_price_range(i, pmin, pmax))
     print(f"  [поиск] всего={len(items)}, дилеров={dealer_count}, вне бюджета={price_count}")
-    # Дедупликация по URL
+    # Дедупликация по URL и по числовому ID (Авито повторяет объявления с разными параметрами)
     seen_u: set[str] = set()
+    seen_ids: set[str] = set()
     deduped: list[dict] = []
+    _id_re = re.compile(r'(\d{7,})')
     for i in items:
         u = i.get("url", "")
-        if u and u not in seen_u:
-            seen_u.add(u)
-            deduped.append(i)
+        if not u:
+            continue
+        # Извлекаем числовой ID из URL
+        _id_m = _id_re.search(u.split("?")[0])
+        _num_id = _id_m.group(1) if _id_m else ""
+        if u in seen_u:
+            continue
+        if _num_id and _num_id in seen_ids:
+            continue
+        seen_u.add(u)
+        if _num_id:
+            seen_ids.add(_num_id)
+        deduped.append(i)
     items = deduped
 
     # Для объявлений без _price_int — парсим из текстового поля price
@@ -6599,17 +6640,30 @@ async def do_search_for_user(uid: int, reply_to):
         and i["url"] not in skipped
         and i["url"] not in seen
     ]
-    # Фильтр по категории и марке
+    # Фильтр по категории и марке (также убирает скутеры/мото)
     suitable = _filter_by_category(suitable, category, brand)
     suitable = rank_by_market_price(suitable, ref_items=[i for i in items if i.get("_market_ref_only")])
-    # Сортировка: сначала ниже рынка (по убыванию скидки), затем по рыночной цене.
-    suitable.sort(key=lambda x: (
-        # 0 = ниже рынка, 1 = по рынку (цена есть), 2 = цена неизвестна
-        0 if x.get("_savings_pct", 0) > 0 else (1 if x.get("_price_int", 0) > 0 else 2),
-        -x.get("_savings_pct", 0),
-        -x.get("_hot_score", 0),
-        x.get("_price_int", 999_999_999),
-    ))
+    # Сортировка:
+    # 1. Сегодня + ниже рынка (самые свежие выгодные)
+    # 2. Любая дата + ниже рынка (по убыванию скидки)
+    # 3. По рыночной цене (любая дата)
+    # 4. Цена неизвестна
+    def _sort_key(x):
+        pct = x.get("_savings_pct", 0)
+        days = x.get("_days_on_site", 999)
+        is_today = days <= 1
+        below = pct > 0
+        price = x.get("_price_int", 999_999_999)
+        if below and is_today:
+            tier = 0   # сегодня ниже рынка — высший приоритет
+        elif below:
+            tier = 1   # ниже рынка но старше
+        elif price > 0:
+            tier = 2   # по рынку, цена известна
+        else:
+            tier = 3   # нет цены
+        return (tier, -pct, days, price)
+    suitable.sort(key=_sort_key)
 
     if not suitable and already_seen_count > 0:
         # auto-clear seen and retry
@@ -6626,7 +6680,9 @@ async def do_search_for_user(uid: int, reply_to):
         suitable = _filter_by_category(suitable, category, brand)
         suitable = rank_by_market_price(suitable, ref_items=[i for i in items if i.get("_market_ref_only")])
         suitable.sort(key=lambda x: (
-            0 if x.get("_savings_pct", 0) > 0 else 1,  # ниже рынка первыми
+            0 if (x.get("_savings_pct", 0) > 0 and x.get("_days_on_site", 999) <= 1) else
+            1 if x.get("_savings_pct", 0) > 0 else
+            (2 if x.get("_price_int", 0) > 0 else 3),  # ниже рынка первыми
             -x.get("_savings_pct", 0),
             -x.get("_hot_score", 0),
             x.get("_price_int", 999_999_999),
