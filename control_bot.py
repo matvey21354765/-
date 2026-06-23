@@ -5025,13 +5025,22 @@ dp = Dispatcher(storage=MemoryStorage())
 REQUIRED_CHANNEL = "@ekbdrivee"
 REQUIRED_CHANNEL_URL = "https://t.me/ekbdrivee"
 
+_SUBSCRIBE_MSG = (
+    "📢 *Для использования бота необходимо подписаться на наш канал!*\n\n"
+    "PerekupDrive — это сообщество перекупщиков и охотников за выгодными авто.\n\n"
+    "🔥 В канале:\n"
+    "• Свежие объявления ниже рынка\n"
+    "• Советы по покупке и проверке авто\n"
+    "• Уведомления по машинам которые только вышли на рынок\n\n"
+    "👇 Подпишись и нажми *«Я подписался»*"
+)
+
 async def _is_subscribed(user_id: int) -> bool:
-    """Возвращает True если пользователь подписан на обязательный канал."""
     try:
         member = await bot.get_chat_member(REQUIRED_CHANNEL, user_id)
         return member.status not in ("left", "kicked", "banned")
     except Exception:
-        return True  # если не удалось проверить — не блокируем
+        return True  # если не удалось проверить — пропускаем
 
 def _subscribe_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -5039,29 +5048,40 @@ def _subscribe_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="✅ Я подписался", callback_data="check_subscription")],
     ])
 
+from aiogram import BaseMiddleware
+from aiogram.types import TelegramObject, Update
+
+class SubscriptionMiddleware(BaseMiddleware):
+    """Блокирует любое взаимодействие с ботом если пользователь не подписан на канал."""
+    async def __call__(self, handler, event: TelegramObject, data: dict):
+        # Определяем user_id из любого типа апдейта
+        update: Update = data.get("event_update") or data.get("update")
+        user = None
+        if hasattr(event, "from_user"):
+            user = event.from_user
+        elif hasattr(event, "message") and event.message:
+            user = event.message.from_user
+
+        if user is None or user.id in ADMIN_IDS:
+            return await handler(event, data)
+
+        # Кнопку "Я подписался" всегда пропускаем
+        if hasattr(event, "data") and event.data == "check_subscription":
+            return await handler(event, data)
+
+        if not await _is_subscribed(user.id):
+            kb = _subscribe_keyboard()
+            if isinstance(event, Message):
+                await event.answer(_SUBSCRIBE_MSG, parse_mode="Markdown", reply_markup=kb)
+            elif isinstance(event, CallbackQuery):
+                await event.answer("Подпишись на канал!", show_alert=True)
+                await event.message.answer(_SUBSCRIBE_MSG, parse_mode="Markdown", reply_markup=kb)
+            return  # не передаём дальше
+
+        return await handler(event, data)
+
 async def _check_and_gate(msg_or_cb) -> bool:
-    """Проверяет подписку. Если не подписан — отправляет сообщение и возвращает False."""
-    if isinstance(msg_or_cb, Message):
-        uid = msg_or_cb.from_user.id
-        reply = msg_or_cb.answer
-    else:
-        uid = msg_or_cb.from_user.id
-        reply = msg_or_cb.message.answer
-    if uid in ADMIN_IDS:
-        return True
-    if not await _is_subscribed(uid):
-        await reply(
-            "📢 *Для использования бота необходимо подписаться на наш канал!*\n\n"
-            "PerekupDrive — это сообщество перекупщиков и охотников за выгодными авто.\n\n"
-            "🔥 В канале:\n"
-            "• Свежие объявления ниже рынка\n"
-            "• Советы по покупке и проверке авто\n"
-            "• Уведомления по машинам которые только вышли на рынок\n\n"
-            "👇 Подпишись и нажми *«Я подписался»*",
-            parse_mode="Markdown",
-            reply_markup=_subscribe_keyboard(),
-        )
-        return False
+    """Оставлен для совместимости, основная проверка теперь в middleware."""
     return True
 
 # URL-ID маппинг для кнопок
@@ -7841,7 +7861,8 @@ async def cmd_invite(msg: Message):
     share_text = "Нашёл бота который ищет авто ниже рынка на Авито, Дроме, Авто.ру, ВК и Telegram — попробуй!"
     await msg.answer(
         f"📲 *Пригласи друга в PerekupDrive*\n\n"
-        f"Поделись своей ссылкой — друг сразу получит доступ к боту.\n\n"
+        f"Сейчас идёт тестовый период — бот полностью бесплатен для всех.\n"
+        f"Поделись ссылкой — друг сразу получит доступ к боту.\n\n"
         f"👥 Приглашено: *{invited_count}* друзей\n\n"
         f"🔗 *Твоя ссылка:*\n{ref_link}",
         parse_mode="Markdown",
@@ -8021,8 +8042,12 @@ async def main():
             print(f"  [бот] username: @{BOT_USERNAME}")
         except Exception:
             BOT_USERNAME = "PerekupDriveBot"
+    # Глобальный middleware проверки подписки — блокирует все апдейты
+    dp.message.middleware(SubscriptionMiddleware())
+    dp.callback_query.middleware(SubscriptionMiddleware())
+
     print("✅ Авто-брокер бот запущен!")
-    print("  [ВЕРСИЯ] 2026-06-22-v17 :: DDG пауза 3-5с (стабильный обход 202) + таймауты расширены")
+    print("  [ВЕРСИЯ] 2026-06-22-v18 :: subscription middleware")
 
     # Логируем Railway IP (нужен для добавления в whitelist прокси)
     try:
