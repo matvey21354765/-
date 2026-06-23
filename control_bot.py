@@ -6356,8 +6356,8 @@ async def _ensure_photo(item: dict) -> None:
             )
             if og:
                 candidate = (og.group(1) or og.group(2) or "").strip()
-                if candidate and "avito" in candidate and not any(
-                    x in candidate.lower() for x in ("logo", "stub", "noimage", "placeholder", "icon")
+                if candidate and not any(
+                    x in candidate.lower() for x in ("logo", "stub", "noimage", "placeholder", "icon", "favicon", "/nophoto")
                 ):
                     photo = candidate
             # twitter:image как запасной вариант (на части моб. страниц нет og:image)
@@ -6369,8 +6369,8 @@ async def _ensure_photo(item: dict) -> None:
                 )
                 if tw:
                     candidate = (tw.group(1) or tw.group(2) or "").strip()
-                    if candidate and "avito" in candidate and not any(
-                        x in candidate.lower() for x in ("logo", "stub", "noimage", "placeholder", "icon")
+                    if candidate and not any(
+                        x in candidate.lower() for x in ("logo", "stub", "noimage", "placeholder", "icon", "favicon", "/nophoto")
                     ):
                         photo = candidate
 
@@ -6566,7 +6566,34 @@ async def _ensure_photo(item: dict) -> None:
                 # Playwright (_via_browser) убран — слишком медленный для 10+
                 # параллельных запросов. Оставлен только быстрый _direct.
                 photo, desc, price_int = _direct()
-            elif source in ("drom", "autoru"):
+            elif source == "autoru":
+                _autoru_hdr = dict(_HDR)
+                _autoru_hdr["Referer"] = "https://auto.ru/"
+                _autoru_hdr["Accept"] = "text/html,application/xhtml+xml,*/*;q=0.9"
+                # Пробуем через прокси (РФ IP) — Auto.ru блокирует зарубежные серверы
+                try:
+                    from curl_cffi import requests as _cffi
+                    r = _cffi.get(url, impersonate="chrome124", timeout=15,
+                                  headers=_autoru_hdr, proxies=_avito_proxies())
+                    if r.status_code == 200 and len(r.text) > 5000:
+                        p, d, pi = _extract_from_page(r.text)
+                        if p: photo = p
+                        if d: desc = d
+                        if pi: price_int = pi
+                except Exception:
+                    pass
+                if not photo and not desc:
+                    try:
+                        r = _req.get(url, timeout=10, headers=_autoru_hdr,
+                                     proxies=_avito_proxies())
+                        if r.status_code == 200:
+                            p, d, pi = _extract_from_page(r.text)
+                            if p: photo = p
+                            if d: desc = d
+                            if pi: price_int = pi
+                    except Exception:
+                        pass
+            elif source == "drom":
                 r = _req.get(url, timeout=10, headers=_HDR)
                 if r.status_code == 200:
                     p, d, pi = _extract_from_page(r.text)
