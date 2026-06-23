@@ -6877,7 +6877,7 @@ async def do_search_for_user(uid: int, reply_to):
             1 for i in items
             if i.get("source") == "avito" and not is_dealer(i)
             and in_price_range(i, pmin, pmax) and i.get("url")
-            and i["url"] not in skipped and i["url"] not in seen
+            and i["url"] not in skipped
         )
         if avito_now == 0:
             print(f"  [fallback] в бюджете {pmin}-{pmax}₽ на Авито пусто — добавляем Дром")
@@ -6903,27 +6903,33 @@ async def do_search_for_user(uid: int, reply_to):
     dealer_count = sum(1 for i in items if is_dealer(i))
     price_count = sum(1 for i in items if not is_dealer(i) and not in_price_range(i, pmin, pmax))
     print(f"  [поиск] всего={len(items)}, дилеров={dealer_count}, вне бюджета={price_count}")
-    # Дедупликация по URL и по числовому ID (Авито повторяет объявления с разными параметрами)
+    # Дедупликация по URL и по числовому ID в рамках одного домена
+    # (Авито повторяет объявления с разными параметрами, но ID уникален только внутри площадки)
     seen_u: set[str] = set()
-    seen_ids: set[str] = set()
+    seen_domain_ids: set[str] = set()
     deduped: list[dict] = []
     _id_re = re.compile(r'(\d{7,})')
+    _domain_re = re.compile(r'https?://(?:www\.)?([^/]+)')
     for i in items:
         u = i.get("url", "")
         if not u:
             continue
-        # Извлекаем числовой ID из URL
-        _id_m = _id_re.search(u.split("?")[0])
-        _num_id = _id_m.group(1) if _id_m else ""
         if u in seen_u:
             continue
-        if _num_id and _num_id in seen_ids:
+        # Извлекаем домен + числовой ID — дедупим только внутри одной площадки
+        _dm = _domain_re.match(u)
+        _domain = _dm.group(1) if _dm else ""
+        _id_m = _id_re.search(u.split("?")[0])
+        _num_id = _id_m.group(1) if _id_m else ""
+        _domain_id_key = f"{_domain}:{_num_id}" if _num_id else ""
+        if _domain_id_key and _domain_id_key in seen_domain_ids:
             continue
         seen_u.add(u)
-        if _num_id:
-            seen_ids.add(_num_id)
+        if _domain_id_key:
+            seen_domain_ids.add(_domain_id_key)
         deduped.append(i)
     items = deduped
+    print(f"  [поиск] после дедупликации: {len(items)} из исходных")
 
     # Для объявлений без _price_int — парсим из текстового поля price
     for it in items:
