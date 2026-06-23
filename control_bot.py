@@ -6034,7 +6034,7 @@ async def cmd_vk_tg_search(msg: Message):
         if in_price_range(i, pmin, pmax)
         and i.get("url")
         and i["url"] not in skipped
-        and i["url"] not in seen
+        # seen не фильтруем в поиске
     ]
     suitable = rank_by_market_price(suitable)
     suitable.sort(key=lambda x: (
@@ -7032,7 +7032,8 @@ async def do_search_for_user(uid: int, reply_to):
         and in_price_range(i, pmin, pmax)
         and i.get("url")
         and i["url"] not in skipped
-        and i["url"] not in seen
+        # seen не фильтруем — показываем всё, включая уже виденное.
+        # Скрытые вручную (skipped) не показываем.
     ]
     # Фильтр по категории и марке (также убирает скутеры/мото)
     suitable = _filter_by_category(suitable, category, brand)
@@ -7103,7 +7104,7 @@ async def do_search_for_user(uid: int, reply_to):
         price_range_items = [i for i in items if not is_dealer(i) and in_price_range(i, pmin, pmax) and i.get("url")]
         price_filtered_c = len(items) - len(price_range_items) - sum(1 for i in items if is_dealer(i))
         # Посмотрим сколько прошло бы без фильтра категории/марки
-        without_cat_filter = [i for i in price_range_items if i["url"] not in skipped and i["url"] not in seen]
+        without_cat_filter = [i for i in price_range_items if i["url"] not in skipped]
         with_cat_filter = _filter_by_category(list(without_cat_filter), category, brand)
 
         hint_parts = []
