@@ -7840,16 +7840,18 @@ async def cmd_invite(msg: Message):
     invited_count = len(entry.get("invited", []))
     bonus_days = entry.get("bonus_days", 0)
     ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{uid}"
+    share_text = "Нашёл бота который ищет авто ниже рынка на Авито, Дроме, Авто.ру, ВК и Telegram. Первые 7 дней бесплатно!"
     await msg.answer(
-        f"🎁 *Бонус за друзей*\n\n"
-        f"За каждого друга, который зарегистрируется по твоей ссылке, ты получишь +3 дня доступа к PerekupDrive.\n\n"
-        f"👥 Приглашено: {invited_count} друзей\n"
-        f"🎁 Бонус накоплен: +{bonus_days} дней\n\n"
-        f"📲 Твоя реф. ссылка:\n{ref_link}\n\n"
-        f"👆 Поделись ссылкой — и оба получите бонус!",
+        f"🤝 *Пригласи друга — получи бонус!*\n\n"
+        f"Сейчас идёт *тестовый период* — бот полностью бесплатен для всех.\n"
+        f"За каждого друга, который зайдёт по твоей ссылке, ты получишь *+3 дня* после окончания теста.\n\n"
+        f"👥 Приглашено: *{invited_count}* друзей\n"
+        f"🎁 Бонус накоплен: *+{bonus_days} дней*\n\n"
+        f"📲 *Твоя ссылка:*\n{ref_link}\n\n"
+        f"👆 Поделись — друг получит 7 дней бесплатного доступа, ты получишь бонус!",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📤 Поделиться ссылкой", url=f"https://t.me/share/url?url={ref_link}&text=Найди+авто+ниже+рынка!")],
+            [InlineKeyboardButton(text="📤 Поделиться ссылкой", url=f"https://t.me/share/url?url={ref_link}&text={share_text}")],
         ])
     )
 
