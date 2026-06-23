@@ -7029,6 +7029,7 @@ async def do_search_for_user(uid: int, reply_to):
         and i.get("url") and i["url"] in seen
     )
     print(f"  [поиск] items={len(items)}, seen={len(seen)}, skipped={len(skipped)}, already_seen={already_seen_count}")
+    _before = len(items)
     suitable = [
         i for i in items
         if not i.get("_market_ref_only")
@@ -7036,8 +7037,15 @@ async def do_search_for_user(uid: int, reply_to):
         and i.get("url")
         and i["url"] not in skipped
     ]
+    print(f"  [фильтр] после in_price_range: {len(suitable)}/{_before} (бюджет {pmin}-{pmax})")
+    # Для отладки: показываем какие цены НЕ прошли
+    _bad_price = [i for i in items if not i.get("_market_ref_only") and i.get("url") and i["url"] not in skipped and not in_price_range(i, pmin, pmax)]
+    if _bad_price:
+        _sample = [(i.get("title","")[:30], i.get("price",""), i.get("_price_int",0)) for i in _bad_price[:5]]
+        print(f"  [фильтр] вне бюджета примеры: {_sample}")
     # Фильтр по категории и марке (также убирает скутеры/мото)
     suitable = _filter_by_category(suitable, category, brand)
+    print(f"  [фильтр] после category({category}/{brand}): {len(suitable)}")
     suitable = rank_by_market_price(suitable, ref_items=[i for i in items if i.get("_market_ref_only")])
     # Дилерские объявления — в конец (но показываем, особенно если ниже рынка)
     for it in suitable:
@@ -7158,10 +7166,12 @@ async def do_search_for_user(uid: int, reply_to):
     # После загрузки цен — выкидываем только те, у кого цена ИЗВЕСТНА и вышла за бюджет.
     # Объявления без цены (_price_int=0) — оставляем: пользователь откроет ссылку и проверит.
     # Это критично для объявлений из поисковых сниппетов — там цена в HTML не всегда есть.
+    _before2 = len(suitable)
     suitable = [
         i for i in suitable
         if (not i.get("_price_int")) or (pmin <= i["_price_int"] <= pmax)
     ]
+    print(f"  [фильтр] после второго price-фильтра: {len(suitable)}/{_before2}")
     if not suitable:
         await reply_to.answer("😔 Не нашёл объявлений в твоём бюджете. Попробуй расширить диапазон цен: /settings")
         return
