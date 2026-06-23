@@ -720,7 +720,7 @@ def scrape_drom(region: str, pages: int = 15, price_min: int = 0, price_max: int
                 except Exception:
                     pass
 
-            time.sleep(0.2)
+            time.sleep(0.05)
         except Exception as e:
             print(f"  [Дром {region}] стр.{p}: {e}")
             break
@@ -989,7 +989,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
                     "Accept-Language": "ru-RU,ru;q=0.9",
                     "Referer": f"https://auto.ru/{slug}/cars/used/",
                 }
-                rc = _cffi.get(html_url, impersonate="chrome124", timeout=20, headers=_cffi_hdrs)
+                rc = _cffi.get(html_url, impersonate="chrome124", timeout=12, headers=_cffi_hdrs)
                 print(f"  [Auto.ru] curl_cffi стр.{p}: HTTP {rc.status_code}, {len(rc.text):,}б")
                 if rc.status_code == 200 and len(rc.text) > 30_000:
                     batch = _autoru_parse_html(rc.text, today)
@@ -1000,7 +1000,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
         if not batch:
             break
         results.extend(batch)
-        time.sleep(0.2)
+        time.sleep(0.05)
 
     print(f"  [Auto.ru] итого {len(results)} объявлений")
     return results
@@ -1844,7 +1844,7 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
                         url_t = f"https://t.me/s/{channel}"
                     else:
                         url_t = f"https://t.me/s/{channel}?before={before_id}"
-                    r = session.get(url_t, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+                    r = session.get(url_t, timeout=7, headers={"User-Agent": "Mozilla/5.0"})
                     if r.status_code != 200:
                         break
                     if "tgme_widget_message" not in r.text:
@@ -1993,7 +1993,7 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
             batch = []
             seen_urls: set[str] = set()
             for q in queries:
-                time.sleep(random.uniform(2.0, 3.5))
+                time.sleep(0.3)
                 for use_lite in (False, True):
                     url = "https://lite.duckduckgo.com/lite/" if use_lite else "https://html.duckduckgo.com/html/"
                     try:
@@ -2073,7 +2073,7 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
         try:
             import urllib.parse as _upq
             q = f"телеграм канал продажа авто {region_name_ru} t.me"
-            time.sleep(random.uniform(2.0, 3.0))
+            time.sleep(0.3)
             r = session.get("https://html.duckduckgo.com/html/", params={"q": q, "kl": "ru-ru"}, timeout=10)
             if r.status_code != 200:
                 return []
@@ -2325,7 +2325,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
         _vk_url_re = re.compile(r'https?://(?:m\.)?vk\.com/(?:wall|club|public|id)[\w\-]+', re.I)
         for q in keywords:
             try:
-                time.sleep(random.uniform(1.0, 2.0))
+                time.sleep(0.3)
                 for base in ("https://lite.duckduckgo.com/lite/", "https://html.duckduckgo.com/html/"):
                     r = session.get(base, params={"q": q, "kl": "ru-ru"}, timeout=10)
                     if r.status_code != 200 or len(r.text) < 500:
@@ -2445,7 +2445,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                 try:
                     # Всегда используем мобильный VK — он показывает посты без авторизации
                     url_c = f"https://m.vk.com/{slug}" if offset == 0 else f"https://m.vk.com/{slug}?offset={offset}"
-                    r = session.get(url_c, timeout=12, headers={"User-Agent": _mob_ua})
+                    r = session.get(url_c, timeout=8, headers={"User-Agent": _mob_ua})
                     if r.status_code == 302 or r.status_code == 403:
                         break
                     if r.status_code != 200:
@@ -2560,7 +2560,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                             break
                     if not found_new or len(batch) >= 60:
                         break
-                    time.sleep(0.5)
+                    time.sleep(0.1)
                 except Exception:
                     break
             return batch
@@ -2605,7 +2605,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                        "login", "join", "share", "away", "l", "id", "app", "market"}
         for q in queries[:4]:
             try:
-                time.sleep(random.uniform(1.5, 2.5))
+                time.sleep(0.3)
                 r = session.get("https://html.duckduckgo.com/html/",
                                 params={"q": q, "kl": "ru-ru"}, timeout=10)
                 if r.status_code != 200:
@@ -2623,15 +2623,15 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
             except Exception:
                 pass
         print(f"  [VK discover] найдено {len(found_slugs)} групп: {found_slugs[:5]}")
-        return found_slugs[:15]
+        return found_slugs[:8]
     # 3. Прямой парсинг известных групп + авто-обнаружение новых
-    vk_groups = VK_AUTO_GROUPS.get(city_key, [])
+    vk_groups = VK_AUTO_GROUPS.get(city_key, [])[:12]  # только первые 12 проверенных
     discovered_groups = _discover_vk_groups()
-    all_vk_groups = list(dict.fromkeys(vk_groups + discovered_groups))
+    all_vk_groups = list(dict.fromkeys(vk_groups + discovered_groups))[:16]  # cap 16 total
     if all_vk_groups:
-        with ThreadPoolExecutor(max_workers=8) as ex:
+        with ThreadPoolExecutor(max_workers=10) as ex:
             futs = {ex.submit(_try_vk_community, slug): slug for slug in all_vk_groups}
-            for fut in as_completed(futs, timeout=30):
+            for fut in as_completed(futs, timeout=20):
                 try:
                     batch = fut.result()
                     if batch:
@@ -7569,7 +7569,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                     # 1. curl_cffi — обходит блокировку CDN с Railway IP
                     try:
                         from curl_cffi import requests as _cffi
-                        r = _cffi.get(photo_url, impersonate="chrome124", timeout=12,
+                        r = _cffi.get(photo_url, impersonate="chrome124", timeout=8,
                                       headers={"Referer": _referer},
                                       proxies=_avito_proxies())
                         if r.status_code == 200 and len(r.content) > 3_000:
@@ -7578,7 +7578,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                         pass
                     # 2. Обычный requests с Referer
                     try:
-                        r2 = _req.get(photo_url, timeout=12, headers={
+                        r2 = _req.get(photo_url, timeout=8, headers={
                             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                             "Referer": _referer,
                             "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
@@ -7611,7 +7611,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
     # Низкая параллельность + увеличенный таймаут: Авито агрессивно отдаёт 429
     # Увеличена параллельность: 6 одновременных запросов с 6-сек таймаутом
     # вместо 3×12 — итоговое время ожидания вдвое меньше.
-    sem = asyncio.Semaphore(6)
+    sem = asyncio.Semaphore(10)
 
     async def _prefetch(it):
         # Грузим если нет фото ИЛИ нет описания
@@ -7633,7 +7633,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
 
     for item in batch:
         await _send_item(item)
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.01)
 
     next_offset = offset + len(batch)
     shown_str = f"{next_offset}/{total}"
@@ -7706,14 +7706,14 @@ async def do_search_for_user(uid: int, reply_to):
     loop = asyncio.get_event_loop()
 
     scraper_map = {
-        "drom":   lambda: scrape_drom(region, pages=12, price_min=pmin, price_max=pmax),
-        "autoru": lambda: scrape_autoru(region, pages=10, price_min=pmin, price_max=pmax),
-        "avito":  lambda: scrape_avito(region, pages=12, price_min=pmin, price_max=pmax, sort_by_date=False, brand=(brand if brand and brand != "any" else "")),
+        "drom":   lambda: scrape_drom(region, pages=8, price_min=pmin, price_max=pmax),
+        "autoru": lambda: scrape_autoru(region, pages=5, price_min=pmin, price_max=pmax),
+        "avito":  lambda: scrape_avito(region, pages=8, price_min=pmin, price_max=pmax, sort_by_date=False, brand=(brand if brand and brand != "any" else "")),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
         "tg":     lambda: scrape_tg_channels(region, pmin, pmax),
     }
     futures = [loop.run_in_executor(None, scraper_map[src]) for src in enabled_sources if src in scraper_map]
-    done, pending = await asyncio.wait(futures, timeout=100)
+    done, pending = await asyncio.wait(futures, timeout=65)
     if pending:
         for f in pending:
             f.cancel()
