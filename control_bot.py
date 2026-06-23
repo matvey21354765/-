@@ -56,14 +56,14 @@ _working_free_proxies_time: float = 0.0
 
 # ── Резидентный прокси для запросов к Авито (опционально) ────────
 # Поддерживает HTTP и SOCKS5. AVITO_PROXY_AUTH=ip — авторизация по IP (без логина).
+# Можно задать через PROXY_URL=http://user:pass@host:port (удобнее для большинства провайдеров)
 AVITO_PROXY_HOST = os.getenv("AVITO_PROXY_HOST", "")
 AVITO_PROXY_PORT = os.getenv("AVITO_PROXY_PORT", "")
 AVITO_PROXY_USER = os.getenv("AVITO_PROXY_USER", "")
 AVITO_PROXY_PASS = os.getenv("AVITO_PROXY_PASS", "")
-AVITO_PROXY_PROTOCOL = os.getenv("AVITO_PROXY_PROTOCOL", "socks5").lower()
+AVITO_PROXY_PROTOCOL = os.getenv("AVITO_PROXY_PROTOCOL", "http").lower()
 AVITO_PROXY_AUTH = os.getenv("AVITO_PROXY_AUTH", "login").lower()  # "login" или "ip"
 # Диапазон портов для ротации IP (напр. pool.proxys.world:10000-10999 = 1000 IP).
-# Каждый запрос берёт случайный порт → каждый раз новый IP, баны Авито исключены.
 AVITO_PROXY_PORT_MIN = os.getenv("AVITO_PROXY_PORT_MIN", "")
 AVITO_PROXY_PORT_MAX = os.getenv("AVITO_PROXY_PORT_MAX", "")
 
@@ -73,6 +73,31 @@ if AVITO_PROXY_PORT_MIN and AVITO_PROXY_PORT_MAX:
         _AVITO_PROXY_PORTS = list(range(int(AVITO_PROXY_PORT_MIN), int(AVITO_PROXY_PORT_MAX) + 1))
     except Exception:
         _AVITO_PROXY_PORTS = []
+
+# Альтернативный способ задать прокси — одна переменная PROXY_URL
+# Форматы: http://user:pass@host:port  /  socks5://user:pass@host:port  /  host:port
+_PROXY_URL_RAW = (
+    os.getenv("PROXY_URL", "") or
+    os.getenv("HTTPS_PROXY", "") or
+    os.getenv("HTTP_PROXY", "") or
+    ""
+)
+# Не берём Railway-системный прокси (он не является резидентным)
+if _PROXY_URL_RAW and "__agentproxy" in _PROXY_URL_RAW:
+    _PROXY_URL_RAW = ""
+
+if _PROXY_URL_RAW and not AVITO_PROXY_HOST:
+    import urllib.parse as _up
+    try:
+        _pu = _up.urlparse(_PROXY_URL_RAW if "://" in _PROXY_URL_RAW else "http://" + _PROXY_URL_RAW)
+        if _pu.hostname:
+            AVITO_PROXY_HOST = _pu.hostname
+            AVITO_PROXY_PORT = str(_pu.port or 80)
+            AVITO_PROXY_USER = _pu.username or ""
+            AVITO_PROXY_PASS = _pu.password or ""
+            AVITO_PROXY_PROTOCOL = (_pu.scheme or "http").lower()
+    except Exception:
+        pass
 
 
 def _avito_proxies() -> "dict[str, str] | None":
@@ -89,12 +114,13 @@ def _avito_proxies() -> "dict[str, str] | None":
 
 AVITO_PROXIES: "dict[str, str] | None" = None
 if AVITO_PROXY_HOST and (AVITO_PROXY_PORT or _AVITO_PROXY_PORTS):
-    # При авторизации по IP логин/пароль не нужны (и мешают SOCKS5)
     _use_auth = AVITO_PROXY_AUTH != "ip" and AVITO_PROXY_USER
     _auth = f"{AVITO_PROXY_USER}:{AVITO_PROXY_PASS}@" if _use_auth else ""
     _repr_port = AVITO_PROXY_PORT or (str(_AVITO_PROXY_PORTS[0]) if _AVITO_PROXY_PORTS else "")
     _avito_proxy_url = f"{AVITO_PROXY_PROTOCOL}://{_auth}{AVITO_PROXY_HOST}:{_repr_port}"
     AVITO_PROXIES = {"http": _avito_proxy_url, "https": _avito_proxy_url}
+
+print(f"[прокси] {'✅ ' + _avito_proxy_url if AVITO_PROXIES else '❌ не настроен — Авито/Auto.ru могут не работать'}")
 
 # ── Регионы ─────────────────────────────────────────────────────
 REGIONS = {
