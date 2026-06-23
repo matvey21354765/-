@@ -7587,9 +7587,9 @@ async def do_search_for_user(uid: int, reply_to):
     loop = asyncio.get_event_loop()
 
     scraper_map = {
-        "drom":   lambda: scrape_drom(region, pages=8, price_min=pmin, price_max=pmax),
-        "autoru": lambda: scrape_autoru(region, pages=8, price_min=pmin, price_max=pmax),
-        "avito":  lambda: scrape_avito(region, pages=10, price_min=pmin, price_max=pmax, sort_by_date=False, brand=(brand if brand and brand != "any" else "")),
+        "drom":   lambda: scrape_drom(region, pages=12, price_min=pmin, price_max=pmax),
+        "autoru": lambda: scrape_autoru(region, pages=10, price_min=pmin, price_max=pmax),
+        "avito":  lambda: scrape_avito(region, pages=12, price_min=pmin, price_max=pmax, sort_by_date=False, brand=(brand if brand and brand != "any" else "")),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
         "tg":     lambda: scrape_tg_channels(region, pmin, pmax),
     }
@@ -7859,12 +7859,37 @@ async def do_search_for_user(uid: int, reply_to):
     # Фильтр по категории и марке (также убирает скутеры/мото)
     suitable = _filter_by_category(suitable, category, brand)
     print(f"  [фильтр] после category({category}/{brand}): {len(suitable)}")
+
+    # Если после фильтра seen осталось мало (<25), но всего объявлений много —
+    # добавляем ранее просмотренные в конец, чтобы пользователь видел полный список.
+    # Свежие (непросмотренные) идут первыми, затем уже показанные.
+    MIN_RESULTS = 25
+    if len(suitable) < MIN_RESULTS:
+        seen_items = [
+            i for i in items
+            if not i.get("_market_ref_only")
+            and in_price_range(i, pmin, pmax)
+            and i.get("url")
+            and i["url"] not in skipped_norm
+            and i["url"] in seen_norm  # именно ранее просмотренные
+        ]
+        seen_items = _filter_by_category(seen_items, category, brand)
+        if seen_items:
+            print(f"  [фильтр] добавляем {len(seen_items)} ранее просмотренных (мало свежих)")
+            # Помечаем чтобы не сортировались выше свежих
+            for it in seen_items:
+                it["_already_seen"] = True
+            suitable = suitable + seen_items
+
     suitable = rank_by_market_price(suitable, ref_items=[i for i in items if i.get("_market_ref_only")])
     # Дилерские объявления — добавляем штраф к deal_score
     for it in suitable:
         if is_dealer(it):
             it["_is_dealer"] = True
             it["_deal_score"] = it.get("_deal_score", 0) - 30
+        # Ранее просмотренные — небольшой штраф, чтобы свежие были выше
+        if it.get("_already_seen"):
+            it["_deal_score"] = it.get("_deal_score", 0) - 5
     suitable = _sort_by_deal(suitable)
 
     if not suitable and already_seen_count > 0:
