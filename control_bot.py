@@ -5039,6 +5039,7 @@ def region_keyboard():
         for slug, name in items[i:i+2]:
             row.append(InlineKeyboardButton(text=name, callback_data=f"region|{slug}"))
         rows.append(row)
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="setup_back_to_category")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -5176,6 +5177,7 @@ def category_keyboard(damaged_on: bool = False) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🇷🇺 Отечественные", callback_data="cat|domestic"),
         ],
         [InlineKeyboardButton(text=dmg_text, callback_data="cat|toggle_damaged")],
+        [InlineKeyboardButton(text="◀️ Отмена", callback_data="setup_cancel")],
     ])
 
 
@@ -5193,6 +5195,7 @@ def brands_keyboard(category: str, prefix: str = "brand") -> InlineKeyboardMarku
             row.append(InlineKeyboardButton(text=name, callback_data=f"{prefix}|{key}"))
         rows.append(row)
     rows.append([InlineKeyboardButton(text="🔍 Любая марка", callback_data=f"{prefix}|any")])
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="setup_back_to_category")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -5491,6 +5494,7 @@ def price_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🔄 Любая цена", callback_data="price_range:0:99000000"),
         ],
         [InlineKeyboardButton(text="✏️ Ввести вручную", callback_data="price_manual")],
+        [InlineKeyboardButton(text="◀️ Назад (город)", callback_data="setup_back_to_region")],
     ])
 
 
@@ -5593,6 +5597,54 @@ async def fsm_price_max(msg: Message, state: FSMContext):
     )
 
 
+# ── FSM: кнопки «Назад» ──────────────────────────────────────────
+
+@dp.callback_query(F.data == "setup_cancel")
+async def cb_setup_cancel(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    await state.clear()
+    await cb.message.answer("Настройка отменена.", reply_markup=MAIN_KEYBOARD)
+
+
+@dp.callback_query(F.data == "setup_back_to_category")
+async def cb_setup_back_to_category(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    await state.update_data(brand="", category="")
+    await cb.message.answer("🔍 Шаг 1/4: Что ищем?", reply_markup=category_keyboard())
+    await state.set_state(Setup.category)
+
+
+@dp.callback_query(F.data == "setup_back_to_region")
+async def cb_setup_back_to_region(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    data = await state.get_data()
+    category = data.get("category", "all")
+    if category in ("foreign", "domestic"):
+        await cb.message.answer(
+            "📍 Шаг 3/4: Выбери город:",
+            reply_markup=region_keyboard(),
+        )
+    else:
+        await cb.message.answer(
+            "📍 Шаг 3/4: Выбери город:",
+            reply_markup=region_keyboard(),
+        )
+    await state.set_state(Setup.region)
+
+
+@dp.callback_query(F.data == "setup_back_to_price")
+async def cb_setup_back_to_price(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    data = await state.get_data()
+    region = data.get("region", "")
+    region_name = REGIONS.get(region, region)
+    await cb.message.answer(
+        f"📍 Регион: {region_name}\n\n💰 Шаг 4/4: Выбери диапазон цен:",
+        reply_markup=price_keyboard(),
+    )
+    await state.set_state(Setup.price_min)
+
+
 @dp.message(Command("settings"))
 @dp.message(F.text == "⚙️ Настройки")
 async def cmd_settings(msg: Message, state: FSMContext):
@@ -5625,6 +5677,7 @@ def sources_keyboard(enabled: list[str]) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="🌐 Все площадки", callback_data="src_all"),
         InlineKeyboardButton(text="🔍 Искать", callback_data="start_search"),
     ])
+    rows.append([InlineKeyboardButton(text="◀️ Назад (цена)", callback_data="setup_back_to_price")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -7003,6 +7056,7 @@ async def do_search_for_user(uid: int, reply_to):
         await reply_to.answer(
             f"😔 Не нашёл новых объявлений в {region_name}.{hint}",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="♻️ Сбросить историю и искать снова", callback_data="reset_and_search")],
                 [InlineKeyboardButton(text="⚙️ Изменить настройки", callback_data="open_settings")],
                 [InlineKeyboardButton(text="🌐 Глобальный поиск", callback_data="do_global_search")],
             ])
@@ -7285,6 +7339,17 @@ async def cb_reset_seen(cb: CallbackQuery):
         "✅ История сброшена! Теперь запусти поиск заново.",
         reply_markup=MAIN_KEYBOARD,
     )
+
+
+@dp.callback_query(F.data == "reset_and_search")
+async def cb_reset_and_search(cb: CallbackQuery):
+    uid = cb.from_user.id
+    save_seen(uid, set())
+    save_skipped(uid, set())
+    if uid in _search_cache:
+        del _search_cache[uid]
+    await cb.answer("♻️ История сброшена, ищу...")
+    await do_search_for_user(uid, cb.message)
 
 
 @dp.message(Command("help"))
