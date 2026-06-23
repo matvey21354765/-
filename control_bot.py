@@ -5236,14 +5236,12 @@ def _filter_by_category(items: list[dict], category: str, brand: str) -> list[di
 
 
 def category_keyboard(damaged_on: bool = False) -> InlineKeyboardMarkup:
-    dmg_text = "⚙️ Битые: вкл" if damaged_on else "⚙️ Битые: выкл"
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🚗 Все автомобили", callback_data="cat|all")],
         [
             InlineKeyboardButton(text="🌍 Иномарки", callback_data="cat|foreign"),
             InlineKeyboardButton(text="🇷🇺 Отечественные", callback_data="cat|domestic"),
         ],
-        [InlineKeyboardButton(text=dmg_text, callback_data="cat|toggle_damaged")],
         [InlineKeyboardButton(text="◀️ Отмена", callback_data="setup_cancel")],
     ])
 
@@ -7840,15 +7838,12 @@ async def cmd_invite(msg: Message):
     invited_count = len(entry.get("invited", []))
     bonus_days = entry.get("bonus_days", 0)
     ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{uid}"
-    share_text = "Нашёл бота который ищет авто ниже рынка на Авито, Дроме, Авто.ру, ВК и Telegram. Первые 7 дней бесплатно!"
+    share_text = "Нашёл бота который ищет авто ниже рынка на Авито, Дроме, Авто.ру, ВК и Telegram — попробуй!"
     await msg.answer(
-        f"🤝 *Пригласи друга — получи бонус!*\n\n"
-        f"Сейчас идёт *тестовый период* — бот полностью бесплатен для всех.\n"
-        f"За каждого друга, который зайдёт по твоей ссылке, ты получишь *+3 дня* после окончания теста.\n\n"
-        f"👥 Приглашено: *{invited_count}* друзей\n"
-        f"🎁 Бонус накоплен: *+{bonus_days} дней*\n\n"
-        f"📲 *Твоя ссылка:*\n{ref_link}\n\n"
-        f"👆 Поделись — друг получит 7 дней бесплатного доступа, ты получишь бонус!",
+        f"📲 *Пригласи друга в PerekupDrive*\n\n"
+        f"Поделись своей ссылкой — друг сразу получит доступ к боту.\n\n"
+        f"👥 Приглашено: *{invited_count}* друзей\n\n"
+        f"🔗 *Твоя ссылка:*\n{ref_link}",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="📤 Поделиться ссылкой", url=f"https://t.me/share/url?url={ref_link}&text={share_text}")],
