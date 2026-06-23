@@ -1509,6 +1509,11 @@ _SOCIAL_CAR_STRONG = [
     "lexus", "infiniti", "volvo", "land rover", "jeep", "suzuki", "datsun",
     "changan", "exeed", "omoda", "tank", "jaecoo", "byd", "lixiang", "москвич",
     "нива", "приора", "гранта", "калина", "largus", "vesta", "xray",
+    # Русские названия марок
+    "митсубиши", "митсубиси", "лексус", "инфинити", "субару", "сузуки",
+    "пежо", "ситроен", "вольво", "шевроле", "опель", "форд", "рено",
+    "шкода", "хонда", "мазда", "ниссан", "тойота", "киа", "хёндай",
+    "хендай", "бмв", "ауди", "фольксваген", "мерседес", "уаз", "газ",
 ]
 _SOCIAL_REJECT_KEYWORDS = [
     # Недвижимость
@@ -2980,7 +2985,7 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
                 def _avito_url_ok(u: str) -> bool:
                     lo = u.lower()
                     # Только реальный CDN фотографий объявлений
-                    if "img.avito.st" not in lo and "images.avito.st" not in lo:
+                    if "img.avito.st" not in lo and "images.avito.st" not in lo and "cdn.avito.st" not in lo and "s.avito.st" not in lo:
                         return False
                     return not any(x in lo for x in (
                         "/stub", "noimage", "placeholder", "/ava/", "/avatar/",
@@ -5731,7 +5736,13 @@ def _is_moto(title: str) -> bool:
                    "toyota", "honda accord", "honda cr", "honda hr", "honda fit",
                    "kia", "hyundai", "nissan", "mazda", "bmw", "audi",
                    "mercedes", "volkswagen", "skoda", "opel", "ford", "renault",
-                   "haval", "geely", "chery", "changan", "lixiang", "exeed"]
+                   "haval", "geely", "chery", "changan", "lixiang", "exeed",
+                   "mitsubishi", "субару", "subaru", "lexus", "лексус",
+                   "infiniti", "инфинити", "volvo", "вольво", "peugeot", "пежо",
+                   "citroen", "ситроен", "chevrolet", "шевроле", "datsun",
+                   "suzuki sx", "suzuki vitara", "suzuki jimny", "suzuki swift",
+                   "suzuki grand", "suzuki kizashi", "land rover", "jeep",
+                   "москвич", "нива", "приора", "гранта", "калина", "веста"]
     has_car = any(k in tl for k in car_markers)
     if has_car:
         return False
@@ -7896,15 +7907,36 @@ async def do_search_for_user(uid: int, reply_to):
         price_range_items = [i for i in items if not is_dealer(i) and in_price_range(i, pmin, pmax) and i.get("url")]
         price_filtered_c = len(items) - len(price_range_items) - sum(1 for i in items if is_dealer(i))
         # Посмотрим сколько прошло бы без фильтра категории/марки
-        without_cat_filter = [i for i in price_range_items if i["url"] not in skipped]
+        without_cat_filter = [i for i in price_range_items if i["url"] not in skipped_norm]
         with_cat_filter = _filter_by_category(list(without_cat_filter), category, brand)
 
         hint_parts = []
-        if len(without_cat_filter) > 0 and len(with_cat_filter) == 0:
+        if len(without_cat_filter) > 0 and len(with_cat_filter) == 0 and brand:
+            # Есть машины в категории, но марки нет — показываем все по категории с примечанием
             cat_label = CATEGORY_LABELS.get(category, category)
-            brand_label = f" · {brand.capitalize()}" if brand else ""
+            fallback_items = _filter_by_category(list(without_cat_filter), category, "")
+            if fallback_items:
+                fallback_items = rank_by_market_price(fallback_items, ref_items=[i for i in items if i.get("_market_ref_only")])
+                for it in fallback_items:
+                    if is_dealer(it):
+                        it["_is_dealer"] = True
+                        it["_deal_score"] = it.get("_deal_score", 0) - 30
+                fallback_items = _sort_by_deal(fallback_items)
+                await reply_to.answer(
+                    f"⚠️ {brand.capitalize()} не нашлось. Показываю все {cat_label} ({len(fallback_items)} шт.):"
+                )
+                _search_cache[uid] = fallback_items
+                _save_cache(uid, fallback_items)
+                await send_batch(reply_to.chat.id, uid, 0)
+                return
             hint_parts.append(
-                f"⚠️ Найдено {len(without_cat_filter)} объявлений, но все отфильтрованы по категории «{cat_label}{brand_label}».\n"
+                f"⚠️ Найдено {len(without_cat_filter)} объявлений, но все отфильтрованы по категории «{cat_label} · {brand.capitalize()}».\n"
+                f"Попробуй изменить категорию в /settings или выбрать «🚗 Все автомобили»."
+            )
+        elif len(without_cat_filter) > 0 and len(with_cat_filter) == 0:
+            cat_label = CATEGORY_LABELS.get(category, category)
+            hint_parts.append(
+                f"⚠️ Найдено {len(without_cat_filter)} объявлений, но все отфильтрованы по категории «{cat_label}».\n"
                 f"Попробуй изменить категорию в /settings или выбрать «🚗 Все автомобили»."
             )
         elif price_filtered_c > 0:
