@@ -3269,11 +3269,15 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         _brand_path = f"/{brand}" if brand and brand != "any" else ""
         url = f"https://www.avito.ru/{slug}/avtomobili{_brand_path}"
         # seller_type=1 — только частники.
-        # s=104 — дата (свежие первыми) для страниц 1-4.
-        # s=1   — цена по возрастанию для страниц 5+, чтобы найти старые дешёвые
-        #         объявления ниже рынка которые не попали на первые страницы.
-        _sort = "104" if p <= 4 else "1"
-        params: dict = {"seller_type": "1", "s": _sort}
+        # s=1 — цена по возрастанию: самые дешёвые (ниже рынка) идут первыми
+        #        независимо от даты выкладки. Сортировка по дате (s=104) НЕ используется
+        #        — она ограничивает выдачу только сегодняшними, а нам нужны ВСЕ даты.
+        # Страницы с нечётным номером — цена по возрастанию (s=1),
+        # с чётным — без сортировки (Авито-релевантность, разные даты).
+        _sort = "1" if p % 2 == 1 else ""
+        params: dict = {"seller_type": "1"}
+        if _sort:
+            params["s"] = _sort
         if p > 1:
             params["p"] = p
         if price_min > 0:
@@ -4049,15 +4053,15 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         all_methods = [_try_web_html, _try_avito_lite, _try_avito_rss, _try_googlebot_ua, _try_avito_public_api]
     else:
         all_methods = [_try_scraperapi_fast, _try_free_proxies, _try_yandex_snippets, _try_curl_cffi, _try_cs_web, _try_mobile_site, _try_web_html, _try_avito_public_api, _try_avito_rss, _try_googlebot_ua, _try_avito_lite, _try_scraperapi, _try_avito_json_api]
-    # Список задач. С прокси — 8 страниц десктоп + 3 страницы мобайл + RSS + Googlebot.
+    # Список задач. С прокси — 12 страниц десктоп + 4 страницы мобайл + RSS + Googlebot.
     if AVITO_PROXIES:
         tasks = (
-            [(_try_web_html, p) for p in range(1, 9)] +
-            [(_try_avito_lite, p) for p in range(1, 4)] +
-            [(_try_avito_rss, 1), (_try_googlebot_ua, 1), (_try_avito_public_api, 1)]
+            [(_try_web_html, p) for p in range(1, 13)] +
+            [(_try_avito_lite, p) for p in range(1, 5)] +
+            [(_try_avito_rss, 1), (_try_avito_rss, 2), (_try_googlebot_ua, 1), (_try_avito_public_api, 1)]
         )
-        _cap = 180
-        _deadline_s = 55
+        _cap = 250
+        _deadline_s = 60
     else:
         tasks = [(m, 1) for m in all_methods]
         _cap = 40
@@ -4214,7 +4218,7 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
         bucket = _avito_price_bucket(price_min, price_max)
         cache_key = f"{region}_{bucket}" + (f"_{brand}" if brand else "")
         _scrape_pmin, _scrape_pmax = price_min, price_max
-        _cache_ttl = 3 * 3600  # 3 часа — быстрее обновляем при платном прокси
+        _cache_ttl = 90 * 60  # 1.5 часа — чаще обновляем чтобы находить новые ниже рынка
     else:
         cache_key = region + (f"_{brand}" if brand else "")
         _scrape_pmin, _scrape_pmax = 0, 99_000_000
