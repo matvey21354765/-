@@ -6510,12 +6510,10 @@ async def cmd_settings(msg: Message, state: FSMContext):
     await state.set_state(Setup.category)
 
 
-ALL_SOURCES = ["drom", "autoru", "avito", "kolesa", "vk", "tg"]
+ALL_SOURCES = ["drom", "autoru", "avito", "vk", "tg"]
 SOURCE_NAMES = {
     "drom":   "🔵 Дром",
     "autoru": "🟠 Auto.ru",
-    "kolesa": "🟢 Kolesa",
-    "bibika": "🟣 Bibika",
     "avito":  "🔴 Авито",
     "vk":     "📘 ВКонтакте",
     "tg":     "✈️ Telegram",
@@ -6690,13 +6688,14 @@ async def cmd_global_search(msg: Message):
     for src, batch in zip(src_names, all_results[:-1]):
         if isinstance(batch, list):
             items.extend(batch)
-            if batch:
-                stat_parts.append(f"{SOURCE_TAGS.get(src, src)}: {len(batch)}")
+        tag = SOURCE_TAGS.get(src, src)
+        cnt = len(batch) if isinstance(batch, list) else 0
+        stat_parts.append(f"{tag}: {cnt}")
 
     tg_batch = all_results[-1]
-    if isinstance(tg_batch, list) and tg_batch:
+    if isinstance(tg_batch, list):
         items.extend(tg_batch)
-        stat_parts.append(f"📢 TG-каналы: {len(tg_batch)}")
+        stat_parts.append(f"✈️ Telegram: {len(tg_batch)}")
 
     if stat_parts:
         await msg.answer("📊 " + " | ".join(stat_parts))
@@ -7473,8 +7472,6 @@ async def _ensure_photo(item: dict) -> None:
 
 SOURCE_TAGS = {
     "autoru":     "🟠 Auto.ru",
-    "kolesa":     "🟢 Kolesa",
-    "bibika":     "🟣 Bibika",
     "avito":      "🔴 Авито",
     "drom":       "🔵 Дром",
     "tg_channel": "📢 TG-канал",
@@ -7784,7 +7781,6 @@ async def do_search_for_user(uid: int, reply_to):
         "drom":   lambda: scrape_drom(region, pages=8, price_min=pmin, price_max=pmax),
         "autoru": lambda: scrape_autoru(region, pages=5, price_min=pmin, price_max=pmax),
         "avito":  lambda: scrape_avito(region, pages=8, price_min=pmin, price_max=pmax, sort_by_date=False, brand=(brand if brand and brand != "any" else "")),
-        "kolesa": lambda: scrape_kolesa(region, pages=5, price_min=pmin, price_max=pmax),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
         "tg":     lambda: scrape_tg_channels(region, pmin, pmax),
     }
@@ -7810,8 +7806,8 @@ async def do_search_for_user(uid: int, reply_to):
     stat_parts = []
     for src, batch in zip([s for s in enabled_sources if s in scraper_map], results):
         items.extend(batch)
-        if batch:
-            stat_parts.append(f"{SOURCE_TAGS.get(src, src)}: {len(batch)}")
+        tag = SOURCE_TAGS.get(src, src)
+        stat_parts.append(f"{tag}: {len(batch)}")
 
     if stat_parts:
         await reply_to.answer("📊 " + " | ".join(stat_parts))
