@@ -436,13 +436,26 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None)
 
     all_for_median = list(items) + (ref_items or [])
     groups: dict[str, list[int]] = {}
+    # Широкие группы: только марка+модель (без года) — запасной уровень
+    groups_broad: dict[str, list[int]] = {}
+    # Ещё шире: только первое слово (марка) — для совсем маленьких выборок
+    groups_brand: dict[str, list[int]] = {}
     for it in all_for_median:
         p = it.get("_price_int", 0)
         if p > 0:
             key = _car_group_key(it.get("title", ""))
             groups.setdefault(key, []).append(p)
+            # Широкий ключ: убираем год (последнее слово если это 4 цифры)
+            parts = key.rsplit(" ", 1)
+            broad_key = parts[0] if len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 4 else key
+            groups_broad.setdefault(broad_key, []).append(p)
+            # Ключ марки: только первое слово
+            brand_key_m = key.split(" ", 1)[0]
+            groups_brand.setdefault(brand_key_m, []).append(p)
 
     market: dict[str, float] = {k: median(v) for k, v in groups.items() if len(v) >= 2}
+    market_broad: dict[str, float] = {k: median(v) for k, v in groups_broad.items() if len(v) >= 2}
+    market_brand: dict[str, float] = {k: median(v) for k, v in groups_brand.items() if len(v) >= 3}
 
     for it in items:
         p = it.get("_price_int", 0)
@@ -451,7 +464,15 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None)
 
         if p > 0:
             key = _car_group_key(it.get("title", ""))
+            # Пробуем точный ключ, затем широкий (без года), затем только марку
             med = market.get(key, 0)
+            if not med:
+                parts = key.rsplit(" ", 1)
+                broad_key = parts[0] if len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 4 else key
+                med = market_broad.get(broad_key, 0)
+            if not med:
+                brand_key_m = key.split(" ", 1)[0]
+                med = market_brand.get(brand_key_m, 0)
             if med > 0:
                 savings_pct = round((1 - p / med) * 100, 1)
                 it["_savings_pct"] = savings_pct
@@ -1472,7 +1493,11 @@ def _tg_parse_price(text: str) -> int:
     return 0
 
 
-_SOCIAL_SALE_KEYWORDS = ["продам", "продаю", "продаётся", "продается", "куплю", "в продаже", "выставил на продажу"]
+_SOCIAL_SALE_KEYWORDS = [
+    "продам", "продаю", "продаётся", "продается", "куплю", "в продаже",
+    "выставил на продажу", "выставляю", "меняю", "обмен", "отдам за",
+    "уступлю", "торг уместен", "срочно продам", "срочная продажа",
+]
 
 # Конкретные идентификаторы автомобиля — "авто" и "машин" сюда НЕ входят (слишком общие)
 _SOCIAL_CAR_STRONG = [
@@ -5713,6 +5738,29 @@ def _is_moto(title: str) -> bool:
     return any(k in tl for k in _MOTO_KEYWORDS)
 
 
+def _match_brand_item(it: dict, brand: str) -> bool:
+    """Проверяет марку в заголовке, URL и описании объявления.
+
+    Авито при скрейпинге через URL-фильтр марки (напр. /mitsubishi/avtomobili)
+    может возвращать заголовки БЕЗ названия марки (например «Outlander, 2018»
+    вместо «Mitsubishi Outlander, 2018»). Поэтому проверяем все доступные поля.
+    """
+    title = it.get("title", "")
+    if _match_brand(title, brand):
+        return True
+    # Проверяем URL — Авито кодирует марку в пути: /ekaterinburg/avtomobili/mitsubishi-...
+    url = it.get("url", "").lower()
+    aliases = BRAND_RU_ALIASES.get(brand.lower(), [brand.lower()])
+    for alias in aliases:
+        if alias in url:
+            return True
+    # Проверяем описание (первые 200 символов)
+    desc = it.get("description", "")[:200]
+    if _match_brand(desc, brand):
+        return True
+    return False
+
+
 def _filter_by_category(items: list[dict], category: str, brand: str) -> list[dict]:
     """Фильтрует список объявлений по категории и марке. Всегда исключает мото/скутеры."""
     # Всегда убираем скутеры/мотоциклы из поиска авто
@@ -5723,10 +5771,15 @@ def _filter_by_category(items: list[dict], category: str, brand: str) -> list[di
     elif category == "domestic":
         items = [it for it in items if any(k in it.get("title", "").lower() for k in DOMESTIC_BRANDS)]
     elif category == "foreign":
+        # Иномарки: исключаем только те, где в заголовке явно указан отечественный бренд.
+        # Если заголовок не содержит отечественного бренда — считаем иномаркой
+        # (Авито при brand-URL может возвращать заголовки без марки).
         items = [it for it in items if not any(k in it.get("title", "").lower() for k in DOMESTIC_BRANDS)]
 
     if brand and brand != "any":
-        items = [it for it in items if _match_brand(it.get("title", ""), brand)]
+        # Проверяем марку в заголовке, URL и описании — Авито при brand-URL-фильтрации
+        # может опускать название марки из заголовка объявления.
+        items = [it for it in items if _match_brand_item(it, brand)]
 
     return items
 
