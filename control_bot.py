@@ -5021,6 +5021,49 @@ class TrackBrand(StatesGroup):
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
+# ── Подписка на канал ────────────────────────────────────────────
+REQUIRED_CHANNEL = "@ekbdrivee"
+REQUIRED_CHANNEL_URL = "https://t.me/ekbdrivee"
+
+async def _is_subscribed(user_id: int) -> bool:
+    """Возвращает True если пользователь подписан на обязательный канал."""
+    try:
+        member = await bot.get_chat_member(REQUIRED_CHANNEL, user_id)
+        return member.status not in ("left", "kicked", "banned")
+    except Exception:
+        return True  # если не удалось проверить — не блокируем
+
+def _subscribe_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📢 Подписаться на канал", url=REQUIRED_CHANNEL_URL)],
+        [InlineKeyboardButton(text="✅ Я подписался", callback_data="check_subscription")],
+    ])
+
+async def _check_and_gate(msg_or_cb) -> bool:
+    """Проверяет подписку. Если не подписан — отправляет сообщение и возвращает False."""
+    if isinstance(msg_or_cb, Message):
+        uid = msg_or_cb.from_user.id
+        reply = msg_or_cb.answer
+    else:
+        uid = msg_or_cb.from_user.id
+        reply = msg_or_cb.message.answer
+    if uid in ADMIN_IDS:
+        return True
+    if not await _is_subscribed(uid):
+        await reply(
+            "📢 *Для использования бота необходимо подписаться на наш канал!*\n\n"
+            "PerekupDrive — это сообщество перекупщиков и охотников за выгодными авто в Екатеринбурге.\n\n"
+            "🔥 В канале:\n"
+            "• Свежие объявления ниже рынка\n"
+            "• Советы по покупке и проверке авто\n"
+            "• Разборы сделок и антифрод\n\n"
+            "👇 Подпишись и нажми *«Я подписался»*",
+            parse_mode="Markdown",
+            reply_markup=_subscribe_keyboard(),
+        )
+        return False
+    return True
+
 # URL-ID маппинг для кнопок
 _id_to_url: dict[str, str] = {}
 _url_to_id: dict[str, str] = {}
@@ -5236,9 +5279,26 @@ def track_brands_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+@dp.callback_query(F.data == "check_subscription")
+async def cb_check_subscription(cb: CallbackQuery):
+    await cb.answer()
+    if await _is_subscribed(cb.from_user.id):
+        await cb.message.edit_text(
+            "✅ Подписка подтверждена! Добро пожаловать в PerekupDrive 🚗\n\n"
+            "Нажми /start чтобы начать поиск.",
+        )
+    else:
+        await cb.message.answer(
+            "❌ Ты ещё не подписан на канал. Подпишись и нажми кнопку снова.",
+            reply_markup=_subscribe_keyboard(),
+        )
+
+
 @dp.message(Command("start"))
 async def cmd_start(msg: Message, state: FSMContext):
     await state.clear()
+    if not await _check_and_gate(msg):
+        return
     analytics.track("start", uid=msg.from_user.id, username=msg.from_user.username)
     # Handle referral parameter
     text_parts = (msg.text or "").split()
@@ -6777,6 +6837,12 @@ async def send_batch(chat_id: int, uid: int, offset: int):
 
 
 async def do_search_for_user(uid: int, reply_to):
+    if not await _is_subscribed(uid) and uid not in ADMIN_IDS:
+        await reply_to.answer(
+            "📢 Для поиска нужно подписаться на канал.",
+            reply_markup=_subscribe_keyboard(),
+        )
+        return
     s = load_settings(uid)
     if not s.get("region"):
         await reply_to.answer("Сначала настрой поиск: /start")
