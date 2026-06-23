@@ -1183,26 +1183,73 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
     TG_REAL_CHANNELS = {
         "ekaterinburg": [
             "avito_auto_ekb", "auto_ekb_sell", "avtoekaterinburg",
-            "ekbauto", "avto_ekb_96", "prodauto96",
+            "ekbauto", "avto_ekb_96", "prodauto96", "avtobazar_eburg",
+            "avto_baza_ekb", "auto96_sell", "ekbauto2", "prodambmw_ekb",
         ],
         "moskva": [
             "avto_msk_sell", "automoscow", "avtomsk",
-            "prodamavtomsk", "caршop_msk",
+            "prodamavtomsk", "avto_msk_77", "avtobazar_msk",
+            "auto_moscow_sell", "avto_moskva_prodazha", "cars_msk",
         ],
         "spb": [
             "avto_spb_sell", "autospb78", "prodamavtospb",
-            "avtosalon_spb", "avto78",
+            "avtosalon_spb", "avto78", "avtobazar_spb",
+            "auto_spb78", "spbauto_sell", "cars_spb78",
         ],
         "novosibirsk": [
             "avto_nsk_sell", "auto_nsk54", "prodamavtonsk",
-            "avtonovosibirsk",
+            "avtonovosibirsk", "avtobazar_nsk", "nsk_avto54",
         ],
-        "kazan": ["avtokazan16", "avto_kazan_sell", "prodamavtokazan"],
-        "chelyabinsk": ["avto74_sell", "avtochel74", "prodamavtochel"],
-        "ufa": ["avto_ufa_sell", "avto02ufa", "prodamavtoufa"],
-        "krasnodar": ["avto_krd_sell", "avto23krasnodar", "prodamavtokrd", "avtobazar_krasnodar"],
-        "omsk": ["avto_omsk_sell", "avto55omsk", "prodamavtoomsk"],
-        "rostov": ["avto_rostov_sell", "avto61rostov", "prodamavtorostov"],
+        "kazan": [
+            "avtokazan16", "avto_kazan_sell", "prodamavtokazan",
+            "avto_kazan16", "avtobazar_kazan",
+        ],
+        "chelyabinsk": [
+            "avto74_sell", "avtochel74", "prodamavtochel",
+            "avto_chel74", "avtobazar_chel",
+        ],
+        "ufa": [
+            "avto_ufa_sell", "avto02ufa", "prodamavtoufa",
+            "avtobazar_ufa", "avto_ufa02",
+        ],
+        "krasnodar": [
+            "avto_krd_sell", "avto23krasnodar", "prodamavtokrd",
+            "avtobazar_krasnodar", "avto_krd23", "kuban_avto",
+        ],
+        "omsk": [
+            "avto_omsk_sell", "avto55omsk", "prodamavtoomsk",
+            "avtobazar_omsk", "avto_omsk55",
+        ],
+        "rostov": [
+            "avto_rostov_sell", "avto61rostov", "prodamavtorostov",
+            "avtobazar_rostov", "avto_rost61",
+        ],
+        "tyumen": [
+            "avto_tyumen_sell", "avto72tyumen", "prodamavtotmn",
+            "avtobazar_tyumen",
+        ],
+        "samara": [
+            "avto_samara_sell", "avto63samara", "prodamavtosmr",
+            "avtobazar_samara",
+        ],
+        "krasnoyarsk": [
+            "avto_krs_sell", "avto24krs", "prodamavtokrs",
+            "avtobazar_krs", "avto_kras24",
+        ],
+        "nn": [
+            "avto_nn_sell", "avto52nn", "prodamavtonn",
+            "avtobazar_nn",
+        ],
+        "perm": [
+            "avto_perm_sell", "avto59perm", "prodamavtoperm",
+            "avtobazar_perm",
+        ],
+        "voronezh": [
+            "avto_vrn_sell", "avto36voronezh", "prodamavtovrn",
+        ],
+        "volgograd": [
+            "avto_vgd_sell", "avto34vgd", "prodamavtovlg",
+        ],
     }
 
     channels = TG_REAL_CHANNELS.get(city_key, [])
@@ -1284,9 +1331,13 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
                 text = text_el.get_text(" ", strip=True)
                 if len(text) < 20:
                     continue
-                keywords = ["авто", "машин", "продам", "продаю", "авт.", "автомобил", "кузов", "двигател", "куплю", "продается"]
-                if not any(k in text.lower() for k in keywords):
+                keywords = ["авто", "машин", "продам", "продаю", "авт.", "автомобил", "кузов", "двигател", "продается", "пробег", "куплю", "срочно", "торг", "ниже рынка", "лада", "toyota", "honda", "kia", "hyundai", "nissan", "mazda", "bmw", "audi", "mercedes", "haval", "geely", "chery", "vaz", "ваз"]
+                _below_market_kw = ["срочно", "торг", "ниже рынка", "дешево", "срочная продажа", "перекупам", "ниже рыночной", "торгуюсь", "уступлю"]
+                text_lower = text.lower()
+                if not any(k in text_lower for k in keywords):
                     continue
+                # Повышаем score для объявлений ниже рынка
+                _is_below = any(k in text_lower for k in _below_market_kw)
                 price = _parse_price(text)
                 if price > 0 and not (price_min <= price <= price_max):
                     continue
@@ -1315,6 +1366,7 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
                     "_seller_url": f"https://t.me/{channel}",
                     "_year": int(year_m.group(1)) if year_m else 0,
                     "_days_on_site": 0,
+                    "_below_market_hint": _is_below,
                 })
             return batch
         except Exception as e:
@@ -1514,7 +1566,10 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
         keywords = [
             f"продам авто {region_name_ru}",
             f"автобарахолка {region_name_ru}",
-            f"авто {region_name_ru} продаю",
+            f"авто {region_name_ru} продаю срочно",
+            f"авто {region_name_ru} ниже рынка",
+            f"машина {region_name_ru} торг",
+            f"продаю машину {region_name_ru} срочно",
         ]
         batch = []
         for q in keywords:
@@ -5222,7 +5277,7 @@ async def cmd_settings(msg: Message, state: FSMContext):
     await state.set_state(Setup.category)
 
 
-ALL_SOURCES = ["drom", "autoru", "avito", "vk", "tg"]
+ALL_SOURCES = ["drom", "autoru", "avito"]
 SOURCE_NAMES = {
     "drom":   "🔵 Дром",
     "autoru": "🟠 Auto.ru",
@@ -6219,7 +6274,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
     #    Мусорные объявления (пробег ~1 000 000 км) уводим в конец.
     candidates: list[dict] = []
     cursor = offset
-    while len(candidates) < 28 and cursor < total and cursor < offset + 120:
+    while len(candidates) < 15 and cursor < total and cursor < offset + 80:
         it = items[cursor]
         cursor += 1
         p = it.get("_price_int") or parse_price(it.get("price", ""))
@@ -6231,9 +6286,9 @@ async def send_batch(chat_id: int, uid: int, offset: int):
 
     # 2. Дозагружаем фото/описание только для отобранных кандидатов
     #    (макс. 20), с низкой параллельностью.
-    await asyncio.gather(*[_prefetch(it) for it in candidates[:20]])
+    await asyncio.gather(*[_prefetch(it) for it in candidates[:10]])
 
-    batch = candidates[:20]
+    batch = candidates[:10]
 
     # Пересчитываем рыночное сравнение после загрузки цен и сортируем СТРОГО по
     # выгоде: максимальная скидка от рынка. Дата (_days_on_site) НЕ участвует в
@@ -6246,7 +6301,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         -x.get("_hot_score", 0),
         x.get("_price_int", 999_999_999),
     ))
-    batch = batch[:20]
+    batch = batch[:10]
     for item in batch:
         await _send_item(item)
         await asyncio.sleep(0.05)
@@ -7022,10 +7077,15 @@ async def _global_monitor_loop():
                     # уведомления перезапишут кэш свежими, и основной поиск
                     # покажет только сегодняшние. Новизну для уведомлений
                     # отслеживаем по _days_on_site ниже.
-                    raw = await loop.run_in_executor(
+                    raw_avito = await loop.run_in_executor(
                         None,
                         lambda r=region: scrape_avito(r, pages=2, sort_by_date=False)
                     )
+                    raw_drom = await loop.run_in_executor(
+                        None,
+                        lambda r=region: scrape_drom(r, pages=3, price_min=0, price_max=99_000_000)
+                    )
+                    raw = raw_avito + raw_drom
                     if not raw:
                         continue
 
