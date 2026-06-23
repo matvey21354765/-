@@ -1096,12 +1096,19 @@ def scrape_bibika(region: str, pages: int = 3, price_min: int = 0, price_max: in
 # ── ВКонтакте: паблики авто-барахолок по городам ─────────────────
 VK_AUTO_GROUPS = {
     "ekaterinburg": [
-        "kareta96", "podjopnik96",  # реальные паблики авто Екатеринбург
+        # Проверенные реальные паблики
+        "kareta96", "podjopnik96",
+        # Авто барахолки Екб
         "avtobaraholka96", "prodamavto96", "avto_ekb96", "ekbauto", "club_avto_ekb",
         "autobazar_ekb", "avtomobileekb", "club196avto", "avto_yekb", "prodamavtoe96",
         "avtodo100_ekb", "avto_do300_ekb", "avto_do500_ekb", "srochno_avto96",
         "avtobazar96", "kupit_avto_ekb", "avto96_prodazha", "ekb_auto_sell",
         "avto_ur", "avto_sverdlovsk", "avtorynok_ekb", "deshevo_avto96",
+        # Дополнительные паттерны
+        "avto_ekaterinburg", "ekaterinburg_avto", "prodazha_avto_ekb",
+        "avto_eburg", "sverdlovsk_avto", "eburg_avto96", "avto_market96",
+        "avto_do200_ekb", "kuplu_avto_ekb", "bazar_avto_ekb", "avto_ekb_cheap",
+        "avtosalon_ekb", "carbazar96", "ekb_carbuy", "avto_sverd96",
     ],
     "moskva": [
         "kareta77", "podjopnik77",
@@ -1109,6 +1116,8 @@ VK_AUTO_GROUPS = {
         "moscowcars", "kupit_avto_msk", "avto_moskva77", "avtomoskva77",
         "avtodo100_msk", "avto_do300_msk", "srochno_avto77", "avto_bazar_msk",
         "avtorynok_msk", "deshevo_avto77", "avto_msk_prodazha", "buy_car_msk",
+        "avto_moskva_prodazha", "moskva_avto_sale", "avto_market77",
+        "prodazha_avto_msk", "carbazar77", "avto_cheap_msk", "avtotorg77",
     ],
     "spb": [
         "kareta78", "podjopnik78",
@@ -1116,6 +1125,8 @@ VK_AUTO_GROUPS = {
         "avtoclub78", "spbavto78", "prodamavtopiter",
         "avtodo100_spb", "avto_do300_spb", "srochno_avto78", "avto78_prodazha",
         "avtorynok_spb", "deshevo_avto78", "spb_auto_sell",
+        "avto_spb_prodazha", "spb_avto_sale", "carbazar78", "avtotorg78",
+        "prodazha_avto_spb", "piter_avto78",
     ],
     "novosibirsk": [
         "kareta54", "podjopnik54",
@@ -1123,6 +1134,8 @@ VK_AUTO_GROUPS = {
         "avto_novosibirsk", "club54avto", "nsk_avto54",
         "avtodo100_nsk", "avto_do300_nsk", "srochno_avto54", "nsk_auto_sell",
         "avtorynok_nsk", "deshevo_avto54",
+        "avto_nsk_prodazha", "nsk_avto_sale", "carbazar54", "avtotorg54",
+        "prodazha_avto_nsk", "novosibirsk_avto_sale",
     ],
     "kazan": [
         "kareta16", "podjopnik16",
@@ -1130,6 +1143,7 @@ VK_AUTO_GROUPS = {
         "autobazar_kazan", "avto_kazan16",
         "avtodo100_kazan", "avto_do300_kazan", "srochno_avto16", "kazan_auto_sell",
         "avtorynok_kazan", "deshevo_avto16",
+        "avto_kazan_prodazha", "kazan_avto_sale", "carbazar16", "avtotorg16",
     ],
     "chelyabinsk": [
         "kareta74", "podjopnik74",
@@ -1137,6 +1151,8 @@ VK_AUTO_GROUPS = {
         "club74avto", "avtoclub74",
         "avtodo100_chel", "avto_do300_74", "srochno_avto74", "chel_auto_sell",
         "avtorynok_chel", "deshevo_avto74",
+        "avto_chel_prodazha", "chel_avto_sale", "carbazar74", "avtotorg74",
+        "prodazha_avto_chel",
     ],
     "ufa": [
         "kareta02", "podjopnik02",
@@ -1144,6 +1160,7 @@ VK_AUTO_GROUPS = {
         "avtoclub02", "ufa_avto02",
         "avtodo100_ufa", "avto_do300_ufa", "srochno_avto02", "ufa_auto_sell",
         "avtorynok_ufa", "deshevo_avto02",
+        "avto_ufa_prodazha", "ufa_avto_sale", "carbazar02", "avtotorg02",
     ],
     "krasnodar": [
         "kareta23", "podjopnik23",
@@ -1151,6 +1168,8 @@ VK_AUTO_GROUPS = {
         "avtoclub23", "krasnodar_avto23", "kuban_avto",
         "avtodo100_krd", "avto_do300_krd", "srochno_avto23", "krd_auto_sell",
         "avtorynok_krd", "deshevo_avto23", "kuban_avto_sell",
+        "avto_krd_prodazha", "krd_avto_sale", "carbazar23", "avtotorg23",
+        "kuban_carbazar", "avto_kuban_sale",
     ],
     "omsk": [
         "kareta55", "podjopnik55",
@@ -1158,6 +1177,7 @@ VK_AUTO_GROUPS = {
         "club55avto", "omsk_avto55",
         "avtodo100_omsk", "avto_do300_omsk", "srochno_avto55", "omsk_auto_sell",
         "avtorynok_omsk", "deshevo_avto55",
+        "avto_omsk_prodazha", "omsk_avto_sale", "carbazar55", "avtotorg55",
     ],
     "rostov": [
         "kareta61", "podjopnik61",
@@ -1165,6 +1185,7 @@ VK_AUTO_GROUPS = {
         "avtoclub61", "rostov_avto61",
         "avtodo100_rostov", "avto_do300_61", "srochno_avto61", "rostov_auto_sell",
         "avtorynok_rostov", "deshevo_avto61",
+        "avto_rostov_prodazha", "rostov_avto_sale", "carbazar61", "avtotorg61",
     ],
     "tyumen": [
         "kareta72", "podjopnik72",
@@ -1172,6 +1193,7 @@ VK_AUTO_GROUPS = {
         "tyumen_avto72",
         "avtodo100_tmn", "avto_do300_tmn", "srochno_avto72", "tmn_auto_sell",
         "avtorynok_tmn", "deshevo_avto72", "tyumen_auto_sell",
+        "avto_tmn_prodazha", "tyumen_avto_sale", "carbazar72", "avtotorg72",
     ],
     "samara": [
         "kareta63", "podjopnik63",
@@ -1179,6 +1201,7 @@ VK_AUTO_GROUPS = {
         "samara_avto63",
         "avtodo100_samara", "avto_do300_63", "srochno_avto63", "samara_auto_sell",
         "avtorynok_samara", "deshevo_avto63",
+        "avto_samara_prodazha", "samara_avto_sale", "carbazar63", "avtotorg63",
     ],
     "krasnoyarsk": [
         "kareta24", "podjopnik24",
@@ -1186,18 +1209,21 @@ VK_AUTO_GROUPS = {
         "krasnoyarsk_avto24",
         "avtodo100_krs", "avto_do300_24", "srochno_avto24", "krs_auto_sell",
         "avtorynok_krs", "deshevo_avto24",
+        "avto_krs_prodazha", "krs_avto_sale", "carbazar24", "avtotorg24",
     ],
     "nn": [
         "kareta52", "podjopnik52",
         "avtobaraholkann", "prodamavtonn", "avto52nn", "autobazar_nn", "nn_avto52",
         "avtodo100_nn", "avto_do300_nn", "srochno_avto52", "nn_auto_sell",
         "avtorynok_nn", "deshevo_avto52",
+        "avto_nn_prodazha", "nn_avto_sale", "carbazar52", "avtotorg52",
     ],
     "perm": [
         "kareta59", "podjopnik59",
         "avtobaraholkaperm", "prodamavtoperm", "avto59perm", "autobazar_perm",
         "avtodo100_perm", "avto_do300_perm", "srochno_avto59", "perm_auto_sell",
         "avtorynok_perm", "deshevo_avto59",
+        "avto_perm_prodazha", "perm_avto_sale", "carbazar59", "avtotorg59",
     ],
     "voronezh": [
         "kareta36", "podjopnik36",
@@ -2269,6 +2295,18 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                     if not posts:
                         break
                     found_new = False
+                    # Все известные города для проверки «чужого» города в тексте
+                    _all_city_names = list({
+                        "москва", "московск", "питер", "петербург", "спб", "новосибирск",
+                        "казань", "екатеринбург", "нижний новгород", "челябинск", "самара",
+                        "омск", "ростов", "уфа", "красноярск", "пермь", "воронеж",
+                        "тюмень", "краснодар", "саратов", "иркутск", "тольятти",
+                        "ульяновск", "барнаул", "хабаровск", "владивосток", "ярославль",
+                        "махачкала", "томск", "оренбург", "кемерово", "новокузнецк",
+                        "рязань", "астрахань", "пенза", "липецк", "тула", "киров",
+                    })
+                    # Имена нашего города/области — посты с ними разрешены
+                    _our_city_names = {n.lower() for n in vk_search_locations}
                     for post in posts:
                         text_el = (post.select_one(".wall_post_text") or
                                    post.select_one("._post_content") or
@@ -2281,6 +2319,15 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                         if not _is_car_sale_social(text):
                             continue
                         if _is_moto(text[:200]):
+                            continue
+                        # Фильтр по городу: если явно упомянут ДРУГОЙ город — пропускаем
+                        tl_city = text.lower()
+                        _other_city = next(
+                            (c for c in _all_city_names
+                             if c in tl_city and not any(oc in tl_city for oc in _our_city_names)),
+                            None
+                        )
+                        if _other_city and not any(oc in tl_city for oc in _our_city_names):
                             continue
                         price = _parse_price(text)
                         if price > 0 and not (price_min <= price <= price_max):
