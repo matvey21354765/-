@@ -462,8 +462,8 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None)
 
     all_for_median = list(items) + (ref_items or [])
     groups: dict[str, list[int]] = {}
-    # Промежуточный уровень: марка+модель+4-летний диапазон (2015→503, 2020→505)
-    # Разделяет 2015 Solaris от 2020 Solaris → медиана не искажается новыми моделями
+    # Промежуточный уровень: марка+модель+2-летний диапазон (2015→1007, 2017→1008, 2019→1009)
+    # Разделяет 2015 Solaris от 2017 Solaris → медиана не искажается новыми моделями
     groups_year_bracket: dict[str, list[int]] = {}
     # Широкие группы: только марка+модель (без года) — запасной уровень
     groups_broad: dict[str, list[int]] = {}
@@ -479,7 +479,7 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None)
             if len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 4:
                 broad_key = parts[0]
                 try:
-                    bracket = int(parts[1]) // 4  # 2015→503, 2016-2019→504, 2020→505
+                    bracket = int(parts[1]) // 2  # 2015→1007, 2016-2017→1008, 2018-2019→1009
                     groups_year_bracket.setdefault(f"{broad_key}_{bracket}", []).append(p)
                 except Exception:
                     pass
@@ -509,7 +509,7 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None)
             # Уровень 2: 4-летний диапазон (изолирует 2015 от 2020-2024)
             if not med:
                 try:
-                    bracket = int(parts[1]) // 4 if (len(parts) == 2 and parts[1].isdigit()) else 0
+                    bracket = int(parts[1]) // 2 if (len(parts) == 2 and parts[1].isdigit()) else 0
                     if bracket:
                         med = market_year_bracket.get(f"{broad_key}_{bracket}", 0)
                 except Exception:
@@ -970,9 +970,24 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
         if price_max < 99_000_000:
             html_url += f"&price_to={price_max}"
 
-        # Метод 0: ПРЯМОЙ запрос через платный ротирующийся прокси (РФ IP) —
-        # Auto.ru, как и Авито, открывается с российского резидентного IP.
-        # Тянем HTML-страницу и парсим __INITIAL_STATE__. Это основной метод.
+        # Метод 0a: curl_cffi — Chrome TLS fingerprint, без зависимости от прокси
+        if not batch:
+            try:
+                from curl_cffi import requests as _cffi
+                _cffi_hdrs0 = {
+                    "Accept": "text/html,application/xhtml+xml,*/*;q=0.9",
+                    "Accept-Language": "ru-RU,ru;q=0.9",
+                    "Referer": f"https://auto.ru/{slug}/cars/used/",
+                }
+                rc0 = _cffi.get(html_url, impersonate="chrome124", timeout=15, headers=_cffi_hdrs0,
+                                proxies=_avito_proxies())
+                print(f"  [Auto.ru] curl_cffi стр.{p}: HTTP {rc0.status_code}, {len(rc0.text):,}б")
+                if rc0.status_code == 200 and len(rc0.text) > 30_000:
+                    batch = _autoru_parse_html(rc0.text, today)
+            except Exception as e:
+                print(f"  [Auto.ru] curl_cffi: {str(e)[:80]}")
+
+        # Метод 0b: ПРЯМОЙ запрос через резидентный прокси (РФ IP)
         if not batch and AVITO_PROXIES:
             try:
                 r0 = _req.get(html_url, headers={
@@ -1029,22 +1044,6 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
                         batch = _autoru_parse_html(r.text, today)
             except Exception as e:
                 print(f"  [Auto.ru] ScraperAPI AJAX: {e}")
-
-        # Метод 4: curl_cffi прямой запрос (обходит Cloudflare/бот-защиту)
-        if not batch:
-            try:
-                from curl_cffi import requests as _cffi
-                _cffi_hdrs = {
-                    "Accept": "text/html,application/xhtml+xml,*/*;q=0.9",
-                    "Accept-Language": "ru-RU,ru;q=0.9",
-                    "Referer": f"https://auto.ru/{slug}/cars/used/",
-                }
-                rc = _cffi.get(html_url, impersonate="chrome124", timeout=12, headers=_cffi_hdrs)
-                print(f"  [Auto.ru] curl_cffi стр.{p}: HTTP {rc.status_code}, {len(rc.text):,}б")
-                if rc.status_code == 200 and len(rc.text) > 30_000:
-                    batch = _autoru_parse_html(rc.text, today)
-            except Exception as e:
-                print(f"  [Auto.ru] curl_cffi: {str(e)[:80]}")
 
         print(f"  [Auto.ru] стр.{p}: итого {len(batch)} объявлений")
         if not batch:
@@ -2506,13 +2505,17 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                     if not _has_posts:
                         break
                     soup = _BS(rtext, "lxml")
-                    # VK mobile selectors (2024): div._post, div.wall_item, div.wi, div[class*=post]
+                    # VK mobile selectors (2024+)
                     posts = (soup.select("div._post") or
                              soup.select("div.wall_item") or
                              soup.select("div.wi") or
                              soup.select("article.post") or
                              soup.select("div[class*='wall-item']") or
-                             soup.select("div[class*='post_item']"))
+                             soup.select("div[class*='post_item']") or
+                             soup.select("div[class*='post_content']") or
+                             soup.select("div[class*='PostCard']") or
+                             soup.select("[data-post-id]") or
+                             soup.select("div[id^='post']"))
                     if not posts:
                         break
                     found_new = False
@@ -6677,6 +6680,7 @@ async def cmd_global_search(msg: Message):
         "drom":   lambda: scrape_drom(region, pages=15, price_min=pmin, price_max=pmax),
         "autoru": lambda: scrape_autoru(region, pages=12, price_min=pmin, price_max=pmax),
         "avito":  lambda: scrape_avito(region, pages=10, price_min=pmin, price_max=pmax, sort_by_date=False),
+        "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
     }
     tg_task = loop.run_in_executor(None, lambda: scrape_tg_channels(region, pmin, pmax))
     tasks = [loop.run_in_executor(None, fn) for fn in scraper_map.values()]
@@ -7453,6 +7457,47 @@ async def _ensure_photo(item: dict) -> None:
                     if p: photo = p
                     if d: desc = d
                     if pi: price_int = pi
+            elif source in ("vk", "tg", "tg_channel"):
+                # VK и TG: загружаем страницу поста и берём og:image / первое фото
+                _vk_hdr = {
+                    "User-Agent": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36",
+                    "Accept": "text/html,application/xhtml+xml,*/*;q=0.9",
+                    "Accept-Language": "ru-RU,ru;q=0.9",
+                }
+                _vk_url = url
+                if source == "vk" and "vk.com/" in url and "m.vk.com" not in url:
+                    _vk_url = url.replace("vk.com/", "m.vk.com/")
+                try:
+                    r = _req.get(_vk_url, timeout=8, headers=_vk_hdr)
+                    if r.status_code == 200 and len(r.text) > 1000:
+                        # og:image (не проверяем домен — любой CDN разрешён)
+                        _og = re.search(
+                            r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']'
+                            r'|<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
+                            r.text
+                        )
+                        if _og:
+                            _cand = (_og.group(1) or _og.group(2) or "").strip()
+                            if _cand and "sticker" not in _cand and "emoji" not in _cand:
+                                photo = _cand
+                        # Первая картинка с userapi.com / вложения VK
+                        if not photo:
+                            for _im in re.finditer(r'https?://[^\s"\'<>]+(?:userapi\.com|vkuseravatar)[^\s"\'<>]*\.(?:jpg|jpeg|webp|png)', r.text):
+                                _c = _im.group(0)
+                                if "sticker" not in _c and "emoji" not in _c:
+                                    photo = _c
+                                    break
+                        # Описание из og:description
+                        if not desc:
+                            _dsc = re.search(
+                                r'<meta[^>]+property=["\']og:description["\'][^>]+content=["\']([^"\']+)["\']'
+                                r'|<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:description["\']',
+                                r.text
+                            )
+                            if _dsc:
+                                desc = (_dsc.group(1) or _dsc.group(2) or "").strip()[:400]
+                except Exception:
+                    pass
         except Exception:
             pass
         return photo, desc, price_int
