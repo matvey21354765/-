@@ -1321,6 +1321,9 @@ _SOCIAL_REJECT_KEYWORDS = [
     "перевозк", "пассажирск", "грузоперевозк", "рейс", "маршрут", "такси",
     # Не машина: госномера, запчасти, автозвук, резина, детали
     "госномер", "гос. номер", "номерной знак", "красивый номер", "продам номер",
+    "эксклюзив. номер", "эксклюзивный номер", "регистрационный номер",
+    "номер на гелик", "номер на мерс", "номер на авто", "идеальный номер",
+    "подчеркнет статус", "номер авт", "автономер",
     "запчаст", "автозапчаст", "разбор", "на разбор", "на запчаст",
     "шин", "резин", "покрышк", "колес", "колёс", "диски", "диск р", "диск на",
     " шт.", "шт,", " шт\n",                        # «4 шт.» — детали поштучно
@@ -7437,15 +7440,21 @@ async def do_search_for_user(uid: int, reply_to):
     sem_pre = asyncio.Semaphore(8)
 
     async def _check_item(it: dict) -> dict | None:
-        """Возвращает None если объявление снято/продано, иначе обогащённый item."""
+        """Проверяет активность объявления и обогащает фото/описанием.
+        VK и TG — не проверяем (требуют авторизацию), только обогащаем если есть описание.
+        """
+        source = it.get("source", "")
+        # VK и TG нельзя проверить без авторизации — оставляем как есть
+        if source in ("vk", "tg", "tg_channel"):
+            return it
         async with sem_pre:
             try:
                 details = await asyncio.wait_for(
-                    loop_pre.run_in_executor(None, _fetch_and_check, it["url"], it.get("source", "")),
+                    loop_pre.run_in_executor(None, _fetch_and_check, it["url"], source),
                     timeout=8
                 )
                 if details is None:
-                    return None  # снято с продажи
+                    return None  # снято с продажи (Дром/Авито/Авто.ру)
                 it["_enriched"] = True
                 if details.get("_photo_url"):
                     it["_photo_url"] = details["_photo_url"]
@@ -7455,10 +7464,13 @@ async def do_search_for_user(uid: int, reply_to):
             except Exception:
                 return it  # при ошибке сети — оставляем объявление
 
-    checked = await asyncio.wait_for(
-        asyncio.gather(*[_check_item(it) for it in check_batch]),
-        timeout=20
-    ) if check_batch else []
+    try:
+        checked = await asyncio.wait_for(
+            asyncio.gather(*[_check_item(it) for it in check_batch]),
+            timeout=25
+        ) if check_batch else []
+    except asyncio.TimeoutError:
+        checked = check_batch  # при таймауте — не удаляем объявления
 
     active = [it for it in checked if it is not None]
     sold_count = len(check_batch) - len(active)
