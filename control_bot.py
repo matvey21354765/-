@@ -3683,7 +3683,10 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         if p > 1:
             params_no_filter["p"] = p
 
+        # s=1 — сортировка по цене (дешёвые первыми) — находит больше вариантов ниже рынка
+        params_price_sort = {**params_private, "s": "1"}
         urls_to_try = [
+            (f"https://m.avito.ru/{slug}/avtomobili", params_price_sort),
             (f"https://m.avito.ru/{slug}/avtomobili", params_private),
             # Без фильтра seller_type — меньше параметров, иногда не триггерит капчу
             (f"https://m.avito.ru/{slug}/avtomobili", params_no_filter),
@@ -6594,6 +6597,20 @@ async def _ensure_photo(item: dict) -> None:
     def _extract_from_page(text: str) -> tuple[str, str, int]:
         photo, desc, price_int = "", "", 0
 
+        _OG_REJECT = ("logo", "stub", "noimage", "placeholder", "icon", "favicon", "/nophoto",
+                      "apple-touch", "opengraph-default", "avito-app", "avito_app", "brand",
+                      "promo", "banner", "fallback", "default_image")
+
+        def _is_real_photo(url: str, src: str) -> bool:
+            """Проверяет что URL — реальное фото (не логотип/заглушка)."""
+            lo = url.lower()
+            if any(x in lo for x in _OG_REJECT):
+                return False
+            # Для Авито: принимаем ТОЛЬКО фото с CDN avito.st — бренд лежит на avito.ru
+            if src == "avito" and "avito.st" not in lo:
+                return False
+            return True
+
         # 1. og:image — самый надёжный для страниц объявлений
         if need_photo:
             og = re.search(
@@ -6603,9 +6620,7 @@ async def _ensure_photo(item: dict) -> None:
             )
             if og:
                 candidate = (og.group(1) or og.group(2) or "").strip()
-                if candidate and not any(
-                    x in candidate.lower() for x in ("logo", "stub", "noimage", "placeholder", "icon", "favicon", "/nophoto")
-                ):
+                if candidate and _is_real_photo(candidate, source):
                     photo = candidate
             # twitter:image как запасной вариант (на части моб. страниц нет og:image)
             if not photo:
@@ -6616,9 +6631,7 @@ async def _ensure_photo(item: dict) -> None:
                 )
                 if tw:
                     candidate = (tw.group(1) or tw.group(2) or "").strip()
-                    if candidate and not any(
-                        x in candidate.lower() for x in ("logo", "stub", "noimage", "placeholder", "icon", "favicon", "/nophoto")
-                    ):
+                    if candidate and _is_real_photo(candidate, source):
                         photo = candidate
 
         # 2. __NEXT_DATA__ JSON
@@ -7211,14 +7224,14 @@ async def do_search_for_user(uid: int, reply_to):
     loop = asyncio.get_event_loop()
 
     scraper_map = {
-        "drom":   lambda: scrape_drom(region, pages=5, price_min=pmin, price_max=pmax),
-        "autoru": lambda: scrape_autoru(region, pages=5, price_min=pmin, price_max=pmax),
-        "avito":  lambda: scrape_avito(region, pages=5, price_min=pmin, price_max=pmax, sort_by_date=False, brand=(brand if brand and brand != "any" else "")),
+        "drom":   lambda: scrape_drom(region, pages=8, price_min=pmin, price_max=pmax),
+        "autoru": lambda: scrape_autoru(region, pages=8, price_min=pmin, price_max=pmax),
+        "avito":  lambda: scrape_avito(region, pages=10, price_min=pmin, price_max=pmax, sort_by_date=False, brand=(brand if brand and brand != "any" else "")),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
         "tg":     lambda: scrape_tg_channels(region, pmin, pmax),
     }
     futures = [loop.run_in_executor(None, scraper_map[src]) for src in enabled_sources if src in scraper_map]
-    done, pending = await asyncio.wait(futures, timeout=70)
+    done, pending = await asyncio.wait(futures, timeout=100)
     if pending:
         for f in pending:
             f.cancel()
