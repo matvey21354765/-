@@ -705,7 +705,7 @@ def _autoru_parse_html(text: str, today) -> list[dict]:
         seen_urls.add(item_url)
         # Ищем марку/модель/год в блоке вокруг этого матча
         ctx_start = max(0, m.start() - 800)
-        ctx = text[ctx_start:m.end()]
+        ctx = text[ctx_start:m.end() + 3000]
         mark_m = re.search(r'"mark_info"\s*:\s*\{[^}]*"name"\s*:\s*"([^"]+)"', ctx)
         model_m = re.search(r'"model_info"\s*:\s*\{[^}]*"name"\s*:\s*"([^"]+)"', ctx)
         year_m = re.search(r'"year"\s*:\s*(\d{4})', ctx)
@@ -714,9 +714,16 @@ def _autoru_parse_html(text: str, today) -> list[dict]:
         year = year_m.group(1) if year_m else ""
         title = f"{mark} {model} {year}".strip() or "Авто на Auto.ru"
         price_str = f"{price_val:,} ₽".replace(",", " ")
+        # Фото: ищем сначала 1200x900, потом любой размер из CDN Яндекса
         photo_m = re.search(r'"1200x900"\s*:\s*"([^"]+)"', ctx)
+        if not photo_m:
+            photo_m = re.search(r'"(?:832x624|456x342|320x240)"\s*:\s*"([^"]+)"', ctx)
+        if not photo_m:
+            photo_m = re.search(r'"((?:https?:)?//avatars\.mds\.yandex\.net/[^"]{10,})"', ctx)
         photo_url = photo_m.group(1).replace("\\/", "/") if photo_m else ""
-        desc_m = re.search(r'"description"\s*:\s*"([^"]{10,400})"', text[max(0,m.start()-2000):m.end()+500])
+        if photo_url.startswith("//"):
+            photo_url = "https:" + photo_url
+        desc_m = re.search(r'"description"\s*:\s*"([^"]{10,400})"', text[max(0,m.start()-2000):m.end()+3000])
         desc = desc_m.group(1).replace("\\n", " ").strip() if desc_m else ""
         item = {
             "source": "autoru", "title": title, "price": price_str,
@@ -6226,7 +6233,24 @@ def _fetch_and_check(url: str, source: str) -> dict | None:
     try:
         import requests as _req
         from bs4 import BeautifulSoup as _BS
-        r = _req.get(url, headers=_FETCH_HEADERS, timeout=12, allow_redirects=True)
+        # Referer важен: Auto.ru и Авито блокируют без него
+        if source == "autoru":
+            _referer = "https://auto.ru/"
+        elif source == "drom":
+            _referer = "https://auto.drom.ru/"
+        else:
+            _referer = "https://www.avito.ru/"
+        _headers = {**_FETCH_HEADERS, "Referer": _referer}
+        # Для Auto.ru пробуем curl_cffi (обходит блокировку)
+        r = None
+        if source == "autoru":
+            try:
+                from curl_cffi import requests as _cffi
+                r = _cffi.get(url, impersonate="chrome124", timeout=12, headers=_headers)
+            except Exception:
+                pass
+        if r is None:
+            r = _req.get(url, headers=_headers, timeout=12, allow_redirects=True)
         if r.status_code in (404, 410):
             return None
         text = r.text
@@ -6246,11 +6270,28 @@ def _fetch_and_check(url: str, source: str) -> dict | None:
         # Отфильтровываем плейсхолдеры (логотип Дрома, хомяка и т.п.)
         if photo_url and any(p in photo_url for p in _DROM_PLACEHOLDER_URLS):
             photo_url = ""
-        # Если og:image не подошёл — берём первую img с cdn/s.
+        # Для Auto.ru: парсим фото из __INITIAL_STATE__ если og:image пустой
+        if not photo_url and source == "autoru":
+            _am = re.search(r'"(?:1200x900|832x624|456x342)"\s*:\s*"((?:https?:)?//[^"]{15,})"', text)
+            if _am:
+                raw = _am.group(1).replace("\\/", "/")
+                photo_url = ("https:" + raw) if raw.startswith("//") else raw
+            if not photo_url:
+                _am2 = re.search(r'"((?:https?:)?//avatars\.mds\.yandex\.net/[^"]{10,})"', text)
+                if _am2:
+                    raw = _am2.group(1).replace("\\/", "/")
+                    photo_url = ("https:" + raw) if raw.startswith("//") else raw
+            # Описание для Auto.ru
+            if not description:
+                _dm = re.search(r'"description"\s*:\s*"((?:\\.|[^"\\]){20,400})"', text)
+                if _dm:
+                    description = _dm.group(1).replace("\\n", " ").replace('\\"', '"').strip()
+        # Если og:image не подошёл — берём первую img с CDN
+        _cdn_keywords = ["avito.st", "avatars.mds.yandex", "cdn", "photos", "images", "s.auto.", "static"]
         if not photo_url:
             for img in soup.select("img[src]"):
                 src = img.get("src", "")
-                if src.startswith("http") and any(x in src for x in ["s.auto.", "cdn", "photos", "images"]):
+                if src.startswith("http") and any(x in src for x in _cdn_keywords):
                     photo_url = src
                     break
         if photo_url and not photo_url.startswith("http"):
@@ -6384,11 +6425,12 @@ async def _ensure_photo(item: dict) -> None:
                 pass
 
         if nd_json:
+            _IMG_CDNS = ("avito.st", "avatars.mds.yandex", "auto.ru", "drom.ru", "dromcdn")
             def _find_img(obj, depth=0) -> str:
                 if depth > 15 or obj is None:
                     return ""
                 if isinstance(obj, str):
-                    if "avito.st" in obj and len(obj) > 15 and (obj.startswith("//") or obj.startswith("http")):
+                    if any(cdn in obj for cdn in _IMG_CDNS) and len(obj) > 15 and (obj.startswith("//") or obj.startswith("http")):
                         raw = obj.replace("\\/", "/")
                         u = ("https:" + raw) if raw.startswith("//") else raw
                         if not any(x in u.lower() for x in ("/stub", "noimage", "logo", "placeholder", "/icon", "favicon")):
@@ -6469,7 +6511,47 @@ async def _ensure_photo(item: dict) -> None:
                             price_int = int(d)
                             break
 
-        # 3. Regex fallback — любой avito.st URL (широкий паттерн)
+        # 3. Для Auto.ru: разбор __INITIAL_STATE__ (Auto.ru не использует __NEXT_DATA__)
+        if need_photo and not photo and source == "autoru":
+            for _marker in ("window.__INITIAL_STATE__=", "window.__INITIAL_STATE__ ="):
+                _idx = text.find(_marker)
+                if _idx == -1:
+                    continue
+                _brace = text.find("{", _idx)
+                if _brace == -1:
+                    continue
+                _end = text.find("</script>", _brace)
+                _json_str = text[_brace:_end].rstrip("; \n\r") if _end != -1 else text[_brace:_brace + 800_000]
+                try:
+                    _st_data = json.loads(_json_str)
+                    _offers = (
+                        _deep_get(_st_data, "listing.data.offers")
+                        or _deep_get(_st_data, "search.offers.offers")
+                        or []
+                    )
+                    if _offers:
+                        offer0 = _offers[0]
+                        photos_list = offer0.get("photos", [])
+                        if photos_list:
+                            sizes = photos_list[0].get("sizes", {})
+                            _p = sizes.get("1200x900") or sizes.get("832x624") or sizes.get("456x342") or ""
+                            if _p:
+                                photo = _p.replace("\\/", "/")
+                                if photo.startswith("//"):
+                                    photo = "https:" + photo
+                        if need_desc and not desc:
+                            desc = offer0.get("description", "")[:400]
+                        break
+                except Exception:
+                    pass
+            # Regex fallback для Auto.ru: avatars.mds.yandex.net CDN
+            if not photo:
+                _am = re.search(r'"(?:1200x900|832x624|456x342)"\s*:\s*"((?:https?:)?//[^"]{15,})"', text)
+                if _am:
+                    raw = _am.group(1).replace("\\/", "/")
+                    photo = ("https:" + raw) if raw.startswith("//") else raw
+
+        # 3b. Regex fallback — любой avito.st URL (широкий паттерн)
         if need_photo and not photo:
             m = re.search(r'((?:https?:)?//(?:[a-z0-9-]+\.)?(?:img|images)\.avito\.st/[^"\'<\s\\]{10,})', text)
             if m:
@@ -6779,11 +6861,19 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                 loop = asyncio.get_event_loop()
 
                 def _download_photo():
-                    # 1. curl_cffi — обходит блокировку Avito CDN с Railway IP
+                    _item_source = item.get("source", "")
+                    # Referer зависит от источника
+                    if _item_source == "autoru":
+                        _referer = "https://auto.ru/"
+                    elif _item_source == "drom":
+                        _referer = "https://auto.drom.ru/"
+                    else:
+                        _referer = "https://www.avito.ru/"
+                    # 1. curl_cffi — обходит блокировку CDN с Railway IP
                     try:
                         from curl_cffi import requests as _cffi
                         r = _cffi.get(photo_url, impersonate="chrome124", timeout=12,
-                                      headers={"Referer": "https://www.avito.ru/"},
+                                      headers={"Referer": _referer},
                                       proxies=_avito_proxies())
                         if r.status_code == 200 and len(r.content) > 3_000:
                             return r.content
@@ -6793,7 +6883,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                     try:
                         r2 = _req.get(photo_url, timeout=12, headers={
                             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                            "Referer": "https://www.avito.ru/",
+                            "Referer": _referer,
                             "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
                         }, proxies=_avito_proxies())
                         if r2.status_code == 200 and len(r2.content) > 3_000:
@@ -6827,9 +6917,8 @@ async def send_batch(chat_id: int, uid: int, offset: int):
     sem = asyncio.Semaphore(6)
 
     async def _prefetch(it):
-        # Если фото уже есть — страницу объявления не грузим для скорости.
-        # Описание синтезируем из заголовка если реальное не пришло из парсера.
-        if it.get("_photo_url"):
+        # Грузим если нет фото ИЛИ нет описания
+        if it.get("_photo_url") and it.get("description"):
             return
         async with sem:
             try:
