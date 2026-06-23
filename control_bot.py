@@ -436,6 +436,9 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None)
 
     all_for_median = list(items) + (ref_items or [])
     groups: dict[str, list[int]] = {}
+    # Промежуточный уровень: марка+модель+4-летний диапазон (2015→503, 2020→505)
+    # Разделяет 2015 Solaris от 2020 Solaris → медиана не искажается новыми моделями
+    groups_year_bracket: dict[str, list[int]] = {}
     # Широкие группы: только марка+модель (без года) — запасной уровень
     groups_broad: dict[str, list[int]] = {}
     # Ещё шире: только первое слово (марка) — для совсем маленьких выборок
@@ -445,15 +448,24 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None)
         if p > 0:
             key = _car_group_key(it.get("title", ""))
             groups.setdefault(key, []).append(p)
-            # Широкий ключ: убираем год (последнее слово если это 4 цифры)
+            # Year-bracket ключ: марка+модель+диапазон4
             parts = key.rsplit(" ", 1)
-            broad_key = parts[0] if len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 4 else key
+            if len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 4:
+                broad_key = parts[0]
+                try:
+                    bracket = int(parts[1]) // 4  # 2015→503, 2016-2019→504, 2020→505
+                    groups_year_bracket.setdefault(f"{broad_key}_{bracket}", []).append(p)
+                except Exception:
+                    pass
+            else:
+                broad_key = key
             groups_broad.setdefault(broad_key, []).append(p)
             # Ключ марки: только первое слово
             brand_key_m = key.split(" ", 1)[0]
             groups_brand.setdefault(brand_key_m, []).append(p)
 
     market: dict[str, float] = {k: median(v) for k, v in groups.items() if len(v) >= 2}
+    market_year_bracket: dict[str, float] = {k: median(v) for k, v in groups_year_bracket.items() if len(v) >= 2}
     market_broad: dict[str, float] = {k: median(v) for k, v in groups_broad.items() if len(v) >= 2}
     market_brand: dict[str, float] = {k: median(v) for k, v in groups_brand.items() if len(v) >= 3}
 
@@ -464,12 +476,26 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None)
 
         if p > 0:
             key = _car_group_key(it.get("title", ""))
-            # Пробуем точный ключ, затем широкий (без года), затем только марку
+            parts = key.rsplit(" ", 1)
+            broad_key = parts[0] if (len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 4) else key
+            # Уровень 1: точный (марка+модель+год)
             med = market.get(key, 0)
+            # Уровень 2: 4-летний диапазон (изолирует 2015 от 2020-2024)
             if not med:
-                parts = key.rsplit(" ", 1)
-                broad_key = parts[0] if len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 4 else key
-                med = market_broad.get(broad_key, 0)
+                try:
+                    bracket = int(parts[1]) // 4 if (len(parts) == 2 and parts[1].isdigit()) else 0
+                    if bracket:
+                        med = market_year_bracket.get(f"{broad_key}_{bracket}", 0)
+                except Exception:
+                    pass
+            # Уровень 3: марка+модель (все годы) — только если нет bracket
+            # Применяем только если цена вписывается в разумный диапазон медианы
+            if not med:
+                med_all = market_broad.get(broad_key, 0)
+                # Если медиана всех лет слишком сильно отклоняется от цены — не используем
+                if med_all and 0.3 < (p / med_all) < 2.5:
+                    med = med_all
+            # Уровень 4: только марка
             if not med:
                 brand_key_m = key.split(" ", 1)[0]
                 med = market_brand.get(brand_key_m, 0)
@@ -494,7 +520,7 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None)
             deal_score += 15.0
 
         # Небольшой бонус за наличие фото — реальное объявление
-        if it.get("photo_url") or it.get("_photos", 0) > 0:
+        if it.get("_photo_url") or it.get("photo_url") or it.get("_photos", 0) > 0:
             deal_score += 3.0
 
         # Штраф если цена выше рынка (не интересно)
@@ -7312,9 +7338,44 @@ async def _ensure_photo(item: dict) -> None:
                     except Exception:
                         pass
             elif source == "drom":
-                r = _req.get(url, timeout=10, headers=_HDR)
-                if r.status_code == 200:
-                    p, d, pi = _extract_from_page(r.text)
+                _drom_hdr = {**_HDR, "Referer": "https://auto.drom.ru/"}
+                _drom_text = ""
+                # 1. cloudscraper — обходит антибот-защиту Дрома
+                try:
+                    import cloudscraper as _cs
+                    _cs_sess = _cs.create_scraper(browser={"browser": "chrome", "platform": "windows"})
+                    _r = _cs_sess.get(url, timeout=12, headers=_drom_hdr)
+                    if _r.status_code == 200 and len(_r.text) > 3000:
+                        _drom_text = _r.text
+                except Exception:
+                    pass
+                # 2. curl_cffi fallback
+                if not _drom_text:
+                    try:
+                        from curl_cffi import requests as _cffi
+                        _r = _cffi.get(url, impersonate="chrome124", timeout=12, headers=_drom_hdr)
+                        if _r.status_code == 200 and len(_r.text) > 3000:
+                            _drom_text = _r.text
+                    except Exception:
+                        pass
+                # 3. plain requests fallback
+                if not _drom_text:
+                    try:
+                        _r = _req.get(url, timeout=10, headers=_drom_hdr)
+                        if _r.status_code == 200:
+                            _drom_text = _r.text
+                    except Exception:
+                        pass
+                if _drom_text:
+                    p, d, pi = _extract_from_page(_drom_text)
+                    if not p:
+                        # Дром-специфичный фолбэк: ищем URL фото на CDN
+                        _dm = re.search(
+                            r'https?://(?:s\.auto|static|st|storage|photo|img)\.drom\.ru/[^"\'\s\\]{10,}\.(?:jpg|jpeg|webp|png)',
+                            _drom_text
+                        )
+                        if _dm:
+                            p = _dm.group(0).replace("\\/", "/")
                     if p: photo = p
                     if d: desc = d
                     if pi: price_int = pi
@@ -7558,7 +7619,9 @@ async def send_batch(chat_id: int, uid: int, offset: int):
             return
         async with sem:
             try:
-                await asyncio.wait_for(_ensure_photo(it), timeout=6)
+                # Дром требует больше времени (cloudscraper + 3 fallback)
+                _t = 14 if it.get("source") == "drom" else 6
+                await asyncio.wait_for(_ensure_photo(it), timeout=_t)
             except Exception:
                 pass
 
