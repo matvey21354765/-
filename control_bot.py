@@ -638,18 +638,41 @@ def scrape_drom(region: str, pages: int = 15, price_min: int = 0, price_max: int
                     photos = int(pm.group()) if pm else 0
 
                     photo_url = ""
-                    for img_el in card.find_all("img"):
-                        src = (img_el.get("data-src") or img_el.get("data-lazy-src") or
-                               img_el.get("data-original") or img_el.get("src") or "")
-                        if src and src.startswith("http") and len(src) > 20:
-                            photo_url = src
+                    _DROM_CDN = ("s.auto.drom.ru", "static.drom.ru", "st.drom.ru",
+                                 "storage.drom.ru", "photo.drom.ru", "img.drom.ru")
+                    # 1. picture > source (Drom lazy-load)
+                    for src_el in card.find_all("source"):
+                        for attr in ("data-srcset", "srcset", "data-src"):
+                            val = src_el.get(attr, "")
+                            if val:
+                                url_part = val.split(",")[0].split(" ")[0].strip()
+                                if url_part.startswith("http") and any(d in url_part for d in _DROM_CDN):
+                                    photo_url = url_part
+                                    break
+                        if photo_url:
                             break
-                    # Также ищем в data-атрибутах карточки (Drom хранит фото в JSON)
+                    # 2. img tags
+                    if not photo_url:
+                        for img_el in card.find_all("img"):
+                            src = (img_el.get("data-src") or img_el.get("data-lazy-src") or
+                                   img_el.get("data-original") or img_el.get("src") or "")
+                            if src and src.startswith("http") and len(src) > 20:
+                                if any(d in src for d in _DROM_CDN) or "drom" in src:
+                                    photo_url = src
+                                    break
+                    # 3. Regex fallback — любой URL на Drom CDN
                     if not photo_url:
                         card_str = str(card)
-                        img_m = re.search(r'https?://[^"\']+(?:static|photo)[^"\']+\.(?:jpg|jpeg|webp)', card_str)
+                        img_m = re.search(
+                            r'https?://(?:s\.auto|static|st|storage|photo|img)\.drom\.ru/[^"\'\s\\]{10,}\.(?:jpg|jpeg|webp|png)',
+                            card_str
+                        )
+                        if not img_m:
+                            img_m = re.search(
+                                r'https?://[^"\']+(?:static|photo)[^"\']+\.(?:jpg|jpeg|webp)', card_str
+                            )
                         if img_m:
-                            photo_url = img_m.group(0)
+                            photo_url = img_m.group(0).replace("\\/", "/")
 
                     if title and item_url:
                         price_int = parse_price(price) or 0
@@ -930,6 +953,22 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
                         batch = _autoru_parse_html(r.text, today)
             except Exception as e:
                 print(f"  [Auto.ru] ScraperAPI AJAX: {e}")
+
+        # Метод 4: curl_cffi прямой запрос (обходит Cloudflare/бот-защиту)
+        if not batch:
+            try:
+                from curl_cffi import requests as _cffi
+                _cffi_hdrs = {
+                    "Accept": "text/html,application/xhtml+xml,*/*;q=0.9",
+                    "Accept-Language": "ru-RU,ru;q=0.9",
+                    "Referer": f"https://auto.ru/{slug}/cars/used/",
+                }
+                rc = _cffi.get(html_url, impersonate="chrome124", timeout=20, headers=_cffi_hdrs)
+                print(f"  [Auto.ru] curl_cffi стр.{p}: HTTP {rc.status_code}, {len(rc.text):,}б")
+                if rc.status_code == 200 and len(rc.text) > 30_000:
+                    batch = _autoru_parse_html(rc.text, today)
+            except Exception as e:
+                print(f"  [Auto.ru] curl_cffi: {str(e)[:80]}")
 
         print(f"  [Auto.ru] стр.{p}: итого {len(batch)} объявлений")
         if not batch:
@@ -2375,19 +2414,29 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
             seen_post_urls: set[str] = set()
             today_d = datetime.date.today()
 
+            _mob_ua = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.82 Mobile Safari/537.36"
             for offset in (0, 20, 40):
                 try:
-                    if offset == 0:
-                        url_c = f"https://vk.com/{slug}"
-                    else:
-                        url_c = f"https://m.vk.com/{slug}?offset={offset}"
-                    r = session.get(url_c, timeout=10, headers={"User-Agent": "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36"})
+                    # Всегда используем мобильный VK — он показывает посты без авторизации
+                    url_c = f"https://m.vk.com/{slug}" if offset == 0 else f"https://m.vk.com/{slug}?offset={offset}"
+                    r = session.get(url_c, timeout=12, headers={"User-Agent": _mob_ua})
+                    if r.status_code == 302 or r.status_code == 403:
+                        break
                     if r.status_code != 200:
                         break
-                    if "_post" not in r.text and "wall_post" not in r.text and "tgme_widget" not in r.text:
+                    rtext = r.text
+                    # Проверяем наличие постов в HTML (несколько возможных паттернов VK)
+                    _has_posts = any(x in rtext for x in ("_post", "wall_post", "wall-item", "wi_body", "post__text", "post_content"))
+                    if not _has_posts:
                         break
-                    soup = _BS(r.text, "lxml")
-                    posts = soup.select("div._post, div.wall_item, article.post")
+                    soup = _BS(rtext, "lxml")
+                    # VK mobile selectors (2024): div._post, div.wall_item, div.wi, div[class*=post]
+                    posts = (soup.select("div._post") or
+                             soup.select("div.wall_item") or
+                             soup.select("div.wi") or
+                             soup.select("article.post") or
+                             soup.select("div[class*='wall-item']") or
+                             soup.select("div[class*='post_item']"))
                     if not posts:
                         break
                     found_new = False
@@ -2406,7 +2455,14 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                     for post in posts:
                         text_el = (post.select_one(".wall_post_text") or
                                    post.select_one("._post_content") or
-                                   post.select_one(".post__text"))
+                                   post.select_one(".post__text") or
+                                   post.select_one(".wi_body") or
+                                   post.select_one(".wall-item__text") or
+                                   post.select_one("[class*='post_text']") or
+                                   post.select_one("[class*='post-text']"))
+                        if not text_el:
+                            # Попробуем взять весь текст поста
+                            text_el = post
                         if not text_el:
                             continue
                         text = text_el.get_text(" ", strip=True)
