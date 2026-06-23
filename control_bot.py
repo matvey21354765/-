@@ -708,11 +708,13 @@ def _autoru_parse_html(text: str, today) -> list[dict]:
         price_str = f"{price_val:,} ₽".replace(",", " ")
         photo_m = re.search(r'"1200x900"\s*:\s*"([^"]+)"', ctx)
         photo_url = photo_m.group(1).replace("\\/", "/") if photo_m else ""
+        desc_m = re.search(r'"description"\s*:\s*"([^"]{10,400})"', text[max(0,m.start()-2000):m.end()+500])
+        desc = desc_m.group(1).replace("\\n", " ").strip() if desc_m else ""
         item = {
             "source": "autoru", "title": title, "price": price_str,
             "url": item_url, "date": str(today),
             "_photos": 1 if photo_url else 0, "_days_on_site": 0,
-            "description": "", "seller": "", "_photo_url": photo_url,
+            "description": desc, "seller": "", "_photo_url": photo_url,
             "_price_int": price_val,
         }
         item["_hot_score"] = hot_score(item)
@@ -723,7 +725,7 @@ def _autoru_parse_html(text: str, today) -> list[dict]:
     return results
 
 
-def scrape_autoru(region: str, pages: int = 5, price_min: int = 0, price_max: int = 99_000_000) -> list[dict]:
+def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: int = 99_000_000) -> list[dict]:
     slug = AUTORU_SLUGS.get(region, region)
     geo_ids = AUTORU_GEO_IDS.get(region, [])
     try:
@@ -1540,9 +1542,6 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
                 price = _parse_price(text)
                 if price > 0 and not (price_min <= price <= price_max):
                     continue
-                # Если бюджет ограничен — не показываем объявления без цены
-                if price == 0 and price_max < 90_000_000:
-                    continue
                 # Ссылка на конкретное сообщение
                 link_el = msg_el.select_one("a.tgme_widget_message_date") or msg_el.select_one("a[href*='t.me']")
                 msg_url = link_el.get("href", f"https://t.me/{channel}") if link_el else f"https://t.me/{channel}"
@@ -1569,6 +1568,7 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
                     "_year": int(year_m.group(1)) if year_m else 0,
                     "_days_on_site": 0,
                     "_below_market_hint": _is_below,
+                    "_no_price": price == 0,
                 })
             return batch
         except Exception as e:
@@ -1616,8 +1616,6 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
                             price = _parse_price(ctx)
                             if price > 0 and not (price_min <= price <= price_max):
                                 continue
-                            if price == 0 and price_max < 90_000_000:
-                                continue
                             year_m2 = _tg_year_re.search(ctx)
                             title = ctx[:80].replace("\n", " ").strip() or f"Авто {region_name_ru} TG"
                             batch.append({
@@ -1632,6 +1630,7 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
                                 "_seller_url": href,
                                 "_year": int(year_m2.group(1)) if year_m2 else 0,
                                 "_days_on_site": 0,
+                                "_no_price": price == 0,
                             })
                         if batch:
                             break
@@ -1827,8 +1826,6 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                     price = _parse_price(text)
                     if price > 0 and not (price_min <= price <= price_max):
                         continue
-                    if price == 0 and price_max < 90_000_000:
-                        continue
                     owner_id = post.get("owner_id", "")
                     post_id = post.get("id", "")
                     url = f"https://vk.com/wall{owner_id}_{post_id}"
@@ -1853,6 +1850,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                         "_seller_url": f"https://vk.com/wall{owner_id}",
                         "_year": int(year_m.group(1)) if year_m else 0,
                         "_days_on_site": 0,
+                        "_no_price": price == 0,
                     })
             except Exception as e:
                 print(f"  [VK API] {e}")
@@ -1899,8 +1897,6 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                         price = _parse_price(text)
                         if price > 0 and not (price_min <= price <= price_max):
                             continue
-                        if price == 0 and price_max < 90_000_000:
-                            continue
                         year_m = _vk_year_re.search(text)
                         title = _social_make_title(text) or "Объявление ВКонтакте"
                         batch.append({
@@ -1915,6 +1911,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                             "_seller_url": href,
                             "_year": int(year_m.group(1)) if year_m else 0,
                             "_days_on_site": 0,
+                            "_no_price": price == 0,
                         })
                     if batch:
                         break
@@ -1961,8 +1958,6 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                     price = _parse_price(text)
                     if price > 0 and not (price_min <= price <= price_max):
                         continue
-                    if price == 0 and price_max < 90_000_000:
-                        continue
                     year_m = _vk_year_re.search(text)
                     title = _social_make_title(text) or "Объявление ВКонтакте"
                     batch.append({
@@ -1977,6 +1972,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                         "_seller_url": href,
                         "_year": int(year_m.group(1)) if year_m else 0,
                         "_days_on_site": 0,
+                        "_no_price": price == 0,
                     })
             except Exception as e:
                 print(f"  [VK Яндекс] {e}")
@@ -2005,9 +2001,6 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                 price = _parse_price(text)
                 if price > 0 and not (price_min <= price <= price_max):
                     continue
-                # Если бюджет ограничен — не показываем объявления без цены
-                if price == 0 and price_max < 90_000_000:
-                    continue
                 link_el = post.select_one("a[href*='/wall']")
                 post_url = ""
                 if link_el:
@@ -2028,6 +2021,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                     "_seller_url": f"https://vk.com/{slug}",
                     "_year": int(year_m.group(1)) if year_m else 0,
                     "_days_on_site": 0,
+                    "_no_price": price == 0,
                 })
             return batch
         except Exception as e:
@@ -5297,6 +5291,32 @@ async def cmd_stats(msg: Message):
     await msg.answer(text, parse_mode="Markdown")
 
 
+@dp.message(Command("dashboard"))
+async def cmd_dashboard(msg: Message):
+    if msg.from_user.id not in ADMIN_IDS:
+        await msg.answer("❌ Только для администраторов.")
+        return
+    try:
+        text = analytics.format_stats_text(REGIONS)
+    except Exception as e:
+        text = f"Ошибка получения статистики: {e}"
+
+    port = int(os.getenv("PORT", "8080"))
+    key = os.getenv("DASHBOARD_KEY", "")
+    railway_url = os.getenv("RAILWAY_PUBLIC_DOMAIN", "")
+
+    if railway_url:
+        dash_url = f"https://{railway_url}/?key={key}" if key else f"https://{railway_url}/"
+    else:
+        dash_url = f"http://localhost:{port}/?key={key}" if key else f"http://localhost:{port}/"
+
+    await msg.answer(
+        text + f"\n\n🌐 [Открыть веб-дашборд]({dash_url})",
+        parse_mode="Markdown",
+        disable_web_page_preview=True,
+    )
+
+
 def _notify_keyboard(s: dict) -> InlineKeyboardMarkup:
     enabled = s.get("monitor_enabled", False)
     interval = s.get("monitor_interval_min", 5)
@@ -5845,7 +5865,7 @@ async def cmd_global_search(msg: Message):
     # Запускаем все источники + TG-каналы параллельно
     scraper_map = {
         "drom":   lambda: scrape_drom(region, pages=15, price_min=pmin, price_max=pmax),
-        "autoru": lambda: scrape_autoru(region, pages=8, price_min=pmin, price_max=pmax),
+        "autoru": lambda: scrape_autoru(region, pages=12, price_min=pmin, price_max=pmax),
         "avito":  lambda: scrape_avito(region, pages=10, price_min=pmin, price_max=pmax, sort_by_date=False),
     }
     tg_task = loop.run_in_executor(None, lambda: scrape_tg_channels(region, pmin, pmax))
@@ -6748,7 +6768,7 @@ async def do_search_for_user(uid: int, reply_to):
 
     scraper_map = {
         "drom":   lambda: scrape_drom(region, pages=15, price_min=pmin, price_max=pmax),
-        "autoru": lambda: scrape_autoru(region, pages=8, price_min=pmin, price_max=pmax),
+        "autoru": lambda: scrape_autoru(region, pages=12, price_min=pmin, price_max=pmax),
         "avito":  lambda: scrape_avito(region, pages=10, price_min=pmin, price_max=pmax, sort_by_date=False, brand=(brand if brand and brand != "any" else "")),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
         "tg":     lambda: scrape_tg_channels(region, pmin, pmax),
