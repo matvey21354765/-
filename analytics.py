@@ -163,6 +163,23 @@ def aggregate(region_names: dict | None = None) -> dict:
             if pmin is not None or pmax is not None:
                 price_counter[_price_bucket(pmin, pmax)] += 1
 
+    # По площадкам
+    platform_counter = Counter()
+    error_counter = Counter()
+    for ev in events:
+        action = ev.get("action", "")
+        if action == "search":
+            results = ev.get("results", 0)
+            if results == 0:
+                error_counter["zero_results"] += 1
+        if action in ("search", "vk_tg_search", "new_today", "global_search"):
+            src = ev.get("source", "")
+            if src:
+                platform_counter[src] += 1
+        if action == "error":
+            err = ev.get("error_type", "unknown")
+            error_counter[err] += 1
+
     # новые юзеры по дням из профилей
     for u in users.values():
         by_day_newusers[_day_str(u.get("first_seen", 0))] += 1
@@ -200,6 +217,8 @@ def aggregate(region_names: dict | None = None) -> dict:
         "top_regions": top_regions,
         "top_prices": top_prices,
         "timeline": timeline,
+        "top_platforms": [{"platform": p, "count": c} for p, c in platform_counter.most_common(10)],
+        "errors": [{"error": e, "count": c} for e, c in error_counter.most_common(10)],
     }
 
 
@@ -306,11 +325,16 @@ async function load(){
         ${card('DAU (24ч)', m.dau, 'WAU (7д): '+m.wau)}
         ${card('Поисков всего', m.searches_total, 'сегодня: '+m.searches_today)}
         ${card('Поисков / юзер', m.avg_searches_per_user)}
+        ${card('Нулевых поисков', (m.errors||[]).find(e=>e.error==='zero_results')?.count || 0, 'поиски без результатов')}
       </div>
       <div class="panel"><h2>📈 За 14 дней</h2><canvas id="chart" height="90"></canvas></div>
       <div class="cols">
         <div class="panel"><h2>🏙 Топ регионов</h2>${rows(m.top_regions,'name','count')}</div>
         <div class="panel"><h2>💰 Топ бюджетов</h2>${rows(m.top_prices,'range','count')}</div>
+      </div>
+      <div class="cols">
+        <div class="panel"><h2>🔌 По площадкам</h2>${rows((m.top_platforms||[]),'platform','count')}</div>
+        <div class="panel"><h2>⚠️ Проблемы</h2>${rows((m.errors||[]),'error','count')}</div>
       </div>`;
     const ctx = document.getElementById('chart');
     if(chart) chart.destroy();

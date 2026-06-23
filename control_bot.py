@@ -1458,7 +1458,7 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
     })
 
     _tg_price_re = re.compile(
-        r"(\d[\d\s]{2,10})\s*(?:₽|тыс\.?\s*р(?:уб)?\.?|руб\.?|р\.)",
+        r"(\d[\d\s]{1,8})\s*(?:₽|тыс\.?\s*(?:р(?:уб(?:лей?|ля)?)?\.?)?|руб(?:лей?|ля)?\.?|р\.|тр\.?|к\b)",
         re.IGNORECASE,
     )
     _tg_price_ctx_re = re.compile(
@@ -1474,8 +1474,9 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
                 continue
             val = int(raw)
             suffix = m.group(0)[len(m.group(1)):].strip().lower()
-            if "тыс" in suffix:
-                val *= 1000
+            if "тыс" in suffix or "тр" in suffix or (suffix.startswith("к") and not "кузов" in suffix):
+                if val < 1000:
+                    val *= 1000
             if 50_000 <= val <= 50_000_000:
                 return val
         for m in _tg_price_ctx_re.finditer(text):
@@ -1489,6 +1490,16 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
             if val < 1000:
                 val *= 1000
             if 50_000 <= val <= 50_000_000:
+                return val
+        # Третий проход: голое число в диапазоне цен авто
+        _bare_num_re = re.compile(r'\b(\d{5,7})\b')
+        for m in _bare_num_re.finditer(text):
+            val = int(m.group(1))
+            if 50_000 <= val <= 9_999_999:
+                # Проверяем что рядом нет слов как "пробег", "год", "км"
+                ctx = text[max(0,m.start()-30):m.end()+30].lower()
+                if any(skip in ctx for skip in ('пробег','км','год','г.в','г/в','тыс.км')):
+                    continue
                 return val
         return 0
 
@@ -1726,7 +1737,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
     today = datetime.date.today()
 
     _vk_price_re = re.compile(
-        r"(\d[\d\s]{2,10})\s*(?:₽|тыс\.?\s*р(?:уб)?\.?|руб\.?|р\.)",
+        r"(\d[\d\s]{1,8})\s*(?:₽|тыс\.?\s*(?:р(?:уб(?:лей?|ля)?)?\.?)?|руб(?:лей?|ля)?\.?|р\.|тр\.?|к\b)",
         re.IGNORECASE,
     )
     # Число рядом с ценовым словом: "цена 150000", "прошу 95 000", "стоимость 80тыс"
@@ -1745,8 +1756,9 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                 continue
             val = int(raw)
             suffix = m.group(0)[len(m.group(1)):].strip().lower()
-            if "тыс" in suffix:
-                val *= 1000
+            if "тыс" in suffix or "тр" in suffix or (suffix.startswith("к") and not "кузов" in suffix):
+                if val < 1000:
+                    val *= 1000
             if 50_000 <= val <= 50_000_000:
                 return val
         # Затем ищем число рядом с ценовым словом
@@ -1761,6 +1773,16 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
             if val < 1000:  # вероятно тысячи без суффикса: "цена 95" → 95000
                 val *= 1000
             if 50_000 <= val <= 50_000_000:
+                return val
+        # Третий проход: голое число в диапазоне цен авто
+        _bare_num_re = re.compile(r'\b(\d{5,7})\b')
+        for m in _bare_num_re.finditer(text):
+            val = int(m.group(1))
+            if 50_000 <= val <= 9_999_999:
+                # Проверяем что рядом нет слов как "пробег", "год", "км"
+                ctx = text[max(0,m.start()-30):m.end()+30].lower()
+                if any(skip in ctx for skip in ('пробег','км','год','г.в','г/в','тыс.км')):
+                    continue
                 return val
         return 0
 
@@ -5935,6 +5957,9 @@ async def cmd_vk_tg_search(msg: Message):
 
     items: list[dict] = []
     stat_parts: list[str] = []
+    vk_cnt = len(vk_result) if isinstance(vk_result, list) else 0
+    tg_cnt = len(tg_result) if isinstance(tg_result, list) else 0
+    analytics.track("vk_tg_raw", uid=uid, region=region, vk=vk_cnt, tg=tg_cnt)
     if isinstance(vk_result, list) and vk_result:
         items.extend(vk_result)
         stat_parts.append(f"📘 VK: {len(vk_result)}")
