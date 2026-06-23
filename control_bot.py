@@ -236,6 +236,19 @@ def save_settings(uid: int, s: dict):
     f.write_text(json.dumps(s, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+_URL_NORM_RE = re.compile(r'(\d{7,})')
+_URL_DOMAIN_RE = re.compile(r'https?://(?:www\.|m\.)?([^/]+)')
+
+def _norm_url(u: str) -> str:
+    """Нормализует URL для дедупликации: убирает query-params и мобильный поддомен."""
+    if not u:
+        return u
+    u = u.split("?")[0].split("#")[0].rstrip("/")
+    u = u.replace("//m.avito.ru/", "//www.avito.ru/")
+    u = u.replace("//m.vk.com/", "//vk.com/")
+    return u
+
+
 def load_seen(uid: int) -> set:
     f = user_dir(uid) / "seen.json"
     try:
@@ -6363,15 +6376,17 @@ async def cmd_new_today(msg: Message):
     )
     items = list(items_avito)
 
-    # Дедупликация
-    seen_u: set[str] = set()
-    deduped: list[dict] = []
+    seen_norm_today = {_norm_url(u) for u in load_seen(uid)}
+    skipped_norm_today = {_norm_url(u) for u in skipped}
+    _seen_u2: set[str] = set()
+    deduped2: list[dict] = []
     for i in items:
-        u = i.get("url", "")
-        if u and u not in seen_u:
-            seen_u.add(u)
-            deduped.append(i)
-    items = deduped
+        u = _norm_url(i.get("url", ""))
+        if u and u not in _seen_u2:
+            _seen_u2.add(u)
+            i["url"] = u
+            deduped2.append(i)
+    items = deduped2
 
     # Фильтр: только за последние 24 часа (_days_on_site <= 1)
     fresh = [it for it in items if it.get("_days_on_site", 0) <= 1]
@@ -6381,7 +6396,7 @@ async def cmd_new_today(msg: Message):
         if not is_dealer(i)
         and in_price_range(i, pmin, pmax)
         and i.get("url")
-        and i["url"] not in skipped
+        and i["url"] not in skipped_norm_today
     ]
     suitable = _filter_by_category(suitable, category, brand)
     suitable = rank_by_market_price(suitable)
@@ -6465,15 +6480,18 @@ async def cmd_global_search(msg: Message):
     if stat_parts:
         await msg.answer("📊 " + " | ".join(stat_parts))
 
-    # Дедупликация
-    seen_u: set[str] = set()
-    deduped: list[dict] = []
+    _seen_g: set[str] = set()
+    deduped_g: list[dict] = []
     for i in items:
-        u = i.get("url", "")
-        if u and u not in seen_u:
-            seen_u.add(u)
-            deduped.append(i)
-    items = deduped
+        u = _norm_url(i.get("url", ""))
+        if u and u not in _seen_g:
+            _seen_g.add(u)
+            i["url"] = u
+            deduped_g.append(i)
+    items = deduped_g
+
+    seen_norm_g = {_norm_url(u) for u in seen}
+    skipped_norm_g = {_norm_url(u) for u in skipped}
 
     # Парсим цену из текста там где не распарсилась
     for it in items:
@@ -6487,8 +6505,8 @@ async def cmd_global_search(msg: Message):
         if not is_dealer(i)
         and in_price_range(i, pmin, pmax)
         and i.get("url")
-        and i["url"] not in skipped
-        and i["url"] not in seen
+        and i["url"] not in skipped_norm_g
+        and i["url"] not in seen_norm_g
     ]
     suitable = rank_by_market_price(suitable)
     suitable = _sort_by_deal(suitable)
@@ -6561,15 +6579,17 @@ async def cmd_vk_tg_search(msg: Message):
     if stat_parts:
         await msg.answer("📊 " + " | ".join(stat_parts))
 
-    # Дедупликация
-    seen_u: set[str] = set()
-    deduped: list[dict] = []
+    _seen_v: set[str] = set()
+    deduped_v: list[dict] = []
     for i in items:
-        u = i.get("url", "")
-        if u and u not in seen_u:
-            seen_u.add(u)
-            deduped.append(i)
-    items = deduped
+        u = _norm_url(i.get("url", ""))
+        if u and u not in _seen_v:
+            _seen_v.add(u)
+            i["url"] = u
+            deduped_v.append(i)
+    items = deduped_v
+
+    skipped_norm_v = {_norm_url(u) for u in skipped}
 
     # Парсим цену из текста если не распарсилась
     for it in items:
@@ -6582,8 +6602,7 @@ async def cmd_vk_tg_search(msg: Message):
         i for i in items
         if in_price_range(i, pmin, pmax)
         and i.get("url")
-        and i["url"] not in skipped
-        # seen не фильтруем в поиске
+        and i["url"] not in skipped_norm_v
     ]
     suitable = rank_by_market_price(suitable)
     suitable = _sort_by_deal(suitable)
@@ -7456,12 +7475,14 @@ async def send_batch(chat_id: int, uid: int, offset: int):
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[nav_row]) if nav_row else MAIN_KEYBOARD,
         )
 
-    # Сохраняем показанные в seen (кап 2000 — удаляем старые если превышено)
+    # Сохраняем показанные в seen (нормализуем URL, кап 2000)
     seen = load_seen(uid)
     for item in batch:
-        seen.add(item.get("url", ""))
+        u = item.get("url", "")
+        if u:
+            seen.add(_norm_url(u))
     if len(seen) > 2000:
-        seen = set(list(seen)[-1500:])  # оставляем последние 1500
+        seen = set(list(seen)[-1500:])
     save_seen(uid, seen)
 
 
@@ -7627,28 +7648,26 @@ async def do_search_for_user(uid: int, reply_to):
     dealer_count = sum(1 for i in items if is_dealer(i))
     price_count = sum(1 for i in items if not is_dealer(i) and not in_price_range(i, pmin, pmax))
     print(f"  [поиск] всего={len(items)}, дилеров={dealer_count}, вне бюджета={price_count}")
-    # Дедупликация по URL и по числовому ID в рамках одного домена
-    # (Авито повторяет объявления с разными параметрами, но ID уникален только внутри площадки)
+    # Дедупликация: нормализуем URL (убираем ?params, m. поддомен) + по числовому ID внутри площадки
     seen_u: set[str] = set()
     seen_domain_ids: set[str] = set()
     deduped: list[dict] = []
-    _id_re = re.compile(r'(\d{7,})')
-    _domain_re = re.compile(r'https?://(?:www\.)?([^/]+)')
     for i in items:
         u = i.get("url", "")
         if not u:
             continue
-        if u in seen_u:
+        u_norm = _norm_url(u)
+        if u_norm in seen_u:
             continue
-        # Извлекаем домен + числовой ID — дедупим только внутри одной площадки
-        _dm = _domain_re.match(u)
+        _dm = _URL_DOMAIN_RE.match(u_norm)
         _domain = (_dm.group(1) if _dm else "").replace("m.vk.com", "vk.com")
-        _id_m = _id_re.search(u.split("?")[0])
+        _id_m = _URL_NORM_RE.search(u_norm.split("?")[0])
         _num_id = _id_m.group(1) if _id_m else ""
         _domain_id_key = f"{_domain}:{_num_id}" if _num_id else ""
         if _domain_id_key and _domain_id_key in seen_domain_ids:
             continue
-        seen_u.add(u)
+        seen_u.add(u_norm)
+        i["url"] = u_norm  # нормализуем URL в объявлении
         if _domain_id_key:
             seen_domain_ids.add(_domain_id_key)
         deduped.append(i)
@@ -7749,20 +7768,23 @@ async def do_search_for_user(uid: int, reply_to):
         except Exception:
             pass
 
+    # seen хранит нормализованные URL — сравниваем тоже по нормализованным
+    seen_norm = {_norm_url(u) for u in seen}
+    skipped_norm = {_norm_url(u) for u in skipped}
     already_seen_count = sum(
         1 for i in items
         if not is_dealer(i) and in_price_range(i, pmin, pmax)
-        and i.get("url") and i["url"] in seen
+        and i.get("url") and i["url"] in seen_norm
     )
-    print(f"  [поиск] items={len(items)}, seen={len(seen)}, skipped={len(skipped)}, already_seen={already_seen_count}")
+    print(f"  [поиск] items={len(items)}, seen={len(seen_norm)}, skipped={len(skipped_norm)}, already_seen={already_seen_count}")
     _before = len(items)
     suitable = [
         i for i in items
         if not i.get("_market_ref_only")
         and in_price_range(i, pmin, pmax)
         and i.get("url")
-        and i["url"] not in skipped
-        and i["url"] not in seen  # не показываем уже просмотренные
+        and i["url"] not in skipped_norm
+        and i["url"] not in seen_norm
     ]
     print(f"  [фильтр] после in_price_range+seen: {len(suitable)}/{_before} (бюджет {pmin}-{pmax})")
     # Для отладки: показываем какие цены НЕ прошли
@@ -7774,62 +7796,31 @@ async def do_search_for_user(uid: int, reply_to):
     suitable = _filter_by_category(suitable, category, brand)
     print(f"  [фильтр] после category({category}/{brand}): {len(suitable)}")
     suitable = rank_by_market_price(suitable, ref_items=[i for i in items if i.get("_market_ref_only")])
-    # Дилерские объявления — в конец (но показываем, особенно если ниже рынка)
+    # Дилерские объявления — добавляем штраф к deal_score
     for it in suitable:
         if is_dealer(it):
             it["_is_dealer"] = True
-    # Логика сортировки:
-    # Главный критерий — ВЫГОДА (% ниже рынка). Свежесть важна только при одинаковой выгоде.
-    # Правило: старое объявление -20% рынка лучше сегодняшнего +5% рынка.
-    # НО: среди одинаково выгодных — сегодняшнее идёт первым.
-    # Дилеры — всегда после частников на том же уровне выгоды.
-    def _sort_key(x):
-        pct = x.get("_savings_pct", 0)           # положительный = ниже рынка
-        days = x.get("_days_on_site", 999)
-        dealer = x.get("_is_dealer", False)
-        price = x.get("_price_int", 999_999_999)
-        dealer_penalty = 5 if dealer else 0
-
-        # Ярусы выгоды (не зависят от свежести)
-        if pct >= 20:
-            value_tier = 0   # сильно ниже рынка (≥20%)
-        elif pct >= 10:
-            value_tier = 1   # заметно ниже рынка (10–20%)
-        elif pct > 0:
-            value_tier = 2   # немного ниже рынка (0–10%)
-        elif pct == 0 and price > 0:
-            value_tier = 3   # по рынку
-        elif pct < 0:
-            value_tier = 4   # выше рынка — в конец
-        else:
-            value_tier = 5   # цена неизвестна
-
-        # Внутри яруса: сначала свежие, потом старые
-        # Но выгода всегда важнее: объявление -15% / 30 дней будет выше -2% / сегодня
-        return (value_tier + dealer_penalty, -pct, days, price)
-    suitable.sort(key=_sort_key)
+            it["_deal_score"] = it.get("_deal_score", 0) - 30
+    suitable = _sort_by_deal(suitable)
 
     if not suitable and already_seen_count > 0:
         # auto-clear seen and retry
-        seen = set()
-        save_seen(uid, seen)
+        seen_norm = set()
+        save_seen(uid, set())
         suitable = [
             i for i in items
             if not i.get("_market_ref_only")
             and in_price_range(i, pmin, pmax)
             and i.get("url")
-            and i["url"] not in skipped
+            and i["url"] not in skipped_norm
         ]
         suitable = _filter_by_category(suitable, category, brand)
         suitable = rank_by_market_price(suitable, ref_items=[i for i in items if i.get("_market_ref_only")])
-        suitable.sort(key=lambda x: (
-            0 if (x.get("_savings_pct", 0) > 0 and x.get("_days_on_site", 999) <= 1) else
-            1 if x.get("_savings_pct", 0) > 0 else
-            (2 if x.get("_price_int", 0) > 0 else 3),  # ниже рынка первыми
-            -x.get("_savings_pct", 0),
-            -x.get("_hot_score", 0),
-            x.get("_price_int", 999_999_999),
-        ))
+        for it in suitable:
+            if is_dealer(it):
+                it["_is_dealer"] = True
+                it["_deal_score"] = it.get("_deal_score", 0) - 30
+        suitable = _sort_by_deal(suitable)
         if suitable:
             await reply_to.answer("♻️ История просмотров сброшена — показываю объявления заново.")
 
