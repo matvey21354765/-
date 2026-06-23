@@ -4724,7 +4724,6 @@ def id_to_url(sid: str) -> str:
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🔍 Найти авто"), KeyboardButton(text="🌐 Глобальный поиск")],
-        [KeyboardButton(text="📢 VK + TG Барахолка")],
         [KeyboardButton(text="🆕 Новые сегодня"), KeyboardButton(text="🎯 Следить за маркой")],
         [KeyboardButton(text="🔔 Уведомления"), KeyboardButton(text="🚗 Мой гараж")],
         [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="❓ Помощь")],
@@ -5277,7 +5276,7 @@ async def cmd_settings(msg: Message, state: FSMContext):
     await state.set_state(Setup.category)
 
 
-ALL_SOURCES = ["drom", "autoru", "avito"]
+ALL_SOURCES = ["drom", "autoru", "avito", "vk", "tg"]
 SOURCE_NAMES = {
     "drom":   "🔵 Дром",
     "autoru": "🟠 Auto.ru",
