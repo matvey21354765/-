@@ -1336,6 +1336,12 @@ _SOCIAL_REJECT_KEYWORDS = [
     "штраф", "гибдд фиксир", "корги", "собак", "животн",
     "реклам", "подпишись", "заработ", "казино", "ставк",
     "пресс-релиз", "подписчик",
+    # Правила/описание каналов и групп — не объявления
+    "правила группы", "правила канала", "правила чата", "платформа размещения",
+    "регистрация в ркн", "администратор", "@tut_admin", "другие города",
+    "не проходят ссылк", "поддержку, развитие", "поддержку развитие",
+    "доска объявлений", "барахолка", "обратная связь бота", "бот поддержки",
+    "вступить в группу", "вступить в чат",
 ]
 
 def _is_car_sale_social(text: str) -> bool:
@@ -1599,6 +1605,11 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
                         photo_url = m.group(1)
                 year_m = _tg_year_re.search(text)
                 title = _social_make_title(text)
+                # Телефон продавца из текста
+                phone_re_ch = re.compile(r'(?:\+7|8)[\s\-]?\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}')
+                phone_m_ch = phone_re_ch.search(text)
+                phone_ch = phone_m_ch.group(0).strip() if phone_m_ch else ""
+                seller_ch = f"@{channel}" + (f" · {phone_ch}" if phone_ch else "")
                 batch.append({
                     "title": title,
                     "price": f"{price:,} ₽".replace(",", " ") if price else "цена не указана",
@@ -1607,7 +1618,7 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
                     "_photo_url": photo_url,
                     "description": text[:500],
                     "source": "tg",
-                    "seller": f"@{channel}",
+                    "seller": seller_ch,
                     "_seller_url": f"https://t.me/{channel}",
                     "_year": int(year_m.group(1)) if year_m else 0,
                     "_days_on_site": 0,
@@ -1619,11 +1630,41 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
             print(f"  [TG {channel}] {e}")
             return []
 
+    _tg_phone_re = re.compile(r'(?:\+7|8|7)[\s\-]?\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}')
+    _tg_post_url_re = re.compile(r'https?://t\.me/([a-zA-Z0-9_]+)/(\d+)', re.I)
+
+    def _fetch_tg_post(post_url: str) -> dict:
+        """Загружает страницу TG-поста, возвращает {photo_url, text, phone}."""
+        try:
+            r = session.get(post_url, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+            if r.status_code != 200:
+                return {}
+            soup = _BS(r.text, "lxml")
+            msg_el = soup.select_one(".tgme_widget_message_wrap") or soup.select_one(".tgme_widget_message")
+            if not msg_el:
+                return {}
+            text_el = msg_el.select_one(".tgme_widget_message_text")
+            text = text_el.get_text(" ", strip=True) if text_el else ""
+            # Фото
+            photo_url = ""
+            img_wrap = msg_el.select_one("a.tgme_widget_message_photo_wrap")
+            if img_wrap:
+                style = img_wrap.get("style", "")
+                pm = re.search(r"url\('([^']+)'\)", style)
+                if pm:
+                    photo_url = pm.group(1)
+            # Телефон продавца
+            phone_m = _tg_phone_re.search(text)
+            phone = phone_m.group(0).strip() if phone_m else ""
+            return {"photo_url": photo_url, "text": text, "phone": phone}
+        except Exception:
+            return {}
+
     def _try_ddg_tg(keywords: str) -> list[dict]:
         """Ищет посты продажи авто в TG через DuckDuckGo (работает с Railway IP)."""
         try:
             import urllib.parse as _upq
-            _tg_url_re = re.compile(r'https?://t\.me/[a-zA-Z0-9_/]+(?:\d+)?', re.I)
+            _tg_url_re = re.compile(r'https?://t\.me/[a-zA-Z0-9_]+/\d+', re.I)  # только конкретные посты с номером
             queries = []
             for _loc in search_locations:
                 queries += [
@@ -1648,31 +1689,48 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
                             except Exception:
                                 break
                         for m in _tg_url_re.finditer(html):
-                            href = m.group(0)
-                            # Пропускаем ссылки на каналы без ID поста (только /channel)
+                            href = m.group(0).rstrip(".,)")
                             if href in seen_urls:
                                 continue
                             seen_urls.add(href)
-                            # Контекст вокруг ссылки
+                            # Контекст вокруг ссылки из DDG
                             pos = html.find(m.group(0))
                             ctx = html[max(0, pos-300):pos+500]
                             import html as _html_mod
                             ctx = _html_mod.unescape(re.sub(r"<[^>]+>", " ", ctx))
                             ctx = re.sub(r"\s+", " ", ctx).strip()
+                            if not _is_car_sale_social(ctx):
+                                continue
                             price = _parse_price(ctx)
                             if price > 0 and not (price_min <= price <= price_max):
                                 continue
-                            year_m2 = _tg_year_re.search(ctx)
-                            title = ctx[:80].replace("\n", " ").strip() or f"Авто {region_name_ru} TG"
+                            # Загружаем реальную страницу поста для фото и телефона
+                            post_details = _fetch_tg_post(href)
+                            post_text = post_details.get("text") or ctx
+                            photo_url = post_details.get("photo_url", "")
+                            phone = post_details.get("phone", "")
+                            # Перепроверяем цену из полного текста если DDG не дал
+                            if not price and post_text:
+                                price = _parse_price(post_text)
+                            if price > 0 and not (price_min <= price <= price_max):
+                                continue
+                            # Извлекаем имя канала для seller
+                            ch_m = _tg_post_url_re.match(href)
+                            channel_name = ch_m.group(1) if ch_m else "Telegram"
+                            seller_label = f"@{channel_name}"
+                            if phone:
+                                seller_label += f" · {phone}"
+                            year_m2 = _tg_year_re.search(post_text or ctx)
+                            title = _social_make_title(post_text or ctx) or f"Авто {region_name_ru} TG"
                             batch.append({
                                 "title": title,
                                 "price": f"{price:,} ₽".replace(",", " ") if price else "цена не указана",
                                 "_price_int": price,
                                 "url": href,
-                                "_photo_url": "",
-                                "description": ctx[:400],
+                                "_photo_url": photo_url,
+                                "description": (post_text or ctx)[:500],
                                 "source": "tg",
-                                "seller": "Telegram",
+                                "seller": seller_label,
                                 "_seller_url": href,
                                 "_year": int(year_m2.group(1)) if year_m2 else 0,
                                 "_days_on_site": 0,
@@ -7804,6 +7862,46 @@ async def _monitor_loop(uid: int):
         await asyncio.sleep(3600)
 
 
+# ── Push-уведомления — раз в 2-3 дня ─────────────────────────────
+_PUSH_MESSAGES = [
+    "🚗 Привет! На рынке б/у авто появились новые выгодные предложения — первым найди машину ниже рынка: /search",
+    "💰 Пока ты отдыхал, рынок изменился. Новые объявления ниже рыночной цены уже ждут тебя: /search",
+    "🔍 Свежие авто с пробегом — нашёл 10+ объявлений ниже рынка в твоём городе. Смотри: /search",
+    "🎯 Выгодная сделка не ждёт! Каждый день продавцы занижают цену. Поищи прямо сейчас: /search",
+    "⚡️ Новые авто ниже рынка появляются каждый день. Не пропусти выгодное предложение: /search",
+    "🚘 Рынок авто живёт своей жизнью — сегодня могут появиться отличные варианты в твоём бюджете: /search",
+]
+
+_PUSH_INTERVAL_SEC = 2.5 * 24 * 3600  # ~2.5 дня между уведомлениями
+
+async def _push_notification_loop():
+    """Раз в 2-3 дня отправляет всем пользователям мотивирующее сообщение для возврата в бот."""
+    import random as _rnd
+    # Первый запуск — подождать сутки чтобы не слать сразу после перезапуска
+    await asyncio.sleep(24 * 3600)
+    while True:
+        now = time.time()
+        if USERS_DIR.exists():
+            for user_path in USERS_DIR.iterdir():
+                if not user_path.is_dir() or not user_path.name.isdigit():
+                    continue
+                uid = int(user_path.name)
+                notif_file = user_path / "last_push_notif.txt"
+                try:
+                    if notif_file.exists():
+                        last_sent = float(notif_file.read_text().strip())
+                        if now - last_sent < _PUSH_INTERVAL_SEC:
+                            continue
+                    msg = _rnd.choice(_PUSH_MESSAGES)
+                    await bot.send_message(uid, msg)
+                    notif_file.write_text(str(now))
+                    await asyncio.sleep(0.1)  # защита от flood
+                except Exception:
+                    pass
+        # Следующий обход — через сутки (каждый день проверяем кому пора слать)
+        await asyncio.sleep(24 * 3600)
+
+
 # ── Глобальный монитор — один цикл на всех пользователей ─────────
 GLOBAL_POLL_SEC = 120   # опрос каждые 2 минуты
 
@@ -8338,6 +8436,9 @@ async def main():
     # Единый глобальный монитор — опрашивает всех активных пользователей каждые 2 минуты
     loop.create_task(_global_monitor_loop())
     print(f"  [монитор] глобальный цикл запущен (интервал {GLOBAL_POLL_SEC}с)")
+    # Push-уведомления — раз в 2-3 дня всем пользователям
+    loop.create_task(_push_notification_loop())
+    print("  [push] цикл уведомлений запущен (интервал ~2.5 дня)")
     # Прогрев кеша бесплатных прокси — тестирует их против Авито и кеширует рабочие
     loop.create_task(_proxy_warmup_loop())
     print("  [прокси-прогрев] запущен фоновый прогрев кеша прокси")
