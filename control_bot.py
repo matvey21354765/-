@@ -513,8 +513,19 @@ def scrape_drom(region: str, pages: int = 15, price_min: int = 0, price_max: int
                     href = link.get("href", "") if link else ""
                     item_url = href if href.startswith("http") else (base + href)
 
-                    price_el = card.select_one("span[data-ftid='bull_price']")
+                    price_el = (
+                        card.select_one("span[data-ftid='bull_price']")
+                        or card.select_one("[class*='price']")
+                        or card.select_one("span[class*='Price']")
+                        or card.select_one("div[class*='price']")
+                    )
                     price = price_el.get_text(strip=True) if price_el else ""
+                    # Если цена пустая — ищем по regex в HTML карточки
+                    if not price:
+                        _card_html = str(card)
+                        _pm = re.search(r'(\d[\d\s]{3,8})(?:\s*₽|\s*руб)', _card_html)
+                        if _pm:
+                            price = _pm.group(0).strip()
 
                     seller_el = (
                         card.select_one("[data-ftid='bull_seller']")
@@ -7166,12 +7177,9 @@ async def do_search_for_user(uid: int, reply_to):
     # После загрузки цен — выкидываем только те, у кого цена ИЗВЕСТНА и вышла за бюджет.
     # Объявления без цены (_price_int=0) — оставляем: пользователь откроет ссылку и проверит.
     # Это критично для объявлений из поисковых сниппетов — там цена в HTML не всегда есть.
-    _before2 = len(suitable)
-    suitable = [
-        i for i in suitable
-        if (not i.get("_price_int")) or (pmin <= i["_price_int"] <= pmax)
-    ]
-    print(f"  [фильтр] после второго price-фильтра: {len(suitable)}/{_before2}")
+    # Второй price-фильтр убран — первый in_price_range уже отфильтровал.
+    # Дополнительно фильтровать не нужно, это только теряет объявления с неизвестной ценой.
+    print(f"  [фильтр] suitable после всех фильтров: {len(suitable)}")
     if not suitable:
         await reply_to.answer("😔 Не нашёл объявлений в твоём бюджете. Попробуй расширить диапазон цен: /settings")
         return
