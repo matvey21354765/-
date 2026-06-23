@@ -6313,10 +6313,16 @@ async def cmd_new_today(msg: Message):
     ]
     suitable = _filter_by_category(suitable, category, brand)
     suitable = rank_by_market_price(suitable)
-    # Ниже рынка — всегда первыми, дата не важна
+    # Старые объявления с высокой экономией — первыми.
+    # За каждый день на сайте +0.5% к effective_savings (max +15% за 30 дней).
+    # Сегодняшнее объявление с savings_pct=15% проигрывает 10-дневному с savings_pct=10%.
+    def _eff_savings(x):
+        s = x.get("_savings_pct", 0)
+        d = min(x.get("_days_on_site", 0), 30)
+        return s + d * 0.5 if s > 0 else s
     suitable.sort(key=lambda x: (
         0 if x.get("_savings_pct", 0) > 0 else (1 if x.get("_price_int", 0) > 0 else 2),
-        -x.get("_savings_pct", 0),
+        -_eff_savings(x),
         -x.get("_hot_score", 0),
         x.get("_price_int", 999_999_999),
     ))
@@ -6424,10 +6430,14 @@ async def cmd_global_search(msg: Message):
         and i["url"] not in seen
     ]
     suitable = rank_by_market_price(suitable)
+    def _eff_savings(x):
+        s = x.get("_savings_pct", 0)
+        d = min(x.get("_days_on_site", 0), 30)
+        return s + d * 0.5 if s > 0 else s
     suitable.sort(key=lambda x: (
         # 0 = ниже рынка, 1 = по рынку (цена есть), 2 = цена неизвестна
         0 if x.get("_savings_pct", 0) > 0 else (1 if x.get("_price_int", 0) > 0 else 2),
-        -x.get("_savings_pct", 0),
+        -_eff_savings(x),
         -x.get("_hot_score", 0),
         x.get("_price_int", 999_999_999),
     ))
@@ -6524,9 +6534,13 @@ async def cmd_vk_tg_search(msg: Message):
         # seen не фильтруем в поиске
     ]
     suitable = rank_by_market_price(suitable)
+    def _eff_savings(x):
+        s = x.get("_savings_pct", 0)
+        d = min(x.get("_days_on_site", 0), 30)
+        return s + d * 0.5 if s > 0 else s
     suitable.sort(key=lambda x: (
         0 if x.get("_savings_pct", 0) > 0 else (1 if x.get("_price_int", 0) > 0 else 2),
-        -x.get("_savings_pct", 0),
+        -_eff_savings(x),
         -x.get("_hot_score", 0),
         x.get("_price_int", 999_999_999),
     ))
