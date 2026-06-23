@@ -1459,11 +1459,37 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
     old_channels = TG_AUTO_CHANNELS.get(city_key, [])
     all_channels = list(dict.fromkeys(channels + old_channels))  # дедупликация
 
-    region_name_ru = {
+    _region_names = {
         "ekaterinburg": "Екатеринбург", "moskva": "Москва", "spb": "Петербург",
         "novosibirsk": "Новосибирск", "kazan": "Казань", "chelyabinsk": "Челябинск",
         "ufa": "Уфа", "krasnodar": "Краснодар", "omsk": "Омск", "rostov": "Ростов",
-    }.get(city_key, city_key)
+        "tyumen": "Тюмень", "samara": "Самара", "perm": "Пермь", "voronezh": "Воронеж",
+        "krasnoyarsk": "Красноярск", "nn": "Нижний Новгород", "irkutsk": "Иркутск",
+    }
+    # Область/регион для широкого поиска (VK/TG не привязаны к городу)
+    _oblast_names = {
+        "ekaterinburg": "Свердловская область",
+        "moskva": "Московская область",
+        "spb": "Ленинградская область",
+        "novosibirsk": "Новосибирская область",
+        "kazan": "Татарстан",
+        "chelyabinsk": "Челябинская область",
+        "ufa": "Башкортостан",
+        "krasnodar": "Краснодарский край",
+        "omsk": "Омская область",
+        "rostov": "Ростовская область",
+        "tyumen": "Тюменская область",
+        "samara": "Самарская область",
+        "perm": "Пермский край",
+        "voronezh": "Воронежская область",
+        "krasnoyarsk": "Красноярский край",
+        "nn": "Нижегородская область",
+        "irkutsk": "Иркутская область",
+    }
+    region_name_ru = _region_names.get(city_key, city_key)
+    oblast_name_ru = _oblast_names.get(city_key, region_name_ru)
+    # Поисковые термины: и город, и область
+    search_locations = list(dict.fromkeys([region_name_ru, oblast_name_ru]))
 
     results: list[dict] = []
     today = datetime.date.today()
@@ -1595,10 +1621,12 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
         try:
             import urllib.parse as _upq
             _tg_url_re = re.compile(r'https?://t\.me/[a-zA-Z0-9_/]+(?:\d+)?', re.I)
-            queries = [
-                f"site:t.me продам авто {region_name_ru}",
-                f"site:t.me автомобил {region_name_ru} частн",
-            ]
+            queries = []
+            for _loc in search_locations:
+                queries += [
+                    f"site:t.me продам авто {_loc}",
+                    f"site:t.me автомобил {_loc} частн",
+                ]
             batch = []
             seen_urls: set[str] = set()
             for q in queries:
@@ -1737,7 +1765,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
     vk_token = os.getenv("VK_TOKEN", "")
     city_key = _TG_REGION_MAP.get(region, "")
 
-    region_name_ru = {
+    _vk_region_names = {
         "ekaterinburg": "Екатеринбург", "moskva": "Москва", "spb": "Петербург",
         "novosibirsk": "Новосибирск", "kazan": "Казань", "chelyabinsk": "Челябинск",
         "ufa": "Уфа", "krasnodar": "Краснодар", "omsk": "Омск", "rostov": "Ростов",
@@ -1745,7 +1773,29 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
         "perm": "Пермь", "voronezh": "Воронеж", "saratov": "Саратов",
         "krasnoyarsk": "Красноярск", "irkutsk": "Иркутск",
         "vladivostok": "Владивосток", "habarovsk": "Хабаровск", "nn": "Нижний Новгород",
-    }.get(city_key, city_key)
+    }
+    _vk_oblast_names = {
+        "ekaterinburg": "Свердловская область",
+        "moskva": "Московская область",
+        "spb": "Ленинградская область",
+        "novosibirsk": "Новосибирская область",
+        "kazan": "Татарстан",
+        "chelyabinsk": "Челябинская область",
+        "ufa": "Башкортостан",
+        "krasnodar": "Краснодарский край",
+        "omsk": "Омская область",
+        "rostov": "Ростовская область",
+        "tyumen": "Тюменская область",
+        "samara": "Самарская область",
+        "perm": "Пермский край",
+        "voronezh": "Воронежская область",
+        "krasnoyarsk": "Красноярский край",
+        "nn": "Нижегородская область",
+        "irkutsk": "Иркутская область",
+    }
+    region_name_ru = _vk_region_names.get(city_key, city_key)
+    oblast_name_ru = _vk_oblast_names.get(city_key, region_name_ru)
+    vk_search_locations = list(dict.fromkeys([region_name_ru, oblast_name_ru]))
 
     results: list[dict] = []
     today = datetime.date.today()
@@ -1810,14 +1860,14 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
         """Поиск через VK API newsfeed.search (требует токен)."""
         if not vk_token:
             return []
-        keywords = [
-            f"продам авто {region_name_ru}",
-            f"автобарахолка {region_name_ru}",
-            f"авто {region_name_ru} продаю срочно",
-            f"авто {region_name_ru} ниже рынка",
-            f"машина {region_name_ru} торг",
-            f"продаю машину {region_name_ru} срочно",
-        ]
+        keywords = []
+        for _loc in vk_search_locations:
+            keywords += [
+                f"продам авто {_loc}",
+                f"автобарахолка {_loc}",
+                f"авто {_loc} продаю срочно",
+                f"машина {_loc} торг",
+            ]
         batch = []
         for q in keywords:
             try:
@@ -1874,12 +1924,13 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
     def _try_ddg_vk() -> list[dict]:
         """Ищет посты ВКонтакте через DuckDuckGo: site:vk.com + ключевые слова."""
         import urllib.parse as _upq
-        keywords = [
-            f"site:vk.com продам авто {region_name_ru} пробег",
-            f"site:vk.com продам автомобиль {region_name_ru} год",
-            f"site:vk.com автобарахолка {region_name_ru} продаю",
-            f"site:vk.com продаётся машина {region_name_ru} торг",
-        ]
+        keywords = []
+        for _loc in vk_search_locations:
+            keywords += [
+                f"site:vk.com продам авто {_loc} пробег",
+                f"site:vk.com автобарахолка {_loc} продаю",
+                f"site:vk.com продаётся машина {_loc} торг",
+            ]
         batch = []
         seen_urls: set[str] = set()
         _vk_url_re = re.compile(r'https?://(?:m\.)?vk\.com/(?:wall|club|public|id)[\w\-]+', re.I)
