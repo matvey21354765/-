@@ -1748,7 +1748,16 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
         results.extend(ddg_batch)
         print(f"  [TG DDG итого] {len(ddg_batch)} результатов")
 
-    return results
+    # Дедупликация по нормализованному URL
+    seen_norm_tg: set[str] = set()
+    deduped_tg: list[dict] = []
+    for it in results:
+        u = it.get("url", "").split("?")[0].rstrip("/")
+        if not u or u in seen_norm_tg:
+            continue
+        seen_norm_tg.add(u)
+        deduped_tg.append(it)
+    return deduped_tg
 
 
 def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
@@ -2131,7 +2140,21 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                 except Exception:
                     pass
 
-    return results
+    # Дедупликация по нормализованному URL (убираем m.vk.com → vk.com)
+    def _norm_vk_url(u: str) -> str:
+        return u.replace("//m.vk.com/", "//vk.com/").split("?")[0].rstrip("/")
+
+    seen_norm: set[str] = set()
+    deduped_results: list[dict] = []
+    for it in results:
+        u = it.get("url", "")
+        norm = _norm_vk_url(u) if u else ""
+        if not norm or norm in seen_norm:
+            continue
+        seen_norm.add(norm)
+        it["url"] = norm  # нормализуем URL сразу
+        deduped_results.append(it)
+    return deduped_results
 
 
 # ── Парсер Авито ────────────────────────────────────────────────
@@ -7197,7 +7220,7 @@ async def do_search_for_user(uid: int, reply_to):
             continue
         # Извлекаем домен + числовой ID — дедупим только внутри одной площадки
         _dm = _domain_re.match(u)
-        _domain = _dm.group(1) if _dm else ""
+        _domain = (_dm.group(1) if _dm else "").replace("m.vk.com", "vk.com")
         _id_m = _id_re.search(u.split("?")[0])
         _num_id = _id_m.group(1) if _id_m else ""
         _domain_id_key = f"{_domain}:{_num_id}" if _num_id else ""
