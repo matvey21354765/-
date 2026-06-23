@@ -1669,15 +1669,6 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
                     found_new = False
                     min_id_this_page: int | None = None
                     for msg_el in messages:
-                        # Отслеживаем min ID для пагинации
-                        link_any = msg_el.select_one("a.tgme_widget_message_date")
-                        if link_any:
-                            href_any = link_any.get("href", "")
-                            id_m_any = re.search(r'/(\d+)$', href_any)
-                            if id_m_any:
-                                mid_any = int(id_m_any.group(1))
-                                if min_id_this_page is None or mid_any < min_id_this_page:
-                                    min_id_this_page = mid_any
                         text_el = msg_el.select_one(".tgme_widget_message_text")
                         if not text_el:
                             continue
@@ -1687,6 +1678,15 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
                         if len(text) < 20:
                             continue
                         if not _is_car_sale_social(text):
+                            # Track msg ID even for non-matching posts
+                            link_el2 = msg_el.select_one("a.tgme_widget_message_date")
+                            if link_el2:
+                                href2 = link_el2.get("href", "")
+                                id_m2 = re.search(r'/(\d+)$', href2)
+                                if id_m2:
+                                    mid2 = int(id_m2.group(1))
+                                    if min_id_this_page is None or mid2 < min_id_this_page:
+                                        min_id_this_page = mid2
                             continue
                         if _is_moto(text[:200]):
                             continue
@@ -1696,13 +1696,20 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
                         price = _parse_price(text)
                         if price > 0 and not (price_min <= price <= price_max):
                             continue
+                        # Ссылка на сообщение
                         link_el = msg_el.select_one("a.tgme_widget_message_date") or msg_el.select_one("a[href*='t.me']")
                         msg_url = link_el.get("href", f"https://t.me/{channel}") if link_el else f"https://t.me/{channel}"
                         if msg_url in seen_msg_urls:
                             continue
                         seen_msg_urls.add(msg_url)
                         found_new = True
-                        # Реальная дата
+                        # ID для пагинации
+                        id_m = re.search(r'/(\d+)$', msg_url)
+                        if id_m:
+                            mid = int(id_m.group(1))
+                            if min_id_this_page is None or mid < min_id_this_page:
+                                min_id_this_page = mid
+                        # Дата
                         days = 0
                         time_el = msg_el.select_one("time[datetime]")
                         if time_el:
@@ -1727,8 +1734,9 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
                         phone_ch = phone_m_ch.group(0).strip() if phone_m_ch else ""
                         seller_ch = f"@{channel}" + (f" · {phone_ch}" if phone_ch else "")
                         year_m = _tg_year_re.search(text)
+                        title = _social_make_title(text)
                         batch.append({
-                            "title": _social_make_title(text),
+                            "title": title,
                             "price": f"{price:,} ₽".replace(",", " ") if price else "цена не указана",
                             "_price_int": price,
                             "url": msg_url,
@@ -1754,7 +1762,6 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
         except Exception as e:
             print(f"  [TG {channel}] {e}")
             return []
-
     _tg_phone_re = re.compile(r'(?:\+7|8|7)[\s\-]?\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}')
     _tg_post_url_re = re.compile(r'https?://t\.me/([a-zA-Z0-9_]+)/(\d+)', re.I)
 
@@ -2255,7 +2262,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                     r = session.get(url_c, timeout=10, headers={"User-Agent": "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36"})
                     if r.status_code != 200:
                         break
-                    if "_post" not in r.text and "wall_post" not in r.text:
+                    if "_post" not in r.text and "wall_post" not in r.text and "tgme_widget" not in r.text:
                         break
                     soup = _BS(r.text, "lxml")
                     posts = soup.select("div._post, div.wall_item, article.post")
@@ -2278,6 +2285,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                         price = _parse_price(text)
                         if price > 0 and not (price_min <= price <= price_max):
                             continue
+                        # URL поста
                         link_el = post.select_one("a[href*='/wall']") or post.select_one("a.post__date")
                         post_url = ""
                         if link_el:
@@ -2287,7 +2295,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                             continue
                         seen_post_urls.add(post_url)
                         found_new = True
-                        # Реальная дата поста
+                        # Дата поста
                         days = 0
                         time_el = post.select_one("time[datetime]")
                         if time_el:
@@ -2302,14 +2310,13 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                         photo_url = ""
                         for img in post.select("img"):
                             src = img.get("src", "")
-                            if src and ("userapi.com" in src or src.endswith((".jpg", ".webp", ".jpeg"))) and "sticker" not in src and "emoji" not in src:
+                            if src and ("userapi.com" in src or "vk.com" in src or src.endswith((".jpg", ".webp", ".jpeg"))) and "sticker" not in src and "emoji" not in src:
                                 photo_url = src
                                 break
-                        # Телефон продавца
+                        year_m = _vk_year_re.search(text)
                         phone_m = re.search(r'(?:\+7|8)[\s\-]?\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}', text)
                         phone = phone_m.group(0).strip() if phone_m else ""
                         seller_label = f"vk.com/{slug}" + (f" · {phone}" if phone else "")
-                        year_m = _vk_year_re.search(text)
                         batch.append({
                             "title": _social_make_title(text),
                             "price": f"{price:,} ₽".replace(",", " ") if price else "цена не указана",
@@ -2335,7 +2342,6 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
         except Exception as e:
             print(f"  [VK {slug}] {e}")
             return []
-
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     # 1. VK API (если есть токен)
@@ -2358,40 +2364,42 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                 pass
 
     def _discover_vk_groups() -> list[str]:
-        """Находит VK-группы авто-барахолок города через DDG."""
-        import urllib.parse as _upq2
-        queries_d = []
+        """Находит VK-группы авто-барахолок города через DDG-поиск."""
+        import urllib.parse as _upq
+        queries = []
         for _loc in search_locations:
-            queries_d += [
-                f"vk.com автобарахолка {_loc} продам авто",
-                f"vk.com поджопник {_loc} авто цена",
-                f"vk.com карета {_loc} продажа машина",
+            queries += [
+                f"site:vk.com/club продам авто {_loc} купить",
+                f"site:vk.com автобарахолка {_loc} цена",
+                f"vk.com продажа авто {_loc} ценник",
             ]
         found_slugs: list[str] = []
         seen_slugs: set[str] = set()
-        _vk_slug_re2 = re.compile(r'vk\.com/([a-zA-Z][a-zA-Z0-9_]{3,49})', re.I)
-        _skip_slugs2 = {"wall", "photo", "video", "music", "feed", "im", "messages",
-                        "login", "join", "share", "away", "l", "app", "market", "search"}
-        for q in queries_d[:4]:
+        _vk_slug_re = re.compile(r'vk\.com/([a-zA-Z0-9_]{3,50})', re.I)
+        _skip_slugs = {"wall", "photo", "video", "music", "feed", "im", "messages",
+                       "login", "join", "share", "away", "l", "id", "app", "market"}
+        for q in queries[:4]:
             try:
                 time.sleep(random.uniform(1.5, 2.5))
                 r = session.get("https://html.duckduckgo.com/html/",
                                 params={"q": q, "kl": "ru-ru"}, timeout=10)
                 if r.status_code != 200:
                     continue
-                html_d = _upq2.unquote(r.text)
-                for m in _vk_slug_re2.finditer(html_d):
+                html_d = _upq.unquote(r.text)
+                for m in _vk_slug_re.finditer(html_d):
                     slug = m.group(1).lower().rstrip(".,)")
-                    if slug in seen_slugs or slug in _skip_slugs2:
+                    if slug in seen_slugs or slug in _skip_slugs or slug.startswith("id") or len(slug) < 4:
+                        continue
+                    # Только группы — не личные страницы
+                    if re.match(r'^\d+$', slug):
                         continue
                     seen_slugs.add(slug)
                     found_slugs.append(slug)
             except Exception:
                 pass
-        print(f"  [VK discover] найдено {len(found_slugs)} групп")
-        return found_slugs[:10]
-
-    # 3. Прямой парсинг известных групп + авто-обнаружение
+        print(f"  [VK discover] найдено {len(found_slugs)} групп: {found_slugs[:5]}")
+        return found_slugs[:15]
+    # 3. Прямой парсинг известных групп + авто-обнаружение новых
     vk_groups = VK_AUTO_GROUPS.get(city_key, [])
     discovered_groups = _discover_vk_groups()
     all_vk_groups = list(dict.fromkeys(vk_groups + discovered_groups))
@@ -2812,12 +2820,16 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
             if depth > 12 or obj is None:
                 return ""
             if isinstance(obj, str):
-                # Любой URL на CDN Авито — принимаем без ограничений по пути
                 low = obj.lower()
                 if len(obj) > 15 and "avito.st" in low and (obj.startswith("//") or obj.startswith("http")):
                     raw = obj.replace("\\/", "/")
                     url_c = ("https:" + raw) if raw.startswith("//") else raw
-                    if not any(x in url_c.lower() for x in ("/stub", "noimage", "placeholder", "/ava/", "/avatar/", "/userAva/", "/user_ava", "/logo", "/icon", "favicon")):
+                    url_lo = url_c.lower()
+                    # Реальные фото объявлений всегда на img.avito.st/image/
+                    # Логотипы/заглушки Авито лежат на других путях (avito.st/s/, avito.st/static/ и т.п.)
+                    if "img.avito.st" not in url_lo and "images.avito.st" not in url_lo:
+                        return ""
+                    if not any(x in url_lo for x in ("/stub", "noimage", "placeholder", "/ava/", "/avatar/", "/userava", "/user_ava", "/logo", "/icon", "favicon", "/brand", "/promo")):
                         return url_c
                 return ""
             if isinstance(obj, list):
