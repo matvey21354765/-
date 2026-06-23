@@ -1166,17 +1166,31 @@ def _tg_parse_price(text: str) -> int:
 
 
 _SOCIAL_SALE_KEYWORDS = ["продам", "продаю", "продаётся", "продается", "куплю", "в продаже", "выставил на продажу"]
-_SOCIAL_CAR_IDENTIFIERS = [
-    "авто", "автомобил", "машин", "пробег", "двигател", "кузов", "тыс.км", "тыс км",
+
+# Конкретные идентификаторы автомобиля — "авто" и "машин" сюда НЕ входят (слишком общие)
+_SOCIAL_CAR_STRONG = [
+    "автомобил", "пробег", "двигател", "кузов", "тыс.км", "тыс км", "т.км",
+    "год выпуска", "г.в.", "г/в", "год вып", "объём", "об.", "литр",
     "toyota", "honda", "kia", "hyundai", "nissan", "mazda", "bmw", "audi", "mercedes",
     "lada", "ваз", "vaz", "haval", "geely", "chery", "skoda", "volkswagen", "vw",
     "renault", "peugeot", "ford", "opel", "chevrolet", "mitsubishi", "subaru",
     "lexus", "infiniti", "volvo", "land rover", "jeep", "suzuki", "datsun",
-    "changan", "exeed", "omoda", "tank", "jaecoo", "byd", "lixiang",
+    "changan", "exeed", "omoda", "tank", "jaecoo", "byd", "lixiang", "москвич",
+    "нива", "приора", "гранта", "калина", "largus", "vesta", "xray",
 ]
 _SOCIAL_REJECT_KEYWORDS = [
+    # Недвижимость
     "квартир", "комнат", "сдаётся", "сдается", "сдам", "аренд", "съём", "съем",
-    "перевозк", "пассажирск", "грузоперевозк", "рейс", "маршрут",
+    "недвижимост", "студи", "апартамент",
+    # Услуги
+    "перевозк", "пассажирск", "грузоперевозк", "рейс", "маршрут", "такси",
+    # Не машина: госномера, запчасти, автозвук
+    "госномер", "гос. номер", "номерной знак", "красивый номер", "продам номер",
+    "запчаст", "автозапчаст", "шин", "колес", "диски", "диск р",
+    "сабвуфер", "сабвуф", "автозвук", "усилитель", "магнитол", "колонки", "автоакустик",
+    "бампер", "фара", "крыло", "капот", "зеркало", "стекло лобов",
+    "масло моторн", "антифриз", "автохимия", "тормозн",
+    # Спам и нерелевант
     "лайфхак", "новост", "зафиксировал", "камер зафиксир", "нарушени",
     "штраф", "гибдд фиксир", "корги", "собак", "животн",
     "реклам", "подпишись", "заработ", "казино", "ставк",
@@ -1184,13 +1198,35 @@ _SOCIAL_REJECT_KEYWORDS = [
 ]
 
 def _is_car_sale_social(text: str) -> bool:
-    """Возвращает True только если текст — объявление о продаже/покупке авто (для VK/TG)."""
+    """Возвращает True только если текст — объявление о продаже/покупке именно автомобиля."""
     tl = text.lower()
     if any(rk in tl for rk in _SOCIAL_REJECT_KEYWORDS):
         return False
     has_sale = any(sk in tl for sk in _SOCIAL_SALE_KEYWORDS)
-    has_car = any(ck in tl for ck in _SOCIAL_CAR_IDENTIFIERS)
+    # Нужен «сильный» идентификатор (марка/модель/пробег/год) — "авто" в контексте "на вашем авто" не считается
+    has_car = any(ck in tl for ck in _SOCIAL_CAR_STRONG)
     return has_sale and has_car
+
+_SOCIAL_TITLE_RE = re.compile(
+    r"(toyota|honda|kia|hyundai|nissan|mazda|bmw|audi|mercedes|lada|ваз|haval|geely|chery|skoda|volkswagen|vw|renault|peugeot|ford|opel|chevrolet|mitsubishi|subaru|lexus|infiniti|volvo|jeep|suzuki|datsun|changan|exeed|omoda|tank|jaecoo|byd|нива|приора|гранта|калина|vesta|largus|xray|москвич)",
+    re.IGNORECASE,
+)
+_SOCIAL_YEAR_RE = re.compile(r"\b(19[5-9]\d|20[012]\d)\b")
+
+def _social_make_title(text: str) -> str:
+    """Строит краткий title для VK/TG поста: марка + год + первые слова."""
+    first_line = text.split("\n")[0].strip()
+    # Если первая строка содержит марку — используем её
+    if _SOCIAL_TITLE_RE.search(first_line):
+        return first_line[:100]
+    # Иначе ищем марку в тексте и строим: "Марка, год — ..."
+    brand_m = _SOCIAL_TITLE_RE.search(text)
+    year_m = _SOCIAL_YEAR_RE.search(text)
+    if brand_m:
+        brand = brand_m.group(0).upper() if len(brand_m.group(0)) <= 3 else brand_m.group(0).title()
+        year = f" {year_m.group(1)}" if year_m else ""
+        return f"{brand}{year} — {first_line[:60]}"
+    return first_line[:100] or text[:100]
 
 
 def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict]:
@@ -1382,7 +1418,7 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
                     if m:
                         photo_url = m.group(1)
                 year_m = _tg_year_re.search(text)
-                title = text[:80].replace("\n", " ").strip()
+                title = _social_make_title(text)
                 batch.append({
                     "title": title,
                     "price": f"{price:,} ₽".replace(",", " ") if price else "цена не указана",
@@ -1637,7 +1673,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                                 photo_url = max(sizes, key=lambda s: s.get("width", 0)).get("url", "")
                                 break
                     batch.append({
-                        "title": text[:80].replace("\n", " ").strip(),
+                        "title": _social_make_title(text),
                         "price": f"{price:,} ₽".replace(",", " ") if price else "цена не указана",
                         "_price_int": price,
                         "url": url,
@@ -1690,7 +1726,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                     if price > 0 and not (price_min <= price <= price_max):
                         continue
                     year_m = _vk_year_re.search(text)
-                    title = text[:80].replace("\n", " ").strip() or "Объявление ВКонтакте"
+                    title = _social_make_title(text) or "Объявление ВКонтакте"
                     batch.append({
                         "title": title,
                         "price": f"{price:,} ₽".replace(",", " ") if price else "цена не указана",
@@ -1740,7 +1776,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                     continue
                 year_m = _vk_year_re.search(text)
                 batch.append({
-                    "title": text[:80].replace("\n", " ").strip(),
+                    "title": _social_make_title(text),
                     "price": f"{price:,} ₽".replace(",", " ") if price else "цена не указана",
                     "_price_int": price,
                     "url": post_url,
