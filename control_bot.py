@@ -4047,7 +4047,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             [(_try_avito_rss, 1), (_try_googlebot_ua, 1), (_try_avito_public_api, 1)]
         )
         _cap = 180
-        _deadline_s = 65
+        _deadline_s = 55
     else:
         tasks = [(m, 1) for m in all_methods]
         _cap = 40
@@ -4062,7 +4062,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         m = re.search(r'(\d{6,})$', base)
         return m.group(1) if m else base
 
-    _ex = _TPE(max_workers=min(8, len(tasks)))
+    _ex = _TPE(max_workers=min(12, len(tasks)))
     merged: dict[str, dict] = {}
     _seen_keys: set = set()
     _soft_deadline = time.time() + _deadline_s
