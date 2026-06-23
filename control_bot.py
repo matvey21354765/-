@@ -382,13 +382,11 @@ def in_price_range(item: dict, price_min: int, price_max: int) -> bool:
 
 
 def hot_score(item: dict) -> float:
-    """Базовая оценка: срочность продажи + свежесть объявления (новые — выше)."""
+    """Базовая оценка срочности продажи."""
     title = item.get("title", "") + " " + item.get("description", "")
-    days = item.get("_days_on_site", 0)
     score = 0.0
     if HOT_WORDS.search(title):
         score += 20.0
-    score += max(0, 14 - min(days, 14)) * 0.5
     return round(score, 2)
 
 
@@ -409,9 +407,17 @@ def _car_group_key(title: str) -> str:
 
 def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None) -> list[dict]:
     """
-    Вычисляет рыночную цену по медиане внутри группы марка+модель+год (по всем площадкам).
-    ref_items — дополнительные записи только для расчёта медианы (например, Дром-данные).
-    Устанавливает _savings_pct: сколько % ниже рынка. Чем больше — тем выгоднее.
+    Вычисляет рыночную цену по медиане внутри группы марка+модель+год.
+    Устанавливает _savings_pct и _deal_score — итоговый балл выгодности сделки.
+
+    _deal_score учитывает:
+      - % ниже рынка (главный фактор)
+      - возраст объявления: давно висит = продавец готов к торгу (+бонус)
+      - срочность продажи: "срочно", "торг" в тексте (+бонус)
+      - качество фото: есть фото = серьёзный продавец (+маленький бонус)
+      - источник: Авито/Дром/Auto.ru надёжнее VK/TG по цене (нейтрально)
+
+    Сортировка должна идти по -_deal_score.
     """
     from statistics import median
 
@@ -427,22 +433,69 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None)
 
     for it in items:
         p = it.get("_price_int", 0)
+        deal_score = 0.0
+        savings_pct = 0.0
+
         if p > 0:
             key = _car_group_key(it.get("title", ""))
             med = market.get(key, 0)
             if med > 0:
-                savings_pct = round((1 - p / med) * 100, 1)  # положительный = ниже рынка
+                savings_pct = round((1 - p / med) * 100, 1)
                 it["_savings_pct"] = savings_pct
                 it["_market_price"] = int(med)
-                if savings_pct >= 25:
-                    it["_hot_score"] = round(it.get("_hot_score", 0) + 50, 2)
-                    it["_below_market"] = True
-                elif savings_pct >= 10:
-                    it["_hot_score"] = round(it.get("_hot_score", 0) + 25, 2)
-                    it["_below_market"] = True
-                elif savings_pct > 0:
-                    it["_hot_score"] = round(it.get("_hot_score", 0) + 10, 2)
+                it["_below_market"] = savings_pct > 0
 
+                # Базовый балл = % экономии (может быть отрицательным)
+                deal_score += savings_pct * 3.0  # каждый % ниже рынка = +3 балла
+
+        # Бонус за возраст: объявление давно висит → продавец готов к торгу
+        # Новые (0-1 дней) — нейтрально. За каждый день после 2-го +1.5 балла, cap 45
+        days = it.get("_days_on_site", 0)
+        if days >= 2:
+            deal_score += min((days - 1) * 1.5, 45.0)
+
+        # Бонус за срочность в тексте: "срочно", "торг", "уступлю" и т.п.
+        text_full = it.get("title", "") + " " + it.get("description", "")
+        if HOT_WORDS.search(text_full):
+            deal_score += 15.0
+
+        # Небольшой бонус за наличие фото — реальное объявление
+        if it.get("photo_url") or it.get("_photos", 0) > 0:
+            deal_score += 3.0
+
+        # Штраф если цена выше рынка (не интересно)
+        if savings_pct < -5:
+            deal_score -= 20.0
+
+        it["_deal_score"] = round(deal_score, 2)
+        it["_hot_score"] = round(it.get("_hot_score", 0) + max(0, deal_score), 2)
+
+    return items
+
+
+def _sort_by_deal(items: list[dict]) -> list[dict]:
+    """
+    Финальная сортировка списка объявлений по выгодности сделки.
+
+    Порядок приоритетов:
+      1. Ниже рынка (savings_pct > 0) → всегда выше рыночных
+      2. По убыванию _deal_score внутри каждой группы
+      3. Объявления без цены — в конец
+    """
+    def _tier(x):
+        s = x.get("_savings_pct", None)
+        if s is not None and s > 0:
+            return 0   # ниже рынка
+        elif x.get("_price_int", 0) > 0:
+            return 1   # есть цена, но по рынку или выше
+        else:
+            return 2   # цена неизвестна
+
+    items.sort(key=lambda x: (
+        _tier(x),
+        -x.get("_deal_score", 0),
+        x.get("_price_int", 999_999_999),
+    ))
     return items
 
 
@@ -6313,19 +6366,7 @@ async def cmd_new_today(msg: Message):
     ]
     suitable = _filter_by_category(suitable, category, brand)
     suitable = rank_by_market_price(suitable)
-    # Старые объявления с высокой экономией — первыми.
-    # За каждый день на сайте +0.5% к effective_savings (max +15% за 30 дней).
-    # Сегодняшнее объявление с savings_pct=15% проигрывает 10-дневному с savings_pct=10%.
-    def _eff_savings(x):
-        s = x.get("_savings_pct", 0)
-        d = min(x.get("_days_on_site", 0), 30)
-        return s + d * 0.5 if s > 0 else s
-    suitable.sort(key=lambda x: (
-        0 if x.get("_savings_pct", 0) > 0 else (1 if x.get("_price_int", 0) > 0 else 2),
-        -_eff_savings(x),
-        -x.get("_hot_score", 0),
-        x.get("_price_int", 999_999_999),
-    ))
+    suitable = _sort_by_deal(suitable)
 
     if not suitable:
         await msg.answer(
@@ -6338,9 +6379,10 @@ async def cmd_new_today(msg: Message):
     _search_cache[uid] = suitable
     _save_cache(uid, suitable)
     analytics.track("new_today", uid=uid, region=region, results=len(suitable))
+    below = sum(1 for x in suitable if x.get("_savings_pct", 0) > 0)
     await msg.answer(
         f"✅ Найдено {len(suitable)} свежих объявлений!\n"
-        f"🟢 Только за последние 24 часа, сначала самые свежие"
+        f"🔥 Ниже рынка: {below} шт. — они первые"
     )
     await send_batch(msg.chat.id, uid, 0)
 
@@ -6430,17 +6472,7 @@ async def cmd_global_search(msg: Message):
         and i["url"] not in seen
     ]
     suitable = rank_by_market_price(suitable)
-    def _eff_savings(x):
-        s = x.get("_savings_pct", 0)
-        d = min(x.get("_days_on_site", 0), 30)
-        return s + d * 0.5 if s > 0 else s
-    suitable.sort(key=lambda x: (
-        # 0 = ниже рынка, 1 = по рынку (цена есть), 2 = цена неизвестна
-        0 if x.get("_savings_pct", 0) > 0 else (1 if x.get("_price_int", 0) > 0 else 2),
-        -_eff_savings(x),
-        -x.get("_hot_score", 0),
-        x.get("_price_int", 999_999_999),
-    ))
+    suitable = _sort_by_deal(suitable)
 
     if not suitable:
         await msg.answer(
@@ -6455,7 +6487,8 @@ async def cmd_global_search(msg: Message):
         "global_search", uid=uid, region=region, price_min=pmin, price_max=pmax,
         results=len(suitable),
     )
-    await msg.answer(f"✅ Найдено {len(suitable)} объявлений (включая TG-каналы)!\n📈 Сначала самые выгодные")
+    below = sum(1 for x in suitable if x.get("_savings_pct", 0) > 0)
+    await msg.answer(f"✅ Найдено {len(suitable)} объявлений!\n🔥 Ниже рынка: {below} шт. — они первые")
     await send_batch(msg.chat.id, uid, 0)
 
 
@@ -6534,16 +6567,7 @@ async def cmd_vk_tg_search(msg: Message):
         # seen не фильтруем в поиске
     ]
     suitable = rank_by_market_price(suitable)
-    def _eff_savings(x):
-        s = x.get("_savings_pct", 0)
-        d = min(x.get("_days_on_site", 0), 30)
-        return s + d * 0.5 if s > 0 else s
-    suitable.sort(key=lambda x: (
-        0 if x.get("_savings_pct", 0) > 0 else (1 if x.get("_price_int", 0) > 0 else 2),
-        -_eff_savings(x),
-        -x.get("_hot_score", 0),
-        x.get("_price_int", 999_999_999),
-    ))
+    suitable = _sort_by_deal(suitable)
 
     if not suitable:
         await msg.answer(
@@ -6556,9 +6580,10 @@ async def cmd_vk_tg_search(msg: Message):
     _search_cache[uid] = suitable
     _save_cache(uid, suitable)
     analytics.track("vk_tg_search", uid=uid, region=region, results=len(suitable))
+    below = sum(1 for x in suitable if x.get("_savings_pct", 0) > 0)
     await msg.answer(
         f"✅ Найдено {len(suitable)} объявлений в VK+TG пабликах!\n"
-        f"📈 Сначала самые выгодные"
+        f"🔥 Ниже рынка: {below} шт. — они первые"
     )
     await send_batch(msg.chat.id, uid, 0)
 
