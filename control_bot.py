@@ -1513,7 +1513,9 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
                 text_el = msg_el.select_one(".tgme_widget_message_text")
                 if not text_el:
                     continue
-                text = text_el.get_text(" ", strip=True)
+                import html as _html_mod
+                text = _html_mod.unescape(text_el.get_text(" ", strip=True))
+                text = re.sub(r'\s+', ' ', text).strip()
                 if len(text) < 20:
                     continue
                 _below_market_kw = ["срочно", "торг", "ниже рынка", "дешево", "срочная продажа", "перекупам", "ниже рыночной", "торгуюсь", "уступлю"]
@@ -1597,10 +1599,13 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
                             # Контекст вокруг ссылки
                             pos = html.find(m.group(0))
                             ctx = html[max(0, pos-300):pos+500]
-                            ctx = re.sub(r"<[^>]+>", " ", ctx)
+                            import html as _html_mod
+                            ctx = _html_mod.unescape(re.sub(r"<[^>]+>", " ", ctx))
                             ctx = re.sub(r"\s+", " ", ctx).strip()
                             price = _parse_price(ctx)
                             if price > 0 and not (price_min <= price <= price_max):
+                                continue
+                            if price == 0 and price_max < 90_000_000:
                                 continue
                             year_m2 = _tg_year_re.search(ctx)
                             title = ctx[:80].replace("\n", " ").strip() or f"Авто {region_name_ru} TG"
@@ -1800,6 +1805,8 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                     price = _parse_price(text)
                     if price > 0 and not (price_min <= price <= price_max):
                         continue
+                    if price == 0 and price_max < 90_000_000:
+                        continue
                     owner_id = post.get("owner_id", "")
                     post_id = post.get("id", "")
                     url = f"https://vk.com/wall{owner_id}_{post_id}"
@@ -1870,6 +1877,8 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                         price = _parse_price(text)
                         if price > 0 and not (price_min <= price <= price_max):
                             continue
+                        if price == 0 and price_max < 90_000_000:
+                            continue
                         year_m = _vk_year_re.search(text)
                         title = _social_make_title(text) or "Объявление ВКонтакте"
                         batch.append({
@@ -1929,6 +1938,8 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                         continue
                     price = _parse_price(text)
                     if price > 0 and not (price_min <= price <= price_max):
+                        continue
+                    if price == 0 and price_max < 90_000_000:
                         continue
                     year_m = _vk_year_re.search(text)
                     title = _social_make_title(text) or "Объявление ВКонтакте"
