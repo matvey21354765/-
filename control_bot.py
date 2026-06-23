@@ -2204,6 +2204,7 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
         # Реальная дата объявления из sortTimeStamp (мс). Если её нет —
         # считаем «сегодня». Так не показываем ложное «сегодня» на старых.
         _days = 0
+        _date_known = False
         _ts = (it.get("sortTimeStamp") or it.get("time") or
                it.get("addDate") or it.get("closingDate") or
                it.get("statsUpdateDate") or 0)
@@ -2212,6 +2213,7 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
                 _ts_sec = int(_ts) / 1000 if int(_ts) > 10_000_000_000 else int(_ts)
                 _posted = datetime.datetime.fromtimestamp(_ts_sec).date()
                 _days = max(0, (today - _posted).days)
+                _date_known = True
         except Exception:
             _days = 0
 
@@ -2222,6 +2224,7 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
             "date": str(today - datetime.timedelta(days=_days)),
             "_photos": len(_images_list) if isinstance(_images_list, list) else 0,
             "_days_on_site": _days,
+            "_date_known": _date_known,
             "description": _desc_raw[:400],
             "_desc_synthetic": _desc_synthetic,
             "seller": seller_name, "_photo_url": photo_url,
@@ -3200,9 +3203,12 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         # только эту марку (точнее и больше, чем фильтрация в памяти).
         _brand_path = f"/{brand}" if brand and brand != "any" else ""
         url = f"https://www.avito.ru/{slug}/avtomobili{_brand_path}"
-        # seller_type=1 — только частники (без дилеров/салонов),
-        # s=104 — сортировка по дате (свежие сверху).
-        params: dict = {"seller_type": "1", "s": "104"}
+        # seller_type=1 — только частники.
+        # s=104 — дата (свежие первыми) для страниц 1-4.
+        # s=1   — цена по возрастанию для страниц 5+, чтобы найти старые дешёвые
+        #         объявления ниже рынка которые не попали на первые страницы.
+        _sort = "104" if p <= 4 else "1"
+        params: dict = {"seller_type": "1", "s": _sort}
         if p > 1:
             params["p"] = p
         if price_min > 0:
@@ -6058,8 +6064,11 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         url = item.get("url", "")
         sid = url_to_id(url)
         days = item.get("_days_on_site", 0)
-        if days == 0:
-            days_str = "🟢 только что / сегодня"
+        _date_known = item.get("_date_known", False) or item.get("date", "") == str(datetime.date.today())
+        if days == 0 and not _date_known:
+            days_str = "🟢 недавно"
+        elif days == 0:
+            days_str = "🟢 сегодня"
         elif days == 1:
             days_str = "🟡 вчера"
         elif days <= 3:
@@ -6390,7 +6399,7 @@ async def do_search_for_user(uid: int, reply_to):
             print(f"  [fallback] в бюджете {pmin}-{pmax}₽ на Авито пусто — добавляем Дром")
             try:
                 drom_fallback = await loop.run_in_executor(
-                    None, lambda: scrape_drom(region, pages=4, price_min=pmin, price_max=pmax)
+                    None, lambda: scrape_drom(region, pages=10, price_min=pmin, price_max=pmax)
                 )
                 if drom_fallback:
                     items.extend(drom_fallback)
@@ -6502,7 +6511,7 @@ async def do_search_for_user(uid: int, reply_to):
         # Авито есть, Дрома нет — тихо загружаем рыночные цены с Дрома для медианы.
         try:
             _drom_ref = await loop.run_in_executor(
-                None, lambda: scrape_drom(region, pages=3, price_min=0, price_max=99_000_000)
+                None, lambda: scrape_drom(region, pages=8, price_min=0, price_max=99_000_000)
             )
             if _drom_ref:
                 # Добавляем Дром-данные ТОЛЬКО для расчёта рынка, не показываем их.
