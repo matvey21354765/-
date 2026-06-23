@@ -5055,32 +5055,8 @@ from aiogram import BaseMiddleware
 from aiogram.types import TelegramObject, Update
 
 class SubscriptionMiddleware(BaseMiddleware):
-    """Блокирует любое взаимодействие с ботом если пользователь не подписан на канал."""
+    """Подписка отключена — пропускаем всех."""
     async def __call__(self, handler, event: TelegramObject, data: dict):
-        # Определяем user_id из любого типа апдейта
-        update: Update = data.get("event_update") or data.get("update")
-        user = None
-        if hasattr(event, "from_user"):
-            user = event.from_user
-        elif hasattr(event, "message") and event.message:
-            user = event.message.from_user
-
-        if user is None or user.id in ADMIN_IDS:
-            return await handler(event, data)
-
-        # Кнопку "Я подписался" всегда пропускаем
-        if hasattr(event, "data") and event.data == "check_subscription":
-            return await handler(event, data)
-
-        if not await _is_subscribed(user.id):
-            kb = _subscribe_keyboard()
-            if isinstance(event, Message):
-                await event.answer(_SUBSCRIBE_MSG, parse_mode="Markdown", reply_markup=kb)
-            elif isinstance(event, CallbackQuery):
-                await event.answer("Подпишись на канал!", show_alert=True)
-                await event.message.answer(_SUBSCRIBE_MSG, parse_mode="Markdown", reply_markup=kb)
-            return  # не передаём дальше
-
         return await handler(event, data)
 
 async def _check_and_gate(msg_or_cb) -> bool:
@@ -5367,18 +5343,12 @@ async def cmd_start(msg: Message, state: FSMContext):
         await msg.answer("🔍 Шаг 1/4: Что ищем?", reply_markup=category_keyboard())
         await state.set_state(Setup.category)
     else:
-        # Старый пользователь — быстрое приветствие с параметрами
-        region_name = REGIONS.get(s["region"], s["region"])
-        pmin = s.get("price_min", 0)
-        pmax = s.get("price_max", 99_000_000)
-        mon = "🟢 включён" if s.get("monitor_enabled") else "🔴 выключен"
+        # Старый пользователь — дружелюбное приветствие
         await msg.answer(
-            f"👋 Привет, {name}!\n\n"
-            f"📍 Город: *{region_name}*\n"
-            f"💰 Бюджет: *{pmin:,} – {pmax:,} ₽*\n"
-            f"🔔 Мониторинг: {mon}\n\n"
-            f"Нажми 🔍 *Найти авто* чтобы начать поиск.\n"
-            f"Если ничего не нашлось — нажми ♻️ *Сбросить историю* и попробуй снова.".replace(",", " "),
+            f"👋 Привет, {name}! Я *PerekupDrive* — бот для поиска авто ниже рыночной цены.\n\n"
+            f"🔍 Ищу объявления от частных лиц на Авито\n"
+            f"📊 Сравниваю цены с рынком и нахожу выгодные\n"
+            f"🔔 Могу присылать уведомления когда появится новое выгодное авто",
             parse_mode="Markdown",
             reply_markup=MAIN_KEYBOARD,
         )
