@@ -5301,19 +5301,41 @@ async def cmd_dashboard(msg: Message):
     except Exception as e:
         text = f"Ошибка получения статистики: {e}"
 
-    port = int(os.getenv("PORT", "8080"))
     key = os.getenv("DASHBOARD_KEY", "")
-    railway_url = os.getenv("RAILWAY_PUBLIC_DOMAIN", "")
+    # Railway может давать домен через разные переменные
+    railway_url = (
+        os.getenv("RAILWAY_PUBLIC_DOMAIN")
+        or os.getenv("RAILWAY_STATIC_URL")
+        or os.getenv("RAILWAY_SERVICE_URL")
+        or os.getenv("PUBLIC_URL")
+        or ""
+    ).strip().rstrip("/")
+    # Убираем протокол если он уже есть — добавим сами
+    if railway_url.startswith("https://"):
+        railway_url = railway_url[8:]
+    elif railway_url.startswith("http://"):
+        railway_url = railway_url[7:]
 
     if railway_url:
         dash_url = f"https://{railway_url}/?key={key}" if key else f"https://{railway_url}/"
     else:
-        dash_url = f"http://localhost:{port}/?key={key}" if key else f"http://localhost:{port}/"
+        dash_url = None
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🌐 Открыть дашборд", url=dash_url)],
+    ]) if dash_url else None
+
+    if not dash_url:
+        # Показать какие Railway-переменные домена реально заданы
+        found_vars = {k: v for k, v in os.environ.items() if "RAILWAY" in k or "PUBLIC" in k or "URL" in k or "DOMAIN" in k}
+        var_hint = "\n".join(f"`{k}={v}`" for k, v in list(found_vars.items())[:8]) or "не найдено"
+        text += f"\n\n⚠️ Не найден публичный домен Railway.\n*Env vars:*\n{var_hint}\n\nДобавь `RAILWAY_PUBLIC_DOMAIN` в Railway → Variables"
 
     await msg.answer(
-        text + f"\n\n🌐 [Открыть веб-дашборд]({dash_url})",
+        text,
         parse_mode="Markdown",
         disable_web_page_preview=True,
+        reply_markup=kb,
     )
 
 
