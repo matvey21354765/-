@@ -1096,6 +1096,7 @@ def scrape_bibika(region: str, pages: int = 3, price_min: int = 0, price_max: in
 # ── ВКонтакте: паблики авто-барахолок по городам ─────────────────
 VK_AUTO_GROUPS = {
     "ekaterinburg": [
+        "kareta96",  # реальный паблик авто Екатеринбург
         "avtobaraholka96", "prodamavto96", "avto_ekb96", "ekbauto", "club_avto_ekb",
         "autobazar_ekb", "avtomobileekb", "club196avto", "avto_yekb", "prodamavtoe96",
         "avtodo100_ekb", "avto_do300_ekb", "avto_do500_ekb", "srochno_avto96",
@@ -1103,98 +1104,114 @@ VK_AUTO_GROUPS = {
         "avto_ur", "avto_sverdlovsk", "avtorynok_ekb", "deshevo_avto96",
     ],
     "moskva": [
+        "kareta77",
         "avtobaraholkamsk", "prodamavtomsk", "autobazar_msk", "avtoclub77",
         "moscowcars", "kupit_avto_msk", "avto_moskva77", "avtomoskva77",
         "avtodo100_msk", "avto_do300_msk", "srochno_avto77", "avto_bazar_msk",
         "avtorynok_msk", "deshevo_avto77", "avto_msk_prodazha", "buy_car_msk",
-        "avtodo500_msk", "avto77_sell",
     ],
     "spb": [
+        "kareta78",
         "avtobaraholkaspb", "prodamavtospb", "autobazar_spb", "avto78spb",
         "avtoclub78", "spbavto78", "prodamavtopiter",
         "avtodo100_spb", "avto_do300_spb", "srochno_avto78", "avto78_prodazha",
         "avtorynok_spb", "deshevo_avto78", "spb_auto_sell",
     ],
     "novosibirsk": [
+        "kareta54",
         "avtobaraholka54", "prodamavto54", "autobazar_nsk", "avtonsk54",
         "avto_novosibirsk", "club54avto", "nsk_avto54",
         "avtodo100_nsk", "avto_do300_nsk", "srochno_avto54", "nsk_auto_sell",
         "avtorynok_nsk", "deshevo_avto54",
     ],
     "kazan": [
+        "kareta16",
         "avtobaraholkakazan", "prodamavtokazan", "avtoclub16", "kazan_avto16",
         "autobazar_kazan", "avto_kazan16",
         "avtodo100_kazan", "avto_do300_kazan", "srochno_avto16", "kazan_auto_sell",
         "avtorynok_kazan", "deshevo_avto16",
     ],
     "chelyabinsk": [
+        "kareta74",
         "avtobaraholka74", "prodamavto74", "avto74chel", "autobazar_chel",
         "club74avto", "avtoclub74",
         "avtodo100_chel", "avto_do300_74", "srochno_avto74", "chel_auto_sell",
         "avtorynok_chel", "deshevo_avto74",
     ],
     "ufa": [
+        "kareta02",
         "avtobaraholkaufa", "prodamavtoufa", "avto02ufa", "autobazar_ufa",
         "avtoclub02", "ufa_avto02",
         "avtodo100_ufa", "avto_do300_ufa", "srochno_avto02", "ufa_auto_sell",
         "avtorynok_ufa", "deshevo_avto02",
     ],
     "krasnodar": [
+        "kareta23",
         "avtobaraholkakrd", "prodamavtokrd", "avto23krd", "autobazar_krasnodar",
         "avtoclub23", "krasnodar_avto23", "kuban_avto",
         "avtodo100_krd", "avto_do300_krd", "srochno_avto23", "krd_auto_sell",
         "avtorynok_krd", "deshevo_avto23", "kuban_avto_sell",
     ],
     "omsk": [
+        "kareta55",
         "avtobaraholkaomsk", "prodamavtoomsk", "avto55omsk", "autobazar_omsk",
         "club55avto", "omsk_avto55",
         "avtodo100_omsk", "avto_do300_omsk", "srochno_avto55", "omsk_auto_sell",
         "avtorynok_omsk", "deshevo_avto55",
     ],
     "rostov": [
+        "kareta61",
         "avtobaraholkarostov", "prodamavtorostov", "avto61rostov", "autobazar_rostov",
         "avtoclub61", "rostov_avto61",
         "avtodo100_rostov", "avto_do300_61", "srochno_avto61", "rostov_auto_sell",
         "avtorynok_rostov", "deshevo_avto61",
     ],
     "tyumen": [
+        "kareta72",
         "avtobaraholkatyumen", "prodamavtotmn", "avto72tyumen", "autobazar_tyumen",
         "tyumen_avto72",
         "avtodo100_tmn", "avto_do300_tmn", "srochno_avto72", "tmn_auto_sell",
         "avtorynok_tmn", "deshevo_avto72", "tyumen_auto_sell",
     ],
     "samara": [
+        "kareta63",
         "avtobaraholkasamara", "prodamavtosmr", "avto63samara", "autobazar_samara",
         "samara_avto63",
         "avtodo100_samara", "avto_do300_63", "srochno_avto63", "samara_auto_sell",
         "avtorynok_samara", "deshevo_avto63",
     ],
     "krasnoyarsk": [
+        "kareta24",
         "avtobaraholkakrs", "prodamavtokrs", "avto24krsk", "autobazar_krs",
         "krasnoyarsk_avto24",
         "avtodo100_krs", "avto_do300_24", "srochno_avto24", "krs_auto_sell",
         "avtorynok_krs", "deshevo_avto24",
     ],
     "nn": [
+        "kareta52",
         "avtobaraholkann", "prodamavtonn", "avto52nn", "autobazar_nn", "nn_avto52",
         "avtodo100_nn", "avto_do300_nn", "srochno_avto52", "nn_auto_sell",
         "avtorynok_nn", "deshevo_avto52",
     ],
     "perm": [
+        "kareta59",
         "avtobaraholkaperm", "prodamavtoperm", "avto59perm", "autobazar_perm",
         "avtodo100_perm", "avto_do300_perm", "srochno_avto59", "perm_auto_sell",
         "avtorynok_perm", "deshevo_avto59",
     ],
     "voronezh": [
+        "kareta36",
         "avtobaraholkavrn", "prodamavtovrn", "avto36voronezh", "autobazar_vrn",
         "avtodo100_vrn", "avto_do300_vrn", "srochno_avto36", "vrn_auto_sell",
         "avtorynok_vrn", "deshevo_avto36",
     ],
     "irkutsk": [
+        "kareta38",
         "avtobaraholka38", "prodamavto38", "avto38irkutsk", "autobazar_irkutsk",
         "avtodo100_irk", "irkutsk_auto_sell", "avtorynok_irkutsk",
     ],
     "volgograd": [
+        "kareta34",
         "avtobaraholka34", "prodamavto34", "avto34vgd", "autobazar_vgd",
         "avtodo100_vgd", "volgograd_auto_sell", "avtorynok_vgd",
     ],
@@ -8043,11 +8060,15 @@ async def _send_monitor_item(uid: int, it: dict):
 
 
 async def _global_monitor_loop():
-    """Единый глобальный цикл — раз в 2 минуты опрашивает Авито для всех активных пользователей."""
+    """Единый глобальный цикл — раз в 2 минуты опрашивает все источники для активных пользователей."""
     print("  [глоб.монитор] запущен")
     loop = asyncio.get_event_loop()
+    # VK/TG медленнее — опрашиваем раз в 10 минут (каждый 5-й тик по 2 минуты)
+    _vk_tg_tick = 0
     while True:
         await asyncio.sleep(GLOBAL_POLL_SEC)
+        _vk_tg_tick += 1
+        do_vk_tg = (_vk_tg_tick % 5 == 0)  # раз в 10 минут
         try:
             # Собираем всех пользователей с включённым мониторингом
             if not USERS_DIR.exists():
@@ -8076,22 +8097,27 @@ async def _global_monitor_loop():
 
             for region, users in by_region.items():
                 try:
-                    # Скрапим Авито БЕЗ сортировки по дате: фоновые уведомления
-                    # и основной поиск делят ОДИН региональный кэш, поэтому кэш
-                    # обязан содержать объявления ЛЮБЫХ дат (отсортированные по
-                    # релевантности/выгоде), а не только сегодняшние. Иначе
-                    # уведомления перезапишут кэш свежими, и основной поиск
-                    # покажет только сегодняшние. Новизну для уведомлений
-                    # отслеживаем по _days_on_site ниже.
-                    raw_avito = await loop.run_in_executor(
-                        None,
-                        lambda r=region: scrape_avito(r, pages=2, sort_by_date=False)
-                    )
-                    raw_drom = await loop.run_in_executor(
-                        None,
-                        lambda r=region: scrape_drom(r, pages=3, price_min=0, price_max=99_000_000)
-                    )
-                    raw = raw_avito + raw_drom
+                    # Все источники параллельно
+                    tasks_m = [
+                        loop.run_in_executor(None, lambda r=region: scrape_avito(r, pages=3, sort_by_date=False)),
+                        loop.run_in_executor(None, lambda r=region: scrape_drom(r, pages=3, price_min=0, price_max=99_000_000)),
+                        loop.run_in_executor(None, lambda r=region: scrape_autoru(r, pages=3, price_min=0, price_max=99_000_000)),
+                    ]
+                    if do_vk_tg:
+                        tasks_m += [
+                            loop.run_in_executor(None, lambda r=region: scrape_vk_groups(r, 0, 99_000_000)),
+                            loop.run_in_executor(None, lambda r=region: scrape_tg_channels(r, 0, 99_000_000)),
+                        ]
+                    done_m, _ = await asyncio.wait(tasks_m, timeout=60)
+                    raw = []
+                    for f in tasks_m:
+                        if f in done_m:
+                            try:
+                                res = f.result()
+                                if isinstance(res, list):
+                                    raw.extend(res)
+                            except Exception:
+                                pass
                     if not raw:
                         continue
 
