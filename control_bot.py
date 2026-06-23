@@ -2939,6 +2939,17 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
                         return r
                 return ""
             if isinstance(obj, dict):
+                def _avito_url_ok(u: str) -> bool:
+                    lo = u.lower()
+                    # Только реальный CDN фотографий объявлений
+                    if "img.avito.st" not in lo and "images.avito.st" not in lo:
+                        return False
+                    return not any(x in lo for x in (
+                        "/stub", "noimage", "placeholder", "/ava/", "/avatar/",
+                        "/userava", "/user_ava", "/logo", "/icon", "favicon",
+                        "/brand", "/promo", "/static/", "default",
+                    ))
+
                 # Ищем по всем известным ключам размеров фото Авито
                 for size in ("1280x960", "1208x906", "864x648", "640x480",
                              "432x324", "320x240", "100x75", "originalSize", "big", "small"):
@@ -2946,10 +2957,7 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
                     if isinstance(v, str) and "avito.st" in v.lower():
                         raw = v.replace("\\/", "/")
                         url_c = ("https:" + raw) if raw.startswith("//") else raw
-                        # Полный фильтр аватаров/логотипов — иначе фото продавца
-                        # под ключом-размером (avatar: {1280x960: ...}) утечёт как
-                        # «фото машины».
-                        if not any(x in url_c.lower() for x in ("/stub", "noimage", "placeholder", "/ava/", "/avatar/", "/userava", "/user_ava", "/logo", "/icon", "favicon")):
+                        if _avito_url_ok(url_c):
                             return url_c
                 # Прямые ключи-превью (часто содержат готовый URL фото)
                 for k in ("url", "thumb", "thumbnail", "coverImage", "firstImage", "src"):
@@ -2957,7 +2965,7 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
                     if isinstance(v, str) and "avito.st" in v.lower():
                         raw = v.replace("\\/", "/")
                         url_c = ("https:" + raw) if raw.startswith("//") else raw
-                        if not any(x in url_c.lower() for x in ("/stub", "noimage", "placeholder", "/ava/", "/avatar/", "/userAva/", "/user_ava", "/logo", "/icon", "favicon")):
+                        if _avito_url_ok(url_c):
                             return url_c
                     elif isinstance(v, (dict, list)):
                         r = _find_avito_photo_in_obj(v, depth + 1)
@@ -2982,6 +2990,17 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
             return ""
 
         photo_url = _find_avito_photo_in_obj(it)
+        if not photo_url:
+            # Резервный поиск: regex по сериализованному JSON объявления
+            _it_str = json.dumps(it, ensure_ascii=False)
+            _img_m = re.search(
+                r'(https?://(?:img|images)\.avito\.st/[^\s"\'\\]{10,}\.(?:jpg|jpeg|webp|png))',
+                _it_str
+            )
+            if _img_m:
+                _cand = _img_m.group(1).replace("\\/", "/")
+                if not any(x in _cand.lower() for x in ("/stub", "noimage", "/logo", "/icon", "/brand", "/ava/")):
+                    photo_url = _cand
         if not photo_url:
             photo_url = ""
 
@@ -3424,8 +3443,8 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
                 if src.startswith("//"):
                     src = "https:" + src
                 _sl = src.lower()
-                if (("avito.st" in _sl) or ("avito-static" in _sl)) and src.startswith("http"):
-                    if any(x in _sl for x in ("placeholder", "logo", "stub", "noimage", "/icon")):
+                if ("img.avito.st" in _sl or "images.avito.st" in _sl) and src.startswith("http"):
+                    if any(x in _sl for x in ("placeholder", "logo", "stub", "noimage", "/icon", "/brand", "/static/")):
                         continue
                     photo_url = src
                     break
@@ -6708,9 +6727,25 @@ def _fetch_and_check(url: str, source: str) -> dict | None:
 
         # Фото: og:image
         photo_url = ""
+        _PHOTO_REJECT = ("/stub", "noimage", "placeholder", "/ava/", "/avatar/",
+                         "/userava", "/user_ava", "/logo", "/icon", "favicon",
+                         "/brand", "/promo", "/static/", "default_image",
+                         "opengraph-default", "avito-app", "avito_app",
+                         "apple-touch", "banner", "fallback")
+
+        def _ok_photo(u: str, src: str) -> bool:
+            lo = u.lower()
+            if any(x in lo for x in _PHOTO_REJECT):
+                return False
+            if src == "avito" and "img.avito.st" not in lo and "images.avito.st" not in lo:
+                return False
+            return True
+
         og = soup.select_one("meta[property='og:image']")
         if og:
-            photo_url = og.get("content", "").strip()
+            _cand = og.get("content", "").strip()
+            if _cand and _ok_photo(_cand, source):
+                photo_url = _cand
         # Отфильтровываем плейсхолдеры (логотип Дрома, хомяка и т.п.)
         if photo_url and any(p in photo_url for p in _DROM_PLACEHOLDER_URLS):
             photo_url = ""
@@ -6730,14 +6765,21 @@ def _fetch_and_check(url: str, source: str) -> dict | None:
                 _dm = re.search(r'"description"\s*:\s*"((?:\\.|[^"\\]){20,400})"', text)
                 if _dm:
                     description = _dm.group(1).replace("\\n", " ").replace('\\"', '"').strip()
-        # Если og:image не подошёл — берём первую img с CDN
-        _cdn_keywords = ["avito.st", "avatars.mds.yandex", "cdn", "photos", "images", "s.auto.", "static"]
+        # Если og:image не подошёл — берём первую img с CDN (только реальные CDN)
         if not photo_url:
+            _cdn_kw_by_src = {
+                "avito":  ["img.avito.st", "images.avito.st"],
+                "autoru": ["avatars.mds.yandex", "s.auto.ru"],
+                "drom":   ["drom.ru/photos", "dromcdn"],
+            }
+            _cdn_kw = _cdn_kw_by_src.get(source, ["img.avito.st", "images.avito.st",
+                                                    "avatars.mds.yandex", "dromcdn"])
             for img in soup.select("img[src]"):
-                src = img.get("src", "")
-                if src.startswith("http") and any(x in src for x in _cdn_keywords):
-                    photo_url = src
-                    break
+                src_attr = img.get("src", "")
+                if src_attr.startswith("http") and any(x in src_attr for x in _cdn_kw):
+                    if _ok_photo(src_attr, source):
+                        photo_url = src_attr
+                        break
         if photo_url and not photo_url.startswith("http"):
             photo_url = "https:" + photo_url if photo_url.startswith("//") else ""
 
@@ -6841,9 +6883,10 @@ async def _ensure_photo(item: dict) -> None:
             lo = url.lower()
             if any(x in lo for x in _OG_REJECT):
                 return False
-            # Для Авито: принимаем ТОЛЬКО фото с CDN avito.st — бренд лежит на avito.ru
-            if src == "avito" and "avito.st" not in lo:
-                return False
+            if src == "avito":
+                # Реальные фото объявлений только на img.avito.st или images.avito.st
+                if "img.avito.st" not in lo and "images.avito.st" not in lo:
+                    return False
             return True
 
         # 1. og:image — самый надёжный для страниц объявлений
