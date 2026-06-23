@@ -6143,15 +6143,22 @@ def _load_cache(uid: int) -> list[dict]:
 
 
 async def send_batch(chat_id: int, uid: int, offset: int):
-    """Отправляет 10 объявлений из кеша начиная с offset."""
+    """Отправляет 10 объявлений из кеша начиная с offset.
+    Список уже отсортирован и отфильтрован — берём напрямую срез [offset:offset+10].
+    """
     items = _search_cache.get(uid) or _load_cache(uid)
     if items:
         _search_cache[uid] = items  # восстанавливаем в память после перезапуска
-    if not items or offset >= len(items):
+    if not items:
         await bot.send_message(chat_id, "✅ Объявления закончились. Нажми /search для нового поиска.")
         return
-
     total = len(items)
+    if offset >= total:
+        await bot.send_message(
+            chat_id,
+            f"✅ Показаны все {total} объявлений. Нажми /search для нового поиска.",
+        )
+        return
 
     async def _send_item(item: dict):
         url = item.get("url", "")
@@ -6305,47 +6312,22 @@ async def send_batch(chat_id: int, uid: int, offset: int):
             except Exception:
                 pass
 
-    # 1. Сначала отбираем кандидатов по цене/заголовку БЕЗ сетевых запросов.
-    #    Мусорные объявления (пробег ~1 000 000 км) уводим в конец.
-    candidates: list[dict] = []
-    cursor = offset
-    while len(candidates) < 15 and cursor < total and cursor < offset + 80:
-        it = items[cursor]
-        cursor += 1
-        p = it.get("_price_int") or parse_price(it.get("price", ""))
-        if p and not (_pmin <= p <= _pmax):
-            continue
-        if not it.get("title") and not p:
-            continue
-        candidates.append(it)
+    # Список уже отсортирован в do_search_for_user. Берём срез напрямую.
+    batch = items[offset:offset + 10]
 
-    # 2. Дозагружаем фото/описание только для отобранных кандидатов
-    #    (макс. 20), с низкой параллельностью.
-    await asyncio.gather(*[_prefetch(it) for it in candidates[:10]])
+    # Дозагружаем фото только для тех у кого нет
+    await asyncio.gather(*[_prefetch(it) for it in batch])
 
-    batch = candidates[:10]
-
-    # Пересчитываем рыночное сравнение после загрузки цен и сортируем СТРОГО по
-    # выгоде: максимальная скидка от рынка. Дата (_days_on_site) НЕ участвует в
-    # сортировке — пользователю важна цена ниже рынка, а не свежесть.
-    batch = rank_by_market_price(batch)
-    batch.sort(key=lambda x: (
-        x.get("_junk", 0),                              # мусорные (1 000 000 км) — в конец
-        0 if x.get("_savings_pct", 0) > 0 else 1,      # ниже рынка первыми
-        -x.get("_savings_pct", 0),
-        -x.get("_hot_score", 0),
-        x.get("_price_int", 999_999_999),
-    ))
-    batch = batch[:10]
     for item in batch:
         await _send_item(item)
         await asyncio.sleep(0.05)
 
-    next_offset = cursor
+    next_offset = offset + len(batch)
+    shown_str = f"{next_offset}/{total}"
     if next_offset < total:
         await bot.send_message(
             chat_id,
-            f"Показано {min(next_offset, total)} из {total}:",
+            f"Показано {shown_str}:",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(text=f"➡️ Ещё объявлений", callback_data=f"page|{uid}|{next_offset}"),
             ]])
