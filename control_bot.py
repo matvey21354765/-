@@ -1078,42 +1078,160 @@ def scrape_bibika(region: str, pages: int = 3, price_min: int = 0, price_max: in
 
 # ── ВКонтакте: паблики авто-барахолок по городам ─────────────────
 VK_AUTO_GROUPS = {
-    "ekaterinburg": ["avtoekb", "avtobaraholka96", "prodamavto96", "auto96"],
-    "moskva":       ["avtomoskva", "avtobaraholkamsk", "kupit_avto_msk"],
-    "spb":          ["avto_spb", "avtobaraholkaspb", "prodamavtospb"],
-    "novosibirsk":  ["avtonsk", "avtobaraholka54", "prodamavto54"],
-    "kazan":        ["avtokazan", "avtobaraholkakazan"],
-    "chelyabinsk":  ["avto74", "avtobaraholka74"],
-    "ufa":          ["avtoufa", "avtobaraholkaufa"],
-    "krasnodar":    ["avtokrd", "avtobaraholkakrd"],
-    "omsk":         ["avtoomsk", "avtobaraholkaomsk"],
-    "rostov":       ["avtorostov", "avtobaraholkarostov"],
+    "ekaterinburg": [
+        "avtobaraholka96", "prodamavto96", "avto_ekb96", "ekbauto", "club_avto_ekb",
+        "autobazar_ekb", "avtomobileekb", "club196avto", "avto_yekb", "prodamavtoe96",
+    ],
+    "moskva": [
+        "avtobaraholkamsk", "prodamavtomsk", "autobazar_msk", "avtoclub77",
+        "moscowcars", "kupit_avto_msk", "avto_moskva77", "avtomoskva77",
+    ],
+    "spb": [
+        "avtobaraholkaspb", "prodamavtospb", "autobazar_spb", "avto78spb",
+        "avtoclub78", "spbavto78", "prodamavtopiter",
+    ],
+    "novosibirsk": [
+        "avtobaraholka54", "prodamavto54", "autobazar_nsk", "avtonsk54",
+        "avto_novosibirsk", "club54avto", "nsk_avto54",
+    ],
+    "kazan": [
+        "avtobaraholkakazan", "prodamavtokazan", "avtoclub16", "kazan_avto16",
+        "autobazar_kazan", "avto_kazan16",
+    ],
+    "chelyabinsk": [
+        "avtobaraholka74", "prodamavto74", "avto74chel", "autobazar_chel",
+        "club74avto", "avtoclub74",
+    ],
+    "ufa": [
+        "avtobaraholkaufa", "prodamavtoufa", "avto02ufa", "autobazar_ufa",
+        "avtoclub02", "ufa_avto02",
+    ],
+    "krasnodar": [
+        "avtobaraholkakrd", "prodamavtokrd", "avto23krd", "autobazar_krasnodar",
+        "avtoclub23", "krasnodar_avto23", "kuban_avto",
+    ],
+    "omsk": [
+        "avtobaraholkaomsk", "prodamavtoomsk", "avto55omsk", "autobazar_omsk",
+        "club55avto", "omsk_avto55",
+    ],
+    "rostov": [
+        "avtobaraholkarostov", "prodamavtorostov", "avto61rostov", "autobazar_rostov",
+        "avtoclub61", "rostov_avto61",
+    ],
+    "tyumen": [
+        "avtobaraholkatyumen", "prodamavtotmn", "avto72tyumen", "autobazar_tyumen",
+        "tyumen_avto72",
+    ],
+    "samara": [
+        "avtobaraholkasamara", "prodamavtosmr", "avto63samara", "autobazar_samara",
+        "samara_avto63",
+    ],
+    "krasnoyarsk": [
+        "avtobaraholkakrs", "prodamavtokrs", "avto24krsk", "autobazar_krs",
+        "krasnoyarsk_avto24",
+    ],
+    "nn": [
+        "avtobaraholkann", "prodamavtonn", "avto52nn", "autobazar_nn",
+        "nn_avto52",
+    ],
+    "perm": [
+        "avtobaraholkaperm", "prodamavtoperm", "avto59perm", "autobazar_perm",
+    ],
+    "voronezh": [
+        "avtobaraholkavrn", "prodamavtovrn", "avto36voronezh", "autobazar_vrn",
+    ],
 }
 
 # ── Парсер Telegram-каналов автопродаж ──────────────────────────
 
 TG_AUTO_CHANNELS = {
-    "ekaterinburg": ["avto_ekb", "prodamavto_ekb", "avtoekb", "kupit_avto_ekb", "avto96ekb", "baraholka_avto_ekb"],
-    "moskva":       ["avto_msk", "prodamavto_msk", "avtomoskva", "kupit_avto_msk", "avto_moskva", "cars_msk"],
-    "spb":          ["avto_spb", "prodamavto_spb", "avtospb", "avto78spb", "cars_spb"],
-    "novosibirsk":  ["avto_nsk", "prodamavto_nsk", "avtonsk54", "cars_nsk"],
-    "kazan":        ["avto_kazan", "prodamavto_kazan", "avtokazan16"],
-    "krasnodar":    ["avto_krd", "prodamavto_krd", "avto23krd"],
-    "chelyabinsk":  ["avto_chel", "prodamavto_chel", "avto74chel"],
-    "ufa":          ["avto_ufa", "prodamavto_ufa", "avto02ufa"],
-    "omsk":         ["avto_omsk", "prodamavto_omsk", "avto55omsk"],
-    "rostov":       ["avto_rostov", "prodamavto_rostov", "avto61rostov"],
-    "tyumen":       ["avto_tyumen", "prodamavto72", "avto72tyumen", "tyumen_avto", "cars_tyumen"],
-    "samara":       ["avto_samara", "prodamavto63", "avto63samara"],
-    "volgograd":    ["avto_volgograd", "prodamavto34", "avto34vlg"],
-    "perm":         ["avto_perm", "prodamavto59", "avto59perm"],
-    "voronezh":     ["avto_voronezh", "prodamavto36", "avto36vrn"],
-    "saratov":      ["avto_saratov", "prodamavto64", "avto64sar"],
-    "krasnoyarsk":  ["avto_krsk", "prodamavto24", "avto24krsk"],
-    "irkutsk":      ["avto_irkutsk", "prodamavto38", "avto38irk"],
-    "vladivostok":  ["avto_vladivostok", "prodamavto25", "avto25vlad"],
-    "habarovsk":    ["avto_habarovsk", "prodamavto27", "avto27hab"],
-    "nn":           ["avto_nn", "prodamavto52", "avto52nn"],
+    "ekaterinburg": [
+        "avto_ekb", "prodamavto_ekb", "avtoekb", "kupit_avto_ekb", "avto96ekb",
+        "baraholka_avto_ekb", "avtobazar_ekb", "ekb_avto96", "avto_yekaterinburg",
+        "prodamauto96", "avto_baraholka96", "ekbauto2024",
+    ],
+    "moskva": [
+        "avto_msk", "prodamavto_msk", "avtomoskva", "kupit_avto_msk", "avto_moskva",
+        "cars_msk", "avtobazar_msk", "prodamauto_msk", "avto_baraholka_msk",
+        "moscowcars2024", "avto77msk", "moskva_avto77",
+    ],
+    "spb": [
+        "avto_spb", "prodamavto_spb", "avtospb", "avto78spb", "cars_spb",
+        "avtobazar_spb", "prodamauto_spb", "avto_baraholka_spb", "spb_avto78",
+        "avto78_prodazha", "spbauto2024",
+    ],
+    "novosibirsk": [
+        "avto_nsk", "prodamavto_nsk", "avtonsk54", "cars_nsk", "avtobazar_nsk",
+        "prodamauto_nsk", "avto_baraholka54", "nsk_avto54", "novosibirsk_avto",
+    ],
+    "kazan": [
+        "avto_kazan", "prodamavto_kazan", "avtokazan16", "avtobazar_kazan",
+        "kazan_avto16", "prodamauto_kazan", "avto_baraholka_kazan",
+    ],
+    "krasnodar": [
+        "avto_krd", "prodamavto_krd", "avto23krd", "avtobazar_krasnodar",
+        "krasnodar_avto23", "prodamauto_krd", "avto_baraholka_krd", "kuban_cars",
+    ],
+    "chelyabinsk": [
+        "avto_chel", "prodamavto_chel", "avto74chel", "avtobazar_chel",
+        "chel_avto74", "prodamauto_chel", "avto_baraholka74",
+    ],
+    "ufa": [
+        "avto_ufa", "prodamavto_ufa", "avto02ufa", "avtobazar_ufa",
+        "ufa_avto02", "prodamauto_ufa", "avto_baraholka_ufa",
+    ],
+    "omsk": [
+        "avto_omsk", "prodamavto_omsk", "avto55omsk", "avtobazar_omsk",
+        "omsk_avto55", "prodamauto_omsk", "avto_baraholka55",
+    ],
+    "rostov": [
+        "avto_rostov", "prodamavto_rostov", "avto61rostov", "avtobazar_rostov",
+        "rostov_avto61", "prodamauto_rostov", "avto_baraholka_rostov",
+    ],
+    "tyumen": [
+        "avto_tyumen", "prodamavto72", "avto72tyumen", "tyumen_avto", "cars_tyumen",
+        "avtobazar_tyumen", "prodamauto72", "avto_baraholka72",
+    ],
+    "samara": [
+        "avto_samara", "prodamavto63", "avto63samara", "avtobazar_samara",
+        "samara_avto63", "prodamauto63", "avto_baraholka63",
+    ],
+    "volgograd": [
+        "avto_volgograd", "prodamavto34", "avto34vlg", "avtobazar_volgograd",
+        "volgograd_avto34", "prodamauto34",
+    ],
+    "perm": [
+        "avto_perm", "prodamavto59", "avto59perm", "avtobazar_perm",
+        "perm_avto59", "prodamauto59", "avto_baraholka59",
+    ],
+    "voronezh": [
+        "avto_voronezh", "prodamavto36", "avto36vrn", "avtobazar_voronezh",
+        "voronezh_avto36", "prodamauto36",
+    ],
+    "saratov": [
+        "avto_saratov", "prodamavto64", "avto64sar", "avtobazar_saratov",
+        "saratov_avto64",
+    ],
+    "krasnoyarsk": [
+        "avto_krsk", "prodamavto24", "avto24krsk", "avtobazar_krs",
+        "krasnoyarsk_avto24", "prodamauto24",
+    ],
+    "irkutsk": [
+        "avto_irkutsk", "prodamavto38", "avto38irk", "avtobazar_irkutsk",
+        "irkutsk_avto38",
+    ],
+    "vladivostok": [
+        "avto_vladivostok", "prodamavto25", "avto25vlad", "avtobazar_vlad",
+        "vladivostok_avto25",
+    ],
+    "habarovsk": [
+        "avto_habarovsk", "prodamavto27", "avto27hab", "avtobazar_hab",
+        "habarovsk_avto27",
+    ],
+    "nn": [
+        "avto_nn", "prodamavto52", "avto52nn", "avtobazar_nn",
+        "nn_avto52", "prodamauto52", "avto_baraholka52",
+    ],
 }
 
 # Маппинг слагов регионов бота → ключи TG_AUTO_CHANNELS
@@ -1524,28 +1642,44 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
             return []
 
 
-    # 1. Пробуем все каналы параллельно + открываем новые через DDG
-    discovered = _discover_tg_channels()
-    combined_channels = list(dict.fromkeys(all_channels + discovered))
-
     from concurrent.futures import ThreadPoolExecutor, as_completed
-    with ThreadPoolExecutor(max_workers=6) as ex:
-        futs = {ex.submit(_try_channel, ch): ch for ch in combined_channels}
-        for fut in as_completed(futs, timeout=20):
+
+    # 1. Обнаруживаем новые каналы через DDG параллельно с парсингом известных
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        f_discover = ex.submit(_discover_tg_channels)
+        futs_known = {ex.submit(_try_channel, ch): ch for ch in all_channels}
+        for fut in as_completed(futs_known, timeout=25):
             try:
                 batch = fut.result()
                 if batch:
                     results.extend(batch)
-                    print(f"  [TG {futs[fut]}] {len(batch)} объявлений")
+                    print(f"  [TG {futs_known[fut]}] {len(batch)} объявлений")
             except Exception:
                 pass
+        try:
+            discovered = f_discover.result(timeout=5)
+        except Exception:
+            discovered = []
 
-    # 2. Если мало результатов — ищем через DDG (работает с Railway IP)
-    if len(results) < 5:
-        ddg_batch = _try_ddg_tg("продам авто")
-        if ddg_batch:
-            results.extend(ddg_batch)
-            print(f"  [TG DDG итого] {len(ddg_batch)} результатов")
+    # 2. Пробуем найденные через DDG каналы
+    new_channels = [ch for ch in discovered if ch not in all_channels]
+    if new_channels:
+        with ThreadPoolExecutor(max_workers=6) as ex2:
+            futs2 = {ex2.submit(_try_channel, ch): ch for ch in new_channels}
+            for fut in as_completed(futs2, timeout=15):
+                try:
+                    batch = fut.result()
+                    if batch:
+                        results.extend(batch)
+                        print(f"  [TG discovered {futs2[fut]}] {len(batch)} объявлений")
+                except Exception:
+                    pass
+
+    # 3. DDG-поиск TG постов всегда (не только при нехватке результатов)
+    ddg_batch = _try_ddg_tg("продам авто")
+    if ddg_batch:
+        results.extend(ddg_batch)
+        print(f"  [TG DDG итого] {len(ddg_batch)} результатов")
 
     return results
 
@@ -1689,11 +1823,76 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                 print(f"  [VK API] {e}")
         return batch
 
+    def _try_ddg_vk() -> list[dict]:
+        """Ищет посты ВКонтакте через DuckDuckGo: site:vk.com + ключевые слова."""
+        import urllib.parse as _upq
+        keywords = [
+            f"site:vk.com продам авто {region_name_ru} пробег",
+            f"site:vk.com продам автомобиль {region_name_ru} год",
+            f"site:vk.com автобарахолка {region_name_ru} продаю",
+            f"site:vk.com продаётся машина {region_name_ru} торг",
+        ]
+        batch = []
+        seen_urls: set[str] = set()
+        _vk_url_re = re.compile(r'https?://(?:m\.)?vk\.com/(?:wall|club|public|id)[\w\-]+', re.I)
+        for q in keywords:
+            try:
+                time.sleep(random.uniform(1.0, 2.0))
+                for base in ("https://lite.duckduckgo.com/lite/", "https://html.duckduckgo.com/html/"):
+                    r = session.get(base, params={"q": q, "kl": "ru-ru"}, timeout=10)
+                    if r.status_code != 200 or len(r.text) < 500:
+                        continue
+                    html = _upq.unquote(r.text)
+                    soup2 = _BS(html, "lxml")
+                    for a in soup2.select("a[href*='vk.com']"):
+                        href = a.get("href", "")
+                        if not href:
+                            continue
+                        if href.startswith("//"):
+                            href = "https:" + href
+                        if not href.startswith("http"):
+                            continue
+                        if href in seen_urls:
+                            continue
+                        seen_urls.add(href)
+                        parent = a.find_parent()
+                        text = parent.get_text(" ", strip=True) if parent else a.get_text(" ", strip=True)
+                        if not _is_car_sale_social(text):
+                            continue
+                        if _is_moto(text[:200]):
+                            continue
+                        price = _parse_price(text)
+                        if price > 0 and not (price_min <= price <= price_max):
+                            continue
+                        year_m = _vk_year_re.search(text)
+                        title = _social_make_title(text) or "Объявление ВКонтакте"
+                        batch.append({
+                            "title": title,
+                            "price": f"{price:,} ₽".replace(",", " ") if price else "цена не указана",
+                            "_price_int": price,
+                            "url": href,
+                            "_photo_url": "",
+                            "description": text[:300],
+                            "source": "vk",
+                            "seller": "ВКонтакте",
+                            "_seller_url": href,
+                            "_year": int(year_m.group(1)) if year_m else 0,
+                            "_days_on_site": 0,
+                        })
+                    if batch:
+                        break
+            except Exception as e:
+                print(f"  [VK DDG] {e}")
+        print(f"  [VK DDG] {len(batch)} результатов")
+        return batch
+
     def _try_yandex_vk() -> list[dict]:
         """Ищет посты ВКонтакте через Яндекс: site:vk.com + ключевые слова."""
         keywords = [
             f"автобарахолка {region_name_ru} продам авто",
             f"продаю авто {region_name_ru} цена",
+            f"продам автомобиль {region_name_ru} пробег",
+            f"продаётся машина {region_name_ru} год",
         ]
         batch = []
         seen_urls = set()
@@ -1793,6 +1992,8 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
             print(f"  [VK {slug}] {e}")
             return []
 
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     # 1. VK API (если есть токен)
     if vk_token:
         api_batch = _try_vk_api_search()
@@ -1800,19 +2001,24 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
             results.extend(api_batch)
             print(f"  [VK API] {len(api_batch)} объявлений")
 
-    # 2. Яндекс поиск по VK
-    yandex_batch = _try_yandex_vk()
-    if yandex_batch:
-        results.extend(yandex_batch)
-        print(f"  [VK Яндекс] {len(yandex_batch)} объявлений")
+    # 2. Яндекс + DDG поиск по VK — параллельно
+    with ThreadPoolExecutor(max_workers=2) as ex2:
+        f_yandex = ex2.submit(_try_yandex_vk)
+        f_ddg = ex2.submit(_try_ddg_vk)
+        for f in as_completed([f_yandex, f_ddg], timeout=20):
+            try:
+                b = f.result()
+                if b:
+                    results.extend(b)
+            except Exception:
+                pass
 
     # 3. Прямой парсинг известных групп
     vk_groups = VK_AUTO_GROUPS.get(city_key, [])
-    from concurrent.futures import ThreadPoolExecutor, as_completed
     if vk_groups:
-        with ThreadPoolExecutor(max_workers=4) as ex:
+        with ThreadPoolExecutor(max_workers=6) as ex:
             futs = {ex.submit(_try_vk_community, slug): slug for slug in vk_groups}
-            for fut in as_completed(futs, timeout=15):
+            for fut in as_completed(futs, timeout=20):
                 try:
                     batch = fut.result()
                     if batch:
@@ -6385,18 +6591,24 @@ async def send_batch(chat_id: int, uid: int, offset: int):
     next_offset = offset + len(batch)
     shown_str = f"{next_offset}/{total}"
     if next_offset < total:
+        nav_row = [InlineKeyboardButton(text="➡️ Ещё", callback_data=f"page|{uid}|{next_offset}")]
+        if offset > 0:
+            prev_offset = max(0, offset - 10)
+            nav_row.insert(0, InlineKeyboardButton(text="⬅️ Назад", callback_data=f"page|{uid}|{prev_offset}"))
         await bot.send_message(
             chat_id,
             f"Показано {shown_str}:",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text=f"➡️ Ещё объявлений", callback_data=f"page|{uid}|{next_offset}"),
-            ]])
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[nav_row])
         )
     else:
+        nav_row = []
+        if offset > 0:
+            prev_offset = max(0, offset - 10)
+            nav_row.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"page|{uid}|{prev_offset}"))
         await bot.send_message(
             chat_id,
             f"✅ Показаны все {total} объявлений.",
-            reply_markup=MAIN_KEYBOARD,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[nav_row]) if nav_row else MAIN_KEYBOARD,
         )
 
     # Сохраняем показанные в seen
