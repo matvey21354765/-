@@ -6610,8 +6610,9 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         if mileage and mileage < 900_000:
             mileage_str = f"  ·  🛣 {mileage:,} км".replace(",", " ")
 
+        dealer_tag = " 🏢" if item.get("_is_dealer") else ""
         caption = (
-            f"{source_tag} {item.get('title', '')}{hot_tag}\n"
+            f"{source_tag} {item.get('title', '')}{hot_tag}{dealer_tag}\n"
             f"💰 {price_line}{deal_line}\n"
             f"📅 {days_str}{mileage_str}"
         )
@@ -7030,17 +7031,18 @@ async def do_search_for_user(uid: int, reply_to):
     print(f"  [поиск] items={len(items)}, seen={len(seen)}, skipped={len(skipped)}, already_seen={already_seen_count}")
     suitable = [
         i for i in items
-        if not is_dealer(i)
-        and not i.get("_market_ref_only")
+        if not i.get("_market_ref_only")
         and in_price_range(i, pmin, pmax)
         and i.get("url")
         and i["url"] not in skipped
-        # seen не фильтруем — показываем всё, включая уже виденное.
-        # Скрытые вручную (skipped) не показываем.
     ]
     # Фильтр по категории и марке (также убирает скутеры/мото)
     suitable = _filter_by_category(suitable, category, brand)
     suitable = rank_by_market_price(suitable, ref_items=[i for i in items if i.get("_market_ref_only")])
+    # Дилерские объявления — в конец (но показываем, особенно если ниже рынка)
+    for it in suitable:
+        if is_dealer(it):
+            it["_is_dealer"] = True
     # Сортировка:
     # 1. Сегодня + ниже рынка (самые свежие выгодные)
     # 2. Любая дата + ниже рынка (по убыванию скидки)
@@ -7051,15 +7053,18 @@ async def do_search_for_user(uid: int, reply_to):
         days = x.get("_days_on_site", 999)
         is_today = days <= 1
         below = pct > 0
+        dealer = x.get("_is_dealer", False)
         price = x.get("_price_int", 999_999_999)
+        # Частники — первые, дилеры — после (но дилер ниже рынка — выше дилера по рынку)
+        dealer_penalty = 10 if dealer else 0
         if below and is_today:
-            tier = 0   # сегодня ниже рынка — высший приоритет
+            tier = 0 + dealer_penalty
         elif below:
-            tier = 1   # ниже рынка но старше
+            tier = 1 + dealer_penalty
         elif price > 0:
-            tier = 2   # по рынку, цена известна
+            tier = 2 + dealer_penalty
         else:
-            tier = 3   # нет цены
+            tier = 3 + dealer_penalty
         return (tier, -pct, days, price)
     suitable.sort(key=_sort_key)
 
@@ -7069,8 +7074,7 @@ async def do_search_for_user(uid: int, reply_to):
         save_seen(uid, seen)
         suitable = [
             i for i in items
-            if not is_dealer(i)
-            and not i.get("_market_ref_only")
+            if not i.get("_market_ref_only")
             and in_price_range(i, pmin, pmax)
             and i.get("url")
             and i["url"] not in skipped
