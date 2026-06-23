@@ -1302,9 +1302,12 @@ _SOCIAL_REJECT_KEYWORDS = [
     "недвижимост", "студи", "апартамент",
     # Услуги
     "перевозк", "пассажирск", "грузоперевозк", "рейс", "маршрут", "такси",
-    # Не машина: госномера, запчасти, автозвук
+    # Не машина: госномера, запчасти, автозвук, резина, детали
     "госномер", "гос. номер", "номерной знак", "красивый номер", "продам номер",
-    "запчаст", "автозапчаст", "шин", "колес", "диски", "диск р",
+    "запчаст", "автозапчаст", "разбор", "на разбор", "на запчаст",
+    "шин", "резин", "покрышк", "колес", "колёс", "диски", "диск р", "диск на",
+    " шт.", "шт,", " шт\n",                        # «4 шт.» — детали поштучно
+    "на ваз ", "на lada ", "запчасти на",           # «на ВАЗ 4 шт» — для другого авто
     "сабвуфер", "сабвуф", "автозвук", "усилитель", "магнитол", "колонки", "автоакустик",
     "бампер", "фара", "крыло", "капот", "зеркало", "стекло лобов",
     "масло моторн", "антифриз", "автохимия", "тормозн",
@@ -1523,6 +1526,9 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
                 _is_below = any(k in text_lower for k in _below_market_kw)
                 price = _parse_price(text)
                 if price > 0 and not (price_min <= price <= price_max):
+                    continue
+                # Если бюджет ограничен — не показываем объявления без цены
+                if price == 0 and price_max < 90_000_000:
                     continue
                 # Ссылка на конкретное сообщение
                 link_el = msg_el.select_one("a.tgme_widget_message_date") or msg_el.select_one("a[href*='t.me']")
@@ -1965,6 +1971,9 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                     continue
                 price = _parse_price(text)
                 if price > 0 and not (price_min <= price <= price_max):
+                    continue
+                # Если бюджет ограничен — не показываем объявления без цены
+                if price == 0 and price_max < 90_000_000:
                     continue
                 link_el = post.select_one("a[href*='/wall']")
                 post_url = ""
