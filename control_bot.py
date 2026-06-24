@@ -575,7 +575,10 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
                 # Golf 2012 за 820к vs медиана всех Golf 2.5M = 67% → отклоняем.
                 # Реальные скидки >50% бывают, но редки — лучше не показывать,
                 # чем вводить в заблуждение.
-                if savings_pct > 50:
+                # Динамический кап: для бюджетных авто (<400к) разрешаем до 60%,
+                # иначе 50%. Golf 2012 за 820к vs медиана 2.5M = 67% → отклоняем.
+                _savings_cap = 60 if p < 400_000 else 50
+                if savings_pct > _savings_cap:
                     med = 0
                     savings_pct = 0.0
             if med > 0:
@@ -8225,7 +8228,7 @@ async def do_search_for_user(uid: int, reply_to):
     loop = asyncio.get_running_loop()
 
     scraper_map = {
-        "drom":   lambda: scrape_drom(region, pages=6, price_min=pmin, price_max=pmax),
+        "drom":   lambda: scrape_drom(region, pages=8, price_min=pmin, price_max=pmax),
         "autoru": lambda: scrape_autoru(region, pages=4, price_min=pmin, price_max=pmax),
         "avito":  lambda: scrape_avito(region, pages=6, price_min=pmin, price_max=pmax, sort_by_date=False, brand=(brand if brand and brand != "any" else "")),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
@@ -8517,7 +8520,15 @@ async def do_search_for_user(uid: int, reply_to):
         if it.get("url") and _norm_url(it["url"]) in seen_norm:
             it["_already_seen"] = True
 
-    suitable = rank_by_market_price(suitable, ref_items=[i for i in items if i.get("_market_ref_only")], avito_only_median=True)
+    _avito_ref_items = [i for i in items if i.get("_market_ref_only")]
+    _use_avito_only = len(_avito_ref_items) >= 5
+    if not _use_avito_only:
+        # Avito недоступен — используем ВСЕ площадки как референс для медианы
+        _avito_ref_items = [i for i in items if not i.get("_market_ref_only") and i.get("_price_int", 0) > 0]
+        print(f"  [рынок] Авито-референс пуст, используем {len(_avito_ref_items)} объявлений со всех площадок")
+    else:
+        print(f"  [рынок] Авито-референс: {len(_avito_ref_items)} объявлений")
+    suitable = rank_by_market_price(suitable, ref_items=_avito_ref_items, avito_only_median=_use_avito_only)
     # Дилерские объявления — добавляем штраф к deal_score
     for it in suitable:
         if is_dealer(it):
