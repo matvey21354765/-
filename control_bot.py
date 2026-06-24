@@ -2562,28 +2562,8 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
             except Exception as e:
                 print(f"  [VK newsfeed] {e}")
 
-        # 2. groups.search — находим РЕАЛЬНЫЕ группы/паблики через VK API
-        _found_group_ids: set[int] = set()
-
-        def _scrape_group_api(gid: int, gname: str = "") -> None:
-            if gid in _found_group_ids:
-                return
-            _found_group_ids.add(gid)
-            try:
-                rg = session.get(f"{VK_API}/wall.get",
-                    params={"owner_id": f"-{gid}", "count": 100, "filter": "owner", **common}, timeout=10)
-                for post in rg.json().get("response", {}).get("items", []):
-                    _add_post(post, label=gname)
-            except Exception:
-                pass
-            for _wq in ["продам", "продаю", "продается", "продаётся"]:
-                try:
-                    rw = session.get(f"{VK_API}/wall.search",
-                        params={"owner_id": f"-{gid}", "query": _wq, "count": 100, **common}, timeout=10)
-                    for post in rw.json().get("response", {}).get("items", []):
-                        _add_post(post, label=gname)
-                except Exception:
-                    pass
+        # 2. groups.search — сначала собираем ВСЕ ID групп (быстро), потом параллельно скрейпим
+        _found_groups: dict[int, str] = {}  # id → name
 
         # Запросы по городу И области — ищем и group, и page (паблики)
         _gs_queries = []
@@ -2592,25 +2572,65 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                 f"автобарахолка {_loc}",
                 f"авто {_loc}",
                 f"продажа авто {_loc}",
-                f"купля продажа авто {_loc}",
                 f"автомобили {_loc}",
                 f"авторынок {_loc}",
             ]
-        for _gq in _gs_queries[:14]:
+        from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _ac
+
+        def _gs_search(q_type: tuple) -> list:
+            _gq, _gtype = q_type
             try:
-                for _gtype in ("page", "group"):
-                    r = session.get(f"{VK_API}/groups.search",
-                        params={"q": _gq, "type": _gtype, "count": 20, **common}, timeout=10)
-                    resp_gs = r.json()
-                    if resp_gs.get("error"):
-                        continue
-                    for g in resp_gs.get("response", {}).get("items", []):
-                        gid = g.get("id")
-                        if gid:
-                            _scrape_group_api(gid, g.get("name", ""))
+                r = session.get(f"{VK_API}/groups.search",
+                    params={"q": _gq, "type": _gtype, "count": 20, **common}, timeout=8)
+                resp_gs = r.json()
+                if resp_gs.get("error"):
+                    return []
+                return resp_gs.get("response", {}).get("items", [])
+            except Exception:
+                return []
+
+        gs_tasks = [(q, t) for q in _gs_queries[:10] for t in ("page", "group")]
+        with _TPE(max_workers=8) as _gex:
+            for res in _gex.map(_gs_search, gs_tasks, timeout=15):
+                for g in (res or []):
+                    gid = g.get("id")
+                    if gid and gid not in _found_groups:
+                        _found_groups[gid] = g.get("name", "")
+
+        def _scrape_one_group(gid_name: tuple) -> list:
+            gid, gname = gid_name
+            local_posts = []
+            try:
+                rg = session.get(f"{VK_API}/wall.get",
+                    params={"owner_id": f"-{gid}", "count": 100, "filter": "owner", **common}, timeout=8)
+                for post in rg.json().get("response", {}).get("items", []):
+                    item = _vk_make_item(post, gname)
+                    if item:
+                        local_posts.append(item)
             except Exception:
                 pass
-        print(f"  [VK groups.search] нашли {len(_found_group_ids)} групп, {len(batch)} постов")
+            for _wq in ["продам", "продаю"]:
+                try:
+                    rw = session.get(f"{VK_API}/wall.search",
+                        params={"owner_id": f"-{gid}", "query": _wq, "count": 100, **common}, timeout=8)
+                    for post in rw.json().get("response", {}).get("items", []):
+                        item = _vk_make_item(post, gname)
+                        if item:
+                            local_posts.append(item)
+                except Exception:
+                    pass
+            return local_posts
+
+        # Параллельно скрейпим первые 20 найденных групп
+        groups_to_scrape = list(_found_groups.items())[:20]
+        seen_urls_gs: set[str] = set()
+        with _TPE(max_workers=10) as _gex2:
+            for posts in _gex2.map(_scrape_one_group, groups_to_scrape, timeout=25):
+                for item in (posts or []):
+                    if item["url"] not in seen_urls_gs:
+                        seen_urls_gs.add(item["url"])
+                        batch.append(item)
+        print(f"  [VK groups.search] нашли {len(_found_groups)} групп, {len(batch)} постов")
 
         # 3. wall.get по известным группам (только те, что реально резолвятся)
         known_groups = VK_AUTO_GROUPS.get(city_key, [])[:8]
@@ -8442,13 +8462,15 @@ async def do_search_for_user(uid: int, reply_to):
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
         "tg":     lambda: scrape_tg_channels(region, pmin, pmax),
     }
-    # Авито-эталон запускаем ПАРАЛЛЕЛЬНО с основными скраперами (экономит 30-60 сек)
+    # Авито-эталон запускаем ПАРАЛЛЕЛЬНО (нужен для точной рыночной цены)
+    # Не запускаем если Авито уже включён как основной источник (он сам и будет эталоном)
+    _need_avito_ref = "avito" not in enabled_sources
     _avito_ref_fut = loop.run_in_executor(
         None, lambda: scrape_avito(region, pages=8, price_min=0, price_max=99_000_000)
-    )
+    ) if _need_avito_ref else None
     src_keys = [s for s in enabled_sources if s in scraper_map]
     futures = [loop.run_in_executor(None, scraper_map[src]) for src in src_keys]
-    all_futs = futures + [_avito_ref_fut]
+    all_futs = futures + ([_avito_ref_fut] if _avito_ref_fut else [])
     done, pending = await asyncio.wait(all_futs, timeout=55)
     if pending:
         for f in pending:
@@ -8667,7 +8689,7 @@ async def do_search_for_user(uid: int, reply_to):
 
     # Получаем результат Авито-эталона (уже запущен параллельно с основными скраперами)
     try:
-        _avito_ref = _avito_ref_fut.result() if _avito_ref_fut in done else []
+        _avito_ref = _avito_ref_fut.result() if (_avito_ref_fut and _avito_ref_fut in done) else []
     except Exception as _e:
         print(f"  [рынок] Авито-эталон ошибка: {_e}")
         _avito_ref = []
@@ -8759,9 +8781,10 @@ async def do_search_for_user(uid: int, reply_to):
                 ])
             )
             return
-        # Диагностика — почему 0
-        price_range_items = [i for i in items if not is_dealer(i) and in_price_range(i, pmin, pmax) and i.get("url")]
-        price_filtered_c = len(items) - len(price_range_items) - sum(1 for i in items if is_dealer(i))
+        # Диагностика — почему 0 (только из источников текущего поиска, не из кэша/эталона)
+        _current_items = [i for i in items if not i.get("_market_ref_only") and i.get("source") in set(src_keys)]
+        price_range_items = [i for i in _current_items if not is_dealer(i) and in_price_range(i, pmin, pmax) and i.get("url")]
+        price_filtered_c = len(_current_items) - len(price_range_items) - sum(1 for i in _current_items if is_dealer(i))
         # Посмотрим сколько прошло бы без фильтра категории/марки
         without_cat_filter = [i for i in price_range_items if i["url"] not in skipped_norm]
         with_cat_filter = _filter_by_category(list(without_cat_filter), category, brand)
