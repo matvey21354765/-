@@ -2420,9 +2420,10 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
     from concurrent.futures import ThreadPoolExecutor as _TPE_VK, as_completed as _ac_VK
     import urllib.parse as _upq_vk
 
-    # ── Шаг 1: Находим реальные VK-группы через Yandex и DDG ───────
-    # Yandex хорошо индексирует vk.com/club{id} и vk.com/public{id}
-    _found_group_ids: dict[int, str] = {}   # group_id → name/slug
+    VK_API_URL = "https://api.vk.com/method"
+
+    # ── Шаг 1: Проверяем токен и ищем группы через API ──────────────
+    _found_group_ids: dict[int, str] = {}
     _found_slugs: list[str] = []
     _vk_group_id_re = re.compile(r'vk\.com/(?:club|public)(\d+)', re.I)
     _vk_slug_re2 = re.compile(r'vk\.com/([a-zA-Z][a-zA-Z0-9_.]{3,40})(?=["\s\?/]|$)', re.I)
