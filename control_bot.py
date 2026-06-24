@@ -2160,21 +2160,49 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
 
     # Также ищем TG-каналы города через DDG и пробуем подписаться
     def _discover_tg_channels() -> list[str]:
-        """Находит реальные TG-каналы авто для города через DDG."""
+        """Находит реальные TG-каналы авто для города через DDG + Yandex."""
+        found_all: list[str] = []
+        _tme_re = re.compile(r't\.me/([a-zA-Z][a-zA-Z0-9_]{3,31})(?![/\d])')
+
+        # DDG
         try:
             import urllib.parse as _upq
-            q = f"телеграм канал продажа авто {region_name_ru} t.me"
-            time.sleep(0.3)
-            r = session.get("https://html.duckduckgo.com/html/", params={"q": q, "kl": "ru-ru"}, timeout=10)
-            if r.status_code != 200:
-                return []
-            html = _upq.unquote(r.text)
-            found = re.findall(r't\.me/([a-zA-Z][a-zA-Z0-9_]{3,31})(?![/\d])', html)
-            unique = list(dict.fromkeys(found))[:8]
-            print(f"  [TG discover] найдено каналов: {unique}")
-            return unique
+            for _dq in [
+                f"телеграм канал продажа авто {region_name_ru} t.me",
+                f"t.me авто продам {region_name_ru} телеграм",
+            ]:
+                try:
+                    r = session.get("https://html.duckduckgo.com/html/",
+                        params={"q": _dq, "kl": "ru-ru"}, timeout=10)
+                    if r.status_code == 200:
+                        found_all += _tme_re.findall(_upq.unquote(r.text))
+                except Exception:
+                    pass
         except Exception:
-            return []
+            pass
+
+        # Yandex
+        try:
+            import urllib.parse as _upq
+            for _yq in [
+                f"site:t.me продам авто {region_name_ru}",
+                f"telegram канал авто барахолка {region_name_ru}",
+            ]:
+                try:
+                    r2 = session.get("https://yandex.ru/search/",
+                        params={"text": _yq, "lr": "213"}, timeout=10,
+                        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+                    if r2.status_code == 200:
+                        found_all += _tme_re.findall(_upq.unquote(r2.text))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        unique = list(dict.fromkeys(found_all))[:15]
+        if unique:
+            print(f"  [TG discover] найдено каналов: {unique}")
+        return unique
 
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -2411,6 +2439,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                 f"срочно авто {_loc}",
                 f"торг авто {_loc}",
             ]
+        _newsfeed_ok = False
         for q in keywords:
             try:
                 r = session.get(f"{VK_API}/newsfeed.search",
@@ -2418,31 +2447,52 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                 resp = r.json()
                 err = resp.get("error", {})
                 if err:
-                    print(f"  [VK newsfeed] {err.get('error_msg','?')}")
-                    break  # token invalid или недостаточно прав — пропускаем метод
+                    print(f"  [VK newsfeed] {err.get('error_msg','?')} — пробуем другие методы")
+                    break  # token не поддерживает newsfeed.search
+                _newsfeed_ok = True
                 for post in resp.get("response", {}).get("items", []):
                     _add_post(post)
             except Exception as e:
                 print(f"  [VK newsfeed] {e}")
 
-        # 2. groups.search — находим группы по ключу, потом wall.search в каждой
+        # 2. groups.search — находим реальные группы через VK API, потом wall.get + wall.search
+        _found_group_ids: set[int] = set()
         try:
-            for _loc in vk_search_locations[:2]:
-                r = session.get(f"{VK_API}/groups.search",
-                    params={"q": f"авто {_loc}", "type": "group", "count": 10, **common}, timeout=8)
-                groups = r.json().get("response", {}).get("items", [])
-                for g in groups:
-                    gid = g.get("id")
-                    if not gid:
-                        continue
-                    for q in [f"продам авто {_loc}", f"авто {_loc}"]:
+            _gs_queries = [f"авто {_loc}" for _loc in vk_search_locations] + [
+                f"барахолка авто {vk_search_locations[0]}",
+                f"продажа авто {vk_search_locations[0]}",
+                f"автомобили {vk_search_locations[0]}",
+            ]
+            for _gq in _gs_queries[:5]:
+                try:
+                    r = session.get(f"{VK_API}/groups.search",
+                        params={"q": _gq, "type": "group", "count": 20, **common}, timeout=8)
+                    groups = r.json().get("response", {}).get("items", [])
+                    for g in groups:
+                        gid = g.get("id")
+                        if not gid or gid in _found_group_ids:
+                            continue
+                        _found_group_ids.add(gid)
+                        # wall.get — все последние посты
                         try:
-                            rw = session.get(f"{VK_API}/wall.search",
-                                params={"owner_id": f"-{gid}", "query": q, "count": 50, **common}, timeout=8)
-                            for post in rw.json().get("response", {}).get("items", []):
+                            rg = session.get(f"{VK_API}/wall.get",
+                                params={"owner_id": f"-{gid}", "count": 100, "filter": "owner", **common}, timeout=8)
+                            for post in rg.json().get("response", {}).get("items", []):
                                 _add_post(post, label=g.get("name", ""))
                         except Exception:
                             pass
+                        # wall.search — по ключевым словам
+                        for _wq in ["продам", "продаю", "продается"]:
+                            try:
+                                rw = session.get(f"{VK_API}/wall.search",
+                                    params={"owner_id": f"-{gid}", "query": _wq, "count": 50, **common}, timeout=8)
+                                for post in rw.json().get("response", {}).get("items", []):
+                                    _add_post(post, label=g.get("name", ""))
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+            print(f"  [VK groups.search] нашли {len(_found_group_ids)} групп, {len(batch)} постов")
         except Exception as e:
             print(f"  [VK groups.search] {e}")
 
