@@ -137,7 +137,8 @@ if AVITO_PROXY_HOST and (AVITO_PROXY_PORT or _AVITO_PROXY_PORTS):
     _avito_proxy_url = f"{AVITO_PROXY_PROTOCOL}://{_auth}{AVITO_PROXY_HOST}:{_repr_port}"
     AVITO_PROXIES = {"http": _avito_proxy_url, "https": _avito_proxy_url}
 
-print(f"[прокси] {'✅ ' + _avito_proxy_url if AVITO_PROXIES else '❌ не настроен — Авито/Auto.ru могут не работать'}")
+_proxy_display = f"{AVITO_PROXY_PROTOCOL}://{AVITO_PROXY_HOST}:{_repr_port}" if AVITO_PROXIES else None
+print(f"[прокси] {'✅ ' + _proxy_display if _proxy_display else '❌ не настроен — Авито/Auto.ru могут не работать'}")
 
 # ── Регионы ─────────────────────────────────────────────────────
 REGIONS = {
@@ -5557,10 +5558,8 @@ def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max
     if api_results:
         print(f"  [Авито] API-метод дал {len(api_results)} объявлений")
         return api_results
-    # Все параллельные методы не дали результатов — браузер тоже не поможет,
-    # т.к. Авито блокирует тот же IP. Возвращаем пустой список быстро.
-    print(f"  [Авито] все методы вернули 0 — блокировка IP или прокси не помог")
-    return []
+    # API-методы не дали результатов — пробуем прямой HTML-скрейпинг (методы 2-3)
+    print(f"  [Авито] API дал 0 — пробуем HTML-скрейпинг…")
 
     def _build_url(p: int) -> str:
         qs_parts = ["seller_type=1"]  # только частники
@@ -6427,7 +6426,7 @@ async def cb_notify_toggle(cb: CallbackQuery):
         # которые появятся ПОСЛЕ включения мониторинга.
         try:
             region_slug = s.get("region", "")
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             existing = await loop.run_in_executor(
                 None, lambda: scrape_avito(region_slug, pages=2, sort_by_date=False)
             )
@@ -6716,17 +6715,10 @@ async def cb_setup_back_to_category(cb: CallbackQuery, state: FSMContext):
 async def cb_setup_back_to_region(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
     data = await state.get_data()
-    category = data.get("category", "all")
-    if category in ("foreign", "domestic"):
-        await cb.message.answer(
-            "📍 Шаг 3/4: Выбери город:",
-            reply_markup=region_keyboard(),
-        )
-    else:
-        await cb.message.answer(
-            "📍 Шаг 3/4: Выбери город:",
-            reply_markup=region_keyboard(),
-        )
+    await cb.message.answer(
+        "📍 Шаг 3/4: Выбери город:",
+        reply_markup=region_keyboard(),
+    )
     await state.set_state(Setup.region)
 
 
@@ -6826,7 +6818,7 @@ async def cmd_new_today(msg: Message):
         f"💰 Бюджет: {pmin:,}–{pmax:,} ₽".replace(",", " ")
     )
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     skipped = load_skipped(uid)
     seen = load_seen(uid)
 
@@ -6915,7 +6907,7 @@ async def cmd_global_search(msg: Message):
         f"Ищу на всех площадках + TG-каналы автопродаж...".replace(",", " ")
     )
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     skipped = load_skipped(uid)
     seen = load_seen(uid)
 
@@ -7024,7 +7016,7 @@ async def cmd_vk_tg_search(msg: Message):
         f"💰 Бюджет: {pmin:,} – {pmax:,} ₽".replace(",", " ")
     )
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     skipped = load_skipped(uid)
     seen = load_seen(uid)
 
@@ -7323,7 +7315,7 @@ async def enrich_and_filter(items: list[dict], max_check: int = 25) -> list[dict
     Параллельно загружает страницы топ-N объявлений,
     фильтрует снятые и обогащает фото+описанием.
     """
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     to_check = items[:max_check]
     rest = items[max_check:]
 
@@ -7370,7 +7362,7 @@ async def _ensure_photo(item: dict) -> None:
     if not url:
         return
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     _HDR = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -7795,28 +7787,32 @@ _search_cache: dict[int, list[dict]] = {}
 # PostgreSQL кеш поиска (переживает перезапуск Railway)
 _DB_URL = os.getenv("DATABASE_URL", "")
 _db_conn = None
+_db_lock = __import__("threading").Lock()
 
 def _get_db():
     global _db_conn
     if not _DB_URL:
         return None
-    try:
-        import psycopg2
-        if _db_conn is None or _db_conn.closed:
-            _db_conn = psycopg2.connect(_DB_URL, connect_timeout=5)
-            _db_conn.autocommit = True
-            cur = _db_conn.cursor()
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS search_cache (
-                    uid BIGINT PRIMARY KEY,
-                    items TEXT,
-                    updated_at TIMESTAMP DEFAULT NOW()
-                )
-            """)
-            cur.close()
+    import psycopg2
+    with _db_lock:
+        try:
+            if _db_conn is None or _db_conn.closed:
+                _db_conn = psycopg2.connect(_DB_URL, connect_timeout=5)
+                _db_conn.autocommit = True
+                with _db_conn.cursor() as cur:
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS search_cache (
+                            uid BIGINT PRIMARY KEY,
+                            items TEXT,
+                            updated_at TIMESTAMP DEFAULT NOW()
+                        )
+                    """)
+        except Exception:
+            return None
         return _db_conn
-    except Exception:
-        return None
+
+import atexit as _atexit
+_atexit.register(lambda: _db_conn and _db_conn.close())
 
 
 def _save_cache(uid: int, items: list[dict]):
@@ -7824,13 +7820,12 @@ def _save_cache(uid: int, items: list[dict]):
     try:
         db = _get_db()
         if db:
-            cur = db.cursor()
-            cur.execute(
-                "INSERT INTO search_cache(uid, items, updated_at) VALUES(%s,%s,NOW()) "
-                "ON CONFLICT(uid) DO UPDATE SET items=EXCLUDED.items, updated_at=NOW()",
-                (uid, json.dumps(items, ensure_ascii=False, default=str))
-            )
-            cur.close()
+            with db.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO search_cache(uid, items, updated_at) VALUES(%s,%s,NOW()) "
+                    "ON CONFLICT(uid) DO UPDATE SET items=EXCLUDED.items, updated_at=NOW()",
+                    (uid, json.dumps(items[:500], ensure_ascii=False, default=str))
+                )
             return
     except Exception:
         pass
@@ -7888,7 +7883,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         # Если нет описания — быстро догружаем со страницы
         if not item.get("description") and url:
             try:
-                loop_s = asyncio.get_event_loop()
+                loop_s = asyncio.get_running_loop()
                 details = await asyncio.wait_for(
                     loop_s.run_in_executor(None, _fetch_and_check, url, item.get("source", "")),
                     timeout=6
@@ -7991,7 +7986,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
             try:
                 import requests as _req
                 from aiogram.types import BufferedInputFile
-                loop = asyncio.get_event_loop()
+                loop = asyncio.get_running_loop()
 
                 def _download_photo():
                     _item_source = item.get("source", "")
@@ -8139,7 +8134,7 @@ async def do_search_for_user(uid: int, reply_to):
 
     skipped = load_skipped(uid)
     seen = load_seen(uid)
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     scraper_map = {
         "drom":   lambda: scrape_drom(region, pages=8, price_min=pmin, price_max=pmax),
@@ -8306,7 +8301,7 @@ async def do_search_for_user(uid: int, reply_to):
     # но оставляем как резерв на случай если прокси всё же пустит.
     no_price = [i for i in items if not is_dealer(i) and not i.get("_price_int") and i.get("url") and i["url"] not in skipped]
     if no_price:
-        loop2 = asyncio.get_event_loop()
+        loop2 = asyncio.get_running_loop()
         _price_re_np = re.compile(r'"price"\s*:\s*\{\s*"value"\s*:\s*(\d+)', re.I)
         _price_re_np2 = re.compile(r'"priceDetailed".*?"value"\s*:\s*(\d+)', re.I | re.S)
 
@@ -8502,7 +8497,7 @@ async def do_search_for_user(uid: int, reply_to):
     # Проверяем первые 15 объявлений: убираем проданные, загружаем фото+описание
     check_batch = suitable[:15]
     rest_batch = suitable[15:]
-    loop_pre = asyncio.get_event_loop()
+    loop_pre = asyncio.get_running_loop()
     sem_pre = asyncio.Semaphore(8)
 
     async def _check_item(it: dict) -> dict | None:
@@ -8580,7 +8575,7 @@ async def do_search_for_user(uid: int, reply_to):
 @dp.callback_query(F.data.startswith("page|"))
 async def cb_page(cb: CallbackQuery):
     _, uid_s, offset_s = cb.data.split("|")
-    uid = int(uid_s)
+    uid = cb.from_user.id  # берём из Telegram, не из payload — защита от IDOR
     offset = int(offset_s)
     await cb.answer()
     # Если кеш пустой (бот перезапустился) и offset > 0 — перезапускаем поиск
@@ -8599,7 +8594,7 @@ async def cb_page(cb: CallbackQuery):
 async def cb_hide(cb: CallbackQuery):
     parts = cb.data.split("|")
     sid = parts[1]
-    uid = int(parts[2]) if len(parts) > 2 else cb.from_user.id
+    uid = cb.from_user.id  # защита от IDOR
     url = id_to_url(sid)
     skipped = load_skipped(uid)
     skipped.add(url)
@@ -8613,7 +8608,7 @@ async def cb_hide(cb: CallbackQuery):
 async def cb_fav(cb: CallbackQuery):
     parts = cb.data.split("|")
     sid = parts[1]
-    uid = int(parts[2]) if len(parts) > 2 else cb.from_user.id
+    uid = cb.from_user.id  # защита от IDOR
     # Сохраняем в избранное (файл favorites.json)
     fav_file = user_dir(uid) / "favorites.json"
     favs = json.loads(fav_file.read_text(encoding="utf-8")) if fav_file.exists() else []
@@ -8633,7 +8628,7 @@ async def cb_fav(cb: CallbackQuery):
 async def cb_similar(cb: CallbackQuery):
     parts = cb.data.split("|")
     sid = parts[1]
-    uid = int(parts[2]) if len(parts) > 2 else cb.from_user.id
+    uid = cb.from_user.id  # защита от IDOR
     url = id_to_url(sid)
     items = _search_cache.get(uid) or _load_cache(uid)
     item = next((it for it in items if it.get("url") == url), None)
@@ -8773,7 +8768,7 @@ async def cmd_test_avito(msg: Message):
 
     try:
         await msg.answer("Пробую headless-браузер (Playwright)...")
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         html = await loop.run_in_executor(None, _avito_fetch_html, url)
         if html:
             class _FakeResp:
@@ -8955,7 +8950,7 @@ async def _send_monitor_item(uid: int, it: dict):
 async def _global_monitor_loop():
     """Единый глобальный цикл — раз в 2 минуты опрашивает все источники для активных пользователей."""
     print("  [глоб.монитор] запущен")
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     # VK/TG медленнее — опрашиваем раз в 10 минут (каждый 5-й тик по 2 минуты)
     _vk_tg_tick = 0
     while True:
@@ -9134,7 +9129,7 @@ async def _global_monitor_loop():
 def _start_monitor(uid: int):
     # Глобальный монитор уже запущен в main(), здесь просто сохраняем задачу-заглушку
     if uid not in _monitor_tasks or _monitor_tasks[uid].done():
-        task = asyncio.get_event_loop().create_task(_monitor_loop(uid))
+        task = asyncio.get_running_loop().create_task(_monitor_loop(uid))
         _monitor_tasks[uid] = task
 
 
@@ -9224,7 +9219,7 @@ async def _warmup_cache():
     поэтому прямого обращения к avito.ru с заблокированного IP нет и риска 429 нет.
     """
     await asyncio.sleep(20)  # дождаться старта бота и первого прогрева прокси
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     print("  [прогрев] непрерывный прогрев кэша запущен")
     while True:
         try:
@@ -9359,7 +9354,7 @@ async def _proxy_warmup_loop() -> None:
     if AVITO_PROXIES:
         print("  [прокси-прогрев] платный прокси активен — бесплатные не нужны, прогрев отключён")
         return
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     while True:
         try:
             await loop.run_in_executor(None, _pre_warm_free_proxies_sync)
@@ -9438,7 +9433,7 @@ async def main():
             print(f"  [прокси {AVITO_PROXY_PROTOCOL}] ❌ ошибка: {e}")
             print(f"  [прокси] Добавь Railway IP в whitelist на сайте провайдера прокси!")
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     # Единый глобальный монитор — опрашивает всех активных пользователей каждые 2 минуты
     loop.create_task(_global_monitor_loop())
     print(f"  [монитор] глобальный цикл запущен (интервал {GLOBAL_POLL_SEC}с)")
