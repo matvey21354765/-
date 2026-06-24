@@ -467,23 +467,20 @@ def _car_group_key(title: str) -> str:
     return f"{brand_model} {year}".strip()
 
 
-def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None) -> list[dict]:
+def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
+                          avito_only_median: bool = False) -> list[dict]:
     """
-    Вычисляет рыночную цену по медиане внутри группы марка+модель+год.
-    Устанавливает _savings_pct и _deal_score — итоговый балл выгодности сделки.
-
-    _deal_score учитывает:
-      - % ниже рынка (главный фактор)
-      - возраст объявления: давно висит = продавец готов к торгу (+бонус)
-      - срочность продажи: "срочно", "торг" в тексте (+бонус)
-      - качество фото: есть фото = серьёзный продавец (+маленький бонус)
-      - источник: Авито/Дром/Auto.ru надёжнее VK/TG по цене (нейтрально)
-
-    Сортировка должна идти по -_deal_score.
+    Вычисляет рыночную цену по медиане Авито-данных (ref_items).
+    Если avito_only_median=True — медиана строится ТОЛЬКО по ref_items (Авито),
+    а не смешивается с ценами других площадок.
     """
     from statistics import median
 
-    all_for_median = list(items) + (ref_items or [])
+    # Для медианы используем либо только Авито-данные, либо всё вместе
+    if avito_only_median and ref_items:
+        all_for_median = list(ref_items)
+    else:
+        all_for_median = list(items) + (ref_items or [])
     groups: dict[str, list[int]] = {}
     # Промежуточный уровень: марка+модель+2-летний диапазон (2015→1007, 2017→1008, 2019→1009)
     # Разделяет 2015 Solaris от 2017 Solaris → медиана не искажается новыми моделями
@@ -6860,7 +6857,13 @@ async def cmd_new_today(msg: Message):
         and i["url"] not in skipped_norm_today
     ]
     suitable = _filter_by_category(suitable, category, brand)
-    suitable = rank_by_market_price(suitable)
+    # Авито-эталон для "Сегодня": берём широкий срез без ценового фильтра
+    _avito_ref_today = await loop.run_in_executor(
+        None, lambda: scrape_avito(region, pages=8, price_min=0, price_max=99_000_000)
+    )
+    for _ar in _avito_ref_today:
+        _ar["_market_ref_only"] = True
+    suitable = rank_by_market_price(suitable, ref_items=_avito_ref_today, avito_only_median=True)
     suitable = _sort_by_deal(suitable)
 
     if not suitable:
@@ -8293,7 +8296,7 @@ async def do_search_for_user(uid: int, reply_to):
         # Нет или мало Авито → тихо грузим цены без ценового фильтра (весь рынок)
         try:
             _avito_ref = await loop.run_in_executor(
-                None, lambda: scrape_avito(region, pages=5, price_min=0, price_max=99_000_000)
+                None, lambda: scrape_avito(region, pages=10, price_min=0, price_max=99_000_000)
             )
             if _avito_ref:
                 for _ar in _avito_ref:
@@ -8355,7 +8358,7 @@ async def do_search_for_user(uid: int, reply_to):
                 it["_already_seen"] = True
             suitable = suitable + seen_items
 
-    suitable = rank_by_market_price(suitable, ref_items=[i for i in items if i.get("_market_ref_only")])
+    suitable = rank_by_market_price(suitable, ref_items=[i for i in items if i.get("_market_ref_only")], avito_only_median=True)
     # Дилерские объявления — добавляем штраф к deal_score
     for it in suitable:
         if is_dealer(it):
@@ -8378,7 +8381,7 @@ async def do_search_for_user(uid: int, reply_to):
             and i["url"] not in skipped_norm
         ]
         suitable = _filter_by_category(suitable, category, brand)
-        suitable = rank_by_market_price(suitable, ref_items=[i for i in items if i.get("_market_ref_only")])
+        suitable = rank_by_market_price(suitable, ref_items=[i for i in items if i.get("_market_ref_only")], avito_only_median=True)
         for it in suitable:
             if is_dealer(it):
                 it["_is_dealer"] = True
@@ -8415,7 +8418,7 @@ async def do_search_for_user(uid: int, reply_to):
             cat_label = CATEGORY_LABELS.get(category, category)
             fallback_items = _filter_by_category(list(without_cat_filter), category, "")
             if fallback_items:
-                fallback_items = rank_by_market_price(fallback_items, ref_items=[i for i in items if i.get("_market_ref_only")])
+                fallback_items = rank_by_market_price(fallback_items, ref_items=[i for i in items if i.get("_market_ref_only")], avito_only_median=True)
                 for it in fallback_items:
                     if is_dealer(it):
                         it["_is_dealer"] = True
