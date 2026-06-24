@@ -598,6 +598,8 @@ def _sort_by_deal(items: list[dict]) -> list[dict]:
       3. Объявления без цены — в конец
     """
     def _tier(x):
+        if x.get("_already_seen"):
+            return 10  # просмотренные — в самый конец
         s = x.get("_savings_pct", None)
         if s is not None and s > 0:
             return 0   # ниже рынка
@@ -8373,16 +8375,16 @@ async def do_search_for_user(uid: int, reply_to):
     )
     print(f"  [поиск] items={len(items)}, seen={len(seen_norm)}, skipped={len(skipped_norm)}, already_seen={already_seen_count}")
     _before = len(items)
+    # Показываем ВСЕ объявления (новые + просмотренные), кроме скрытых.
+    # Просмотренные помечаем _already_seen — они идут в конец списка.
     suitable = [
         i for i in items
         if not i.get("_market_ref_only")
         and in_price_range(i, pmin, pmax)
         and i.get("url")
         and i["url"] not in skipped_norm
-        and i["url"] not in seen_norm
     ]
-    print(f"  [фильтр] после in_price_range+seen: {len(suitable)}/{_before} (бюджет {pmin}-{pmax})")
-    # Для отладки: показываем какие цены НЕ прошли
+    print(f"  [фильтр] после in_price_range+skipped: {len(suitable)}/{_before} (бюджет {pmin}-{pmax})")
     _bad_price = [i for i in items if not i.get("_market_ref_only") and i.get("url") and i["url"] not in skipped and not in_price_range(i, pmin, pmax)]
     if _bad_price:
         _sample = [(i.get("title","")[:30], i.get("price",""), i.get("_price_int",0)) for i in _bad_price[:5]]
@@ -8391,26 +8393,10 @@ async def do_search_for_user(uid: int, reply_to):
     suitable = _filter_by_category(suitable, category, brand)
     print(f"  [фильтр] после category({category}/{brand}): {len(suitable)}")
 
-    # Если после фильтра seen осталось мало (<40), но всего объявлений много —
-    # добавляем ранее просмотренные в конец, чтобы пользователь видел полный список.
-    # Свежие (непросмотренные) идут первыми, затем уже показанные.
-    MIN_RESULTS = 40
-    if len(suitable) < MIN_RESULTS:
-        seen_items = [
-            i for i in items
-            if not i.get("_market_ref_only")
-            and in_price_range(i, pmin, pmax)
-            and i.get("url")
-            and i["url"] not in skipped_norm
-            and i["url"] in seen_norm  # именно ранее просмотренные
-        ]
-        seen_items = _filter_by_category(seen_items, category, brand)
-        if seen_items:
-            print(f"  [фильтр] добавляем {len(seen_items)} ранее просмотренных (мало свежих)")
-            # Помечаем чтобы не сортировались выше свежих
-            for it in seen_items:
-                it["_already_seen"] = True
-            suitable = suitable + seen_items
+    # Помечаем уже просмотренные — они получат штраф и уйдут в конец
+    for it in suitable:
+        if it.get("url") and _norm_url(it["url"]) in seen_norm:
+            it["_already_seen"] = True
 
     suitable = rank_by_market_price(suitable, ref_items=[i for i in items if i.get("_market_ref_only")], avito_only_median=True)
     # Дилерские объявления — добавляем штраф к deal_score
@@ -8418,31 +8404,7 @@ async def do_search_for_user(uid: int, reply_to):
         if is_dealer(it):
             it["_is_dealer"] = True
             it["_deal_score"] = it.get("_deal_score", 0) - 30
-        # Ранее просмотренные — небольшой штраф, чтобы свежие были выше
-        if it.get("_already_seen"):
-            it["_deal_score"] = it.get("_deal_score", 0) - 5
     suitable = _sort_by_deal(suitable)
-
-    if not suitable and already_seen_count > 0:
-        # auto-clear seen and retry
-        seen_norm = set()
-        save_seen(uid, set())
-        suitable = [
-            i for i in items
-            if not i.get("_market_ref_only")
-            and in_price_range(i, pmin, pmax)
-            and i.get("url")
-            and i["url"] not in skipped_norm
-        ]
-        suitable = _filter_by_category(suitable, category, brand)
-        suitable = rank_by_market_price(suitable, ref_items=[i for i in items if i.get("_market_ref_only")], avito_only_median=True)
-        for it in suitable:
-            if is_dealer(it):
-                it["_is_dealer"] = True
-                it["_deal_score"] = it.get("_deal_score", 0) - 30
-        suitable = _sort_by_deal(suitable)
-        if suitable:
-            await reply_to.answer("♻️ История просмотров сброшена — показываю объявления заново.")
 
     if not suitable:
         items_in_seen_count = sum(
