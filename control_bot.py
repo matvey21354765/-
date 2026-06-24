@@ -690,7 +690,7 @@ def scrape_drom(region: str, pages: int = 15, price_min: int = 0, price_max: int
                     photos = int(pm.group()) if pm else 0
 
                     photo_url = ""
-                    _DROM_CDN = ("s.auto.drom.ru", "static.drom.ru", "st.drom.ru",
+                    _DROM_CDN = ("auto.drom.ru", "static.drom.ru", "st.drom.ru",
                                  "storage.drom.ru", "photo.drom.ru", "img.drom.ru")
                     # 1. picture > source (Drom lazy-load)
                     for src_el in card.find_all("source"):
@@ -703,20 +703,26 @@ def scrape_drom(region: str, pages: int = 15, price_min: int = 0, price_max: int
                                     break
                         if photo_url:
                             break
-                    # 2. img tags
+                    # 2. img tags — проверяем src, srcset, data-src
                     if not photo_url:
                         for img_el in card.find_all("img"):
-                            src = (img_el.get("data-src") or img_el.get("data-lazy-src") or
-                                   img_el.get("data-original") or img_el.get("src") or "")
-                            if src and src.startswith("http") and len(src) > 20:
-                                if any(d in src for d in _DROM_CDN) or "drom" in src:
-                                    photo_url = src
-                                    break
+                            # Берём первый непустой URL из всех атрибутов
+                            for attr in ("src", "data-src", "data-lazy-src", "data-original", "srcset"):
+                                raw = img_el.get(attr, "")
+                                if raw:
+                                    # srcset может быть "url 1x, url 2x"
+                                    src = raw.split(",")[0].split(" ")[0].strip()
+                                    if src and src.startswith("http") and len(src) > 20:
+                                        if any(d in src for d in _DROM_CDN) or "drom" in src:
+                                            photo_url = src
+                                            break
+                            if photo_url:
+                                break
                     # 3. Regex fallback — любой URL на Drom CDN
                     if not photo_url:
                         card_str = str(card)
                         img_m = re.search(
-                            r'https?://(?:s\.auto|static|st|storage|photo|img)\.drom\.ru/[^"\'\s\\]{10,}\.(?:jpg|jpeg|webp|png)',
+                            r'https?://[^"\'<\s]*\.drom\.ru/[^"\'\s\\]{10,}\.(?:jpg|jpeg|webp|png)',
                             card_str
                         )
                         if not img_m:
@@ -743,7 +749,7 @@ def scrape_drom(region: str, pages: int = 15, price_min: int = 0, price_max: int
                         for script_el in card.find_all("script"):
                             sc = script_el.string or ""
                             _sm = re.search(
-                                r'https?://(?:s\.auto|static|st|storage|photo|img)\.drom\.ru/[^"\'\s\\]{10,}\.(?:jpg|jpeg|webp|png)',
+                                r'https?://[^"\'<\s]*\.drom\.ru/[^"\'\s\\]{10,}\.(?:jpg|jpeg|webp|png)',
                                 sc
                             )
                             if _sm:
@@ -2500,8 +2506,23 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                     if r.status_code != 200:
                         break
                     rtext = r.text
-                    # Проверяем наличие постов в HTML (несколько возможных паттернов VK)
-                    _has_posts = any(x in rtext for x in ("_post", "wall_post", "wall-item", "wi_body", "post__text", "post_content"))
+                    # Проверяем что группа существует (не "Страница не найдена")
+                    _page_404 = any(x in rtext for x in (
+                        "This community was removed", "Страница не найдена",
+                        "сообщество недоступно", "private group",
+                        "id=\"not_found\"", "class=\"not_found\""
+                    ))
+                    if _page_404:
+                        break
+                    # Проверяем реальное наличие постов (не JS-строки в бандле)
+                    # data-post-id — только у реальных постов в DOM
+                    _has_posts = (
+                        "data-post-id" in rtext or
+                        "wi_body" in rtext or
+                        "wall-item__text" in rtext or
+                        "post__text" in rtext or
+                        ("wall_item" in rtext and "продам" in rtext.lower())
+                    )
                     if not _has_posts:
                         break
                     soup = _BS(rtext, "lxml")
@@ -7449,7 +7470,7 @@ async def _ensure_photo(item: dict) -> None:
                     if not p:
                         # Дром-специфичный фолбэк: ищем URL фото на CDN
                         _dm = re.search(
-                            r'https?://(?:s\.auto|static|st|storage|photo|img)\.drom\.ru/[^"\'\s\\]{10,}\.(?:jpg|jpeg|webp|png)',
+                            r'https?://[^"\'<\s]*\.drom\.ru/[^"\'\s\\]{10,}\.(?:jpg|jpeg|webp|png)',
                             _drom_text
                         )
                         if _dm:
