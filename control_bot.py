@@ -7268,6 +7268,9 @@ def _fetch_and_check(url: str, source: str) -> dict | None:
                 return False
             if src == "avito" and "img.avito.st" not in lo and "images.avito.st" not in lo:
                 return False
+            # Auto.ru фото всегда на avatars.mds.yandex.net — остальное (логотипы, иконки) отклоняем
+            if src == "autoru" and "avatars.mds.yandex.net" not in lo:
+                return False
             return True
 
         og = soup.select_one("meta[property='og:image']")
@@ -8577,7 +8580,8 @@ async def do_search_for_user(uid: int, reply_to):
                 if details is None:
                     return None  # снято с продажи (Дром/Авито/Авто.ру)
                 it["_enriched"] = True
-                if details.get("_photo_url"):
+                # Фото обновляем только если у объявления его нет (не перезаписываем хорошее)
+                if details.get("_photo_url") and not it.get("_photo_url"):
                     it["_photo_url"] = details["_photo_url"]
                 if details.get("description") and not it.get("description"):
                     it["description"] = details["description"]
@@ -8615,20 +8619,51 @@ async def do_search_for_user(uid: int, reply_to):
         "search", uid=uid, region=region, price_min=pmin, price_max=pmax,
         source=",".join(enabled_sources), results=len(suitable),
     )
-    _below_cnt = sum(1 for i in suitable if i.get("_savings_pct", 0) > 0)
-    _fresh_cnt = sum(1 for i in suitable if not i.get("_already_seen"))
-    _seen_cnt = len(suitable) - _fresh_cnt
-    _seen_note = f"\n♻️ Из них {_seen_cnt} показывал раньше — они в конце списка." if _seen_cnt else ""
-    if _below_cnt:
-        await reply_to.answer(
-            f"✅ Найдено {len(suitable)} объявлений!\n"
-            f"🟢 Из них {_below_cnt} НИЖЕ РЫНКА — показываю их первыми, затем по рыночной цене.{_seen_note}"
-        )
+    _below_cnt   = sum(1 for i in suitable if i.get("_savings_pct", 0) >= 25)
+    _good_cnt    = sum(1 for i in suitable if 0 < i.get("_savings_pct", 0) < 25)
+    _market_cnt  = sum(1 for i in suitable if -5 <= i.get("_savings_pct", 0) <= 0)
+    _above_cnt   = sum(1 for i in suitable if i.get("_savings_pct", 0) < -5)
+    _no_price_cnt= sum(1 for i in suitable if not i.get("_savings_pct") and not i.get("_market_price"))
+    _fresh_cnt   = sum(1 for i in suitable if not i.get("_already_seen"))
+    _seen_cnt    = len(suitable) - _fresh_cnt
+
+    # Топ-3 самых выгодных объявления
+    _top3 = [i for i in suitable if i.get("_savings_pct", 0) > 0][:3]
+
+    lines = [f"✅ Найдено {len(suitable)} объявлений!\n"]
+
+    # Таблица распределения по выгодности
+    if _below_cnt or _good_cnt:
+        lines.append("📊 Распределение по выгодности:")
+        if _below_cnt:
+            lines.append(f"  🟢 Выгодно (>25% ниже рынка): {_below_cnt}")
+        if _good_cnt:
+            lines.append(f"  🟡 Ниже рынка (1–25%): {_good_cnt}")
+        if _market_cnt:
+            lines.append(f"  ⚪ По рынку: {_market_cnt}")
+        if _above_cnt:
+            lines.append(f"  🔴 Дороже рынка: {_above_cnt}")
+        if _no_price_cnt:
+            lines.append(f"  ❓ Без цены/анализа: {_no_price_cnt}")
+        lines.append("")
     else:
-        await reply_to.answer(
-            f"✅ Найдено {len(suitable)} объявлений!\n"
-            f"📊 Ниже рынка сейчас нет — показываю по рыночной цене (от дешёвых к дорогим).{_seen_note}"
-        )
+        lines.append("📊 Ниже рынка сейчас нет — показываю по цене.")
+        lines.append("")
+
+    # Топ выгодных
+    if _top3:
+        lines.append("🔥 Самые выгодные:")
+        for _t in _top3:
+            _pct = _t.get("_savings_pct", 0)
+            _pr  = _t.get("price", "?")
+            _ttl = _t.get("title", "")[:30]
+            lines.append(f"  -{_pct}% · {_pr} · {_ttl}")
+        lines.append("")
+
+    if _seen_cnt:
+        lines.append(f"♻️ Из них {_seen_cnt} показывал раньше — они в конце списка.")
+
+    await reply_to.answer("\n".join(lines))
     await send_batch(reply_to.chat.id, uid, 0)
 
 
