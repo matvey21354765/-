@@ -8221,26 +8221,25 @@ async def do_search_for_user(uid: int, reply_to):
                     pass
         await asyncio.gather(*[_fetch_price(it) for it in no_price[:5]])
 
-    # Дополняем рыночными данными из Дрома: Дром работает с Railway IP без блокировок
-    # и содержит те же машины с ценами. Даже если Авито-объявление без цены — медиана
-    # по марке/модели/году из Дрома позволяет rank_by_market_price найти «ниже рынка».
-    avito_items_in_result = [i for i in items if i.get("source") == "avito"]
-    drom_items_in_result = [i for i in items if i.get("source") == "drom"]
-    if avito_items_in_result and not drom_items_in_result:
-        # Авито есть, Дрома нет — тихо загружаем рыночные цены с Дрома для медианы.
+    # Авито — эталон рыночных цен: всегда подгружаем широкий срез Авито
+    # независимо от выбранных платформ. Это даёт точную медиану для VK/TG/Дром/Auto.ru.
+    avito_items_in_result = [i for i in items if i.get("source") == "avito" and not i.get("_market_ref_only")]
+    if len(avito_items_in_result) < 40:
+        # Нет или мало Авито → тихо грузим цены без ценового фильтра (весь рынок)
         try:
-            _drom_ref = await loop.run_in_executor(
-                None, lambda: scrape_drom(region, pages=8, price_min=0, price_max=99_000_000)
+            _avito_ref = await loop.run_in_executor(
+                None, lambda: scrape_avito(region, pages=5, price_min=0, price_max=99_000_000)
             )
-            if _drom_ref:
-                # Добавляем Дром-данные ТОЛЬКО для расчёта рынка, не показываем их.
-                # Помечаем флагом, чтобы не попали в результаты.
-                for _dr in _drom_ref:
-                    _dr["_market_ref_only"] = True
-                items = items + _drom_ref
-                print(f"  [рынок] добавлено {len(_drom_ref)} Дром-записей для расчёта медианы")
+            if _avito_ref:
+                for _ar in _avito_ref:
+                    _ar["_market_ref_only"] = True
+                items = items + _avito_ref
+                print(f"  [рынок] Авито-эталон: {len(_avito_ref)} записей для медианы")
         except Exception:
             pass
+    else:
+        # Авито уже есть в результатах — используем его же как ref_items тоже
+        print(f"  [рынок] используем {len(avito_items_in_result)} Авито-объявлений как эталон")
 
     # seen хранит нормализованные URL — сравниваем тоже по нормализованным
     seen_norm = {_norm_url(u) for u in seen}
