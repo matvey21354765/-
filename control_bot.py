@@ -100,9 +100,17 @@ if _PROXY_URL_RAW and not AVITO_PROXY_HOST:
         pass
 
 
+# Флаг: прокси вернул 407 (неверная авторизация) — автоматически отключаем
+_proxy_auth_failed: bool = False
+
+
 def _avito_proxies() -> "dict[str, str] | None":
     """Возвращает прокси-словарь со СЛУЧАЙНЫМ портом из пула (ротация IP).
-    Если пул портов не задан — возвращает статический AVITO_PROXIES."""
+    Если пул портов не задан — возвращает статический AVITO_PROXIES.
+    Если прокси вернул 407 — возвращает None (работаем напрямую)."""
+    global _proxy_auth_failed
+    if _proxy_auth_failed:
+        return None
     if AVITO_PROXY_HOST and _AVITO_PROXY_PORTS:
         port = random.choice(_AVITO_PROXY_PORTS)
         use_auth = AVITO_PROXY_AUTH != "ip" and AVITO_PROXY_USER
@@ -110,6 +118,15 @@ def _avito_proxies() -> "dict[str, str] | None":
         url = f"{AVITO_PROXY_PROTOCOL}://{auth}{AVITO_PROXY_HOST}:{port}"
         return {"http": url, "https": url}
     return AVITO_PROXIES
+
+
+def _mark_proxy_failed(err: str) -> None:
+    """Помечаем прокси как сломанный при ошибке 407."""
+    global _proxy_auth_failed
+    if "407" in err or "Proxy Authentication Required" in err or "Tunnel connection failed" in err:
+        if not _proxy_auth_failed:
+            _proxy_auth_failed = True
+            print("[прокси] ⚠️ Прокси вернул 407 — переключаемся на прямое соединение")
 
 
 AVITO_PROXIES: "dict[str, str] | None" = None
@@ -4397,6 +4414,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                     continue  # парсер дал 0 — пробуем другой IP
                 break  # иной код — не ретраим
             except Exception as e:
+                _mark_proxy_failed(str(e))
                 print(f"  [Авито webHTML] стр.{p} попытка {attempt+1}: {str(e)[:60]}")
                 time.sleep(random.uniform(1.0, 2.0))
                 continue
@@ -4657,6 +4675,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             if r.status_code == 200 and ('"urlPath"' in r.text or '__NEXT_DATA__' in r.text):
                 return _parse_avito_html(r.text, slug, today)
         except Exception as e:
+            _mark_proxy_failed(str(e))
             print(f"  [Googlebot UA] стр.{p}: {e}")
         return []
 
@@ -4690,8 +4709,10 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                         if result:
                             return result
                 except Exception as e:
+                    _mark_proxy_failed(str(e))
                     print(f"  [Авито lite] {url}: {e}")
         except Exception as e:
+            _mark_proxy_failed(str(e))
             print(f"  [Авито lite] {e}")
         return []
 
@@ -5125,14 +5146,16 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
     # free_proxies даёт настоящую страницу Авито (десятки объявлений), DuckDuckGo —
     # ещё несколько. Запускаем ВСЁ параллельно и СЛИВАЕМ результаты, а не берём
     # первый ответивший метод (иначе теряем большие пачки, что приходят чуть позже).
-    if AVITO_PROXIES:
+    _no_proxy_methods = [_try_scraperapi_fast, _try_free_proxies, _try_yandex_snippets, _try_cffi_web, _try_curl_cffi, _try_cs_web, _try_mobile_site, _try_web_html, _try_avito_public_api, _try_avito_rss, _try_googlebot_ua, _try_avito_lite, _try_scraperapi, _try_avito_json_api]
+    _use_proxy = AVITO_PROXIES and not _proxy_auth_failed
+    if _use_proxy:
         # Платный прокси. Основной метод — _try_web_html.
         # Резервные методы: мобильный сайт, RSS, Googlebot UA — если часть IP забанена.
         all_methods = [_try_web_html, _try_avito_lite, _try_avito_rss, _try_googlebot_ua, _try_avito_public_api]
     else:
-        all_methods = [_try_scraperapi_fast, _try_free_proxies, _try_yandex_snippets, _try_cffi_web, _try_curl_cffi, _try_cs_web, _try_mobile_site, _try_web_html, _try_avito_public_api, _try_avito_rss, _try_googlebot_ua, _try_avito_lite, _try_scraperapi, _try_avito_json_api]
+        all_methods = _no_proxy_methods
     # Список задач. С прокси — страницы с человеческой задержкой между ними.
-    if AVITO_PROXIES:
+    if _use_proxy:
         # С мобильным прокси запускаем страницы с задержкой 1-3с (имитация человека)
         # Параллелизм ограничен 3 потоками — Авито считает больше подозрительным
         tasks = (
@@ -5191,6 +5214,34 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         _ex.shutdown(wait=False)
 
     results = list(merged.values())
+
+    # Если прокси сломан (407) и ничего не нашли — перезапускаем без прокси
+    if not results and _proxy_auth_failed and _use_proxy:
+        print(f"  [Авито] прокси не работает (407) — повтор без прокси")
+        fallback_tasks = [(m, 1) for m in _no_proxy_methods]
+        _ex2 = _TPE(max_workers=min(8, len(fallback_tasks)))
+        try:
+            fut_map2 = {_ex2.submit(m, pg): (m, pg) for (m, pg) in fallback_tasks}
+            for fut in _as_completed(fut_map2, timeout=40):
+                try:
+                    b = fut.result()
+                except Exception:
+                    b = []
+                if b:
+                    for it in b:
+                        u = it.get("url")
+                        key = _listing_key(u)
+                        if u and key and key not in _seen_keys:
+                            _seen_keys.add(key)
+                            merged[u] = it
+                if len(merged) >= 40 or (merged and time.time() > _soft_deadline + 40):
+                    break
+        except Exception as e:
+            print(f"  [Авито fallback] пул: {str(e)[:60]}")
+        finally:
+            _ex2.shutdown(wait=False)
+        results = list(merged.values())
+
     if not results:
         print(f"  [Авито API] стр.1: 0 объявлений")
         return results
