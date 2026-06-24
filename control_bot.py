@@ -8345,25 +8345,19 @@ async def do_search_for_user(uid: int, reply_to):
                     pass
         await asyncio.gather(*[_fetch_price(it) for it in no_price[:5]])
 
-    # Авито — эталон рыночных цен: всегда подгружаем широкий срез Авито
-    # независимо от выбранных платформ. Это даёт точную медиану для VK/TG/Дром/Auto.ru.
-    avito_items_in_result = [i for i in items if i.get("source") == "avito" and not i.get("_market_ref_only")]
-    if len(avito_items_in_result) < 40:
-        # Нет или мало Авито → тихо грузим цены без ценового фильтра (весь рынок)
-        try:
-            _avito_ref = await loop.run_in_executor(
-                None, lambda: scrape_avito(region, pages=10, price_min=0, price_max=99_000_000)
-            )
-            if _avito_ref:
-                for _ar in _avito_ref:
-                    _ar["_market_ref_only"] = True
-                items = items + _avito_ref
-                print(f"  [рынок] Авито-эталон: {len(_avito_ref)} записей для медианы")
-        except Exception:
-            pass
-    else:
-        # Авито уже есть в результатах — используем его же как ref_items тоже
-        print(f"  [рынок] используем {len(avito_items_in_result)} Авито-объявлений как эталон")
+    # Авито — эталон рыночных цен: ВСЕГДА грузим широкий срез без ценового фильтра.
+    # Это даёт точную медиану для сравнения любых площадок (VK/TG/Дром/Auto.ru) с Авито.
+    try:
+        _avito_ref = await loop.run_in_executor(
+            None, lambda: scrape_avito(region, pages=10, price_min=0, price_max=99_000_000)
+        )
+        if _avito_ref:
+            for _ar in _avito_ref:
+                _ar["_market_ref_only"] = True
+            items = items + _avito_ref
+            print(f"  [рынок] Авито-эталон: {len(_avito_ref)} записей для медианы цен")
+    except Exception as _e:
+        print(f"  [рынок] Авито-эталон не загрузился: {_e}")
 
     # seen хранит нормализованные URL — сравниваем тоже по нормализованным
     seen_norm = {_norm_url(u) for u in seen}
@@ -8392,6 +8386,17 @@ async def do_search_for_user(uid: int, reply_to):
     # Фильтр по категории и марке (также убирает скутеры/мото)
     suitable = _filter_by_category(suitable, category, brand)
     print(f"  [фильтр] после category({category}/{brand}): {len(suitable)}")
+
+    # Финальная дедупликация suitable (могут быть дубли если разные источники нашли одно)
+    _seen_final: set[str] = set()
+    _deduped_suitable: list[dict] = []
+    for _it in suitable:
+        _u = _norm_url(_it.get("url", ""))
+        if _u and _u not in _seen_final:
+            _seen_final.add(_u)
+            _deduped_suitable.append(_it)
+    suitable = _deduped_suitable
+    print(f"  [фильтр] после финальной дедупликации: {len(suitable)}")
 
     # Помечаем уже просмотренные — они получат штраф и уйдут в конец
     for it in suitable:
