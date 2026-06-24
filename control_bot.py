@@ -2206,7 +2206,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
     except ImportError:
         return []
 
-    vk_token = os.getenv("VK_TOKEN", "")
+    vk_token = os.getenv("VK_TOKEN", "4e23362e4e23362e4e23362e4c4d62ef5f44e234e23362e241bdc8082449c578e8eace8")
     city_key = _TG_REGION_MAP.get(region, "")
 
     _vk_region_names = {
@@ -2300,69 +2300,133 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
         "Accept-Language": "ru-RU,ru;q=0.9",
     })
 
+    def _vk_make_item(post: dict, source_label: str = "") -> "dict | None":
+        """Превращает VK API post dict в item для бота."""
+        text = post.get("text", "")
+        if len(text) < 30:
+            return None
+        if not _is_car_sale_social(text):
+            return None
+        if _is_moto(text[:200]):
+            return None
+        price = _parse_price(text)
+        if price > 0 and not (price_min <= price <= price_max):
+            return None
+        owner_id = post.get("owner_id") or post.get("from_id", 0)
+        post_id = post.get("id", "")
+        url = f"https://vk.com/wall{owner_id}_{post_id}"
+        year_m = _vk_year_re.search(text)
+        photo_url = ""
+        for att in post.get("attachments", []):
+            if att.get("type") == "photo":
+                sizes = att["photo"].get("sizes", [])
+                if sizes:
+                    photo_url = max(sizes, key=lambda s: s.get("width", 0)).get("url", "")
+                    break
+        # Дата
+        import datetime as _dt
+        days = 0
+        if post.get("date"):
+            try:
+                post_date = _dt.datetime.fromtimestamp(post["date"]).date()
+                days = max(0, (_dt.date.today() - post_date).days)
+            except Exception:
+                pass
+        seller = source_label or f"vk.com/wall{owner_id}"
+        return {
+            "title": _social_make_title(text),
+            "price": f"{price:,} ₽".replace(",", " ") if price else "цена не указана",
+            "_price_int": price,
+            "url": url,
+            "_photo_url": photo_url,
+            "description": text[:500],
+            "source": "vk",
+            "seller": seller,
+            "_seller_url": f"https://vk.com/wall{owner_id}",
+            "_year": int(year_m.group(1)) if year_m else 0,
+            "_days_on_site": days,
+            "_no_price": price == 0,
+        }
+
     def _try_vk_api_search() -> list[dict]:
-        """Поиск через VK API newsfeed.search (требует токен)."""
+        """Поиск через VK API newsfeed.search + wall.search по группам."""
         if not vk_token:
             return []
+
+        batch: list[dict] = []
+        seen_urls: set[str] = set()
+        VK_API = "https://api.vk.com/method"
+        common = {"access_token": vk_token, "v": "5.199"}
+
+        def _add_post(post: dict, label: str = "") -> None:
+            item = _vk_make_item(post, label)
+            if item and item["url"] not in seen_urls:
+                seen_urls.add(item["url"])
+                batch.append(item)
+
+        # 1. newsfeed.search — ищет по всем публичным постам (user token)
         keywords = []
         for _loc in vk_search_locations:
             keywords += [
                 f"продам авто {_loc}",
                 f"автобарахолка {_loc}",
-                f"авто {_loc} продаю срочно",
-                f"машина {_loc} торг",
+                f"продаю машину {_loc}",
             ]
-        batch = []
         for q in keywords:
             try:
-                r = session.get(
-                    "https://api.vk.com/method/newsfeed.search",
-                    params={
-                        "q": q, "count": 50, "extended": 0,
-                        "access_token": vk_token, "v": "5.131",
-                    },
-                    timeout=8,
-                )
-                items = r.json().get("response", {}).get("items", [])
-                for post in items:
-                    text = post.get("text", "")
-                    if len(text) < 30:
-                        continue
-                    if not _is_car_sale_social(text):
-                        continue
-                    if _is_moto(text[:200]):
-                        continue
-                    price = _parse_price(text)
-                    if price > 0 and not (price_min <= price <= price_max):
-                        continue
-                    owner_id = post.get("owner_id", "")
-                    post_id = post.get("id", "")
-                    url = f"https://vk.com/wall{owner_id}_{post_id}"
-                    year_m = _vk_year_re.search(text)
-                    # Фото
-                    photo_url = ""
-                    for att in post.get("attachments", []):
-                        if att.get("type") == "photo":
-                            sizes = att["photo"].get("sizes", [])
-                            if sizes:
-                                photo_url = max(sizes, key=lambda s: s.get("width", 0)).get("url", "")
-                                break
-                    batch.append({
-                        "title": _social_make_title(text),
-                        "price": f"{price:,} ₽".replace(",", " ") if price else "цена не указана",
-                        "_price_int": price,
-                        "url": url,
-                        "_photo_url": photo_url,
-                        "description": text[:500],
-                        "source": "vk",
-                        "seller": f"vk.com/id{abs(owner_id)}",
-                        "_seller_url": f"https://vk.com/wall{owner_id}",
-                        "_year": int(year_m.group(1)) if year_m else 0,
-                        "_days_on_site": 0,
-                        "_no_price": price == 0,
-                    })
+                r = session.get(f"{VK_API}/newsfeed.search",
+                    params={"q": q, "count": 50, "extended": 0, **common}, timeout=8)
+                resp = r.json()
+                err = resp.get("error", {})
+                if err:
+                    print(f"  [VK newsfeed] {err.get('error_msg','?')}")
+                    break  # token invalid или недостаточно прав — пропускаем метод
+                for post in resp.get("response", {}).get("items", []):
+                    _add_post(post)
             except Exception as e:
-                print(f"  [VK API] {e}")
+                print(f"  [VK newsfeed] {e}")
+
+        # 2. groups.search — находим группы по ключу, потом wall.search в каждой
+        try:
+            for _loc in vk_search_locations[:2]:
+                r = session.get(f"{VK_API}/groups.search",
+                    params={"q": f"авто {_loc}", "type": "group", "count": 10, **common}, timeout=8)
+                groups = r.json().get("response", {}).get("items", [])
+                for g in groups:
+                    gid = g.get("id")
+                    if not gid:
+                        continue
+                    for q in [f"продам авто {_loc}", f"авто {_loc}"]:
+                        try:
+                            rw = session.get(f"{VK_API}/wall.search",
+                                params={"owner_id": f"-{gid}", "query": q, "count": 50, **common}, timeout=8)
+                            for post in rw.json().get("response", {}).get("items", []):
+                                _add_post(post, label=g.get("name", ""))
+                        except Exception:
+                            pass
+        except Exception as e:
+            print(f"  [VK groups.search] {e}")
+
+        # 3. wall.search по известным группам города
+        known_groups = VK_AUTO_GROUPS.get(city_key, [])[:8]
+        for slug in known_groups:
+            try:
+                # Сначала узнаём id группы
+                ri = session.get(f"{VK_API}/utils.resolveScreenName",
+                    params={"screen_name": slug, **common}, timeout=5)
+                obj = ri.json().get("response", {})
+                if not obj or obj.get("type") not in ("group", "public", "page"):
+                    continue
+                gid = obj.get("object_id")
+                for q in vk_search_locations[:1]:
+                    rw = session.get(f"{VK_API}/wall.search",
+                        params={"owner_id": f"-{gid}", "query": f"продам авто {q}", "count": 50, **common}, timeout=8)
+                    for post in rw.json().get("response", {}).get("items", []):
+                        _add_post(post, label=slug)
+            except Exception:
+                pass
+
+        print(f"  [VK API] {len(batch)} объявлений")
         return batch
 
     def _try_ddg_vk() -> list[dict]:
