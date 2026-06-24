@@ -8619,51 +8619,21 @@ async def do_search_for_user(uid: int, reply_to):
         "search", uid=uid, region=region, price_min=pmin, price_max=pmax,
         source=",".join(enabled_sources), results=len(suitable),
     )
-    _below_cnt   = sum(1 for i in suitable if i.get("_savings_pct", 0) >= 25)
-    _good_cnt    = sum(1 for i in suitable if 0 < i.get("_savings_pct", 0) < 25)
-    _market_cnt  = sum(1 for i in suitable if -5 <= i.get("_savings_pct", 0) <= 0)
-    _above_cnt   = sum(1 for i in suitable if i.get("_savings_pct", 0) < -5)
-    _no_price_cnt= sum(1 for i in suitable if not i.get("_savings_pct") and not i.get("_market_price"))
-    _fresh_cnt   = sum(1 for i in suitable if not i.get("_already_seen"))
-    _seen_cnt    = len(suitable) - _fresh_cnt
+    _any_below = sum(1 for i in suitable if i.get("_savings_pct", 0) > 0)
+    _seen_cnt  = sum(1 for i in suitable if i.get("_already_seen"))
 
-    # Топ-3 самых выгодных объявления
-    _top3 = [i for i in suitable if i.get("_savings_pct", 0) > 0][:3]
-
-    lines = [f"✅ Найдено {len(suitable)} объявлений!\n"]
-
-    # Таблица распределения по выгодности
-    if _below_cnt or _good_cnt:
-        lines.append("📊 Распределение по выгодности:")
-        if _below_cnt:
-            lines.append(f"  🟢 Выгодно (>25% ниже рынка): {_below_cnt}")
-        if _good_cnt:
-            lines.append(f"  🟡 Ниже рынка (1–25%): {_good_cnt}")
-        if _market_cnt:
-            lines.append(f"  ⚪ По рынку: {_market_cnt}")
-        if _above_cnt:
-            lines.append(f"  🔴 Дороже рынка: {_above_cnt}")
-        if _no_price_cnt:
-            lines.append(f"  ❓ Без цены/анализа: {_no_price_cnt}")
-        lines.append("")
+    if _any_below:
+        _msg = (
+            f"✅ Найдено {len(suitable)} объявлений!\n"
+            f"🟢 {_any_below} ниже рынка — идут первыми."
+        )
     else:
-        lines.append("📊 Ниже рынка сейчас нет — показываю по цене.")
-        lines.append("")
-
-    # Топ выгодных
-    if _top3:
-        lines.append("🔥 Самые выгодные:")
-        for _t in _top3:
-            _pct = _t.get("_savings_pct", 0)
-            _pr  = _t.get("price", "?")
-            _ttl = _t.get("title", "")[:30]
-            lines.append(f"  -{_pct}% · {_pr} · {_ttl}")
-        lines.append("")
+        _msg = f"✅ Найдено {len(suitable)} объявлений! Показываю от дешёвых к дорогим."
 
     if _seen_cnt:
-        lines.append(f"♻️ Из них {_seen_cnt} показывал раньше — они в конце списка.")
+        _msg += f"\n♻️ {_seen_cnt} уже видел — они в конце."
 
-    await reply_to.answer("\n".join(lines))
+    await reply_to.answer(_msg)
     await send_batch(reply_to.chat.id, uid, 0)
 
 
