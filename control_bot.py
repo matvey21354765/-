@@ -1812,6 +1812,24 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
 
     city_key = _TG_REGION_MAP.get(region, "")
 
+    # Создаём сессию с русским прокси (тот же что и для Авито)
+    session = _req.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept-Language": "ru-RU,ru;q=0.9",
+    })
+    _tg_proxy_url = (
+        os.getenv("PROXY_URL") or
+        os.getenv("AVITO_PROXY_URL") or
+        (
+            f"http://{AVITO_PROXY_USER}:{AVITO_PROXY_PASS}@{AVITO_PROXY_HOST}:{AVITO_PROXY_PORT}"
+            if AVITO_PROXY_HOST and AVITO_PROXY_USER and not _proxy_auth_failed
+            else ""
+        )
+    )
+    if _tg_proxy_url and "__agentproxy" not in _tg_proxy_url:
+        session.proxies.update({"http": _tg_proxy_url, "https": _tg_proxy_url})
+
     # Реальные публичные TG каналы продажи авто по городам
     # Источник: t.me/s/ — только каналы с открытым веб-просмотром
     TG_REAL_CHANNELS: dict[str, list[str]] = {
@@ -2278,6 +2296,18 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Accept-Language": "ru-RU,ru;q=0.9",
     })
+    # Используем тот же русский прокси что и для Авито — лучше обходит блокировки VK/Yandex
+    _vk_proxy_url = (
+        os.getenv("PROXY_URL") or
+        os.getenv("AVITO_PROXY_URL") or
+        (
+            f"http://{AVITO_PROXY_USER}:{AVITO_PROXY_PASS}@{AVITO_PROXY_HOST}:{AVITO_PROXY_PORT}"
+            if AVITO_PROXY_HOST and AVITO_PROXY_USER and not _proxy_auth_failed
+            else ""
+        )
+    )
+    if _vk_proxy_url and "__agentproxy" not in _vk_proxy_url:
+        session.proxies.update({"http": _vk_proxy_url, "https": _vk_proxy_url})
 
     def _vk_make_item(post: dict, source_label: str = "") -> "dict | None":
         """Превращает VK API post dict в item для бота."""
