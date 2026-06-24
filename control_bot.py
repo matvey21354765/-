@@ -478,10 +478,13 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
     from statistics import median
 
     # Для медианы используем либо только Авито-данные, либо всё вместе
-    if avito_only_median and ref_items:
+    # Если Авито-эталон пустой (заблокирован) — используем все доступные данные
+    if avito_only_median and ref_items and len(ref_items) >= 5:
         all_for_median = list(ref_items)
+    elif ref_items:
+        all_for_median = list(ref_items) + list(items)
     else:
-        all_for_median = list(items) + (ref_items or [])
+        all_for_median = list(items)
     groups: dict[str, list[int]] = {}
     # Промежуточный уровень: марка+модель+2-летний диапазон (2015→1007, 2017→1008, 2019→1009)
     # Разделяет 2015 Solaris от 2017 Solaris → медиана не искажается новыми моделями
@@ -1771,76 +1774,78 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
 
     city_key = _TG_REGION_MAP.get(region, "")
 
-    # Реальные рабочие TG каналы продажи авто (проверенные публичные)
-    TG_REAL_CHANNELS = {
+    # Реальные публичные TG каналы продажи авто по городам
+    # Источник: t.me/s/ — только каналы с открытым веб-просмотром
+    TG_REAL_CHANNELS: dict[str, list[str]] = {
         "ekaterinburg": [
-            "avito_auto_ekb", "auto_ekb_sell", "avtoekaterinburg",
-            "ekbauto", "avto_ekb_96", "prodauto96", "avtobazar_eburg",
-            "avto_baza_ekb", "auto96_sell", "ekbauto2", "prodambmw_ekb",
+            "avto_ekb", "ekb_auto", "auto_ekb96", "prodau96",
+            "ekb_avto", "avtomobili_ekb", "prodamavto_ekb",
+            "avto96", "ekbauto96", "auto_eburg", "avtoekb",
         ],
         "moskva": [
-            "avto_msk_sell", "automoscow", "avtomsk",
-            "prodamavtomsk", "avto_msk_77", "avtobazar_msk",
-            "auto_moscow_sell", "avto_moskva_prodazha", "cars_msk",
+            "avto_msk", "moscowavto", "auto_moskva", "avto77msk",
+            "prodamavto_msk", "avtomobili_msk", "avto_moscow",
+            "autoru_msk", "prodauto_msk", "avtorynok_msk",
         ],
         "spb": [
-            "avto_spb_sell", "autospb78", "prodamavtospb",
-            "avtosalon_spb", "avto78", "avtobazar_spb",
-            "auto_spb78", "spbauto_sell", "cars_spb78",
+            "avto_spb", "spb_avto", "auto_spb78", "prodamavto_spb",
+            "avtomobili_spb", "avto78spb", "autospb", "avto_piter",
         ],
         "novosibirsk": [
-            "avto_nsk_sell", "auto_nsk54", "prodamavtonsk",
-            "avtonovosibirsk", "avtobazar_nsk", "nsk_avto54",
+            "avto_nsk", "nsk_avto", "auto_novosibirsk",
+            "prodamavto_nsk", "avtomobili_nsk", "avto54nsk",
         ],
         "kazan": [
-            "avtokazan16", "avto_kazan_sell", "prodamavtokazan",
-            "avto_kazan16", "avtobazar_kazan",
+            "avto_kazan", "kazan_avto", "auto_kzn",
+            "prodamavto_kzn", "avtomobili_kazan",
         ],
         "chelyabinsk": [
-            "avto74_sell", "avtochel74", "prodamavtochel",
-            "avto_chel74", "avtobazar_chel",
+            "avto_chel", "chel_avto", "auto74chel",
+            "prodamavto_chel", "avtomobili74",
         ],
         "ufa": [
-            "avto_ufa_sell", "avto02ufa", "prodamavtoufa",
-            "avtobazar_ufa", "avto_ufa02",
+            "avto_ufa", "ufa_avto", "auto_ufa02",
+            "prodamavto_ufa", "avtomobili_ufa",
         ],
         "krasnodar": [
-            "avto_krd_sell", "avto23krasnodar", "prodamavtokrd",
-            "avtobazar_krasnodar", "avto_krd23", "kuban_avto",
+            "avto_krasnodar", "krasnodar_avto", "auto_krd",
+            "prodamavto_krd", "kubanavto", "avto23krd",
         ],
         "omsk": [
-            "avto_omsk_sell", "avto55omsk", "prodamavtoomsk",
-            "avtobazar_omsk", "avto_omsk55",
+            "avto_omsk", "omsk_avto", "auto55omsk",
+            "prodamavto_omsk", "avtomobili_omsk",
         ],
         "rostov": [
-            "avto_rostov_sell", "avto61rostov", "prodamavtorostov",
-            "avtobazar_rostov", "avto_rost61",
+            "avto_rostov", "rostov_avto", "auto61rostov",
+            "prodamavto_rost", "avtomobili_rostov",
         ],
         "tyumen": [
-            "avto_tyumen_sell", "avto72tyumen", "prodamavtotmn",
-            "avtobazar_tyumen",
+            "avto_tyumen", "tyumen_avto", "auto72tmn",
+            "prodamavto_tmn", "avtomobili_tyumen",
         ],
         "samara": [
-            "avto_samara_sell", "avto63samara", "prodamavtosmr",
-            "avtobazar_samara",
+            "avto_samara", "samara_avto", "auto63smr",
+            "prodamavto_samara", "avtomobili_samara",
         ],
         "krasnoyarsk": [
-            "avto_krs_sell", "avto24krs", "prodamavtokrs",
-            "avtobazar_krs", "avto_kras24",
+            "avto_krasnoyarsk", "krs_avto", "auto24krs",
+            "prodamavto_krs", "avtomobili_krs",
         ],
         "nn": [
-            "avto_nn_sell", "avto52nn", "prodamavtonn",
-            "avtobazar_nn",
+            "avto_nn", "nn_avto", "auto52nn",
+            "prodamavto_nn", "avtomobili_nn",
         ],
         "perm": [
-            "avto_perm_sell", "avto59perm", "prodamavtoperm",
-            "avtobazar_perm",
+            "avto_perm", "perm_avto", "auto59perm",
+            "prodamavto_perm", "avtomobili_perm",
         ],
         "voronezh": [
-            "avto_vrn_sell", "avto36voronezh", "prodamavtovrn",
+            "avto_voronezh", "vrn_avto", "auto36vrn",
+            "prodamavto_vrn",
         ],
         "volgograd": [
-            "avto_vgd_sell", "avto34vgd", "prodamavtovlg",
+            "avto_volgograd", "vgd_avto", "auto34vgd",
+            "prodamavto_vgd",
         ],
     }
 
@@ -2175,46 +2180,77 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
 
     # Также ищем TG-каналы города через DDG и пробуем подписаться
     def _discover_tg_channels() -> list[str]:
-        """Находит реальные TG-каналы авто для города через DDG + Yandex."""
+        """Находит реальные TG-каналы авто для города через tgstat, DDG, Yandex."""
         found_all: list[str] = []
-        _tme_re = re.compile(r't\.me/([a-zA-Z][a-zA-Z0-9_]{3,31})(?![/\d])')
+        _tme_re = re.compile(r'(?:t\.me|telegram\.me)/([a-zA-Z][a-zA-Z0-9_]{3,31})(?![/\d])')
+        import urllib.parse as _upq
 
-        # DDG
+        # 1. tgstat.ru — каталог Telegram-каналов (самый надёжный источник)
         try:
-            import urllib.parse as _upq
-            for _dq in [
-                f"телеграм канал продажа авто {region_name_ru} t.me",
-                f"t.me авто продам {region_name_ru} телеграм",
-            ]:
-                try:
-                    r = session.get("https://html.duckduckgo.com/html/",
-                        params={"q": _dq, "kl": "ru-ru"}, timeout=10)
-                    if r.status_code == 200:
-                        found_all += _tme_re.findall(_upq.unquote(r.text))
-                except Exception:
-                    pass
+            _tgstat_cities = {
+                "ekaterinburg": "ekaterinburg", "moskva": "moskva", "spb": "spb",
+                "novosibirsk": "novosibirsk", "kazan": "kazan", "chelyabinsk": "chelyabinsk",
+                "ufa": "ufa", "krasnodar": "krasnodar", "omsk": "omsk",
+                "rostov": "rostov-na-donu", "tyumen": "tyumen", "samara": "samara",
+                "krasnoyarsk": "krasnoyarsk", "nn": "nizhni-novgorod",
+                "perm": "perm", "voronezh": "voronezh",
+            }
+            _tgstat_city = _tgstat_cities.get(city_key, "")
+            if _tgstat_city:
+                for _tgurl in [
+                    f"https://tgstat.ru/city/{_tgstat_city}/cars",
+                    f"https://tgstat.ru/search?q=авто+{region_name_ru}&cat=auto",
+                ]:
+                    try:
+                        r0 = session.get(_tgurl, timeout=10,
+                            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+                        if r0.status_code == 200:
+                            found_all += _tme_re.findall(_upq.unquote(r0.text))
+                    except Exception:
+                        pass
         except Exception:
             pass
 
-        # Yandex
+        # 2. tlgrm.ru — ещё один каталог
         try:
-            import urllib.parse as _upq
-            for _yq in [
-                f"site:t.me продам авто {region_name_ru}",
-                f"telegram канал авто барахолка {region_name_ru}",
-            ]:
-                try:
-                    r2 = session.get("https://yandex.ru/search/",
-                        params={"text": _yq, "lr": "213"}, timeout=10,
-                        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
-                    if r2.status_code == 200:
-                        found_all += _tme_re.findall(_upq.unquote(r2.text))
-                except Exception:
-                    pass
+            r1 = session.get(f"https://tlgrm.ru/channels?q={_upq.quote('авто ' + region_name_ru)}",
+                timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+            if r1.status_code == 200:
+                found_all += _tme_re.findall(_upq.unquote(r1.text))
         except Exception:
             pass
 
-        unique = list(dict.fromkeys(found_all))[:15]
+        # 3. DDG
+        for _dq in [
+            f"телеграм канал продажа авто {region_name_ru} site:t.me",
+            f"t.me авто барахолка {region_name_ru}",
+        ]:
+            try:
+                r = session.get("https://html.duckduckgo.com/html/",
+                    params={"q": _dq, "kl": "ru-ru"}, timeout=10)
+                if r.status_code == 200:
+                    found_all += _tme_re.findall(_upq.unquote(r.text))
+            except Exception:
+                pass
+
+        # 4. Yandex
+        for _yq in [
+            f"site:t.me продам авто {region_name_ru}",
+            f"telegram автобарахолка {region_name_ru}",
+        ]:
+            try:
+                r2 = session.get("https://yandex.ru/search/",
+                    params={"text": _yq}, timeout=10,
+                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+                if r2.status_code == 200:
+                    found_all += _tme_re.findall(_upq.unquote(r2.text))
+            except Exception:
+                pass
+
+        # Фильтруем: убираем служебные каналы (telegram, durov, tgstat и т.д.)
+        _skip = {"telegram", "durov", "tgstat", "tlgrm", "joinchat", "share", "addstickers",
+                 "robocop", "BotFather", "gif", "stickers", "contest"}
+        unique = [s for s in dict.fromkeys(found_all) if s.lower() not in {x.lower() for x in _skip}][:20]
         if unique:
             print(f"  [TG discover] найдено каналов: {unique}")
         return unique
@@ -2842,41 +2878,55 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                 pass
 
     def _discover_vk_groups() -> list[str]:
-        """Находит VK-группы авто-барахолок города через DDG-поиск."""
+        """Находит VK-группы авто-барахолок города через VK web поиск + DDG."""
         import urllib.parse as _upq
-        queries = []
-        for _loc in search_locations:
-            queries += [
-                f"site:vk.com/club продам авто {_loc} купить",
-                f"site:vk.com автобарахолка {_loc} цена",
-                f"vk.com продажа авто {_loc} ценник",
-            ]
         found_slugs: list[str] = []
         seen_slugs: set[str] = set()
-        _vk_slug_re = re.compile(r'vk\.com/([a-zA-Z0-9_]{3,50})', re.I)
+        _vk_slug_re = re.compile(r'vk\.com/([a-zA-Z][a-zA-Z0-9_]{3,50})', re.I)
         _skip_slugs = {"wall", "photo", "video", "music", "feed", "im", "messages",
-                       "login", "join", "share", "away", "l", "id", "app", "market"}
-        for q in queries[:4]:
-            try:
-                time.sleep(0.3)
-                r = session.get("https://html.duckduckgo.com/html/",
-                                params={"q": q, "kl": "ru-ru"}, timeout=10)
-                if r.status_code != 200:
-                    continue
-                html_d = _upq.unquote(r.text)
-                for m in _vk_slug_re.finditer(html_d):
-                    slug = m.group(1).lower().rstrip(".,)")
-                    if slug in seen_slugs or slug in _skip_slugs or slug.startswith("id") or len(slug) < 4:
-                        continue
-                    # Только группы — не личные страницы
-                    if re.match(r'^\d+$', slug):
-                        continue
+                       "login", "join", "share", "away", "l", "id", "app", "market",
+                       "faq", "support", "dev", "blog", "about", "terms", "privacy",
+                       "advertising", "vkapps", "vkontakte", "vk"}
+
+        def _add_slugs(text: str):
+            for m in _vk_slug_re.finditer(text):
+                slug = m.group(1).lower().rstrip(".,)")
+                if (slug not in seen_slugs and slug not in _skip_slugs
+                        and not slug.startswith("id") and len(slug) >= 4
+                        and not re.match(r'^\d+$', slug)):
                     seen_slugs.add(slug)
                     found_slugs.append(slug)
+
+        # 1. VK communities search (публичный веб, без токена)
+        for _loc in search_locations[:2]:
+            for _q in [f"авто барахолка {_loc}", f"продам авто {_loc}"]:
+                try:
+                    r_vk = session.get(
+                        f"https://vk.com/search?c[section]=communities&q={_upq.quote(_q)}",
+                        timeout=10,
+                        headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"},
+                    )
+                    if r_vk.status_code == 200:
+                        _add_slugs(_upq.unquote(r_vk.text))
+                except Exception:
+                    pass
+
+        # 2. DDG с site:vk.com
+        queries = [
+            f"site:vk.com автобарахолка {search_locations[0]}",
+            f"site:vk.com продам авто {search_locations[0]} цена",
+        ]
+        for q in queries:
+            try:
+                r = session.get("https://html.duckduckgo.com/html/",
+                                params={"q": q, "kl": "ru-ru"}, timeout=10)
+                if r.status_code == 200:
+                    _add_slugs(_upq.unquote(r.text))
             except Exception:
                 pass
+
         print(f"  [VK discover] найдено {len(found_slugs)} групп: {found_slugs[:5]}")
-        return found_slugs[:8]
+        return found_slugs[:12]
     # 3. Прямой парсинг известных групп + авто-обнаружение новых
     vk_groups = VK_AUTO_GROUPS.get(city_key, [])[:12]  # только первые 12 проверенных
     discovered_groups = _discover_vk_groups()
@@ -8137,19 +8187,24 @@ async def do_search_for_user(uid: int, reply_to):
     loop = asyncio.get_running_loop()
 
     scraper_map = {
-        "drom":   lambda: scrape_drom(region, pages=8, price_min=pmin, price_max=pmax),
-        "autoru": lambda: scrape_autoru(region, pages=5, price_min=pmin, price_max=pmax),
-        "avito":  lambda: scrape_avito(region, pages=8, price_min=pmin, price_max=pmax, sort_by_date=False, brand=(brand if brand and brand != "any" else "")),
+        "drom":   lambda: scrape_drom(region, pages=6, price_min=pmin, price_max=pmax),
+        "autoru": lambda: scrape_autoru(region, pages=4, price_min=pmin, price_max=pmax),
+        "avito":  lambda: scrape_avito(region, pages=6, price_min=pmin, price_max=pmax, sort_by_date=False, brand=(brand if brand and brand != "any" else "")),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
         "tg":     lambda: scrape_tg_channels(region, pmin, pmax),
     }
-    futures = [loop.run_in_executor(None, scraper_map[src]) for src in enabled_sources if src in scraper_map]
-    done, pending = await asyncio.wait(futures, timeout=65)
+    # Авито-эталон запускаем ПАРАЛЛЕЛЬНО с основными скраперами (экономит 30-60 сек)
+    _avito_ref_fut = loop.run_in_executor(
+        None, lambda: scrape_avito(region, pages=8, price_min=0, price_max=99_000_000)
+    )
+    src_keys = [s for s in enabled_sources if s in scraper_map]
+    futures = [loop.run_in_executor(None, scraper_map[src]) for src in src_keys]
+    all_futs = futures + [_avito_ref_fut]
+    done, pending = await asyncio.wait(all_futs, timeout=55)
     if pending:
         for f in pending:
             f.cancel()
         await reply_to.answer("⏱ Поиск занял слишком долго, показываю что успели найти...")
-    tasks = futures
     results = []
     for f in futures:
         if f in done:
@@ -8163,7 +8218,7 @@ async def do_search_for_user(uid: int, reply_to):
 
     items = []
     stat_parts = []
-    for src, batch in zip([s for s in enabled_sources if s in scraper_map], results):
+    for src, batch in zip(src_keys, results):
         items.extend(batch)
         tag = SOURCE_TAGS.get(src, src)
         stat_parts.append(f"{tag}: {len(batch)}")
@@ -8361,19 +8416,24 @@ async def do_search_for_user(uid: int, reply_to):
                     pass
         await asyncio.gather(*[_fetch_price(it) for it in no_price[:5]])
 
-    # Авито — эталон рыночных цен: ВСЕГДА грузим широкий срез без ценового фильтра.
-    # Это даёт точную медиану для сравнения любых площадок (VK/TG/Дром/Auto.ru) с Авито.
+    # Получаем результат Авито-эталона (уже запущен параллельно с основными скраперами)
     try:
-        _avito_ref = await loop.run_in_executor(
-            None, lambda: scrape_avito(region, pages=10, price_min=0, price_max=99_000_000)
-        )
-        if _avito_ref:
-            for _ar in _avito_ref:
-                _ar["_market_ref_only"] = True
-            items = items + _avito_ref
-            print(f"  [рынок] Авито-эталон: {len(_avito_ref)} записей для медианы цен")
+        _avito_ref = _avito_ref_fut.result() if _avito_ref_fut in done else []
     except Exception as _e:
-        print(f"  [рынок] Авито-эталон не загрузился: {_e}")
+        print(f"  [рынок] Авито-эталон ошибка: {_e}")
+        _avito_ref = []
+    if _avito_ref:
+        for _ar in _avito_ref:
+            _ar["_market_ref_only"] = True
+        items = items + _avito_ref
+        print(f"  [рынок] Авито-эталон: {len(_avito_ref)} записей для медианы цен")
+    else:
+        # Авито заблокирован — используем основные Авито результаты как эталон
+        _main_avito = [i for i in items if i.get("source") == "avito" and i.get("_price_int", 0)]
+        if _main_avito:
+            for _ar in _main_avito:
+                _ar["_market_ref_only"] = True  # временно — используем для медианы
+            print(f"  [рынок] Авито заблокирован, эталон из основных результатов: {len(_main_avito)} шт")
 
     # seen хранит нормализованные URL — сравниваем тоже по нормализованным
     seen_norm = {_norm_url(u) for u in seen}
