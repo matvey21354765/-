@@ -6460,22 +6460,76 @@ async def cmd_dashboard(msg: Message):
     )
 
 
+# Все возможные площадки для мониторинга
+_MONITOR_SOURCES = [
+    ("avito",  "Авито"),
+    ("drom",   "Дром"),
+    ("autoru", "Auto.ru"),
+    ("vk",     "ВКонтакте"),
+    ("tg",     "Telegram"),
+]
+
+def _monitor_sources(s: dict) -> list[str]:
+    """Возвращает список включённых площадок. По умолчанию — все."""
+    src = s.get("monitor_sources")
+    if not src or not isinstance(src, list):
+        return [k for k, _ in _MONITOR_SOURCES]
+    return src
+
+
 def _notify_keyboard(s: dict) -> InlineKeyboardMarkup:
     enabled = s.get("monitor_enabled", False)
     interval = s.get("monitor_interval_min", 5)
     min_pct = s.get("monitor_min_savings_pct", 10)
     toggle_text = "🔕 Выключить мониторинг" if enabled else "🔔 Включить мониторинг"
+    active_src = _monitor_sources(s)
+    src_label = ", ".join(n for k, n in _MONITOR_SOURCES if k in active_src) or "Не выбраны"
+    monitor_regions = s.get("monitor_regions", [])
+    extra_reg_label = f"+{len(monitor_regions)} регионов" if monitor_regions else "только мой регион"
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=toggle_text, callback_data="notify_toggle")],
+        [InlineKeyboardButton(text=f"🌐 Площадки: {src_label}", callback_data="notify_sources")],
+        [InlineKeyboardButton(text=f"📍 Регионы: {extra_reg_label}", callback_data="notify_regions")],
         [
             InlineKeyboardButton(text=f"⏱ Каждые {interval} мин", callback_data="notify_interval"),
-        ],
-        [
             InlineKeyboardButton(text=f"📉 Скидка от {min_pct}%", callback_data="notify_pct"),
         ],
         [InlineKeyboardButton(text="⭐ Моё избранное", callback_data="notify_favs")],
         [InlineKeyboardButton(text="◀️ Назад", callback_data="notify_back")],
     ])
+
+
+def _notify_sources_keyboard(s: dict) -> InlineKeyboardMarkup:
+    active = set(_monitor_sources(s))
+    rows = []
+    for key, label in _MONITOR_SOURCES:
+        check = "✅" if key in active else "☐"
+        rows.append([InlineKeyboardButton(text=f"{check} {label}", callback_data=f"notify_src_toggle|{key}")])
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="notify_sources_back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _notify_regions_keyboard(s: dict, page: int = 0) -> InlineKeyboardMarkup:
+    """Клавиатура выбора дополнительных регионов для мониторинга."""
+    extra = set(s.get("monitor_regions", []))
+    region_list = list(REGIONS.items())  # [(slug, name), ...]
+    per_page = 8
+    total_pages = (len(region_list) + per_page - 1) // per_page
+    page = max(0, min(page, total_pages - 1))
+    chunk = region_list[page * per_page: (page + 1) * per_page]
+    rows = []
+    for slug, name in chunk:
+        check = "✅" if slug in extra else "☐"
+        rows.append([InlineKeyboardButton(text=f"{check} {name}", callback_data=f"notify_reg_toggle|{slug}|{page}")])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"notify_reg_page|{page - 1}"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"notify_reg_page|{page + 1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="notify_sources_back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 @dp.callback_query(F.data == "notify_settings")
@@ -6487,12 +6541,20 @@ async def cb_notify_settings(cb: CallbackQuery):
     status = "✅ Включён" if enabled else "❌ Выключен"
     interval = s.get("monitor_interval_min", 5)
     min_pct = s.get("monitor_min_savings_pct", 10)
+    active_src = _monitor_sources(s)
+    src_names = ", ".join(n for k, n in _MONITOR_SOURCES if k in active_src)
+    extra_regions = s.get("monitor_regions", [])
+    reg_names = ", ".join(REGIONS.get(r, r) for r in extra_regions) if extra_regions else "нет"
+    own_region = REGIONS.get(s.get("region", ""), s.get("region", ""))
     await cb.message.answer(
         f"🔔 *Настройки уведомлений*\n\n"
         f"Статус: {status}\n"
         f"Интервал проверки: каждые {interval} мин\n"
-        f"Минимальная скидка: {min_pct}% ниже рынка\n\n"
-        f"Бот проверяет Авито и присылает уведомление когда появляются выгодные авто.",
+        f"Минимальная скидка: {min_pct}% ниже рынка\n"
+        f"Площадки: {src_names}\n"
+        f"Регион: {own_region}"
+        + (f"\nДоп. регионы: {reg_names}" if extra_regions else "") +
+        f"\n\nПри появлении выгодного авто — сразу пришлю с фото, ценой и скидкой от рынка.",
         parse_mode="Markdown",
         reply_markup=_notify_keyboard(s),
     )
@@ -6525,12 +6587,18 @@ async def cb_notify_toggle(cb: CallbackQuery):
                 print(f"  [монитор] uid={uid}: seed seen {len(existing)} текущих объявлений")
         except Exception as e:
             print(f"  [монитор] seed seen ошибка: {e}")
+        active_src = _monitor_sources(s)
+        src_names = ", ".join(n for k, n in _MONITOR_SOURCES if k in active_src)
+        extra_regions = s.get("monitor_regions", [])
+        all_regions_names = region_name
+        if extra_regions:
+            all_regions_names += ", " + ", ".join(REGIONS.get(r, r) for r in extra_regions)
         await cb.message.answer(
             f"✅ *Мониторинг включён!*\n\n"
-            f"🔔 Как только на Авито появится *новое* авто в {region_name} "
-            f"*ниже рынка* — сразу пришлю уведомление с ценой, фото и описанием.\n\n"
-            f"Проверяю каждые ~2 минуты. Текущие объявления показывать не буду — "
-            f"только свежие, которые выложат после включения.",
+            f"🔔 Слежу за площадками: *{src_names}*\n"
+            f"📍 Регионы: *{all_regions_names}*\n\n"
+            f"Как только появится новое авто ниже рынка — сразу пришлю с фото, ценой и скидкой.\n"
+            f"Проверяю каждые ~2 минуты. Текущие объявления не показываю — только свежие.",
             parse_mode="Markdown",
             reply_markup=_notify_keyboard(s),
         )
@@ -6603,6 +6671,118 @@ async def cb_notify_back(cb: CallbackQuery):
             [InlineKeyboardButton(text="⚙️ Изменить настройки", callback_data="change_settings")],
             [InlineKeyboardButton(text="🔔 Уведомления", callback_data="notify_settings")],
         ])
+    )
+
+
+@dp.callback_query(F.data == "notify_sources")
+async def cb_notify_sources(cb: CallbackQuery):
+    await cb.answer()
+    uid = cb.from_user.id
+    s = load_settings(uid)
+    active = _monitor_sources(s)
+    src_names = ", ".join(n for k, n in _MONITOR_SOURCES if k in active) or "нет"
+    await cb.message.answer(
+        f"🌐 *Площадки для мониторинга*\n\n"
+        f"Выбери откуда получать уведомления о выгодных авто.\n"
+        f"Сейчас включены: *{src_names}*\n\n"
+        f"Нажми на площадку чтобы включить/выключить:",
+        parse_mode="Markdown",
+        reply_markup=_notify_sources_keyboard(s),
+    )
+
+
+@dp.callback_query(F.data.startswith("notify_src_toggle|"))
+async def cb_notify_src_toggle(cb: CallbackQuery):
+    await cb.answer()
+    uid = cb.from_user.id
+    key = cb.data.split("|", 1)[1]
+    s = load_settings(uid)
+    active = set(_monitor_sources(s))
+    if key in active:
+        active.discard(key)
+    else:
+        active.add(key)
+    # Не даём выключить всё
+    if not active:
+        active = {key}
+    s["monitor_sources"] = list(active)
+    save_settings(uid, s)
+    await cb.message.edit_reply_markup(reply_markup=_notify_sources_keyboard(s))
+
+
+@dp.callback_query(F.data == "notify_regions")
+async def cb_notify_regions(cb: CallbackQuery):
+    await cb.answer()
+    uid = cb.from_user.id
+    s = load_settings(uid)
+    extra = s.get("monitor_regions", [])
+    own = REGIONS.get(s.get("region", ""), s.get("region", ""))
+    extra_names = ", ".join(REGIONS.get(r, r) for r in extra) if extra else "нет"
+    await cb.message.answer(
+        f"📍 *Регионы мониторинга*\n\n"
+        f"Основной регион (всегда включён): *{own}*\n"
+        f"Дополнительные: *{extra_names}*\n\n"
+        f"Выбери дополнительные регионы для мониторинга:",
+        parse_mode="Markdown",
+        reply_markup=_notify_regions_keyboard(s, page=0),
+    )
+
+
+@dp.callback_query(F.data.startswith("notify_reg_toggle|"))
+async def cb_notify_reg_toggle(cb: CallbackQuery):
+    await cb.answer()
+    uid = cb.from_user.id
+    parts = cb.data.split("|")
+    slug = parts[1]
+    page = int(parts[2]) if len(parts) > 2 else 0
+    s = load_settings(uid)
+    extra = set(s.get("monitor_regions", []))
+    own = s.get("region", "")
+    if slug == own:
+        await cb.answer("Основной регион нельзя убрать", show_alert=True)
+        return
+    if slug in extra:
+        extra.discard(slug)
+    else:
+        extra.add(slug)
+    s["monitor_regions"] = list(extra)
+    save_settings(uid, s)
+    await cb.message.edit_reply_markup(reply_markup=_notify_regions_keyboard(s, page=page))
+
+
+@dp.callback_query(F.data.startswith("notify_reg_page|"))
+async def cb_notify_reg_page(cb: CallbackQuery):
+    await cb.answer()
+    uid = cb.from_user.id
+    page = int(cb.data.split("|")[1])
+    s = load_settings(uid)
+    await cb.message.edit_reply_markup(reply_markup=_notify_regions_keyboard(s, page=page))
+
+
+@dp.callback_query(F.data == "notify_sources_back")
+async def cb_notify_sources_back(cb: CallbackQuery):
+    await cb.answer()
+    uid = cb.from_user.id
+    s = load_settings(uid)
+    enabled = s.get("monitor_enabled", False)
+    status = "✅ Включён" if enabled else "❌ Выключен"
+    interval = s.get("monitor_interval_min", 5)
+    min_pct = s.get("monitor_min_savings_pct", 10)
+    active_src = _monitor_sources(s)
+    src_names = ", ".join(n for k, n in _MONITOR_SOURCES if k in active_src)
+    extra_regions = s.get("monitor_regions", [])
+    reg_names = ", ".join(REGIONS.get(r, r) for r in extra_regions) if extra_regions else "нет"
+    own_region = REGIONS.get(s.get("region", ""), s.get("region", ""))
+    await cb.message.answer(
+        f"🔔 *Настройки уведомлений*\n\n"
+        f"Статус: {status}\n"
+        f"Интервал: каждые {interval} мин\n"
+        f"Минимальная скидка: {min_pct}% ниже рынка\n"
+        f"Площадки: {src_names}\n"
+        f"Регион: {own_region}"
+        + (f"\nДополнительные регионы: {reg_names}" if extra_regions else ""),
+        parse_mode="Markdown",
+        reply_markup=_notify_keyboard(s),
     )
 
 
@@ -9017,10 +9197,14 @@ async def _send_monitor_item(uid: int, it: dict):
     price_line = it.get("price", "—") or "—"
     if market:
         price_line += f"  🔻 рынок ~{market:,} ₽ (-{pct}%)".replace(",", " ")
+    src = it.get("source", "avito")
+    src_icon = {"avito": "🟠 Авито", "drom": "🔵 Дром", "autoru": "🔴 Auto.ru", "vk": "💙 ВКонтакте", "tg": "✈️ Telegram"}.get(src, "📌")
+    it_region = it.get("_monitor_region", "")
+    region_label = f" · {REGIONS.get(it_region, it_region)}" if it_region else ""
     caption = (
         f"🔔 {it.get('title', '')}\n"
         f"💰 {price_line}\n"
-        f"📅 только что на Авито"
+        f"📌 {src_icon}{region_label}"
     )
     if it.get("description"):
         _desc = it["description"][:180].strip()
@@ -9064,10 +9248,13 @@ async def _global_monitor_loop():
     loop = asyncio.get_running_loop()
     # VK/TG медленнее — опрашиваем раз в 10 минут (каждый 5-й тик по 2 минуты)
     _vk_tg_tick = 0
+    # Кэш результатов по (регион, источник) чтобы не скрейпить дважды для разных пользователей
+    _region_src_cache: dict[str, list[dict]] = {}
     while True:
         await asyncio.sleep(GLOBAL_POLL_SEC)
         _vk_tg_tick += 1
         do_vk_tg = (_vk_tg_tick % 5 == 0)  # раз в 10 минут
+        _region_src_cache.clear()
         try:
             # Собираем всех пользователей с включённым мониторингом
             if not USERS_DIR.exists():
@@ -9089,149 +9276,184 @@ async def _global_monitor_loop():
             if not active_users:
                 continue
 
-            # Группируем по региону — один запрос на регион
-            by_region: dict[str, list[dict]] = {}
+            # Собираем все уникальные пары (регион, источник) нужные хоть одному пользователю
+            needed: dict[str, set[str]] = {}  # region → set of sources
             for u in active_users:
-                by_region.setdefault(u["region"], []).append(u)
+                user_srcs = set(_monitor_sources(u))
+                all_regions = [u["region"]] + list(u.get("monitor_regions", []))
+                for reg in all_regions:
+                    needed.setdefault(reg, set()).update(user_srcs)
 
-            for region, users in by_region.items():
+            # Скрейпим только нужные (регион, источник) параллельно
+            _src_scrapers = {
+                "avito":  lambda r: scrape_avito(r, pages=3, sort_by_date=False),
+                "drom":   lambda r: scrape_drom(r, pages=3, price_min=0, price_max=99_000_000),
+                "autoru": lambda r: scrape_autoru(r, pages=3, price_min=0, price_max=99_000_000),
+                "vk":     lambda r: scrape_vk_groups(r, 0, 99_000_000),
+                "tg":     lambda r: scrape_tg_channels(r, 0, 99_000_000),
+            }
+            tasks_m = {}
+            for reg, srcs in needed.items():
+                for src in srcs:
+                    if src not in _src_scrapers:
+                        continue
+                    if src in ("vk", "tg") and not do_vk_tg:
+                        continue
+                    key_rs = f"{reg}:{src}"
+                    fn = _src_scrapers[src]
+                    tasks_m[key_rs] = loop.run_in_executor(None, lambda r=reg, f=fn: f(r))
+
+            if tasks_m:
+                done_m, _ = await asyncio.wait(list(tasks_m.values()), timeout=70)
+                for key_rs, fut in tasks_m.items():
+                    if fut in done_m:
+                        try:
+                            res = fut.result()
+                            _region_src_cache[key_rs] = res if isinstance(res, list) else []
+                        except Exception:
+                            _region_src_cache[key_rs] = []
+                    else:
+                        _region_src_cache[key_rs] = []
+
+            # Для каждого пользователя собираем raw из его регионов и площадок
+            for u in active_users:
                 try:
-                    # Все источники параллельно
-                    tasks_m = [
-                        loop.run_in_executor(None, lambda r=region: scrape_avito(r, pages=3, sort_by_date=False)),
-                        loop.run_in_executor(None, lambda r=region: scrape_drom(r, pages=3, price_min=0, price_max=99_000_000)),
-                        loop.run_in_executor(None, lambda r=region: scrape_autoru(r, pages=3, price_min=0, price_max=99_000_000)),
-                    ]
-                    if do_vk_tg:
-                        tasks_m += [
-                            loop.run_in_executor(None, lambda r=region: scrape_vk_groups(r, 0, 99_000_000)),
-                            loop.run_in_executor(None, lambda r=region: scrape_tg_channels(r, 0, 99_000_000)),
-                        ]
-                    done_m, _ = await asyncio.wait(tasks_m, timeout=60)
+                    uid = u["uid"]
+                    pmin = u.get("price_min", 0)
+                    pmax = u.get("price_max", 99_000_000)
+                    min_pct = u.get("monitor_min_savings_pct", MONITOR_MIN_SAVINGS_PCT)
+                    track_brand = u.get("track_brand", "")
+                    user_srcs = set(_monitor_sources(u))
+                    all_regions = [u["region"]] + list(u.get("monitor_regions", []))
+
                     raw = []
-                    for f in tasks_m:
-                        if f in done_m:
-                            try:
-                                res = f.result()
-                                if isinstance(res, list):
-                                    raw.extend(res)
-                            except Exception:
-                                pass
+                    for reg in all_regions:
+                        for src in user_srcs:
+                            if src in ("vk", "tg") and not do_vk_tg:
+                                continue
+                            key_rs = f"{reg}:{src}"
+                            items_rs = _region_src_cache.get(key_rs, [])
+                            # Помечаем регион для уведомлений
+                            for it in items_rs:
+                                it["_monitor_region"] = reg
+                            raw.extend(items_rs)
+
                     if not raw:
                         continue
 
-                    # Для каждого пользователя фильтруем индивидуально
-                    for u in users:
-                        uid = u["uid"]
-                        pmin = u.get("price_min", 0)
-                        pmax = u.get("price_max", 99_000_000)
-                        min_pct = u.get("monitor_min_savings_pct", MONITOR_MIN_SAVINGS_PCT)
-                        track_brand = u.get("track_brand", "")
+                    seen = load_seen(uid)
+                    skipped = load_skipped(uid)
 
-                        seen = load_seen(uid)
-                        skipped = load_skipped(uid)
+                    new_items = [
+                        it for it in raw
+                        if it.get("url")
+                        and it["url"] not in seen
+                        and it["url"] not in skipped
+                        and not is_dealer(it)
+                        and in_price_range(it, pmin, pmax)
+                    ]
+                    if not new_items:
+                        seen.update(it["url"] for it in raw if it.get("url"))
+                        save_seen(uid, seen)
+                        continue
 
-                        new_items = [
-                            it for it in raw
-                            if it.get("url")
-                            and it["url"] not in seen
-                            and it["url"] not in skipped
-                            and not is_dealer(it)
-                            and in_price_range(it, pmin, pmax)
+                    # Считаем рыночную цену по ВСЕМУ каталогу (raw) — чем больше, тем точнее
+                    cached = _search_cache.get(uid) or _load_cache(uid)
+                    pool = rank_by_market_price(raw + cached + new_items)
+                    new_urls = {x["url"] for x in new_items}
+
+                    new_below = sorted(
+                        [it for it in pool
+                         if it.get("url") in new_urls
+                         and it.get("_below_market")
+                         and it.get("_savings_pct", 0) >= min_pct],
+                        key=lambda x: -x.get("_savings_pct", 0)
+                    )
+
+                    # Уведомления по слежению за маркой (независимо от скидки)
+                    if track_brand:
+                        brand_new = [
+                            it for it in new_items
+                            if it.get("url") in new_urls
+                            and _match_brand(it.get("title", ""), track_brand)
                         ]
-                        if not new_items:
-                            continue
-
-                        # Считаем рыночную цену по ВСЕМУ каталогу региона (raw) —
-                        # чем больше выборка, тем точнее медиана и «ниже рынка».
-                        cached = _search_cache.get(uid) or _load_cache(uid)
-                        pool = rank_by_market_price(raw + cached + new_items)
-                        new_urls = {x["url"] for x in new_items}
-
-                        new_below = sorted(
-                            [it for it in pool
-                             if it.get("url") in new_urls
-                             and it.get("_below_market")
-                             and it.get("_savings_pct", 0) >= min_pct],
-                            key=lambda x: -x.get("_savings_pct", 0)
-                        )
-
-                        # Уведомления по слежению за маркой (независимо от скидки)
-                        if track_brand:
-                            brand_new = [
-                                it for it in new_items
-                                if it.get("url") in new_urls
-                                and _match_brand(it.get("title", ""), track_brand)
-                            ]
-                            if brand_new:
-                                region_name_tb = REGIONS.get(region, region)
-                                brand_label = next(
-                                    (n for n, k in FOREIGN_BRANDS_DISPLAY + DOMESTIC_BRANDS_DISPLAY if k == track_brand),
-                                    track_brand.capitalize()
-                                )
-                                for it in brand_new[:3]:
-                                    url_tb = it.get("url", "")
-                                    sid_tb = url_to_id(url_tb)
-                                    pct_tb = it.get("_savings_pct", 0)
-                                    market_tb = it.get("_market_price", 0)
-                                    price_line_tb = it.get("price", "—") or "—"
-                                    if market_tb and pct_tb > 0:
-                                        price_line_tb += f" ▼ рынок ~{market_tb:,} ₽ (-{pct_tb}%)".replace(",", " ")
-                                    days_tb = it.get("_days_on_site", 0)
-                                    days_label_tb = "только что" if days_tb == 0 else f"{days_tb} дн. назад"
-                                    caption_tb = (
-                                        f"🔔 Новая {brand_label} в {region_name_tb}!\n"
-                                        f"🚗 {it.get('title', '')}\n"
-                                        f"💰 {price_line_tb}\n"
-                                        f"🕐 Появилось {days_label_tb}"
-                                    )
-                                    kb_tb = InlineKeyboardMarkup(inline_keyboard=[[
-                                        InlineKeyboardButton(text="🔗 Открыть", url=url_tb),
-                                        InlineKeyboardButton(text="⭐ Сохранить", callback_data=f"fav|{sid_tb}|{uid}"),
-                                    ]])
-                                    try:
-                                        photo_tb = it.get("_photo_url", "")
-                                        if photo_tb:
-                                            await bot.send_photo(uid, photo=photo_tb, caption=caption_tb, reply_markup=kb_tb)
-                                        else:
-                                            await bot.send_message(uid, caption_tb, reply_markup=kb_tb)
-                                    except Exception:
-                                        try:
-                                            await bot.send_message(uid, caption_tb, reply_markup=kb_tb)
-                                        except Exception:
-                                            pass
-                                    await asyncio.sleep(0.3)
-
-                        if not new_below:
-                            # Обновляем seen даже без выгодных — чтобы не дублировать
-                            seen.update(it["url"] for it in new_items)
-                            save_seen(uid, seen)
-                            continue
-
-                        region_name = REGIONS.get(region, region)
-                        print(f"  [монитор] uid={uid} регион={region_name}: {len(new_below)} новых выгодных")
-
-                        # Если задан track_brand — фильтруем уведомления о скидках по марке
-                        if track_brand:
-                            new_below = [it for it in new_below if _match_brand(it.get("title", ""), track_brand)]
-
-                        if new_below:
-                            # Шапка-уведомление
-                            await bot.send_message(
-                                uid,
-                                f"🔔 *{region_name}* — {len(new_below)} новых авто ниже рынка!",
-                                parse_mode="Markdown",
+                        if brand_new:
+                            brand_label = next(
+                                (n for n, k in FOREIGN_BRANDS_DISPLAY + DOMESTIC_BRANDS_DISPLAY if k == track_brand),
+                                track_brand.capitalize()
                             )
-                            # Шлём каждое объявление (максимум 5)
-                            for it in new_below[:5]:
-                                await _send_monitor_item(uid, it)
+                            for it in brand_new[:3]:
+                                it_region = it.get("_monitor_region", u.get("region", ""))
+                                region_name_tb = REGIONS.get(it_region, it_region)
+                                url_tb = it.get("url", "")
+                                sid_tb = url_to_id(url_tb)
+                                pct_tb = it.get("_savings_pct", 0)
+                                market_tb = it.get("_market_price", 0)
+                                price_line_tb = it.get("price", "—") or "—"
+                                if market_tb and pct_tb > 0:
+                                    price_line_tb += f" ▼ рынок ~{market_tb:,} ₽ (-{pct_tb}%)".replace(",", " ")
+                                days_tb = it.get("_days_on_site", 0)
+                                days_label_tb = "только что" if days_tb == 0 else f"{days_tb} дн. назад"
+                                src_tb = it.get("source", "")
+                                src_icon_tb = {"avito": "🟠", "drom": "🔵", "autoru": "🔴", "vk": "💙", "tg": "✈️"}.get(src_tb, "📌")
+                                caption_tb = (
+                                    f"🔔 {src_icon_tb} Новая {brand_label} в {region_name_tb}!\n"
+                                    f"🚗 {it.get('title', '')}\n"
+                                    f"💰 {price_line_tb}\n"
+                                    f"🕐 Появилось {days_label_tb}"
+                                )
+                                kb_tb = InlineKeyboardMarkup(inline_keyboard=[[
+                                    InlineKeyboardButton(text="🔗 Открыть", url=url_tb),
+                                    InlineKeyboardButton(text="⭐ Сохранить", callback_data=f"fav|{sid_tb}|{uid}"),
+                                ]])
+                                try:
+                                    photo_tb = it.get("_photo_url", "")
+                                    if photo_tb:
+                                        await bot.send_photo(uid, photo=photo_tb, caption=caption_tb, reply_markup=kb_tb)
+                                    else:
+                                        await bot.send_message(uid, caption_tb, reply_markup=kb_tb)
+                                except Exception:
+                                    try:
+                                        await bot.send_message(uid, caption_tb, reply_markup=kb_tb)
+                                    except Exception:
+                                        pass
                                 await asyncio.sleep(0.3)
 
+                    if not new_below:
                         seen.update(it["url"] for it in new_items)
                         save_seen(uid, seen)
+                        continue
+
+                    # Если задан track_brand — фильтруем уведомления о скидках по марке
+                    if track_brand:
+                        new_below = [it for it in new_below if _match_brand(it.get("title", ""), track_brand)]
+
+                    print(f"  [монитор] uid={uid}: {len(new_below)} новых выгодных")
+
+                    if new_below:
+                        # Группируем по регионам для шапки
+                        regs_in_batch = list(dict.fromkeys(
+                            REGIONS.get(it.get("_monitor_region", u.get("region", "")), it.get("_monitor_region", ""))
+                            for it in new_below
+                        ))
+                        regs_label = ", ".join(regs_in_batch[:3])
+                        srcs_in_batch = list(dict.fromkeys(it.get("source", "") for it in new_below))
+                        src_icon_map = {"avito": "🟠", "drom": "🔵", "autoru": "🔴", "vk": "💙", "tg": "✈️"}
+                        srcs_label = " ".join(src_icon_map.get(s, "") for s in srcs_in_batch if s)
+                        await bot.send_message(
+                            uid,
+                            f"🔔 {srcs_label} *{regs_label}* — {len(new_below)} новых авто ниже рынка!",
+                            parse_mode="Markdown",
+                        )
+                        for it in new_below[:5]:
+                            await _send_monitor_item(uid, it)
+                            await asyncio.sleep(0.3)
+
+                    seen.update(it["url"] for it in new_items)
+                    save_seen(uid, seen)
 
                 except Exception as e:
-                    print(f"  [глоб.монитор] регион={region}: {e}")
+                    print(f"  [глоб.монитор] uid обработка: {e}")
 
         except Exception as e:
             print(f"  [глоб.монитор] ошибка цикла: {e}")
