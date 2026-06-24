@@ -993,7 +993,41 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
         if price_max < 99_000_000:
             html_url += f"&price_to={price_max}"
 
-        # Метод 0a: curl_cffi — Chrome TLS fingerprint, без зависимости от прокси
+        # Метод 0а: Прямой AJAX API с прокси (наиболее надёжный при наличии РФ IP)
+        if not batch and AVITO_PROXIES:
+            try:
+                r_ajax = _req.post(
+                    "https://auto.ru/-/ajax/desktop/listing/",
+                    json=body,
+                    headers={**headers_ajax, "x-requested-with": "fetch"},
+                    proxies=_avito_proxies(),
+                    timeout=20,
+                )
+                print(f"  [Auto.ru] прокси AJAX стр.{p}: HTTP {r_ajax.status_code}, {len(r_ajax.text):,}б")
+                if r_ajax.status_code == 200:
+                    try:
+                        batch = _autoru_parse_offers(r_ajax.json(), today)
+                    except Exception:
+                        batch = _autoru_parse_html(r_ajax.text, today)
+            except Exception as e:
+                print(f"  [Auto.ru] прокси AJAX: {str(e)[:80]}")
+
+        # Метод 0b: Прямой HTML через прокси (РФ IP, обходит гео-блок)
+        if not batch and AVITO_PROXIES:
+            try:
+                r0 = _req.get(html_url, headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language": "ru-RU,ru;q=0.9",
+                    "Referer": f"https://auto.ru/{slug}/cars/used/",
+                }, timeout=25, proxies=_avito_proxies())
+                print(f"  [Auto.ru] прокси HTML стр.{p}: HTTP {r0.status_code}, {len(r0.text):,}б")
+                if r0.status_code == 200 and len(r0.text) > 50_000:
+                    batch = _autoru_parse_html(r0.text, today)
+            except Exception as e:
+                print(f"  [Auto.ru] прокси HTML: {str(e)[:50]}")
+
+        # Метод 0c: curl_cffi — Chrome TLS fingerprint, без зависимости от прокси
         if not batch:
             try:
                 from curl_cffi import requests as _cffi
@@ -1009,21 +1043,6 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
                     batch = _autoru_parse_html(rc0.text, today)
             except Exception as e:
                 print(f"  [Auto.ru] curl_cffi: {str(e)[:80]}")
-
-        # Метод 0b: ПРЯМОЙ запрос через резидентный прокси (РФ IP)
-        if not batch and AVITO_PROXIES:
-            try:
-                r0 = _req.get(html_url, headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    "Accept-Language": "ru-RU,ru;q=0.9",
-                    "Referer": f"https://auto.ru/{slug}/cars/used/",
-                }, timeout=25, proxies=_avito_proxies())
-                print(f"  [Auto.ru] прокси HTML стр.{p}: HTTP {r0.status_code}, {len(r0.text):,}б")
-                if r0.status_code == 200 and len(r0.text) > 50_000:
-                    batch = _autoru_parse_html(r0.text, today)
-            except Exception as e:
-                print(f"  [Auto.ru] прокси HTML: {str(e)[:50]}")
 
         # Метод 1: ScraperAPI render=true — JS выполняется, __INITIAL_STATE__ заполняется
         if not batch and SCRAPER_API_KEY:
@@ -2388,6 +2407,9 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                 f"продам авто {_loc}",
                 f"автобарахолка {_loc}",
                 f"продаю машину {_loc}",
+                f"продам автомобиль {_loc}",
+                f"срочно авто {_loc}",
+                f"торг авто {_loc}",
             ]
         for q in keywords:
             try:
@@ -2424,22 +2446,33 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
         except Exception as e:
             print(f"  [VK groups.search] {e}")
 
-        # 3. wall.search по известным группам города
-        known_groups = VK_AUTO_GROUPS.get(city_key, [])[:8]
+        # 3. wall.search + wall.get по известным группам города
+        known_groups = VK_AUTO_GROUPS.get(city_key, [])[:12]
         for slug in known_groups:
             try:
-                # Сначала узнаём id группы
                 ri = session.get(f"{VK_API}/utils.resolveScreenName",
                     params={"screen_name": slug, **common}, timeout=5)
                 obj = ri.json().get("response", {})
                 if not obj or obj.get("type") not in ("group", "public", "page"):
                     continue
                 gid = obj.get("object_id")
-                for q in vk_search_locations[:1]:
-                    rw = session.get(f"{VK_API}/wall.search",
-                        params={"owner_id": f"-{gid}", "query": f"продам авто {q}", "count": 50, **common}, timeout=8)
-                    for post in rw.json().get("response", {}).get("items", []):
+                # wall.search — по ключевым словам
+                for q in [f"продам {_loc}" for _loc in vk_search_locations[:2]] + ["продам", "куплю"]:
+                    try:
+                        rw = session.get(f"{VK_API}/wall.search",
+                            params={"owner_id": f"-{gid}", "query": q, "count": 50, **common}, timeout=8)
+                        for post in rw.json().get("response", {}).get("items", []):
+                            _add_post(post, label=slug)
+                    except Exception:
+                        pass
+                # wall.get — последние 50 постов группы (независимо от ключей)
+                try:
+                    rg = session.get(f"{VK_API}/wall.get",
+                        params={"owner_id": f"-{gid}", "count": 50, "filter": "owner", **common}, timeout=8)
+                    for post in rg.json().get("response", {}).get("items", []):
                         _add_post(post, label=slug)
+                except Exception:
+                    pass
             except Exception:
                 pass
 
@@ -5159,12 +5192,12 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         # С мобильным прокси запускаем страницы с задержкой 1-3с (имитация человека)
         # Параллелизм ограничен 3 потоками — Авито считает больше подозрительным
         tasks = (
-            [(_try_web_html, p) for p in range(1, 9)] +
-            [(_try_avito_lite, p) for p in range(1, 4)] +
+            [(_try_web_html, p) for p in range(1, 13)] +
+            [(_try_avito_lite, p) for p in range(1, 5)] +
             [(_try_avito_rss, 1), (_try_googlebot_ua, 1), (_try_avito_public_api, 1)]
         )
-        _cap = 200
-        _deadline_s = 60
+        _cap = 300
+        _deadline_s = 90
     else:
         tasks = [(m, 1) for m in all_methods]
         _cap = 40
