@@ -454,16 +454,35 @@ def hot_score(item: dict) -> float:
 
 
 def _car_group_key(title: str) -> str:
-    """Извлекает марку+модель+год для группировки (напр. 'toyota camry 2018')."""
+    """Извлекает марку+модель+год для группировки (напр. 'toyota camry 2018').
+
+    Корректно обрабатывает заголовки с префиксами площадок:
+      'Дром Volkswagen Golf 2012' → 'volkswagen golf 2012'
+      'Авито Mazda 3 1.6 AT, 2008' → 'mazda 3 2008'
+    """
     t = title.lower()
+    # Удаляем префиксы площадок
+    for _pfx in ("авито", "дром", "auto.ru", "autoru", "вконтакте", "tg", "telegram"):
+        t = re.sub(rf'^\s*{re.escape(_pfx)}\s*', '', t)
     # Убираем технические характеристики: 1.6 МТ, 156 000 км и т.п.
     t = re.sub(r'\d+[\.,]\d+\s*(л|at|mt|акп|мкп|амт)', '', t)
-    t = re.sub(r'\d[\d\s]+км', '', t)
-    # Год
+    t = re.sub(r'\d[\d\s]{2,}км', '', t)
+    # Год выпуска
     year_m = re.search(r'\b(20\d{2}|19\d{2})\b', t)
     year = year_m.group(1) if year_m else ""
-    # Марка+модель — первые 2 слова
-    words = re.sub(r'[^а-яёa-z\s]', ' ', t).split()
+    if year_m:
+        t = t[:year_m.start()] + t[year_m.end():]  # убираем год из строки
+    # Берём первые 2 смысловых слова — марка + модель
+    # Оставляем числа-части модели: Mazda 3, BMW 5, ВАЗ 2114 и т.п.
+    # Исключаем числа > 2100 (могут быть годами, уже обработаны выше)
+    def _is_model_word(w: str) -> bool:
+        if w.isalpha():
+            return True
+        if w.isdigit():
+            n = int(w)
+            return n < 2100  # модели: 3, 5, 2114, 320 и т.п. (не годы)
+        return False
+    words = [w for w in re.sub(r'[^а-яёa-z0-9\s]', ' ', t).split() if w and _is_model_word(w)]
     brand_model = " ".join(words[:2]) if len(words) >= 2 else " ".join(words)
     return f"{brand_model} {year}".strip()
 
@@ -530,7 +549,7 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
             broad_key = parts[0] if (len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 4) else key
             # Уровень 1: точный (марка+модель+год)
             med = market.get(key, 0)
-            # Уровень 2: 4-летний диапазон (изолирует 2015 от 2020-2024)
+            # Уровень 2: 2-летний диапазон года (2012→1006, 2013→1006, 2014→1007...)
             if not med:
                 try:
                     bracket = int(parts[1]) // 2 if (len(parts) == 2 and parts[1].isdigit()) else 0
@@ -538,25 +557,25 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
                         med = market_year_bracket.get(f"{broad_key}_{bracket}", 0)
                 except Exception:
                     pass
-            # Уровень 3: марка+модель (все годы) — только если нет bracket
-            # Применяем только если цена вписывается в разумный диапазон медианы
+            # Уровень 3: марка+модель (все годы) — только если цена близка к медиане.
+            # Узкие границы: 0.55–1.8 — исключает сравнение старого Golf 2012 с новым Golf 2022
             if not med:
                 med_all = market_broad.get(broad_key, 0)
-                # Если медиана всех лет слишком сильно отклоняется от цены — не используем
-                if med_all and 0.3 < (p / med_all) < 2.5:
+                if med_all and 0.55 < (p / med_all) < 1.8:
                     med = med_all
-            # Уровень 4: только марка
+            # Уровень 4: только марка — ещё уже: 0.6–1.5
             if not med:
                 brand_key_m = key.split(" ", 1)[0]
                 med_brand = market_brand.get(brand_key_m, 0)
-                # Используем марку только если отклонение разумное (не более 3x)
-                if med_brand and 0.2 < (p / med_brand) < 3.0:
+                if med_brand and 0.6 < (p / med_brand) < 1.5:
                     med = med_brand
             if med > 0:
                 savings_pct = round((1 - p / med) * 100, 1)
-                # Если "скидка" > 75% — сравнение некорректно (разные классы авто)
-                # Не показываем рыночную цену, чтобы не вводить в заблуждение
-                if savings_pct > 75:
+                # Кап: скидка > 50% почти всегда означает неверное сравнение.
+                # Golf 2012 за 820к vs медиана всех Golf 2.5M = 67% → отклоняем.
+                # Реальные скидки >50% бывают, но редки — лучше не показывать,
+                # чем вводить в заблуждение.
+                if savings_pct > 50:
                     med = 0
                     savings_pct = 0.0
             if med > 0:
@@ -564,8 +583,7 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
                 it["_market_price"] = int(med)
                 it["_below_market"] = savings_pct > 0
 
-                # Базовый балл = % экономии (может быть отрицательным)
-                deal_score += savings_pct * 3.0  # каждый % ниже рынка = +3 балла
+                deal_score += savings_pct * 3.0
 
         # Бонус за возраст: объявление давно висит → продавец готов к торгу
         # Новые (0-1 дней) — нейтрально. За каждый день после 2-го +1.5 балла, cap 45
