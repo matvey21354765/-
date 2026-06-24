@@ -2064,6 +2064,8 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
 
     def _parse_channel(channel: str) -> list[dict]:
         """Парсит публичный TG канал через t.me/s/ — до 3 страниц."""
+        import requests as _req_tme
+        _tme_session = _req_tme.Session()  # t.me не блокирует Railway — прокси не нужен
         try:
             batch = []
             seen_urls_ch: set[str] = set()
@@ -2072,7 +2074,7 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
             for _page in range(3):
                 url_t = f"https://t.me/s/{channel}" if before_id is None else f"https://t.me/s/{channel}?before={before_id}"
                 try:
-                    r = session.get(url_t, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+                    r = _tme_session.get(url_t, timeout=10, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
                     if r.status_code != 200 or "tgme_widget_message" not in r.text:
                         break
                     from bs4 import BeautifulSoup as _BS2
@@ -2422,60 +2424,74 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
 
     VK_API_URL = "https://api.vk.com/method"
 
+    # VK API НЕ должен идти через прокси — создаём отдельную сессию без прокси
+    import requests as _req_vk
+    _vk_api = _req_vk.Session()
+    _vk_api.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept-Language": "ru-RU,ru;q=0.9",
+    })
+
     # ── Шаг 1: Проверяем токен и ищем группы через API ──────────────
     _found_group_ids: dict[int, str] = {}
     _vk_token_ok = False
 
     if vk_token:
         try:
-            _tr = session.get(f"{VK_API_URL}/groups.search",
+            _tr = _vk_api.get(f"{VK_API_URL}/groups.search",
                 params={"q": f"автобарахолка {region_name_ru}", "count": 1,
-                        "access_token": vk_token, "v": "5.199"}, timeout=8)
+                        "access_token": vk_token, "v": "5.131"}, timeout=10)
             _tr_json = _tr.json()
             _vk_token_ok = "error" not in _tr_json
             if not _vk_token_ok:
                 _ec = _tr_json.get("error", {}).get("error_code", 0)
                 print(f"  [VK] токен невалиден: код {_ec} {_tr_json.get('error',{}).get('error_msg','')}")
+            else:
+                print(f"  [VK] токен OK")
         except Exception as e:
             print(f"  [VK] ошибка проверки токена: {e}")
 
     if _vk_token_ok:
-        # groups.search — найдёт реальные группы по городу
+        # groups.search — ищем по каждому типу отдельно (page и group)
         _gs_queries = [
-            f"автобарахолка {region_name_ru}",
-            f"авто {region_name_ru}",
-            f"продажа авто {region_name_ru}",
-            f"авторынок {region_name_ru}",
-            f"автобарахолка {oblast_name_ru}",
-            f"авто {oblast_name_ru}",
+            (f"автобарахолка {region_name_ru}", "group"),
+            (f"автобарахолка {region_name_ru}", "page"),
+            (f"авто {region_name_ru}", "group"),
+            (f"авторынок {region_name_ru}", "page"),
+            (f"автобарахолка {oblast_name_ru}", "group"),
+            (f"авто {oblast_name_ru}", "page"),
+            (f"продажа авто {region_name_ru}", "group"),
         ]
-        def _gs_one(q: str) -> list:
+        def _gs_one(q_type: tuple) -> list:
+            q, gtype = q_type
             try:
-                r = session.get(f"{VK_API_URL}/groups.search",
-                    params={"q": q, "count": 20, "type": "page,group",
-                            "access_token": vk_token, "v": "5.199"}, timeout=8)
+                r = _vk_api.get(f"{VK_API_URL}/groups.search",
+                    params={"q": q, "count": 20, "type": gtype,
+                            "access_token": vk_token, "v": "5.131"}, timeout=10)
                 resp = r.json()
                 if "error" in resp:
+                    print(f"  [VK gs] ошибка для '{q}': {resp['error'].get('error_msg','')}")
                     return []
                 return resp.get("response", {}).get("items", [])
-            except Exception:
+            except Exception as e:
+                print(f"  [VK gs] исключение: {e}")
                 return []
 
         with _TPE_VK(max_workers=6) as _gsex:
-            for res in _gsex.map(_gs_one, _gs_queries, timeout=20):
+            for res in _gsex.map(_gs_one, _gs_queries, timeout=25):
                 for g in (res or []):
                     gid = g.get("id")
                     if gid and gid not in _found_group_ids:
                         _found_group_ids[gid] = g.get("name", f"club{gid}")
         print(f"  [VK groups.search] найдено {len(_found_group_ids)} групп")
 
-        # newsfeed.search — прямой поиск постов (только с user-token)
+        # newsfeed.search — прямой поиск постов (работает с user-token, не service)
         _nf_seen: set[str] = set()
         for _nfq in [f"продам авто {region_name_ru}", f"продам {region_name_ru} пробег"]:
             try:
-                r = session.get(f"{VK_API_URL}/newsfeed.search",
+                r = _vk_api.get(f"{VK_API_URL}/newsfeed.search",
                     params={"q": _nfq, "count": 100, "extended": 1,
-                            "access_token": vk_token, "v": "5.199"}, timeout=8)
+                            "access_token": vk_token, "v": "5.131"}, timeout=10)
                 resp = r.json()
                 if resp.get("error"):
                     break
@@ -2493,13 +2509,13 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
     def _scrape_wall(gid_name: tuple) -> list:
         gid, gname = gid_name
         local = []
-        base = {"owner_id": f"-{gid}", "count": 100, "filter": "owner", "v": "5.199"}
-        search = {"owner_id": f"-{gid}", "query": "продам", "count": 100, "v": "5.199"}
+        base = {"owner_id": f"-{gid}", "count": 100, "filter": "owner", "v": "5.131"}
+        search_p = {"owner_id": f"-{gid}", "query": "продам", "count": 100, "v": "5.131"}
         if _vk_token_ok:
             base["access_token"] = vk_token
-            search["access_token"] = vk_token
+            search_p["access_token"] = vk_token
         try:
-            rg = session.get(f"{VK_API_URL}/wall.get", params=base, timeout=10)
+            rg = _vk_api.get(f"{VK_API_URL}/wall.get", params=base, timeout=10)
             resp = rg.json().get("response", {})
             for post in (resp.get("items", []) if isinstance(resp, dict) else []):
                 item = _vk_make_item(post, gname)
@@ -2508,7 +2524,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
         except Exception:
             pass
         try:
-            rw = session.get(f"{VK_API_URL}/wall.search", params=search, timeout=10)
+            rw = _vk_api.get(f"{VK_API_URL}/wall.search", params=search_p, timeout=10)
             resp2 = rw.json().get("response", {})
             for post in (resp2.get("items", []) if isinstance(resp2, dict) else []):
                 item = _vk_make_item(post, gname)
@@ -2565,10 +2581,10 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
     def _resolve_and_scrape(slug: str) -> list:
         """Резолвит slug → group_id через utils.resolveScreenName, затем скрейпит стену."""
         gid = None
-        # utils.resolveScreenName работает БЕЗ токена
+        # utils.resolveScreenName работает БЕЗ токена — используем прямую сессию
         try:
-            r = session.get(f"{VK_API_URL}/utils.resolveScreenName",
-                params={"screen_name": slug, "v": "5.199"}, timeout=5)
+            r = _vk_api.get(f"{VK_API_URL}/utils.resolveScreenName",
+                params={"screen_name": slug, "v": "5.131"}, timeout=6)
             obj = r.json().get("response", False)
             if obj and isinstance(obj, dict) and obj.get("type") in ("group", "page", "public"):
                 gid = obj.get("object_id")
