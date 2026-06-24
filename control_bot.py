@@ -2133,11 +2133,14 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
         try:
             import urllib.parse as _upq
             _tg_url_re = re.compile(r'https?://t\.me/[a-zA-Z0-9_]+/\d+', re.I)  # только конкретные посты с номером
+            # Ищем по городу И области
+            all_locs = list(dict.fromkeys([region_name_ru, oblast_name_ru]))
             queries = []
-            for _loc in search_locations:
+            for _loc in all_locs:
                 queries += [
                     f"site:t.me продам авто {_loc}",
                     f"site:t.me автомобил {_loc} частн",
+                    f"site:t.me авто барахолка {_loc}",
                 ]
             batch = []
             seen_urls: set[str] = set()
@@ -2271,24 +2274,37 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
             except Exception:
                 pass
 
-        # 4. Yandex
-        for _yq in [
-            f"site:t.me продам авто {region_name_ru}",
-            f"telegram автобарахолка {region_name_ru}",
-        ]:
+        # 4. Yandex — по городу И области
+        for _loc in search_locations:
+            for _yq in [
+                f"site:t.me продам авто {_loc}",
+                f"telegram автобарахолка {_loc}",
+                f"telegram канал авто {_loc} продажа",
+            ]:
+                try:
+                    r2 = session.get("https://yandex.ru/search/",
+                        params={"text": _yq}, timeout=10,
+                        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+                    if r2.status_code == 200:
+                        found_all += _tme_re.findall(_upq.unquote(r2.text))
+                except Exception:
+                    pass
+
+        # 5. tgstat.ru поиск по области тоже
+        if oblast_name_ru != region_name_ru:
             try:
-                r2 = session.get("https://yandex.ru/search/",
-                    params={"text": _yq}, timeout=10,
-                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
-                if r2.status_code == 200:
-                    found_all += _tme_re.findall(_upq.unquote(r2.text))
+                r_ob = session.get(
+                    f"https://tgstat.ru/search?q={_upq.quote('авто ' + oblast_name_ru)}&cat=auto",
+                    timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+                if r_ob.status_code == 200:
+                    found_all += _tme_re.findall(_upq.unquote(r_ob.text))
             except Exception:
                 pass
 
         # Фильтруем: убираем служебные каналы (telegram, durov, tgstat и т.д.)
         _skip = {"telegram", "durov", "tgstat", "tlgrm", "joinchat", "share", "addstickers",
-                 "robocop", "BotFather", "gif", "stickers", "contest"}
-        unique = [s for s in dict.fromkeys(found_all) if s.lower() not in {x.lower() for x in _skip}][:20]
+                 "robocop", "BotFather", "gif", "stickers", "contest", "c"}
+        unique = [s for s in dict.fromkeys(found_all) if s.lower() not in {x.lower() for x in _skip} and len(s) >= 4][:30]
         if unique:
             print(f"  [TG discover] найдено каналов: {unique}")
         return unique
@@ -2296,11 +2312,12 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    # 1. Обнаруживаем новые каналы через DDG параллельно с парсингом известных
-    with ThreadPoolExecutor(max_workers=10) as ex:
+    # 1. Обнаруживаем каналы через DDG/Yandex/tgstat параллельно с парсингом известных
+    with ThreadPoolExecutor(max_workers=12) as ex:
         f_discover = ex.submit(_discover_tg_channels)
+        f_ddg = ex.submit(_try_ddg_tg, "продам авто")
         futs_known = {ex.submit(_try_channel, ch): ch for ch in all_channels}
-        for fut in as_completed(futs_known, timeout=25):
+        for fut in as_completed(futs_known, timeout=30):
             try:
                 batch = fut.result()
                 if batch:
@@ -2309,16 +2326,23 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
             except Exception:
                 pass
         try:
-            discovered = f_discover.result(timeout=5)
+            discovered = f_discover.result(timeout=10)
         except Exception:
             discovered = []
+        try:
+            ddg_batch = f_ddg.result(timeout=5)
+            if ddg_batch:
+                results.extend(ddg_batch)
+                print(f"  [TG DDG итого] {len(ddg_batch)} результатов")
+        except Exception:
+            pass
 
-    # 2. Пробуем найденные через DDG каналы
+    # 2. Пробуем найденные через discovery каналы
     new_channels = [ch for ch in discovered if ch not in all_channels]
     if new_channels:
-        with ThreadPoolExecutor(max_workers=6) as ex2:
+        with ThreadPoolExecutor(max_workers=8) as ex2:
             futs2 = {ex2.submit(_try_channel, ch): ch for ch in new_channels}
-            for fut in as_completed(futs2, timeout=15):
+            for fut in as_completed(futs2, timeout=20):
                 try:
                     batch = fut.result()
                     if batch:
@@ -2326,12 +2350,6 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
                         print(f"  [TG discovered {futs2[fut]}] {len(batch)} объявлений")
                 except Exception:
                     pass
-
-    # 3. DDG-поиск TG постов всегда (не только при нехватке результатов)
-    ddg_batch = _try_ddg_tg("продам авто")
-    if ddg_batch:
-        results.extend(ddg_batch)
-        print(f"  [TG DDG итого] {len(ddg_batch)} результатов")
 
     # Дедупликация по нормализованному URL
     seen_norm_tg: set[str] = set()
@@ -2544,49 +2562,58 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
             except Exception as e:
                 print(f"  [VK newsfeed] {e}")
 
-        # 2. groups.search — находим реальные группы через VK API, потом wall.get + wall.search
+        # 2. groups.search — находим РЕАЛЬНЫЕ группы/паблики через VK API
         _found_group_ids: set[int] = set()
-        try:
-            _gs_queries = [f"авто {_loc}" for _loc in vk_search_locations] + [
-                f"барахолка авто {vk_search_locations[0]}",
-                f"продажа авто {vk_search_locations[0]}",
-                f"автомобили {vk_search_locations[0]}",
-            ]
-            for _gq in _gs_queries[:5]:
+
+        def _scrape_group_api(gid: int, gname: str = "") -> None:
+            if gid in _found_group_ids:
+                return
+            _found_group_ids.add(gid)
+            try:
+                rg = session.get(f"{VK_API}/wall.get",
+                    params={"owner_id": f"-{gid}", "count": 100, "filter": "owner", **common}, timeout=10)
+                for post in rg.json().get("response", {}).get("items", []):
+                    _add_post(post, label=gname)
+            except Exception:
+                pass
+            for _wq in ["продам", "продаю", "продается", "продаётся"]:
                 try:
-                    r = session.get(f"{VK_API}/groups.search",
-                        params={"q": _gq, "type": "group", "count": 20, **common}, timeout=8)
-                    groups = r.json().get("response", {}).get("items", [])
-                    for g in groups:
-                        gid = g.get("id")
-                        if not gid or gid in _found_group_ids:
-                            continue
-                        _found_group_ids.add(gid)
-                        # wall.get — все последние посты
-                        try:
-                            rg = session.get(f"{VK_API}/wall.get",
-                                params={"owner_id": f"-{gid}", "count": 100, "filter": "owner", **common}, timeout=8)
-                            for post in rg.json().get("response", {}).get("items", []):
-                                _add_post(post, label=g.get("name", ""))
-                        except Exception:
-                            pass
-                        # wall.search — по ключевым словам
-                        for _wq in ["продам", "продаю", "продается"]:
-                            try:
-                                rw = session.get(f"{VK_API}/wall.search",
-                                    params={"owner_id": f"-{gid}", "query": _wq, "count": 50, **common}, timeout=8)
-                                for post in rw.json().get("response", {}).get("items", []):
-                                    _add_post(post, label=g.get("name", ""))
-                            except Exception:
-                                pass
+                    rw = session.get(f"{VK_API}/wall.search",
+                        params={"owner_id": f"-{gid}", "query": _wq, "count": 100, **common}, timeout=10)
+                    for post in rw.json().get("response", {}).get("items", []):
+                        _add_post(post, label=gname)
                 except Exception:
                     pass
-            print(f"  [VK groups.search] нашли {len(_found_group_ids)} групп, {len(batch)} постов")
-        except Exception as e:
-            print(f"  [VK groups.search] {e}")
 
-        # 3. wall.search + wall.get по известным группам города
-        known_groups = VK_AUTO_GROUPS.get(city_key, [])[:12]
+        # Запросы по городу И области — ищем и group, и page (паблики)
+        _gs_queries = []
+        for _loc in vk_search_locations:
+            _gs_queries += [
+                f"автобарахолка {_loc}",
+                f"авто {_loc}",
+                f"продажа авто {_loc}",
+                f"купля продажа авто {_loc}",
+                f"автомобили {_loc}",
+                f"авторынок {_loc}",
+            ]
+        for _gq in _gs_queries[:14]:
+            try:
+                for _gtype in ("page", "group"):
+                    r = session.get(f"{VK_API}/groups.search",
+                        params={"q": _gq, "type": _gtype, "count": 20, **common}, timeout=10)
+                    resp_gs = r.json()
+                    if resp_gs.get("error"):
+                        continue
+                    for g in resp_gs.get("response", {}).get("items", []):
+                        gid = g.get("id")
+                        if gid:
+                            _scrape_group_api(gid, g.get("name", ""))
+            except Exception:
+                pass
+        print(f"  [VK groups.search] нашли {len(_found_group_ids)} групп, {len(batch)} постов")
+
+        # 3. wall.get по известным группам (только те, что реально резолвятся)
+        known_groups = VK_AUTO_GROUPS.get(city_key, [])[:8]
         for slug in known_groups:
             try:
                 ri = session.get(f"{VK_API}/utils.resolveScreenName",
@@ -2949,30 +2976,31 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                 except Exception:
                     pass
 
-        # 2. DDG с site:vk.com
-        queries = [
-            f"site:vk.com автобарахолка {search_locations[0]}",
-            f"site:vk.com продам авто {search_locations[0]} цена",
-        ]
-        for q in queries:
-            try:
-                r = session.get("https://html.duckduckgo.com/html/",
-                                params={"q": q, "kl": "ru-ru"}, timeout=10)
-                if r.status_code == 200:
-                    _add_slugs(_upq.unquote(r.text))
-            except Exception:
-                pass
+        # 2. DDG с site:vk.com — по городу И области
+        for _loc in vk_search_locations[:2]:
+            for q in [
+                f"site:vk.com автобарахолка {_loc}",
+                f"site:vk.com продам авто {_loc} цена",
+                f"site:vk.com авторынок {_loc}",
+            ]:
+                try:
+                    r = session.get("https://html.duckduckgo.com/html/",
+                                    params={"q": q, "kl": "ru-ru"}, timeout=10)
+                    if r.status_code == 200:
+                        _add_slugs(_upq.unquote(r.text))
+                except Exception:
+                    pass
 
         print(f"  [VK discover] найдено {len(found_slugs)} групп: {found_slugs[:5]}")
-        return found_slugs[:12]
+        return found_slugs[:20]
     # 3. Прямой парсинг известных групп + авто-обнаружение новых
-    vk_groups = VK_AUTO_GROUPS.get(city_key, [])[:12]  # только первые 12 проверенных
+    vk_groups = VK_AUTO_GROUPS.get(city_key, [])[:8]  # только первые 8 проверенных
     discovered_groups = _discover_vk_groups()
-    all_vk_groups = list(dict.fromkeys(vk_groups + discovered_groups))[:16]  # cap 16 total
+    all_vk_groups = list(dict.fromkeys(vk_groups + discovered_groups))[:24]  # cap 24 total
     if all_vk_groups:
-        with ThreadPoolExecutor(max_workers=10) as ex:
+        with ThreadPoolExecutor(max_workers=12) as ex:
             futs = {ex.submit(_try_vk_community, slug): slug for slug in all_vk_groups}
-            for fut in as_completed(futs, timeout=20):
+            for fut in as_completed(futs, timeout=25):
                 try:
                     batch = fut.result()
                     if batch:
@@ -9475,7 +9503,7 @@ def _stop_monitor(uid: int):
 @dp.message(Command("monitor"))
 @dp.message(F.text == "🔔 Уведомления")
 async def cmd_monitor(msg: Message):
-    """Включить/выключить автомониторинг новых объявлений ниже рынка."""
+    """Открывает меню настроек уведомлений."""
     uid = msg.from_user.id
     s = load_settings(uid)
     if not s.get("region"):
@@ -9483,32 +9511,28 @@ async def cmd_monitor(msg: Message):
         return
 
     enabled = s.get("monitor_enabled", False)
-    if enabled:
-        # Выключаем
-        s["monitor_enabled"] = False
-        save_settings(uid, s)
-        _stop_monitor(uid)
-        await msg.answer(
-            "🔕 Автомониторинг выключен.\n\n"
-            "Напиши /monitor чтобы снова включить."
-        )
-    else:
-        # Включаем
-        s["monitor_enabled"] = True
-        save_settings(uid, s)
-        _start_monitor(uid)
-        region_name = REGIONS.get(s["region"], s["region"])
-        pmin = s.get("price_min", 0)
-        pmax = s.get("price_max", 99_000_000)
-        await msg.answer(
-            f"✅ *Автомониторинг включён!*\n\n"
-            f"🔔 Буду проверять Авито каждые 2 минуты.\n"
-            f"Регион: {region_name}\n"
-            f"Бюджет: {pmin:,}–{pmax:,} ₽\n"
-            f"Показываю только авто на 10%+ ниже рынка.\n\n"
-            f"Напиши /monitor снова чтобы выключить.",
-            parse_mode="Markdown",
-        )
+    status = "✅ Включён" if enabled else "❌ Выключен"
+    interval = s.get("monitor_interval_min", 5)
+    min_pct = s.get("monitor_min_savings_pct", 10)
+    active_src = _monitor_sources(s)
+    src_names = ", ".join(n for k, n in _MONITOR_SOURCES if k in active_src)
+    extra_regions = s.get("monitor_regions", [])
+    reg_names = ", ".join(REGIONS.get(r, r) for r in extra_regions) if extra_regions else "нет"
+    own_region = REGIONS.get(s.get("region", ""), s.get("region", ""))
+    pmin = s.get("price_min", 0)
+    pmax = s.get("price_max", 99_000_000)
+    await msg.answer(
+        f"🔔 *Настройки уведомлений*\n\n"
+        f"Статус: {status}\n"
+        f"Интервал проверки: каждые {interval} мин\n"
+        f"Минимальная скидка: {min_pct}% ниже рынка\n"
+        f"Площадки: {src_names}\n"
+        f"Регион: {own_region} · Бюджет: {pmin:,}–{pmax:,} ₽".replace(",", " ")
+        + (f"\nДоп. регионы: {reg_names}" if extra_regions else "") +
+        f"\n\nПри появлении выгодного авто — сразу пришлю с фото, ценой и скидкой от рынка.",
+        parse_mode="Markdown",
+        reply_markup=_notify_keyboard(s),
+    )
 
 
 BOT_USERNAME = os.getenv("BOT_USERNAME", "")
