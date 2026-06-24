@@ -7769,8 +7769,49 @@ SOURCE_TAGS = {
 # Кеш результатов поиска: uid -> list[dict]
 _search_cache: dict[int, list[dict]] = {}
 
+# PostgreSQL кеш поиска (переживает перезапуск Railway)
+_DB_URL = os.getenv("DATABASE_URL", "")
+_db_conn = None
+
+def _get_db():
+    global _db_conn
+    if not _DB_URL:
+        return None
+    try:
+        import psycopg2
+        if _db_conn is None or _db_conn.closed:
+            _db_conn = psycopg2.connect(_DB_URL, connect_timeout=5)
+            _db_conn.autocommit = True
+            cur = _db_conn.cursor()
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS search_cache (
+                    uid BIGINT PRIMARY KEY,
+                    items TEXT,
+                    updated_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            cur.close()
+        return _db_conn
+    except Exception:
+        return None
+
 
 def _save_cache(uid: int, items: list[dict]):
+    # Сохраняем в PostgreSQL (переживает рестарт)
+    try:
+        db = _get_db()
+        if db:
+            cur = db.cursor()
+            cur.execute(
+                "INSERT INTO search_cache(uid, items, updated_at) VALUES(%s,%s,NOW()) "
+                "ON CONFLICT(uid) DO UPDATE SET items=EXCLUDED.items, updated_at=NOW()",
+                (uid, json.dumps(items, ensure_ascii=False, default=str))
+            )
+            cur.close()
+            return
+    except Exception:
+        pass
+    # Fallback: файл
     try:
         f = user_dir(uid) / "last_search.json"
         f.write_text(json.dumps(items, ensure_ascii=False, default=str), encoding="utf-8")
@@ -7779,6 +7820,19 @@ def _save_cache(uid: int, items: list[dict]):
 
 
 def _load_cache(uid: int) -> list[dict]:
+    # Сначала из PostgreSQL
+    try:
+        db = _get_db()
+        if db:
+            cur = db.cursor()
+            cur.execute("SELECT items FROM search_cache WHERE uid=%s", (uid,))
+            row = cur.fetchone()
+            cur.close()
+            if row:
+                return json.loads(row[0])
+    except Exception:
+        pass
+    # Fallback: файл
     try:
         f = user_dir(uid) / "last_search.json"
         if f.exists():
@@ -8541,6 +8595,15 @@ async def cb_page(cb: CallbackQuery):
     uid = int(uid_s)
     offset = int(offset_s)
     await cb.answer()
+    # Если кеш пустой (бот перезапустился) и offset > 0 — перезапускаем поиск
+    items = _search_cache.get(uid) or _load_cache(uid)
+    if not items and offset > 0:
+        await bot.send_message(
+            cb.message.chat.id,
+            "🔄 Бот перезапустился, кеш очистился. Повторяю поиск...",
+        )
+        await do_search_for_user(uid, cb.message)
+        return
     await send_batch(cb.message.chat.id, uid, offset)
 
 
