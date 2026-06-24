@@ -594,28 +594,45 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
 
 def _sort_by_deal(items: list[dict]) -> list[dict]:
     """
-    Финальная сортировка списка объявлений по выгодности сделки.
+    Идеальная сортировка: сначала самые выгодные + висящие дольше.
 
-    Порядок приоритетов:
-      1. Ниже рынка (savings_pct > 0) → всегда выше рыночных
-      2. По убыванию _deal_score внутри каждой группы
-      3. Объявления без цены — в конец
+    Логика:
+      Tier 0 — ниже рынка (savings_pct > 0):
+        Ключ: -(savings_pct * 2 + age_bonus)
+        age_bonus = min(days, 90) * 0.5   → макс 45 очков за 90 дней
+        savings   = pct * 2               → -30% даёт 60 очков
+        Смысл: среди одинакового % скидки тот, кто висит дольше, идёт первым.
+        Пример: -25% 0 дней = 50 очков, -25% 30 дней = 65 очков → 30-дневный первый.
+                -40% 0 дней = 80 очков → всё равно выше -25%, правильно.
+
+      Tier 1 — по рынку или выше, но цена известна:
+        Сортировка: дешевле → выше (покупатель ищет минимум)
+
+      Tier 2 — цена неизвестна: в конец
+
+      Tier 10 — уже просмотрено: самый конец
     """
-    def _tier(x):
+    def _score(x) -> float:
+        pct  = x.get("_savings_pct", 0) or 0
+        days = x.get("_days_on_site", 0) or 0
+        # Бонус за срочность/торг в тексте (уже посчитан в _deal_score)
+        hot  = 10.0 if (x.get("_deal_score", 0) - pct * 3) > 10 else 0.0
+        age_bonus = min(days, 90) * 0.5
+        return pct * 2.0 + age_bonus + hot
+
+    def _tier(x) -> int:
         if x.get("_already_seen"):
-            return 10  # просмотренные — в самый конец
-        s = x.get("_savings_pct", None)
-        if s is not None and s > 0:
-            return 0   # ниже рынка
-        elif x.get("_price_int", 0) > 0:
-            return 1   # есть цена, но по рынку или выше
-        else:
-            return 2   # цена неизвестна
+            return 10
+        pct = x.get("_savings_pct", 0) or 0
+        if pct > 0:
+            return 0
+        if x.get("_price_int", 0) > 0:
+            return 1
+        return 2
 
     items.sort(key=lambda x: (
         _tier(x),
-        -x.get("_deal_score", 0),
-        x.get("_price_int", 999_999_999),
+        -_score(x) if _tier(x) == 0 else x.get("_price_int", 999_999_999),
     ))
     return items
 
