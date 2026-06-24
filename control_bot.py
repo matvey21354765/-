@@ -510,8 +510,8 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
             brand_key_m = key.split(" ", 1)[0]
             groups_brand.setdefault(brand_key_m, []).append(p)
 
-    market: dict[str, float] = {k: median(v) for k, v in groups.items() if len(v) >= 2}
-    market_year_bracket: dict[str, float] = {k: median(v) for k, v in groups_year_bracket.items() if len(v) >= 2}
+    market: dict[str, float] = {k: median(v) for k, v in groups.items() if len(v) >= 1}
+    market_year_bracket: dict[str, float] = {k: median(v) for k, v in groups_year_bracket.items() if len(v) >= 1}
     market_broad: dict[str, float] = {k: median(v) for k, v in groups_broad.items() if len(v) >= 2}
     market_brand: dict[str, float] = {k: median(v) for k, v in groups_brand.items() if len(v) >= 3}
 
@@ -7237,6 +7237,7 @@ def _fetch_and_check(url: str, source: str) -> dict | None:
         if photo_url and any(p in photo_url for p in _DROM_PLACEHOLDER_URLS):
             photo_url = ""
         # Для Auto.ru: парсим фото из __INITIAL_STATE__ если og:image пустой
+        description = ""  # инициализируем до всех проверок
         if not photo_url and source == "autoru":
             _am = re.search(r'"(?:1200x900|832x624|456x342)"\s*:\s*"((?:https?:)?//[^"]{15,})"', text)
             if _am:
@@ -7247,7 +7248,7 @@ def _fetch_and_check(url: str, source: str) -> dict | None:
                 if _am2:
                     raw = _am2.group(1).replace("\\/", "/")
                     photo_url = ("https:" + raw) if raw.startswith("//") else raw
-            # Описание для Auto.ru
+            # Описание для Auto.ru из JSON
             if not description:
                 _dm = re.search(r'"description"\s*:\s*"((?:\\.|[^"\\]){20,400})"', text)
                 if _dm:
@@ -7271,26 +7272,46 @@ def _fetch_and_check(url: str, source: str) -> dict | None:
             photo_url = "https:" + photo_url if photo_url.startswith("//") else ""
 
         # Описание продавца
-        if source == "drom":
-            desc_el = (
-                soup.select_one("[data-ftid='bull_description']")
-                or soup.select_one("[data-ftid='item_description']")
-                or soup.select_one("div[class*='comment']")
-                or soup.select_one("div[class*='description']")
-            )
-        elif source == "avito":
-            desc_el = (
-                soup.select_one("div[itemprop='description']")
-                or soup.select_one("[data-marker='item-view/item-description']")
-                or soup.select_one("div[class*='description-text']")
-            )
-        else:
-            desc_el = (
-                soup.select_one("div[class*='description']")
-                or soup.select_one("p[class*='description']")
-                or soup.select_one("[itemprop='description']")
-            )
-        description = desc_el.get_text(strip=True)[:500] if desc_el else ""
+        if not description:
+            if source == "drom":
+                desc_el = (
+                    soup.select_one("[data-ftid='bull_description']")
+                    or soup.select_one("[data-ftid='item_description']")
+                    or soup.select_one("div[class*='bull-item__description']")
+                    or soup.select_one("div[class*='comment']")
+                    or soup.select_one("div[class*='description']")
+                )
+                description = desc_el.get_text(strip=True)[:500] if desc_el else ""
+                # Дром может рендерить описание в JSON внутри <script>
+                if not description:
+                    _djm = re.search(
+                        r'"(?:description|comment|text)"\s*:\s*"((?:\\.|[^"\\]){20,500})"', text
+                    )
+                    if _djm:
+                        description = _djm.group(1).replace("\\n", "\n").replace('\\"', '"').strip()[:500]
+                # Парсим характеристики как описание (год, пробег, двигатель)
+                if not description:
+                    _chars: list[str] = []
+                    for _li in soup.select("li[class*='param'], li[class*='char'], span[class*='value']"):
+                        _t = _li.get_text(strip=True)
+                        if _t and len(_t) < 60:
+                            _chars.append(_t)
+                    if _chars:
+                        description = " · ".join(_chars[:6])
+            elif source == "avito":
+                desc_el = (
+                    soup.select_one("div[itemprop='description']")
+                    or soup.select_one("[data-marker='item-view/item-description']")
+                    or soup.select_one("div[class*='description-text']")
+                )
+                description = desc_el.get_text(strip=True)[:500] if desc_el else ""
+            else:
+                desc_el = (
+                    soup.select_one("div[class*='description']")
+                    or soup.select_one("p[class*='description']")
+                    or soup.select_one("[itemprop='description']")
+                )
+                description = desc_el.get_text(strip=True)[:500] if desc_el else ""
 
         return {"_photo_url": photo_url, "description": description}
     except Exception:
