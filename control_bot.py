@@ -1818,6 +1818,7 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Accept-Language": "ru-RU,ru;q=0.9",
     })
+    _TG_FALLBACK_PROXY = "http://VAdPaN:EDNyWFYHyH2Y@mproxy.site:16358"
     _tg_proxy_url = (
         os.getenv("PROXY_URL") or
         os.getenv("AVITO_PROXY_URL") or
@@ -1825,7 +1826,7 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
             f"http://{AVITO_PROXY_USER}:{AVITO_PROXY_PASS}@{AVITO_PROXY_HOST}:{AVITO_PROXY_PORT}"
             if AVITO_PROXY_HOST and AVITO_PROXY_USER and not _proxy_auth_failed
             else ""
-        )
+        ) or _TG_FALLBACK_PROXY
     )
     if _tg_proxy_url and "__agentproxy" not in _tg_proxy_url:
         session.proxies.update({"http": _tg_proxy_url, "https": _tg_proxy_url})
@@ -1994,6 +1995,36 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
                         found += _tme_re.findall(_upq_tg.unquote(r.text))
                 except Exception:
                     pass
+
+        # 5. Google — ищет t.me ссылки лучше всего с российского IP
+        for _loc in search_locations:
+            for _q in [
+                f"site:t.me автобарахолка {_loc}",
+                f"site:t.me продам авто {_loc}",
+                f"telegram автобарахолка {_loc} канал",
+            ]:
+                try:
+                    r = session.get("https://www.google.com/search",
+                        params={"q": _q, "hl": "ru", "num": "20"},
+                        timeout=9,
+                        headers={
+                            "User-Agent": "Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.82 Mobile Safari/537.36",
+                            "Accept-Language": "ru-RU,ru;q=0.9",
+                        })
+                    if r.status_code == 200:
+                        found += _tme_re.findall(_upq_tg.unquote(r.text))
+                except Exception:
+                    pass
+
+        # 6. Telegram поиск через web.telegram.org (публичные каналы)
+        try:
+            r = session.get("https://telegram.me/s/",
+                params={"q": f"автобарахолка {region_name_ru}"},
+                timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+            if r.status_code == 200:
+                found += _tme_re.findall(r.text)
+        except Exception:
+            pass
 
         unique = [s for s in dict.fromkeys(found)
                   if s.lower() not in {x.lower() for x in _skip_tg} and len(s) >= 4]
@@ -2296,7 +2327,9 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Accept-Language": "ru-RU,ru;q=0.9",
     })
-    # Используем тот же русский прокси что и для Авито — лучше обходит блокировки VK/Yandex
+    # Русский резидентный прокси — обходит блокировки VK API / Yandex / DDG
+    # Хардкодим как абсолютный fallback чтобы работало даже без Railway env vars
+    _VK_FALLBACK_PROXY = "http://VAdPaN:EDNyWFYHyH2Y@mproxy.site:16358"
     _vk_proxy_url = (
         os.getenv("PROXY_URL") or
         os.getenv("AVITO_PROXY_URL") or
@@ -2304,7 +2337,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
             f"http://{AVITO_PROXY_USER}:{AVITO_PROXY_PASS}@{AVITO_PROXY_HOST}:{AVITO_PROXY_PORT}"
             if AVITO_PROXY_HOST and AVITO_PROXY_USER and not _proxy_auth_failed
             else ""
-        )
+        ) or _VK_FALLBACK_PROXY
     )
     if _vk_proxy_url and "__agentproxy" not in _vk_proxy_url:
         session.proxies.update({"http": _vk_proxy_url, "https": _vk_proxy_url})
@@ -2400,6 +2433,53 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
             except Exception:
                 pass
 
+    def _vk_web_search(loc: str):
+        """VK собственный веб-поиск сообществ — работает без токена через браузер."""
+        import urllib.parse as _upvw
+        _vk_section_re = re.compile(r'vk\.com/(?:club|public)(\d+)|"id":(\d+),"name":"[^"]*(?:авто|авт|барахол|машин|продам)[^"]*"', re.I)
+        for q in [
+            f"автобарахолка {loc}",
+            f"авто продам {loc}",
+            f"авторынок {loc}",
+        ]:
+            try:
+                r = session.get("https://vk.com/search",
+                    params={"c[section]": "communities", "c[type]": "1", "q": q},
+                    timeout=10,
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                        "Accept": "text/html,application/xhtml+xml",
+                        "Referer": "https://vk.com/",
+                    })
+                if r.status_code == 200:
+                    _parse_vk_group_refs(r.text)
+                    # Также ищем JSON-формат с group IDs
+                    for m in _vk_section_re.finditer(r.text):
+                        gid = int(m.group(1) or m.group(2) or 0)
+                        if gid and gid not in _found_group_ids:
+                            _found_group_ids[gid] = f"club{gid}"
+            except Exception:
+                pass
+
+    def _google_vk_groups_search(loc: str):
+        """Google как альтернатива Yandex для поиска VK групп."""
+        for q in [
+            f"site:vk.com автобарахолка {loc}",
+            f"site:vk.com продам авто {loc} барахолка",
+        ]:
+            try:
+                r = session.get("https://www.google.com/search",
+                    params={"q": q, "hl": "ru", "num": "20"},
+                    timeout=9,
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.82 Mobile Safari/537.36",
+                        "Accept-Language": "ru-RU,ru;q=0.9",
+                    })
+                if r.status_code == 200:
+                    _parse_vk_group_refs(r.text)
+            except Exception:
+                pass
+
     def _ddg_vk_groups_search(loc: str):
         for q in [
             f"site:vk.com автобарахолка {loc}",
@@ -2413,20 +2493,34 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
             except Exception:
                 pass
 
-    # Параллельно ищем по городу и области
+    # Параллельно ищем по городу и области всеми доступными методами
     _disc_tasks = [(_yandex_vk_groups_search, loc) for loc in vk_search_locations]
     _disc_tasks += [(_ddg_vk_groups_search, loc) for loc in vk_search_locations[:1]]
-    with _TPE_VK(max_workers=8) as _ex_disc:
+    _disc_tasks += [(_vk_web_search, loc) for loc in vk_search_locations]    # VK собственный поиск
+    _disc_tasks += [(_google_vk_groups_search, loc) for loc in vk_search_locations[:1]]  # Google backup
+    with _TPE_VK(max_workers=10) as _ex_disc:
         futs_disc = [_ex_disc.submit(fn, loc) for fn, loc in _disc_tasks]
-        for _ in _ac_VK(futs_disc, timeout=15):
+        for _ in _ac_VK(futs_disc, timeout=20):
             pass
     print(f"  [VK discover] ID групп: {len(_found_group_ids)}, slugs: {len(_found_slugs)}")
 
-    # ── Шаг 2: VK API groups.search (если есть токен) ───────────────
+    # ── Шаг 2: VK API groups.search ──────────────────────────────────
     VK_API_URL = "https://api.vk.com/method"
-    _api_params = {"access_token": vk_token, "v": "5.199"} if vk_token else {}
-
+    # Проверяем токен — если невалидный (ошибка 5), сбрасываем
+    _vk_token_ok = False
     if vk_token:
+        try:
+            _test_r = session.get(f"{VK_API_URL}/groups.search",
+                params={"q": "авто", "count": 1, "access_token": vk_token, "v": "5.199"}, timeout=5)
+            _test_resp = _test_r.json()
+            _vk_token_ok = "error" not in _test_resp
+            if not _vk_token_ok:
+                print(f"  [VK] токен невалиден: {_test_resp.get('error',{}).get('error_msg','?')}")
+        except Exception:
+            pass
+    _api_params = {"access_token": vk_token, "v": "5.199"} if _vk_token_ok else {}
+
+    if _vk_token_ok:
         def _gs_one(q_type: tuple) -> list:
             gq, gtype = q_type
             try:
@@ -2475,18 +2569,20 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
         gid, gname = gid_name
         local = []
         base = {"owner_id": f"-{gid}", "count": 100, "filter": "owner", "v": "5.199"}
-        if vk_token:
+        if _vk_token_ok:
             base["access_token"] = vk_token
         try:
             rg = session.get(f"{VK_API_URL}/wall.get", params=base, timeout=8)
-            for post in rg.json().get("response", {}).get("items", []):
+            data = rg.json()
+            # wall.get без токена работает для открытых групп
+            for post in (data.get("response", {}).get("items", []) if isinstance(data.get("response"), dict) else []):
                 item = _vk_make_item(post, gname)
                 if item:
                     local.append(item)
         except Exception:
             pass
         ws = {"owner_id": f"-{gid}", "query": "продам", "count": 100, "v": "5.199"}
-        if vk_token:
+        if _vk_token_ok:
             ws["access_token"] = vk_token
         try:
             rw = session.get(f"{VK_API_URL}/wall.search", params=ws, timeout=8)
@@ -2733,7 +2829,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
         def _resolve_slug_to_id(slug: str) -> "tuple[int,str]|None":
             try:
                 params = {"group_ids": slug, "v": "5.199"}
-                if vk_token:
+                if _vk_token_ok:
                     params["access_token"] = vk_token
                 r = session.get(f"{VK_API_URL}/groups.getById",
                     params=params, timeout=6)
