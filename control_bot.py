@@ -2424,249 +2424,63 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
 
     # ── Шаг 1: Проверяем токен и ищем группы через API ──────────────
     _found_group_ids: dict[int, str] = {}
-    _found_slugs: list[str] = []
-    _vk_group_id_re = re.compile(r'vk\.com/(?:club|public)(\d+)', re.I)
-    _vk_slug_re2 = re.compile(r'vk\.com/([a-zA-Z][a-zA-Z0-9_.]{3,40})(?=["\s\?/]|$)', re.I)
-    _skip_vk = {"wall","photo","video","music","feed","im","messages","login",
-                "join","share","away","l","id","app","market","faq","support",
-                "dev","blog","about","terms","privacy","advertising","vk",
-                "vkontakte","catalog","events","groups","people","search","write",
-                "albums","audios","docs","friends","notifications","settings","bookmark"}
-
-    def _parse_vk_group_refs(html: str):
-        html_d = _upq_vk.unquote(html)
-        for m in _vk_group_id_re.finditer(html_d):
-            gid = int(m.group(1))
-            if gid not in _found_group_ids:
-                _found_group_ids[gid] = f"club{gid}"
-        for m in _vk_slug_re2.finditer(html_d):
-            sl = m.group(1).lower().rstrip(".,)")
-            if (sl not in _skip_vk and not re.match(r'^\d+$', sl)
-                    and sl not in _found_slugs and len(sl) >= 4):
-                _found_slugs.append(sl)
-
-    def _vk_ajax_search(loc: str):
-        """VK внутренний AJAX поиск сообществ — работает без авторизации."""
-        for q in [f"автобарахолка {loc}", f"авто продам {loc}", f"авторынок {loc}"]:
-            try:
-                # VK внутренний AJAX endpoint для поиска сообществ
-                r = session.post("https://vk.com/al_search.php",
-                    data={"act": "section", "section": "communities",
-                          "c[q]": q, "offset": "0", "ajax": "1"},
-                    timeout=10,
-                    headers={
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                        "X-Requested-With": "XMLHttpRequest",
-                        "Referer": "https://vk.com/search",
-                        "Content-Type": "application/x-www-form-urlencoded",
-                        "Origin": "https://vk.com",
-                    })
-                if r.status_code == 200:
-                    _parse_vk_group_refs(r.text)
-                    # Также парсим JSON-ответ
-                    try:
-                        jd = r.json()
-                        payload = jd.get("payload", [[]])[1] if isinstance(jd.get("payload"), list) else []
-                        for item in (payload if isinstance(payload, list) else []):
-                            if isinstance(item, dict):
-                                gid = item.get("id") or item.get("group_id")
-                                if gid and abs(int(gid)) not in _found_group_ids:
-                                    _found_group_ids[abs(int(gid))] = item.get("name", f"club{gid}")
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-
-    def _bing_vk_search(loc: str):
-        """Bing поиск VK групп — менее строгий чем Yandex, работает без captcha."""
-        for q in [
-            f"site:vk.com/club автобарахолка {loc}",
-            f"site:vk.com/public продам авто {loc}",
-            f"vk.com club автобарахолка {loc}",
-        ]:
-            try:
-                r = session.get("https://www.bing.com/search",
-                    params={"q": q, "setlang": "ru", "count": "20"},
-                    timeout=9,
-                    headers={
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                        "Accept-Language": "ru-RU,ru;q=0.9",
-                    })
-                if r.status_code == 200:
-                    _parse_vk_group_refs(r.text)
-            except Exception:
-                pass
-
-    def _yandex_vk_groups_search(loc: str):
-        for q in [
-            f"site:vk.com/club автобарахолка {loc}",
-            f"site:vk.com/public продажа авто {loc}",
-            f"site:vk.com авторынок {loc} продам",
-            f"site:vk.com автомобили барахолка {loc}",
-        ]:
-            try:
-                r = session.get("https://yandex.ru/search/",
-                    params={"text": q}, timeout=9,
-                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
-                if r.status_code == 200:
-                    _parse_vk_group_refs(r.text)
-            except Exception:
-                pass
-
-    def _vk_mobile_search(loc: str):
-        """Мобильный VK поиск сообществ — работает без авторизации."""
-        _mob_ua = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.82 Mobile Safari/537.36"
-        _vk_id_re2 = re.compile(r'href="/(?:club|public)(\d+)"|data-id="(\d+)"', re.I)
-        for q in [
-            f"автобарахолка {loc}",
-            f"авто продам {loc}",
-            f"авторынок {loc}",
-            f"авто барахолка {loc}",
-        ]:
-            try:
-                # Мобильный поиск сообществ — без логина возвращает HTML со slug/id
-                r = session.get("https://m.vk.com/search",
-                    params={"q": q, "section": "communities"},
-                    timeout=10, allow_redirects=True,
-                    headers={"User-Agent": _mob_ua, "Accept-Language": "ru-RU,ru;q=0.9"})
-                if r.status_code == 200 and "club" in r.text.lower():
-                    _parse_vk_group_refs(r.text)
-                    for m in _vk_id_re2.finditer(r.text):
-                        gid = int(m.group(1) or m.group(2) or 0)
-                        if gid and gid not in _found_group_ids:
-                            _found_group_ids[gid] = f"club{gid}"
-            except Exception:
-                pass
-            try:
-                # VK catalog groups — тоже без логина
-                r2 = session.get("https://m.vk.com/catalog.php",
-                    params={"section": "groups", "query": q},
-                    timeout=9, headers={"User-Agent": _mob_ua})
-                if r2.status_code == 200:
-                    _parse_vk_group_refs(r2.text)
-                    for m in _vk_id_re2.finditer(r2.text):
-                        gid = int(m.group(1) or m.group(2) or 0)
-                        if gid and gid not in _found_group_ids:
-                            _found_group_ids[gid] = f"club{gid}"
-            except Exception:
-                pass
-
-    def _vk_api_no_token_search(loc: str):
-        """VK API groups.search — иногда работает без токена для публичных данных."""
-        for q in [f"автобарахолка {loc}", f"авто {loc}", f"продажа авто {loc}"]:
-            try:
-                r = session.get(f"https://api.vk.com/method/groups.search",
-                    params={"q": q, "count": 20, "type": "page,group", "v": "5.199"},
-                    timeout=8)
-                resp = r.json()
-                if "error" not in resp:
-                    for g in resp.get("response", {}).get("items", []):
-                        gid = g.get("id")
-                        if gid and gid not in _found_group_ids:
-                            _found_group_ids[gid] = g.get("name", f"club{gid}")
-                else:
-                    # Если ошибка авторизации — смысла повторять нет
-                    if resp["error"].get("error_code") in (5, 15):
-                        break
-            except Exception:
-                pass
-
-    def _google_vk_groups_search(loc: str):
-        """Google как альтернатива Yandex для поиска VK групп."""
-        for q in [
-            f"site:vk.com автобарахолка {loc}",
-            f"site:vk.com продам авто {loc} барахолка",
-        ]:
-            try:
-                r = session.get("https://www.google.com/search",
-                    params={"q": q, "hl": "ru", "num": "20"},
-                    timeout=9,
-                    headers={
-                        "User-Agent": "Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.82 Mobile Safari/537.36",
-                        "Accept-Language": "ru-RU,ru;q=0.9",
-                    })
-                if r.status_code == 200:
-                    _parse_vk_group_refs(r.text)
-            except Exception:
-                pass
-
-    def _ddg_vk_groups_search(loc: str):
-        for q in [
-            f"site:vk.com автобарахолка {loc}",
-            f"site:vk.com продам авто {loc}",
-        ]:
-            try:
-                r = session.get("https://html.duckduckgo.com/html/",
-                    params={"q": q, "kl": "ru-ru"}, timeout=9)
-                if r.status_code == 200:
-                    _parse_vk_group_refs(r.text)
-            except Exception:
-                pass
-
-    # Параллельно ищем по городу и области всеми доступными методами
-    _disc_tasks = [(_vk_ajax_search, loc) for loc in vk_search_locations]         # VK AJAX (главный)
-    _disc_tasks += [(_bing_vk_search, loc) for loc in vk_search_locations]         # Bing (надёжный)
-    _disc_tasks += [(_yandex_vk_groups_search, loc) for loc in vk_search_locations]
-    _disc_tasks += [(_ddg_vk_groups_search, loc) for loc in vk_search_locations[:1]]
-    _disc_tasks += [(_vk_mobile_search, loc) for loc in vk_search_locations]
-    _disc_tasks += [(_google_vk_groups_search, loc) for loc in vk_search_locations[:1]]
-    with _TPE_VK(max_workers=14) as _ex_disc:
-        futs_disc = [_ex_disc.submit(fn, loc) for fn, loc in _disc_tasks]
-        for _ in _ac_VK(futs_disc, timeout=25):
-            pass
-    print(f"  [VK discover] ID групп: {len(_found_group_ids)}, slugs: {len(_found_slugs)}")
-
-    # ── Шаг 2: VK API groups.search ──────────────────────────────────
-    VK_API_URL = "https://api.vk.com/method"
-    # Проверяем токен — если невалидный (ошибка 5), сбрасываем
     _vk_token_ok = False
+
     if vk_token:
         try:
-            _test_r = session.get(f"{VK_API_URL}/groups.search",
-                params={"q": "авто", "count": 1, "access_token": vk_token, "v": "5.199"}, timeout=5)
-            _test_resp = _test_r.json()
-            _vk_token_ok = "error" not in _test_resp
+            _tr = session.get(f"{VK_API_URL}/groups.search",
+                params={"q": f"автобарахолка {region_name_ru}", "count": 1,
+                        "access_token": vk_token, "v": "5.199"}, timeout=8)
+            _tr_json = _tr.json()
+            _vk_token_ok = "error" not in _tr_json
             if not _vk_token_ok:
-                print(f"  [VK] токен невалиден: {_test_resp.get('error',{}).get('error_msg','?')}")
-        except Exception:
-            pass
-    _api_params = {"access_token": vk_token, "v": "5.199"} if _vk_token_ok else {}
+                _ec = _tr_json.get("error", {}).get("error_code", 0)
+                print(f"  [VK] токен невалиден: код {_ec} {_tr_json.get('error',{}).get('error_msg','')}")
+        except Exception as e:
+            print(f"  [VK] ошибка проверки токена: {e}")
 
     if _vk_token_ok:
-        def _gs_one(q_type: tuple) -> list:
-            gq, gtype = q_type
+        # groups.search — найдёт реальные группы по городу
+        _gs_queries = [
+            f"автобарахолка {region_name_ru}",
+            f"авто {region_name_ru}",
+            f"продажа авто {region_name_ru}",
+            f"авторынок {region_name_ru}",
+            f"автобарахолка {oblast_name_ru}",
+            f"авто {oblast_name_ru}",
+        ]
+        def _gs_one(q: str) -> list:
             try:
                 r = session.get(f"{VK_API_URL}/groups.search",
-                    params={"q": gq, "type": gtype, "count": 20, **_api_params}, timeout=8)
+                    params={"q": q, "count": 20, "type": "page,group",
+                            "access_token": vk_token, "v": "5.199"}, timeout=8)
                 resp = r.json()
-                if resp.get("error"):
+                if "error" in resp:
                     return []
                 return resp.get("response", {}).get("items", [])
             except Exception:
                 return []
 
-        _api_gs_tasks = [(q, t)
-            for loc in vk_search_locations
-            for q in [f"автобарахолка {loc}", f"авто {loc}", f"продажа авто {loc}"]
-            for t in ("page", "group")]
-        with _TPE_VK(max_workers=8) as _gsex:
-            for res in _gsex.map(_gs_one, _api_gs_tasks[:16], timeout=15):
+        with _TPE_VK(max_workers=6) as _gsex:
+            for res in _gsex.map(_gs_one, _gs_queries, timeout=20):
                 for g in (res or []):
                     gid = g.get("id")
                     if gid and gid not in _found_group_ids:
                         _found_group_ids[gid] = g.get("name", f"club{gid}")
+        print(f"  [VK groups.search] найдено {len(_found_group_ids)} групп")
 
-        # newsfeed.search — работает только с user-token
+        # newsfeed.search — прямой поиск постов (только с user-token)
         _nf_seen: set[str] = set()
-        for q in [f"продам авто {loc}" for loc in vk_search_locations] + ["срочно авто торг"]:
+        for _nfq in [f"продам авто {region_name_ru}", f"продам {region_name_ru} пробег"]:
             try:
                 r = session.get(f"{VK_API_URL}/newsfeed.search",
-                    params={"q": q, "count": 100, "extended": 1, **_api_params}, timeout=8)
+                    params={"q": _nfq, "count": 100, "extended": 1,
+                            "access_token": vk_token, "v": "5.199"}, timeout=8)
                 resp = r.json()
                 if resp.get("error"):
                     break
                 for post in resp.get("response", {}).get("items", []):
-                    item = _vk_make_item(post, "")
+                    item = _vk_make_item(post, "newsfeed")
                     if item and item["url"] not in _nf_seen:
                         _nf_seen.add(item["url"])
                         results.append(item)
@@ -2675,351 +2489,122 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
         if _nf_seen:
             print(f"  [VK newsfeed] {len(_nf_seen)} постов")
 
-    # ── Шаг 3: Скрейпим стены найденных групп через VK API ──────────
-    # wall.get на публичных группах работает БЕЗ токена
-    def _scrape_group_wall(gid_name: tuple) -> list:
+    # ── Шаг 2: Скрейпим стены найденных групп ────────────────────────
+    def _scrape_wall(gid_name: tuple) -> list:
         gid, gname = gid_name
         local = []
         base = {"owner_id": f"-{gid}", "count": 100, "filter": "owner", "v": "5.199"}
+        search = {"owner_id": f"-{gid}", "query": "продам", "count": 100, "v": "5.199"}
         if _vk_token_ok:
             base["access_token"] = vk_token
+            search["access_token"] = vk_token
         try:
-            rg = session.get(f"{VK_API_URL}/wall.get", params=base, timeout=8)
-            data = rg.json()
-            # wall.get без токена работает для открытых групп
-            for post in (data.get("response", {}).get("items", []) if isinstance(data.get("response"), dict) else []):
+            rg = session.get(f"{VK_API_URL}/wall.get", params=base, timeout=10)
+            resp = rg.json().get("response", {})
+            for post in (resp.get("items", []) if isinstance(resp, dict) else []):
                 item = _vk_make_item(post, gname)
                 if item:
                     local.append(item)
         except Exception:
             pass
-        ws = {"owner_id": f"-{gid}", "query": "продам", "count": 100, "v": "5.199"}
-        if _vk_token_ok:
-            ws["access_token"] = vk_token
         try:
-            rw = session.get(f"{VK_API_URL}/wall.search", params=ws, timeout=8)
-            for post in rw.json().get("response", {}).get("items", []):
+            rw = session.get(f"{VK_API_URL}/wall.search", params=search, timeout=10)
+            resp2 = rw.json().get("response", {})
+            for post in (resp2.get("items", []) if isinstance(resp2, dict) else []):
                 item = _vk_make_item(post, gname)
-                if item:
+                if item and item["url"] not in {x["url"] for x in local}:
                     local.append(item)
         except Exception:
             pass
         return local
 
-    wall_groups = list(_found_group_ids.items())[:30]
+    wall_groups = list(_found_group_ids.items())[:40]
     _wall_seen: set[str] = set()
-    with _TPE_VK(max_workers=12) as _wex:
-        for posts in _wex.map(_scrape_group_wall, wall_groups, timeout=25):
-            for item in (posts or []):
-                if item["url"] not in _wall_seen:
-                    _wall_seen.add(item["url"])
-                    results.append(item)
-    print(f"  [VK walls] {len(_wall_seen)} постов из {len(wall_groups)} групп")
-
-    # ── Шаг 4: Парсим найденные slug-группы через m.vk.com ──────────
-    # Эти slug реально найдены через Yandex/DDG — не фиктивные
-    def _try_vk_community(slug: str) -> list[dict]:
-        """Парсит стену паблика ВКонтакте — до 3 страниц с реальными датами."""
-        try:
-            batch = []
-            seen_post_urls: set[str] = set()
-            today_d = datetime.date.today()
-
-            _mob_ua = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.82 Mobile Safari/537.36"
-            for offset in (0, 20, 40):
-                try:
-                    url_c = f"https://m.vk.com/{slug}" if offset == 0 else f"https://m.vk.com/{slug}?offset={offset}"
-                    r = session.get(url_c, timeout=8, headers={"User-Agent": _mob_ua})
-                    if r.status_code in (302, 403, 404):
-                        break
-                    if r.status_code != 200:
-                        break
-                    rtext = r.text
-                    _page_404 = any(x in rtext for x in (
-                        "This community was removed", "Страница не найдена",
-                        "сообщество недоступно", "private group",
-                        "id=\"not_found\"", "class=\"not_found\""
-                    ))
-                    if _page_404:
-                        break
-                    _has_posts = (
-                        "data-post-id" in rtext or "wi_body" in rtext or
-                        "wall-item__text" in rtext or "post__text" in rtext or
-                        ("wall_item" in rtext and "продам" in rtext.lower())
-                    )
-                    if not _has_posts:
-                        break
-                    soup = _BS(rtext, "lxml")
-                    posts = (soup.select("div._post") or soup.select("div.wall_item") or
-                             soup.select("div.wi") or soup.select("article.post") or
-                             soup.select("div[class*='wall-item']") or
-                             soup.select("[data-post-id]") or soup.select("div[id^='post']"))
-                    if not posts:
-                        break
-                    found_new = False
-                    _our_city_names = {n.lower() for n in vk_search_locations}
-                    _all_city_names = {"москва","московск","питер","петербург","спб",
-                        "новосибирск","казань","екатеринбург","нижний новгород",
-                        "челябинск","самара","омск","ростов","уфа","красноярск",
-                        "пермь","воронеж","тюмень","краснодар","саратов","иркутск"}
-                    for post in posts:
-                        text_el = (post.select_one(".wall_post_text") or
-                                   post.select_one("._post_content") or
-                                   post.select_one(".post__text") or
-                                   post.select_one(".wi_body") or
-                                   post.select_one(".wall-item__text") or
-                                   post.select_one("[class*='post_text']"))
-                        if not text_el:
-                            text_el = post
-                        text = text_el.get_text(" ", strip=True)
-                        if len(text) < 20 or not _is_car_sale_social(text) or _is_moto(text[:200]):
-                            continue
-                        tl = text.lower()
-                        _other = next((c for c in _all_city_names
-                                       if c in tl and not any(oc in tl for oc in _our_city_names)), None)
-                        if _other and not any(oc in tl for oc in _our_city_names):
-                            continue
-                        price = _parse_price(text)
-                        if price > 0 and not (price_min <= price <= price_max):
-                            continue
-                        link_el = post.select_one("a[href*='/wall']") or post.select_one("a.post__date")
-                        post_url = ""
-                        if link_el:
-                            h = link_el.get("href", "")
-                            post_url = f"https://vk.com{h}" if h.startswith("/") else h
-                        if not post_url or post_url in seen_post_urls:
-                            continue
-                        seen_post_urls.add(post_url)
-                        found_new = True
-                        days = 0
-                        time_el = post.select_one("time[datetime]")
-                        if time_el:
-                            try:
-                                from datetime import datetime as _dt
-                                post_date = _dt.fromisoformat(time_el.get("datetime", "")[:10]).date()
-                                days = max(0, (today_d - post_date).days)
-                            except Exception:
-                                pass
-                        photo_url = ""
-                        for img in post.select("img"):
-                            src = img.get("src", "")
-                            if src and ("userapi.com" in src or "vk.com" in src) and "sticker" not in src:
-                                photo_url = src
-                                break
-                        year_m = _vk_year_re.search(text)
-                        phone_m = re.search(r'(?:\+7|8)[\s\-]?\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}', text)
-                        phone = phone_m.group(0).strip() if phone_m else ""
-                        batch.append({
-                            "title": _social_make_title(text),
-                            "price": f"{price:,} ₽".replace(",", " ") if price else "цена не указана",
-                            "_price_int": price,
-                            "url": post_url,
-                            "_photo_url": photo_url,
-                            "description": text[:500],
-                            "source": "vk",
-                            "seller": f"vk.com/{slug}" + (f" · {phone}" if phone else ""),
-                            "_seller_url": f"https://vk.com/{slug}",
-                            "_year": int(year_m.group(1)) if year_m else 0,
-                            "_days_on_site": days,
-                            "_no_price": price == 0,
-                        })
-                        if len(batch) >= 60:
-                            break
-                    if not found_new or len(batch) >= 60:
-                        break
-                    time.sleep(0.1)
-                except Exception:
-                    break
-            return batch
-        except Exception as e:
-            print(f"  [VK {slug}] {e}")
-            return []
-
-    # ── Хардкодные VK slug-группы по городам (fallback если discovery=0) ──
-    # Паттерны: avto_{city}, {city}_avto, avtobazar_{city}, avtobaraholka_{city}
-    # utils.resolveScreenName проверяет каждый и возвращает только реальные группы
-    _VK_SEED_SLUGS: dict[str, list[str]] = {
-        "ekaterinburg": [
-            "avto_ekb", "avtoekb", "avto_ekb96", "ekb_avto96", "baraholka_avto96",
-            "avtobazar_ekb", "avto_eburg", "avto_sverdl", "ekbauto", "prodamavto_ekb",
-            "avtorynok_ekb", "avto96", "avto_yekaterinburg", "auto_ekb",
-            "avtobaraholka_ekb", "avto_baraholka96", "prodaja_avto_ekb",
-            "ekb_baraholka_avto", "avtoprodazha_ekb", "avto_ural96",
-            "prodautoekb", "avto_torg_ekb", "avtorynok96", "avtoboard_ekb",
-            "kupit_avto_ekb96", "prodamavto96", "avtomobili_ekb96",
-        ],
-        "moskva": [
-            "avto_msk", "avtomoskva", "avto77msk", "avtobazar_msk", "prodamavto_msk",
-            "cars_msk", "avto_moscow", "moscowcars", "avtorynok_msk", "kupit_avto_msk",
-            "prodauto_msk", "avtomarket_msk", "auto_moskva",
-        ],
-        "spb": [
-            "avto_spb", "avtospb", "avto78spb", "prodamavto_spb", "avtobazar_spb",
-            "spb_avto78", "cars_spb", "avto_piter", "avto78_prodazha",
-            "kupit_avto_spb", "prodauto_spb",
-        ],
-        "novosibirsk": [
-            "avto_nsk", "avtonsk54", "nsk_avto54", "prodamavto_nsk", "avtobazar_nsk",
-            "novosibirsk_avto", "avto54", "cars_nsk", "avto_novosibirsk",
-        ],
-        "kazan": [
-            "avto_kazan", "avtokazan16", "kazan_avto16", "prodamavto_kazan",
-            "avtobazar_kazan", "cars_kazan", "avto_kzn", "auto_kazan",
-        ],
-        "chelyabinsk": [
-            "avto_chel", "avto74chel", "chel_avto74", "prodamavto_chel",
-            "avtobazar_chel", "cars_chel", "avto74", "avto_chelyabinsk",
-        ],
-        "ufa": [
-            "avto_ufa", "avto02ufa", "ufa_avto02", "prodamavto_ufa",
-            "avtobazar_ufa", "cars_ufa", "avto_bashkortostan",
-        ],
-        "krasnodar": [
-            "avto_krd", "avto23krd", "krasnodar_avto23", "prodamavto_krd",
-            "avtobazar_krasnodar", "kuban_avto", "avto_kuban", "cars_krd",
-            "avto_krasnodar", "auto_krd",
-        ],
-        "omsk": [
-            "avto_omsk", "avto55omsk", "omsk_avto55", "prodamavto_omsk",
-            "avtobazar_omsk", "cars_omsk", "avto55",
-        ],
-        "rostov": [
-            "avto_rostov", "avto61rostov", "rostov_avto61", "prodamavto_rostov",
-            "avtobazar_rostov", "cars_rostov", "avto61", "avto_don",
-            "avto_rostovnadon", "don_avto",
-        ],
-        "tyumen": [
-            "avto_tyumen", "avto72tyumen", "tyumen_avto72", "prodamavto72",
-            "avtobazar_tyumen", "cars_tyumen", "avto72", "avto_tmn",
-        ],
-        "samara": [
-            "avto_samara", "avto63samara", "samara_avto63", "prodamavto63",
-            "avtobazar_samara", "cars_samara", "avto63", "avto_samarskaya",
-        ],
-        "perm": [
-            "avto_perm", "avto59perm", "perm_avto59", "prodamavto59",
-            "avtobazar_perm", "cars_perm", "avto59",
-        ],
-        "voronezh": [
-            "avto_voronezh", "avto36vrn", "voronezh_avto36", "prodamavto36",
-            "avtobazar_voronezh", "cars_vrn", "avto36", "avto_vrn",
-            "vrn_avto", "auto_voronezh", "avtovrn", "avtomobili_vrn",
-        ],
-        "volgograd": [
-            "avto_volgograd", "avto34vlg", "volgograd_avto34", "prodamavto34",
-            "avtobazar_volgograd", "cars_vgd", "avto34",
-        ],
-        "krasnoyarsk": [
-            "avto_krsk", "avto24krsk", "krasnoyarsk_avto24", "prodamavto24",
-            "avtobazar_krs", "cars_krs", "avto24",
-        ],
-        "nn": [
-            "avto_nn", "avto52nn", "nn_avto52", "prodamavto52", "avtobazar_nn",
-            "cars_nn", "avto52", "avto_nnov", "avto_nizhny",
-        ],
-        "saratov": [
-            "avto_saratov", "avto64sar", "saratov_avto64", "prodamavto64",
-            "avtobazar_saratov", "cars_sar", "avto64",
-        ],
-        "irkutsk": [
-            "avto_irkutsk", "avto38irk", "irkutsk_avto38", "prodamavto38",
-            "avtobazar_irkutsk", "cars_irk", "avto38",
-        ],
-        "vladivostok": [
-            "avto_vladivostok", "avto25vlad", "vladivostok_avto25", "prodamavto25",
-            "avtobazar_vlad", "cars_vlad", "avto25", "japancars_vlad",
-        ],
-        "habarovsk": [
-            "avto_habarovsk", "avto27hab", "habarovsk_avto27", "prodamavto27",
-            "avtobazar_hab", "cars_hab", "avto27",
-        ],
-    }
-    # Добавляем хардкодные slugs + генерируем дополнительные паттерны
-    _seed_vk = _VK_SEED_SLUGS.get(city_key, [])
-    for _s in _seed_vk:
-        if _s not in _found_slugs and _s not in _skip_vk:
-            _found_slugs.append(_s)
-
-    # Генерируем дополнительные slug-паттерны для города
-    _ckey = city_key or ""
-    _cname_t = region_name_ru.lower().replace(" ", "")  # "екатеринбург"
-    _cname_e = _ckey  # "ekaterinburg"
-    _rcode = _vk_oblast_names.get(_ckey, "").split()[0].lower()[:4]  # "свер"
-    _extra_patterns = [
-        f"avtobaraholka_{_cname_e}", f"avtoboard_{_cname_e}",
-        f"prodazha_avto_{_cname_e}", f"avtoprodazha_{_cname_e}",
-        f"avto_torg_{_cname_e}", f"kupit_avto_{_cname_e}",
-        f"avtorynok_{_cname_e}", f"avto_rynok_{_cname_e}",
-        f"cars_{_cname_e}", f"car_{_cname_e}",
-        f"prodamauto_{_cname_e}", f"prodam_avto_{_cname_e}",
-        f"avto_{_cname_e}", f"auto_{_cname_e}",
-        f"{_cname_e}_avto", f"{_cname_e}_auto",
-        f"{_cname_e}avto", f"avto{_cname_e}",
-    ]
-    for _s in _extra_patterns:
-        if _s and _s not in _found_slugs and _s not in _skip_vk and len(_s) >= 4:
-            _found_slugs.append(_s)
-
-    # Конвертируем slugs в group_id через utils.resolveScreenName — работает БЕЗ токена!
-    _all_slugs_to_resolve = list(dict.fromkeys(
-        [s for s in _found_slugs if s not in _skip_vk and not re.match(r'^\d+$', s)]
-    ))[:60]
-
-    def _resolve_slug_no_token(slug: str) -> "tuple[int,str]|None":
-        """utils.resolveScreenName работает без access_token для публичных групп."""
-        try:
-            r = session.get(f"{VK_API_URL}/utils.resolveScreenName",
-                params={"screen_name": slug, "v": "5.199"},
-                timeout=5)
-            resp = r.json()
-            obj = resp.get("response", {})
-            if obj and obj.get("type") in ("group", "page", "public"):
-                gid = obj.get("object_id")
-                if gid and gid not in _found_group_ids:
-                    return (gid, slug)
-        except Exception:
-            pass
-        # Fallback: пробуем m.vk.com/{slug} и ищем group_id в HTML
-        try:
-            _mob = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 Mobile Safari/537.36"
-            r2 = session.get(f"https://m.vk.com/{slug}", timeout=6,
-                headers={"User-Agent": _mob}, allow_redirects=True)
-            if r2.status_code == 200:
-                # Ищем group_id в мета-тегах и JavaScript
-                _gid_re = re.compile(r'"group_id"\s*:\s*(\d+)|data-group-id="(\d+)"|/club(\d+)')
-                for m in _gid_re.finditer(r2.text):
-                    gid = int(m.group(1) or m.group(2) or m.group(3) or 0)
-                    if gid and gid not in _found_group_ids:
-                        return (gid, slug)
-        except Exception:
-            pass
-        return None
-
-    if _all_slugs_to_resolve:
-        with _TPE_VK(max_workers=20) as _res_ex:
-            for res in _res_ex.map(_resolve_slug_no_token, _all_slugs_to_resolve, timeout=30):
-                if res:
-                    _found_group_ids[res[0]] = res[1]
-        print(f"  [VK resolve] {len(_found_group_ids)} групп после resolveScreenName")
-
-    # Скрейпим стены дополнительно найденных через resolve
-    _extra_wall_groups = [(gid, name) for gid, name in _found_group_ids.items()
-                           if (gid, name) not in [(g[0], g[1]) for g in wall_groups]][:20]
-    if _extra_wall_groups:
-        with _TPE_VK(max_workers=10) as _ewex:
-            for posts in _ewex.map(_scrape_group_wall, _extra_wall_groups, timeout=25):
+    if wall_groups:
+        with _TPE_VK(max_workers=12) as _wex:
+            for posts in _wex.map(_scrape_wall, wall_groups, timeout=30):
                 for item in (posts or []):
                     if item["url"] not in _wall_seen:
                         _wall_seen.add(item["url"])
                         results.append(item)
-        print(f"  [VK extra walls] {len(_extra_wall_groups)} доп. групп")
+        print(f"  [VK wall] {len(_wall_seen)} постов из {len(wall_groups)} групп")
 
-    # Берём только slug-ги найденные через поиск (реальные)
-    real_slugs = [s for s in _found_slugs if s not in _skip_vk][:20]
-    if real_slugs:
-        with _TPE_VK(max_workers=10) as _sex:
-            for batch_s in _sex.map(_try_vk_community, real_slugs, timeout=25):
-                results.extend(batch_s or [])
+    # ── Шаг 3: Seed slugs через utils.resolveScreenName (без токена) ──
+    _VK_SEED_SLUGS = {
+        "ekaterinburg": ["avto_ekb","avtoekb","ekb_avto","avtobaraholka_ekb","avtobazar_ekb","avto96","avto_sverdlovsk","prodamavto_ekb","avtorynok_ekb","avto_ural","baraholka_avto_ekb","car_ekb","avto_yekaterinburg","prodajaavto_ekb"],
+        "moskva": ["avto_msk","avto_moscow","avtomoskva","avto77","avtobazar_msk","avtobaraholka_msk","avto_moskva","prodamavto_msk","avtorynok_msk","moscowcars","avto_msk77"],
+        "spb": ["avto_spb","avtospb","avto78","avto_piter","avtobazar_spb","avtobaraholka_spb","prodamavto_spb","avtorynok_spb","spb_avto","avto78spb"],
+        "novosibirsk": ["avto_nsk","avtonsk","avto54","avtobazar_nsk","avtobaraholka_nsk","prodamavto_nsk","nsk_avto","avtorynok_nsk","avto_novosibirsk"],
+        "kazan": ["avto_kazan","avtokazan","avto16","avtobazar_kazan","avtobaraholka_kazan","prodamavto_kazan","kazan_avto","avtorynok_kazan"],
+        "chelyabinsk": ["avto_chel","avtochel","avto74","avtobazar_chel","avtobaraholka_chel","prodamavto_chel","chel_avto","avtorynok_chel"],
+        "ufa": ["avto_ufa","avtoufa","avto02","avtobazar_ufa","avtobaraholka_ufa","prodamavto_ufa","ufa_avto","avtorynok_ufa"],
+        "krasnodar": ["avto_krd","avtokrd","avto23","avtobazar_krasnodar","avtobaraholka_krd","prodamavto_krd","krd_avto","kuban_avto","avto_kuban"],
+        "omsk": ["avto_omsk","avtoomsk","avto55","avtobazar_omsk","avtobaraholka_omsk","prodamavto_omsk","omsk_avto"],
+        "rostov": ["avto_rostov","avtorostov","avto61","avtobazar_rostov","avtobaraholka_rostov","prodamavto_rostov","rostov_avto","avto_don"],
+        "tyumen": ["avto_tyumen","avtotyumen","avto72","avtobazar_tyumen","avtobaraholka_tyumen","prodamavto_tyumen","tyumen_avto"],
+        "samara": ["avto_samara","avtosamara","avto63","avtobazar_samara","avtobaraholka_samara","prodamavto_samara","samara_avto"],
+        "perm": ["avto_perm","avtoperm","avto59","avtobazar_perm","avtobaraholka_perm","prodamavto_perm","perm_avto"],
+        "voronezh": ["avto_voronezh","avtovoronezh","avto36","avtobazar_voronezh","avtobaraholka_vrn","prodamavto_vrn","vrn_avto","avto_vrn","avtovrn"],
+        "volgograd": ["avto_volgograd","avtovolgograd","avto34","avtobazar_volgograd","avtobaraholka_vgd","prodamavto_vgd","vgd_avto"],
+        "krasnoyarsk": ["avto_krsk","avtokrsk","avto24","avtobazar_krs","avtobaraholka_krs","prodamavto_krs","krsk_avto"],
+        "nn": ["avto_nn","avtonn","avto52","avtobazar_nn","avtobaraholka_nn","prodamavto_nn","nn_avto"],
+        "saratov": ["avto_saratov","avtosaratov","avto64","avtobazar_saratov","prodamavto_saratov","saratov_avto"],
+        "irkutsk": ["avto_irkutsk","avtoirkutsk","avto38","avtobazar_irkutsk","prodamavto_irkutsk","irkutsk_avto"],
+        "vladivostok": ["avto_vladivostok","avtovladivostok","avto25","avtobazar_vlad","prodamavto_vlad","vlad_avto","japancars_vlad"],
+        "habarovsk": ["avto_habarovsk","avtohabarovsk","avto27","avtobazar_hab","prodamavto_hab","hab_avto"],
+    }
+    _seed_slugs = _VK_SEED_SLUGS.get(city_key, [])
+    # Генерируем доп паттерны из названия города
+    _cname_e = city_key or ""
+    for _pat in [f"avto_{_cname_e}", f"avtobaraholka_{_cname_e}", f"avtobazar_{_cname_e}",
+                 f"prodamavto_{_cname_e}", f"avtorynok_{_cname_e}", f"{_cname_e}_avto",
+                 f"avto{_cname_e}"]:
+        if _pat and _pat not in _seed_slugs and len(_pat) >= 4:
+            _seed_slugs.append(_pat)
+
+    def _resolve_and_scrape(slug: str) -> list:
+        """Резолвит slug → group_id через utils.resolveScreenName, затем скрейпит стену."""
+        gid = None
+        # utils.resolveScreenName работает БЕЗ токена
+        try:
+            r = session.get(f"{VK_API_URL}/utils.resolveScreenName",
+                params={"screen_name": slug, "v": "5.199"}, timeout=5)
+            obj = r.json().get("response", False)
+            if obj and isinstance(obj, dict) and obj.get("type") in ("group", "page", "public"):
+                gid = obj.get("object_id")
+                if gid and gid not in _found_group_ids:
+                    _found_group_ids[gid] = slug
+        except Exception:
+            pass
+        # Если resolveScreenName не дал ID — пробуем через redirect URL
+        if not gid:
+            try:
+                _mob = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 Mobile Safari/537.36"
+                r2 = session.get(f"https://m.vk.com/{slug}", timeout=6,
+                    headers={"User-Agent": _mob}, allow_redirects=True)
+                if r2.status_code == 200 and ("wi_body" in r2.text or "wall_item" in r2.text or "data-post-id" in r2.text):
+                    for _gm in re.finditer(r'"group_id"\s*:\s*(\d+)|/club(\d+)|data-group-id="(\d+)"', r2.text):
+                        _gid_val = int(_gm.group(1) or _gm.group(2) or _gm.group(3) or 0)
+                        if _gid_val:
+                            gid = _gid_val
+                            if gid not in _found_group_ids:
+                                _found_group_ids[gid] = slug
+                            break
+            except Exception:
+                pass
+        if not gid:
+            return []
+        return _scrape_wall((gid, slug))
+
+    if _seed_slugs:
+        _already_scraped = {gid for gid, _ in wall_groups}
+        with _TPE_VK(max_workers=15) as _sex:
+            for batch_s in _sex.map(_resolve_and_scrape, _seed_slugs[:50], timeout=35):
+                for item in (batch_s or []):
+                    if item["url"] not in _wall_seen:
+                        _wall_seen.add(item["url"])
+                        results.append(item)
+        print(f"  [VK slugs] {len(_wall_seen)} итого после resolve")
 
     # Также Yandex/DDG прямые посты
     _try_yandex_vk_results = _try_yandex_vk()
