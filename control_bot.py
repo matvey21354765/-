@@ -137,7 +137,17 @@ if AVITO_PROXY_HOST and (AVITO_PROXY_PORT or _AVITO_PROXY_PORTS):
     _avito_proxy_url = f"{AVITO_PROXY_PROTOCOL}://{_auth}{AVITO_PROXY_HOST}:{_repr_port}"
     AVITO_PROXIES = {"http": _avito_proxy_url, "https": _avito_proxy_url}
 
-_proxy_display = f"{AVITO_PROXY_PROTOCOL}://{AVITO_PROXY_HOST}:{_repr_port}" if AVITO_PROXIES else None
+# Хардкодный fallback — если env vars не заданы в Railway, используем прокси из кода
+if not AVITO_PROXIES and not _proxy_auth_failed:
+    _HARDCODED_PROXY = "http://VAdPaN:EDNyWFYHyH2Y@mproxy.site:16358"
+    AVITO_PROXIES = {"http": _HARDCODED_PROXY, "https": _HARDCODED_PROXY}
+    AVITO_PROXY_HOST = "mproxy.site"
+    AVITO_PROXY_PORT = "16358"
+    AVITO_PROXY_USER = "VAdPaN"
+    AVITO_PROXY_PASS = "EDNyWFYHyH2Y"
+    print("[прокси] ⚡ Используем встроенный прокси mproxy.site")
+
+_proxy_display = f"{AVITO_PROXY_PROTOCOL}://{AVITO_PROXY_HOST}:{AVITO_PROXY_PORT}" if AVITO_PROXIES else None
 print(f"[прокси] {'✅ ' + _proxy_display if _proxy_display else '❌ не настроен — Авито/Auto.ru могут не работать'}")
 
 # ── Регионы ─────────────────────────────────────────────────────
@@ -2853,33 +2863,48 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
         if _s not in _found_slugs and _s not in _skip_vk:
             _found_slugs.append(_s)
 
-    # Конвертируем найденные slugs в group_id через VK API groups.getById (без токена)
-    _all_slugs_to_resolve = [s for s in _found_slugs if s not in _skip_vk
-                              and not re.match(r'^\d+$', s)][:30]
-    if _all_slugs_to_resolve:
-        def _resolve_slug_to_id(slug: str) -> "tuple[int,str]|None":
-            try:
-                params = {"group_ids": slug, "v": "5.199"}
-                if _vk_token_ok:
-                    params["access_token"] = vk_token
-                r = session.get(f"{VK_API_URL}/groups.getById",
-                    params=params, timeout=6)
-                resp = r.json()
-                items = resp.get("response", {}).get("groups") or resp.get("response", [])
-                if isinstance(items, list) and items:
-                    g = items[0]
-                    gid = g.get("id")
-                    if gid and gid not in _found_group_ids:
-                        return (gid, g.get("name", slug))
-            except Exception:
-                pass
-            return None
+    # Конвертируем slugs в group_id через utils.resolveScreenName — работает БЕЗ токена!
+    # Это единственный VK API метод не требующий авторизации
+    _all_slugs_to_resolve = list(dict.fromkeys(
+        [s for s in _found_slugs if s not in _skip_vk and not re.match(r'^\d+$', s)]
+    ))[:40]
 
-        with _TPE_VK(max_workers=15) as _res_ex:
-            for res in _res_ex.map(_resolve_slug_to_id, _all_slugs_to_resolve, timeout=20):
+    def _resolve_slug_no_token(slug: str) -> "tuple[int,str]|None":
+        """utils.resolveScreenName работает без access_token для публичных групп."""
+        try:
+            r = session.get(f"{VK_API_URL}/utils.resolveScreenName",
+                params={"screen_name": slug, "v": "5.199"},
+                timeout=5)
+            resp = r.json()
+            obj = resp.get("response", {})
+            if obj and obj.get("type") in ("group", "page", "public"):
+                gid = obj.get("object_id")
+                if gid and gid not in _found_group_ids:
+                    return (gid, slug)
+        except Exception:
+            pass
+        # Fallback: пробуем m.vk.com/{slug} и ищем group_id в HTML
+        try:
+            _mob = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 Mobile Safari/537.36"
+            r2 = session.get(f"https://m.vk.com/{slug}", timeout=6,
+                headers={"User-Agent": _mob}, allow_redirects=True)
+            if r2.status_code == 200:
+                # Ищем group_id в мета-тегах и JavaScript
+                _gid_re = re.compile(r'"group_id"\s*:\s*(\d+)|data-group-id="(\d+)"|/club(\d+)')
+                for m in _gid_re.finditer(r2.text):
+                    gid = int(m.group(1) or m.group(2) or m.group(3) or 0)
+                    if gid and gid not in _found_group_ids:
+                        return (gid, slug)
+        except Exception:
+            pass
+        return None
+
+    if _all_slugs_to_resolve:
+        with _TPE_VK(max_workers=20) as _res_ex:
+            for res in _res_ex.map(_resolve_slug_no_token, _all_slugs_to_resolve, timeout=30):
                 if res:
                     _found_group_ids[res[0]] = res[1]
-        print(f"  [VK resolve] {len(_found_group_ids)} групп после resolve slugs")
+        print(f"  [VK resolve] {len(_found_group_ids)} групп после resolveScreenName")
 
     # Скрейпим стены дополнительно найденных через resolve
     _extra_wall_groups = [(gid, name) for gid, name in _found_group_ids.items()
