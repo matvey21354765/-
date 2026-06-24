@@ -1896,9 +1896,17 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
                 "robocop","BotFather","gif","stickers","contest","c","bot","notifications",
                 "SpamBot","vote","channel","group"}
 
+    # Федеральные автоканалы которые точно существуют в Telegram
+    _TG_FEDERAL_CHANNELS = [
+        "avtomarket_rf", "avtorynok_ru", "prodamauto_rf", "avtobaraholka_rf",
+        "kupit_avto_rossiya", "avto_rossiya", "avtomobili_rossii",
+        "avtomarket", "avto_market_russia", "avtobazar_ru",
+        "prodamavto_rf", "auto_baraxolka", "avto_sale_russia",
+        "carprice_ru", "avtorynok", "avtomarket_online",
+    ]
     # Уже известные каналы из справочника (могут быть фейками — проверим t.me/s/)
     _seed_channels = list(dict.fromkeys(
-        TG_REAL_CHANNELS.get(city_key, []) + TG_AUTO_CHANNELS.get(city_key, [])
+        TG_REAL_CHANNELS.get(city_key, []) + TG_AUTO_CHANNELS.get(city_key, []) + _TG_FEDERAL_CHANNELS
     ))
 
     def _discover_channels() -> list[str]:
@@ -2589,8 +2597,147 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
             print(f"  [VK {slug}] {e}")
             return []
 
+    # ── Хардкодные VK slug-группы по городам (fallback если discovery=0) ──
+    _VK_SEED_SLUGS: dict[str, list[str]] = {
+        "ekaterinburg": [
+            "avto_ekb", "avtoekb", "avto_ekb96", "ekb_avto96", "baraholka_avto96",
+            "avtobazar_ekb", "avto_eburg", "avto_sverdl", "ekbauto", "prodamavto_ekb",
+            "avtorynok_ekb", "avto96", "avto_yekaterinburg", "auto_ekb",
+        ],
+        "moskva": [
+            "avto_msk", "avtomoskva", "avto77msk", "avtobazar_msk", "prodamavto_msk",
+            "cars_msk", "avto_moscow", "moscowcars", "avtorynok_msk", "kupit_avto_msk",
+            "prodauto_msk", "avtomarket_msk", "auto_moskva",
+        ],
+        "spb": [
+            "avto_spb", "avtospb", "avto78spb", "prodamavto_spb", "avtobazar_spb",
+            "spb_avto78", "cars_spb", "avto_piter", "avto78_prodazha",
+            "kupit_avto_spb", "prodauto_spb",
+        ],
+        "novosibirsk": [
+            "avto_nsk", "avtonsk54", "nsk_avto54", "prodamavto_nsk", "avtobazar_nsk",
+            "novosibirsk_avto", "avto54", "cars_nsk", "avto_novosibirsk",
+        ],
+        "kazan": [
+            "avto_kazan", "avtokazan16", "kazan_avto16", "prodamavto_kazan",
+            "avtobazar_kazan", "cars_kazan", "avto_kzn", "auto_kazan",
+        ],
+        "chelyabinsk": [
+            "avto_chel", "avto74chel", "chel_avto74", "prodamavto_chel",
+            "avtobazar_chel", "cars_chel", "avto74", "avto_chelyabinsk",
+        ],
+        "ufa": [
+            "avto_ufa", "avto02ufa", "ufa_avto02", "prodamavto_ufa",
+            "avtobazar_ufa", "cars_ufa", "avto_bashkortostan",
+        ],
+        "krasnodar": [
+            "avto_krd", "avto23krd", "krasnodar_avto23", "prodamavto_krd",
+            "avtobazar_krasnodar", "kuban_avto", "avto_kuban", "cars_krd",
+            "avto_krasnodar", "auto_krd",
+        ],
+        "omsk": [
+            "avto_omsk", "avto55omsk", "omsk_avto55", "prodamavto_omsk",
+            "avtobazar_omsk", "cars_omsk", "avto55",
+        ],
+        "rostov": [
+            "avto_rostov", "avto61rostov", "rostov_avto61", "prodamavto_rostov",
+            "avtobazar_rostov", "cars_rostov", "avto61", "avto_don",
+            "avto_rostovnadon", "don_avto",
+        ],
+        "tyumen": [
+            "avto_tyumen", "avto72tyumen", "tyumen_avto72", "prodamavto72",
+            "avtobazar_tyumen", "cars_tyumen", "avto72", "avto_tmn",
+        ],
+        "samara": [
+            "avto_samara", "avto63samara", "samara_avto63", "prodamavto63",
+            "avtobazar_samara", "cars_samara", "avto63", "avto_samarskaya",
+        ],
+        "perm": [
+            "avto_perm", "avto59perm", "perm_avto59", "prodamavto59",
+            "avtobazar_perm", "cars_perm", "avto59",
+        ],
+        "voronezh": [
+            "avto_voronezh", "avto36vrn", "voronezh_avto36", "prodamavto36",
+            "avtobazar_voronezh", "cars_vrn", "avto36", "avto_vrn",
+            "vrn_avto", "auto_voronezh", "avtovrn", "avtomobili_vrn",
+        ],
+        "volgograd": [
+            "avto_volgograd", "avto34vlg", "volgograd_avto34", "prodamavto34",
+            "avtobazar_volgograd", "cars_vgd", "avto34",
+        ],
+        "krasnoyarsk": [
+            "avto_krsk", "avto24krsk", "krasnoyarsk_avto24", "prodamavto24",
+            "avtobazar_krs", "cars_krs", "avto24",
+        ],
+        "nn": [
+            "avto_nn", "avto52nn", "nn_avto52", "prodamavto52", "avtobazar_nn",
+            "cars_nn", "avto52", "avto_nnov", "avto_nizhny",
+        ],
+        "saratov": [
+            "avto_saratov", "avto64sar", "saratov_avto64", "prodamavto64",
+            "avtobazar_saratov", "cars_sar", "avto64",
+        ],
+        "irkutsk": [
+            "avto_irkutsk", "avto38irk", "irkutsk_avto38", "prodamavto38",
+            "avtobazar_irkutsk", "cars_irk", "avto38",
+        ],
+        "vladivostok": [
+            "avto_vladivostok", "avto25vlad", "vladivostok_avto25", "prodamavto25",
+            "avtobazar_vlad", "cars_vlad", "avto25", "japancars_vlad",
+        ],
+        "habarovsk": [
+            "avto_habarovsk", "avto27hab", "habarovsk_avto27", "prodamavto27",
+            "avtobazar_hab", "cars_hab", "avto27",
+        ],
+    }
+    # Добавляем хардкодные slugs если discovery ничего не нашёл
+    _seed_vk = _VK_SEED_SLUGS.get(city_key, [])
+    for _s in _seed_vk:
+        if _s not in _found_slugs and _s not in _skip_vk:
+            _found_slugs.append(_s)
+
+    # Конвертируем найденные slugs в group_id через VK API groups.getById (без токена)
+    _all_slugs_to_resolve = [s for s in _found_slugs if s not in _skip_vk
+                              and not re.match(r'^\d+$', s)][:30]
+    if _all_slugs_to_resolve:
+        def _resolve_slug_to_id(slug: str) -> "tuple[int,str]|None":
+            try:
+                params = {"group_ids": slug, "v": "5.199"}
+                if vk_token:
+                    params["access_token"] = vk_token
+                r = session.get(f"{VK_API_URL}/groups.getById",
+                    params=params, timeout=6)
+                resp = r.json()
+                items = resp.get("response", {}).get("groups") or resp.get("response", [])
+                if isinstance(items, list) and items:
+                    g = items[0]
+                    gid = g.get("id")
+                    if gid and gid not in _found_group_ids:
+                        return (gid, g.get("name", slug))
+            except Exception:
+                pass
+            return None
+
+        with _TPE_VK(max_workers=15) as _res_ex:
+            for res in _res_ex.map(_resolve_slug_to_id, _all_slugs_to_resolve, timeout=20):
+                if res:
+                    _found_group_ids[res[0]] = res[1]
+        print(f"  [VK resolve] {len(_found_group_ids)} групп после resolve slugs")
+
+    # Скрейпим стены дополнительно найденных через resolve
+    _extra_wall_groups = [(gid, name) for gid, name in _found_group_ids.items()
+                           if (gid, name) not in [(g[0], g[1]) for g in wall_groups]][:20]
+    if _extra_wall_groups:
+        with _TPE_VK(max_workers=10) as _ewex:
+            for posts in _ewex.map(_scrape_group_wall, _extra_wall_groups, timeout=25):
+                for item in (posts or []):
+                    if item["url"] not in _wall_seen:
+                        _wall_seen.add(item["url"])
+                        results.append(item)
+        print(f"  [VK extra walls] {len(_extra_wall_groups)} доп. групп")
+
     # Берём только slug-ги найденные через поиск (реальные)
-    real_slugs = [s for s in _found_slugs if s not in _skip_vk][:16]
+    real_slugs = [s for s in _found_slugs if s not in _skip_vk][:20]
     if real_slugs:
         with _TPE_VK(max_workers=10) as _sex:
             for batch_s in _sex.map(_try_vk_community, real_slugs, timeout=25):
