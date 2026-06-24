@@ -4390,15 +4390,15 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                     # Страница получена, но парсер вернул 0 — пробуем следующий IP
                     print(f"  [Авито webHTML] стр.{p} попытка {attempt+1}: парсер 0 объявлений, ретрай")
                 if r.status_code in (403, 429, 503):
-                    time.sleep(random.uniform(0.3, 0.8))
+                    time.sleep(random.uniform(2.0, 4.0))
                     continue  # IP в бане — пробуем другой
                 elif r.status_code == 200:
-                    time.sleep(random.uniform(0.2, 0.5))
+                    time.sleep(random.uniform(1.5, 3.0))
                     continue  # парсер дал 0 — пробуем другой IP
                 break  # иной код — не ретраим
             except Exception as e:
                 print(f"  [Авито webHTML] стр.{p} попытка {attempt+1}: {str(e)[:60]}")
-                time.sleep(random.uniform(0.2, 0.5))
+                time.sleep(random.uniform(1.0, 2.0))
                 continue
         return []
 
@@ -5126,19 +5126,21 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
     # ещё несколько. Запускаем ВСЁ параллельно и СЛИВАЕМ результаты, а не берём
     # первый ответивший метод (иначе теряем большие пачки, что приходят чуть позже).
     if AVITO_PROXIES:
-        # Платный прокси. Основной метод — _try_web_html (8 страниц с фильтром цены).
+        # Платный прокси. Основной метод — _try_web_html.
         # Резервные методы: мобильный сайт, RSS, Googlebot UA — если часть IP забанена.
         all_methods = [_try_web_html, _try_avito_lite, _try_avito_rss, _try_googlebot_ua, _try_avito_public_api]
     else:
         all_methods = [_try_scraperapi_fast, _try_free_proxies, _try_yandex_snippets, _try_cffi_web, _try_curl_cffi, _try_cs_web, _try_mobile_site, _try_web_html, _try_avito_public_api, _try_avito_rss, _try_googlebot_ua, _try_avito_lite, _try_scraperapi, _try_avito_json_api]
-    # Список задач. С прокси — 12 страниц десктоп + 4 страницы мобайл + RSS + Googlebot.
+    # Список задач. С прокси — страницы с человеческой задержкой между ними.
     if AVITO_PROXIES:
+        # С мобильным прокси запускаем страницы с задержкой 1-3с (имитация человека)
+        # Параллелизм ограничен 3 потоками — Авито считает больше подозрительным
         tasks = (
-            [(_try_web_html, p) for p in range(1, 13)] +
-            [(_try_avito_lite, p) for p in range(1, 5)] +
-            [(_try_avito_rss, 1), (_try_avito_rss, 2), (_try_googlebot_ua, 1), (_try_avito_public_api, 1)]
+            [(_try_web_html, p) for p in range(1, 9)] +
+            [(_try_avito_lite, p) for p in range(1, 4)] +
+            [(_try_avito_rss, 1), (_try_googlebot_ua, 1), (_try_avito_public_api, 1)]
         )
-        _cap = 250
+        _cap = 200
         _deadline_s = 60
     else:
         tasks = [(m, 1) for m in all_methods]
@@ -5154,7 +5156,10 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         m = re.search(r'(\d{6,})$', base)
         return m.group(1) if m else base
 
-    _ex = _TPE(max_workers=min(12, len(tasks)))
+    # С прокси: макс 3 потока — имитируем человека, не триггерим rate-limit Авито
+    # Без прокси: до 12 потоков — пробуем всё параллельно
+    _max_w = 3 if AVITO_PROXIES else min(12, len(tasks))
+    _ex = _TPE(max_workers=_max_w)
     merged: dict[str, dict] = {}
     _seen_keys: set = set()
     _soft_deadline = time.time() + _deadline_s
