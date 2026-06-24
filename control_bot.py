@@ -229,6 +229,12 @@ DEALER_KEYWORDS = [
     "гарантия завода", "официальная гарантия",
     "car dealer", "автосупермаркет",
     "в наличии и под заказ", "отдел продаж",
+    # Рекламные вставки Auto.ru (не реальные объявления)
+    "самый недорогой способ продвижения",
+    "поможет быстрее найти покупателя",
+    "оказаться наверху списка объявлений",
+    "отсортированного по актуальности",
+    "продвижение объявления",
 ]
 
 HOT_WORDS = re.compile(
@@ -541,9 +547,18 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None)
             # Уровень 4: только марка
             if not med:
                 brand_key_m = key.split(" ", 1)[0]
-                med = market_brand.get(brand_key_m, 0)
+                med_brand = market_brand.get(brand_key_m, 0)
+                # Используем марку только если отклонение разумное (не более 3x)
+                if med_brand and 0.2 < (p / med_brand) < 3.0:
+                    med = med_brand
             if med > 0:
                 savings_pct = round((1 - p / med) * 100, 1)
+                # Если "скидка" > 75% — сравнение некорректно (разные классы авто)
+                # Не показываем рыночную цену, чтобы не вводить в заблуждение
+                if savings_pct > 75:
+                    med = 0
+                    savings_pct = 0.0
+            if med > 0:
                 it["_savings_pct"] = savings_pct
                 it["_market_price"] = int(med)
                 it["_below_market"] = savings_pct > 0
