@@ -8462,15 +8462,14 @@ async def do_search_for_user(uid: int, reply_to):
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
         "tg":     lambda: scrape_tg_channels(region, pmin, pmax),
     }
-    # Авито-эталон запускаем ПАРАЛЛЕЛЬНО (нужен для точной рыночной цены)
-    # Не запускаем если Авито уже включён как основной источник (он сам и будет эталоном)
-    _need_avito_ref = "avito" not in enabled_sources
+    # Авито-эталон ВСЕГДА запускаем параллельно — рыночная цена берётся с Авито
+    # даже если пользователь ищет только ВК/TG/Дром
     _avito_ref_fut = loop.run_in_executor(
         None, lambda: scrape_avito(region, pages=8, price_min=0, price_max=99_000_000)
-    ) if _need_avito_ref else None
+    )
     src_keys = [s for s in enabled_sources if s in scraper_map]
     futures = [loop.run_in_executor(None, scraper_map[src]) for src in src_keys]
-    all_futs = futures + ([_avito_ref_fut] if _avito_ref_fut else [])
+    all_futs = futures + [_avito_ref_fut]
     done, pending = await asyncio.wait(all_futs, timeout=55)
     if pending:
         for f in pending:
