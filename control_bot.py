@@ -2433,31 +2433,61 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
             except Exception:
                 pass
 
-    def _vk_web_search(loc: str):
-        """VK собственный веб-поиск сообществ — работает без токена через браузер."""
-        import urllib.parse as _upvw
-        _vk_section_re = re.compile(r'vk\.com/(?:club|public)(\d+)|"id":(\d+),"name":"[^"]*(?:авто|авт|барахол|машин|продам)[^"]*"', re.I)
+    def _vk_mobile_search(loc: str):
+        """Мобильный VK поиск сообществ — работает без авторизации."""
+        _mob_ua = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.82 Mobile Safari/537.36"
+        _vk_id_re2 = re.compile(r'href="/(?:club|public)(\d+)"|data-id="(\d+)"', re.I)
         for q in [
             f"автобарахолка {loc}",
             f"авто продам {loc}",
             f"авторынок {loc}",
+            f"авто барахолка {loc}",
         ]:
             try:
-                r = session.get("https://vk.com/search",
-                    params={"c[section]": "communities", "c[type]": "1", "q": q},
-                    timeout=10,
-                    headers={
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                        "Accept": "text/html,application/xhtml+xml",
-                        "Referer": "https://vk.com/",
-                    })
-                if r.status_code == 200:
+                # Мобильный поиск сообществ — без логина возвращает HTML со slug/id
+                r = session.get("https://m.vk.com/search",
+                    params={"q": q, "section": "communities"},
+                    timeout=10, allow_redirects=True,
+                    headers={"User-Agent": _mob_ua, "Accept-Language": "ru-RU,ru;q=0.9"})
+                if r.status_code == 200 and "club" in r.text.lower():
                     _parse_vk_group_refs(r.text)
-                    # Также ищем JSON-формат с group IDs
-                    for m in _vk_section_re.finditer(r.text):
+                    for m in _vk_id_re2.finditer(r.text):
                         gid = int(m.group(1) or m.group(2) or 0)
                         if gid and gid not in _found_group_ids:
                             _found_group_ids[gid] = f"club{gid}"
+            except Exception:
+                pass
+            try:
+                # VK catalog groups — тоже без логина
+                r2 = session.get("https://m.vk.com/catalog.php",
+                    params={"section": "groups", "query": q},
+                    timeout=9, headers={"User-Agent": _mob_ua})
+                if r2.status_code == 200:
+                    _parse_vk_group_refs(r2.text)
+                    for m in _vk_id_re2.finditer(r2.text):
+                        gid = int(m.group(1) or m.group(2) or 0)
+                        if gid and gid not in _found_group_ids:
+                            _found_group_ids[gid] = f"club{gid}"
+            except Exception:
+                pass
+
+    def _vk_api_no_token_search(loc: str):
+        """VK API groups.search — иногда работает без токена для публичных данных."""
+        for q in [f"автобарахолка {loc}", f"авто {loc}", f"продажа авто {loc}"]:
+            try:
+                r = session.get(f"https://api.vk.com/method/groups.search",
+                    params={"q": q, "count": 20, "type": "page,group", "v": "5.199"},
+                    timeout=8)
+                resp = r.json()
+                if "error" not in resp:
+                    for g in resp.get("response", {}).get("items", []):
+                        gid = g.get("id")
+                        if gid and gid not in _found_group_ids:
+                            _found_group_ids[gid] = g.get("name", f"club{gid}")
+                else:
+                    # Если ошибка авторизации — смысла повторять нет
+                    if resp["error"].get("error_code") in (5, 15):
+                        break
             except Exception:
                 pass
 
@@ -2496,11 +2526,12 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
     # Параллельно ищем по городу и области всеми доступными методами
     _disc_tasks = [(_yandex_vk_groups_search, loc) for loc in vk_search_locations]
     _disc_tasks += [(_ddg_vk_groups_search, loc) for loc in vk_search_locations[:1]]
-    _disc_tasks += [(_vk_web_search, loc) for loc in vk_search_locations]    # VK собственный поиск
-    _disc_tasks += [(_google_vk_groups_search, loc) for loc in vk_search_locations[:1]]  # Google backup
-    with _TPE_VK(max_workers=10) as _ex_disc:
+    _disc_tasks += [(_vk_mobile_search, loc) for loc in vk_search_locations]      # мобильный VK без логина
+    _disc_tasks += [(_vk_api_no_token_search, loc) for loc in vk_search_locations[:1]]  # VK API без токена
+    _disc_tasks += [(_google_vk_groups_search, loc) for loc in vk_search_locations[:1]]  # Google
+    with _TPE_VK(max_workers=12) as _ex_disc:
         futs_disc = [_ex_disc.submit(fn, loc) for fn, loc in _disc_tasks]
-        for _ in _ac_VK(futs_disc, timeout=20):
+        for _ in _ac_VK(futs_disc, timeout=25):
             pass
     print(f"  [VK discover] ID групп: {len(_found_group_ids)}, slugs: {len(_found_slugs)}")
 
