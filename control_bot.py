@@ -2006,7 +2006,24 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
                 except Exception:
                     pass
 
-        # 5. Google — ищет t.me ссылки лучше всего с российского IP
+        # 5. Bing — менее строгий к ботам, хорошо находит t.me
+        for _loc in search_locations:
+            for _q in [
+                f"site:t.me автобарахолка {_loc}",
+                f"site:t.me продам авто {_loc}",
+            ]:
+                try:
+                    r = session.get("https://www.bing.com/search",
+                        params={"q": _q, "setlang": "ru", "count": "20"},
+                        timeout=9,
+                        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                                 "Accept-Language": "ru-RU,ru;q=0.9"})
+                    if r.status_code == 200:
+                        found += _tme_re.findall(_upq_tg.unquote(r.text))
+                except Exception:
+                    pass
+
+        # 6. Google — ищет t.me ссылки лучше всего с российского IP
         for _loc in search_locations:
             for _q in [
                 f"site:t.me автобарахолка {_loc}",
@@ -2427,6 +2444,58 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                     and sl not in _found_slugs and len(sl) >= 4):
                 _found_slugs.append(sl)
 
+    def _vk_ajax_search(loc: str):
+        """VK внутренний AJAX поиск сообществ — работает без авторизации."""
+        for q in [f"автобарахолка {loc}", f"авто продам {loc}", f"авторынок {loc}"]:
+            try:
+                # VK внутренний AJAX endpoint для поиска сообществ
+                r = session.post("https://vk.com/al_search.php",
+                    data={"act": "section", "section": "communities",
+                          "c[q]": q, "offset": "0", "ajax": "1"},
+                    timeout=10,
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                        "X-Requested-With": "XMLHttpRequest",
+                        "Referer": "https://vk.com/search",
+                        "Content-Type": "application/x-www-form-urlencoded",
+                        "Origin": "https://vk.com",
+                    })
+                if r.status_code == 200:
+                    _parse_vk_group_refs(r.text)
+                    # Также парсим JSON-ответ
+                    try:
+                        jd = r.json()
+                        payload = jd.get("payload", [[]])[1] if isinstance(jd.get("payload"), list) else []
+                        for item in (payload if isinstance(payload, list) else []):
+                            if isinstance(item, dict):
+                                gid = item.get("id") or item.get("group_id")
+                                if gid and abs(int(gid)) not in _found_group_ids:
+                                    _found_group_ids[abs(int(gid))] = item.get("name", f"club{gid}")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+    def _bing_vk_search(loc: str):
+        """Bing поиск VK групп — менее строгий чем Yandex, работает без captcha."""
+        for q in [
+            f"site:vk.com/club автобарахолка {loc}",
+            f"site:vk.com/public продам авто {loc}",
+            f"vk.com club автобарахолка {loc}",
+        ]:
+            try:
+                r = session.get("https://www.bing.com/search",
+                    params={"q": q, "setlang": "ru", "count": "20"},
+                    timeout=9,
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                        "Accept-Language": "ru-RU,ru;q=0.9",
+                    })
+                if r.status_code == 200:
+                    _parse_vk_group_refs(r.text)
+            except Exception:
+                pass
+
     def _yandex_vk_groups_search(loc: str):
         for q in [
             f"site:vk.com/club автобарахолка {loc}",
@@ -2534,12 +2603,13 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                 pass
 
     # Параллельно ищем по городу и области всеми доступными методами
-    _disc_tasks = [(_yandex_vk_groups_search, loc) for loc in vk_search_locations]
+    _disc_tasks = [(_vk_ajax_search, loc) for loc in vk_search_locations]         # VK AJAX (главный)
+    _disc_tasks += [(_bing_vk_search, loc) for loc in vk_search_locations]         # Bing (надёжный)
+    _disc_tasks += [(_yandex_vk_groups_search, loc) for loc in vk_search_locations]
     _disc_tasks += [(_ddg_vk_groups_search, loc) for loc in vk_search_locations[:1]]
-    _disc_tasks += [(_vk_mobile_search, loc) for loc in vk_search_locations]      # мобильный VK без логина
-    _disc_tasks += [(_vk_api_no_token_search, loc) for loc in vk_search_locations[:1]]  # VK API без токена
-    _disc_tasks += [(_google_vk_groups_search, loc) for loc in vk_search_locations[:1]]  # Google
-    with _TPE_VK(max_workers=12) as _ex_disc:
+    _disc_tasks += [(_vk_mobile_search, loc) for loc in vk_search_locations]
+    _disc_tasks += [(_google_vk_groups_search, loc) for loc in vk_search_locations[:1]]
+    with _TPE_VK(max_workers=14) as _ex_disc:
         futs_disc = [_ex_disc.submit(fn, loc) for fn, loc in _disc_tasks]
         for _ in _ac_VK(futs_disc, timeout=25):
             pass
@@ -2765,11 +2835,17 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
             return []
 
     # ── Хардкодные VK slug-группы по городам (fallback если discovery=0) ──
+    # Паттерны: avto_{city}, {city}_avto, avtobazar_{city}, avtobaraholka_{city}
+    # utils.resolveScreenName проверяет каждый и возвращает только реальные группы
     _VK_SEED_SLUGS: dict[str, list[str]] = {
         "ekaterinburg": [
             "avto_ekb", "avtoekb", "avto_ekb96", "ekb_avto96", "baraholka_avto96",
             "avtobazar_ekb", "avto_eburg", "avto_sverdl", "ekbauto", "prodamavto_ekb",
             "avtorynok_ekb", "avto96", "avto_yekaterinburg", "auto_ekb",
+            "avtobaraholka_ekb", "avto_baraholka96", "prodaja_avto_ekb",
+            "ekb_baraholka_avto", "avtoprodazha_ekb", "avto_ural96",
+            "prodautoekb", "avto_torg_ekb", "avtorynok96", "avtoboard_ekb",
+            "kupit_avto_ekb96", "prodamavto96", "avtomobili_ekb96",
         ],
         "moskva": [
             "avto_msk", "avtomoskva", "avto77msk", "avtobazar_msk", "prodamavto_msk",
@@ -2857,17 +2933,36 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
             "avtobazar_hab", "cars_hab", "avto27",
         ],
     }
-    # Добавляем хардкодные slugs если discovery ничего не нашёл
+    # Добавляем хардкодные slugs + генерируем дополнительные паттерны
     _seed_vk = _VK_SEED_SLUGS.get(city_key, [])
     for _s in _seed_vk:
         if _s not in _found_slugs and _s not in _skip_vk:
             _found_slugs.append(_s)
 
+    # Генерируем дополнительные slug-паттерны для города
+    _ckey = city_key or ""
+    _cname_t = region_name_ru.lower().replace(" ", "")  # "екатеринбург"
+    _cname_e = _ckey  # "ekaterinburg"
+    _rcode = _vk_oblast_names.get(_ckey, "").split()[0].lower()[:4]  # "свер"
+    _extra_patterns = [
+        f"avtobaraholka_{_cname_e}", f"avtoboard_{_cname_e}",
+        f"prodazha_avto_{_cname_e}", f"avtoprodazha_{_cname_e}",
+        f"avto_torg_{_cname_e}", f"kupit_avto_{_cname_e}",
+        f"avtorynok_{_cname_e}", f"avto_rynok_{_cname_e}",
+        f"cars_{_cname_e}", f"car_{_cname_e}",
+        f"prodamauto_{_cname_e}", f"prodam_avto_{_cname_e}",
+        f"avto_{_cname_e}", f"auto_{_cname_e}",
+        f"{_cname_e}_avto", f"{_cname_e}_auto",
+        f"{_cname_e}avto", f"avto{_cname_e}",
+    ]
+    for _s in _extra_patterns:
+        if _s and _s not in _found_slugs and _s not in _skip_vk and len(_s) >= 4:
+            _found_slugs.append(_s)
+
     # Конвертируем slugs в group_id через utils.resolveScreenName — работает БЕЗ токена!
-    # Это единственный VK API метод не требующий авторизации
     _all_slugs_to_resolve = list(dict.fromkeys(
         [s for s in _found_slugs if s not in _skip_vk and not re.match(r'^\d+$', s)]
-    ))[:40]
+    ))[:60]
 
     def _resolve_slug_no_token(slug: str) -> "tuple[int,str]|None":
         """utils.resolveScreenName работает без access_token для публичных групп."""
