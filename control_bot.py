@@ -4524,7 +4524,11 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                         # 200 но скелет-страница без данных — пробуем следующий профиль/сессию
                         print(f"  [Авито cffi {_tag}] стр.{p} {_imp}: 200 скелет ({len(r.text):,}б), след. профиль")
                         continue
-                    elif r.status_code in (403, 429, 503):
+                    elif r.status_code == 429:
+                        print(f"  [Авито cffi {_tag}] стр.{p}: 429 rate limit, ждём 3с...")
+                        time.sleep(3)
+                        break  # этот канал забанен — следующий
+                    elif r.status_code in (403, 503):
                         break  # этот канал забанен — следующий
                 except Exception as e:
                     print(f"  [Авито cffi {_tag}] стр.{p}: {str(e)[:80]}")
@@ -5561,12 +5565,16 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
     # Поэтому _try_cffi_web (он сам идёт напрямую) — основной метод на всех страницах.
     if _use_proxy:
         tasks = (
-            [(_try_yandex_snippets, 1)] +                         # DDG — не зависит от Авито, быстрый
-            [(_try_cffi_web, p) for p in range(1, 5)] +         # curl_cffi через прокси
-            [(_try_web_html, p) for p in range(1, 4)] +          # requests+прокси (HTML)
-            [(_try_avito_mobile_api, p) for p in range(1, 3)] +  # mobileAPI (JSON)
-            [(_try_mobile_site, 1)] +                             # m.avito.ru
-            [(_try_avito_rss, 1)]
+            [(_try_yandex_snippets, 1)] +                        # DDG — не зависит от Авито, работает при 429
+            [(_try_avito_rss, 1)] +                              # RSS — отдельный endpoint Авито
+            [(_try_cffi_web, 1)] +                               # curl_cffi стр.1 (прокси → прямой)
+            [(_try_web_html, 1)] +                               # requests+прокси стр.1
+            [(_try_avito_mobile_api, 1)] +                       # mobileAPI стр.1
+            [(_try_cffi_web, 2)] +                               # стр.2 после стр.1
+            [(_try_web_html, 2)] +
+            [(_try_avito_mobile_api, 2)] +
+            [(_try_mobile_site, 1)] +
+            [(_try_cffi_web, 3), (_try_cffi_web, 4)]
         )
         _cap = 300
         _deadline_s = 50
