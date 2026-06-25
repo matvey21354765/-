@@ -4452,7 +4452,8 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         return []
 
     def _try_cffi_web(p: int) -> list[dict]:
-        """curl_cffi Chrome impersonation — обходит TLS fingerprinting Авито без прокси."""
+        """curl_cffi Chrome impersonation — обходит TLS fingerprinting Авито.
+        Работает как с прокси, так и без — Chrome TLS fingerprint не блокируется Авито."""
         try:
             from curl_cffi import requests as _cffi
             _brand_path = f"/{brand}" if brand and brand != "any" else ""
@@ -4464,14 +4465,18 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                 params["pmin"] = price_min
             if price_max < 99_000_000:
                 params["pmax"] = price_max
-            r = _cffi.get(url, params=params, impersonate="chrome124", timeout=18, headers={
+            # С прокси — российский IP + Chrome TLS = максимальный шанс получить данные
+            _proxies = _avito_proxies() or {}
+            r = _cffi.get(url, params=params, impersonate="chrome124", timeout=10, headers={
                 "Accept": "text/html,application/xhtml+xml,*/*;q=0.9",
                 "Accept-Language": "ru-RU,ru;q=0.9",
                 "Referer": "https://www.avito.ru/",
-            })
+            }, proxies=_proxies)
             print(f"  [Авито cffi] стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
-            if r.status_code == 200 and ('"urlPath"' in r.text or 'data-marker="item"' in r.text or '__NEXT_DATA__' in r.text):
+            if r.status_code == 200 and ('"urlPath"' in r.text or '"canonicalUrl"' in r.text or 'data-marker="item"' in r.text or '__NEXT_DATA__' in r.text):
                 return _parse_avito_html(r.text, slug, today)
+            elif r.status_code == 200:
+                print(f"  [Авито cffi] стр.{p}: 200 но нет данных, первые 200б: {r.text[:200]!r}")
         except Exception as e:
             print(f"  [Авито cffi] стр.{p}: {str(e)[:80]}")
         return []
@@ -5497,14 +5502,17 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         all_methods = _no_proxy_methods
     # Список задач. С прокси — страницы с человеческой задержкой между ними.
     if _use_proxy:
-        # С мобильным прокси: параллельно пробуем все методы на стр.1-3
-        # Меньше задач → быстрее → укладываемся в 45с deadline
+        # С мобильным прокси:
+        # 1. curl_cffi (Chrome TLS fingerprint) + прокси = лучший шанс обойти Авито
+        # 2. cloudscraper (JS-bypass) + прокси
+        # 3. mobile API JSON (без HTML парсинга)
+        # 4. HTML методы
         tasks = (
+            [(_try_cffi_web, p) for p in range(1, 5)] +       # curl_cffi Chrome TLS
+            [(_try_curl_cffi, p) for p in range(1, 4)] +      # curl_cffi с явным прокси
+            [(_try_cs_web, p) for p in range(1, 4)] +         # cloudscraper
             [(_try_avito_mobile_api, p) for p in range(1, 4)] +
-            [(_try_avito_json_api, p) for p in range(1, 3)] +
-            [(_try_avito_xhr, p) for p in range(1, 3)] +
-            [(_try_web_html, p) for p in range(1, 5)] +
-            [(_try_mobile_site, 1)] +
+            [(_try_web_html, p) for p in range(1, 4)] +
             [(_try_avito_rss, 1)]
         )
         _cap = 300
