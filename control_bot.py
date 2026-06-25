@@ -1623,177 +1623,100 @@ VK_AUTO_GROUPS = {
 # ── Парсер Telegram-каналов автопродаж ──────────────────────────
 
 TG_AUTO_CHANNELS = {
-    # Каналы проверены вручную — реально существуют в Telegram
+    # Каналы найдены через tgstat.ru / telemetr.me / прямую проверку t.me/s/
     "ekaterinburg": [
-        "perekupskiydvig",    # Перекупской двиг — федеральный, активный
-        "avtorynokby196",     # Авторынок by 196 — Екатеринбург
-        "avtobaraholka_ural", # Авто барахолка Урал
-        "avto_ural96",        # Авто Урал 96
-        "ekb_avto",           # ЕКБ авто
-        "avto_sverdlovsk",    # Авто Свердловская область
-        "baraholka196",       # Барахолка 196
-        "avto196ekb",         # Авто 196 ЕКБ
+        "autorinok_66",           # Барахолка авто Свердловская обл. — 2.46K
+        "mashiny_v_ekaterinburge",# Авторынок Екатеринбург
+        "baraholkaekb",           # Барахолка Екатеринбург (авто)
+        "avto196ekb",
     ],
     "moskva": [
-        "perekupskiydvig",    # федеральный
-        "avtorynokby77",
-        "avto_msk_baraholka",
-        "autobaraholka_msk",
-        "avtobaraholka77",
-        "prodamavto_moscow",
-        "avto_moskva77",
-        "baraholka_avto_msk",
+        "mashiny_v_moskve",       # Авторынок Москва — 28K
+        "mospodbor",              # MOSPODBOR подбор/продажа — 83K
+        "saleautomsk",            # Sale Auto Москва — 2K
+        "AVTOBAZAR_RF",           # Продажа авторынок Москва
     ],
     "spb": [
-        "perekupskiydvig",
-        "avtorynokby78",
-        "avto_spb_baraholka",
-        "autobaraholka_spb",
-        "avtobaraholka78",
-        "prodamavto_spb78",
-        "avto_piter_baraholka",
+        "mashiny_v_spbq",         # Авторынок СПБ — 1.8K
+        "NizheRynkaSpbfast",      # АВТО НИЖЕ РЫНКА СПБ
+        "mashiny_v_peterburge",   # Авторынок Петербург
     ],
     "novosibirsk": [
-        "perekupskiydvig",
-        "avtorynokby54",
-        "avto_nsk_baraholka",
-        "autobaraholka_nsk",
-        "avtobaraholka54",
-        "avto_novosibirsk54",
-        "baraholka_avto_nsk",
+        "mashiny_v_novosibirske", # Авторынок Новосибирск — 9.2K
+        "avtonovosib",            # Новосибирск авторынок
     ],
     "kazan": [
-        "perekupskiydvig",
-        "avtorynokby16",
-        "avto_kazan_baraholka",
-        "autobaraholka_kazan",
-        "avtobaraholka16",
-        "avto_kazan16",
+        "mashiny_v_kazani",       # Авторынок Казань — 15K
+        "kazanplusauto",          # Kazan Plus продажа авто — 7K
+        "kazan_avto_100t",        # Тачка за сотку Казань — 3.5K
     ],
     "krasnodar": [
-        "perekupskiydvig",
-        "avtorynokby23",
-        "avto_krd_baraholka",
-        "autobaraholka_krd",
-        "avtobaraholka23",
-        "avto_krasnodar23",
-        "kuban_avto_baraholka",
+        "mashiny_v_krasnodare",   # Авторынок Краснодар — 11.6K
+        "avtok23",                # Авторынок Краснодар — 924
+        "bukkrai",                # Продажа авто Краснодар
     ],
     "chelyabinsk": [
-        "perekupskiydvig",
-        "avtorynokby74",
-        "avto_chel_baraholka",
-        "autobaraholka_chel",
-        "avtobaraholka74",
-        "avto_chelyabinsk74",
+        "mashiny_v_chelyabinske", # Авторынок Челябинск
+        "Avtorinok_74",           # Авторынок Челябинск — 4.2K
     ],
     "ufa": [
-        "perekupskiydvig",
-        "avtorynokby02",
-        "avto_ufa_baraholka",
-        "autobaraholka_ufa",
-        "avtobaraholka02",
-        "avto_ufa02",
+        "mashiny_v_ufe",          # Авторынок Уфа — 11.7K
+        "autorynok_ufa",          # Авторынок Уфа объявления — 5.8K
+        "avtorynok_ufa_perekup",  # Авторынок Уфа перекупы — 11K
     ],
     "omsk": [
-        "perekupskiydvig",
-        "avtorynokby55",
-        "avto_omsk_baraholka",
-        "autobaraholka_omsk",
-        "avtobaraholka55",
-        "avto_omsk55",
+        "mashiny_v_omske",        # Авторынок Омск — 12.7K
+        "avtorynok_omsk_55",      # Авторынок Омск — 18.4K
     ],
     "rostov": [
-        "perekupskiydvig",
-        "avtorynokby61",
-        "avto_rostov_baraholka",
-        "autobaraholka_rostov",
-        "avtobaraholka61",
-        "avto_rostov61",
+        "mashiny_v_rostove",      # Авторынок Ростов — 13.4K
+        "mashiny_v_rostove_nd",   # Авторынок Ростов-на-Дону
     ],
     "tyumen": [
-        "perekupskiydvig",
-        "avtorynokby72",
-        "avto_tyumen_baraholka",
-        "autobaraholka_tyumen",
-        "avtobaraholka72",
-        "avto_tyumen72",
+        "avto_tumen_72",          # Авторынок Тюмень 72
+        "mashiny_v_tyumeni",      # Авторынок Тюмень
     ],
     "samara": [
-        "perekupskiydvig",
-        "avtorynokby63",
-        "avto_samara_baraholka",
-        "autobaraholka_samara",
-        "avtobaraholka63",
-        "avto_samara63",
+        "mashiny_v_samare",       # Авторынок Самара — 9K
+        "AUTOTORG63",             # АвтоРынок Самара/Тольятти — 6.1K
     ],
     "volgograd": [
-        "perekupskiydvig",
-        "avtorynokby34",
-        "avto_vgd_baraholka",
-        "autobaraholka_vgd",
-        "avtobaraholka34",
-        "avto_volgograd34",
+        "AvtomobiliVolgograd",    # Авторынок Волгоград/Волжский — 11.4K
+        "mashiny_v_volgograde",   # Авторынок Волгоград
     ],
     "perm": [
-        "perekupskiydvig",
-        "avtorynokby59",
-        "avto_perm_baraholka",
-        "autobaraholka_perm",
-        "avtobaraholka59",
-        "avto_perm59",
+        "mashiny_v_permi",        # Авторынок Пермь — 12.9K
+        "automarket_59",          # Авто Пермь
     ],
     "voronezh": [
-        "perekupskiydvig",
-        "avtorynokby36",
-        "avto_vrn_baraholka",
-        "autobaraholka_vrn",
-        "avtobaraholka36",
-        "avto_voronezh36",
+        "auto_voronezh36",        # Воронеж Авторынок — 3.7K
+        "vrnCars",                # Авторынок Воронеж №1 — 8.5K
+        "Voronezh_AvtoRynok",     # Воронеж АвтоРынок
     ],
     "saratov": [
-        "perekupskiydvig",
-        "avtorynokby64",
-        "avto_saratov_baraholka",
-        "autobaraholka_saratov",
-        "avtobaraholka64",
+        "mashiny_v_saratove",     # Авторынок Саратов — 13.5K
+        "autobazar13",            # Авторынок Пенза/Саранск/Саратов — 5.5K
     ],
     "krasnoyarsk": [
-        "perekupskiydvig",
-        "avtorynokby24",
-        "avto_krs_baraholka",
-        "autobaraholka_krs",
-        "avtobaraholka24",
-        "avto_krasnoyarsk24",
+        "mashiny_v_krasnoyarske", # Авторынок Красноярск — 8.3K
+        "AUTO_24RU",              # Авторынок Красноярск
     ],
     "irkutsk": [
-        "perekupskiydvig",
-        "avtorynokby38",
-        "avto_irk_baraholka",
-        "autobaraholka_irkutsk",
-        "avtobaraholka38",
+        "AUTO_38RU",              # Авторынок Иркутск
+        "mashiny_v_irkutske",     # Авторынок Иркутск
     ],
     "vladivostok": [
-        "perekupskiydvig",
-        "avtorynokby25",
-        "avto_vlad_baraholka",
-        "autobaraholka_vlad",
-        "avtobaraholka25",
+        "mashiny_v_vladivostoke", # Авторынок Владивосток — 11.4K
+        "VelesAutoDV_salecar",    # Veles Auto ДВ — 63.5K
     ],
     "habarovsk": [
-        "perekupskiydvig",
-        "avtorynokby27",
-        "avto_hab_baraholka",
-        "autobaraholka_hab",
-        "avtobaraholka27",
+        "auto_khv",               # Авто Хабаровск — 3.3K
+        "mashiny_v_habarovske",   # Авторынок Хабаровск
     ],
     "nn": [
-        "perekupskiydvig",
-        "avtorynokby52",
-        "avto_nn_baraholka",
-        "autobaraholka_nn",
-        "avtobaraholka52",
-        "avto_nn52",
+        "mashiny_v_nizhnem",      # Авторынок Нижний Новгород — 14.7K
+        "mashiny_v_nn",           # Авторынок НН
+        "rynok_nizhniy",          # Барахолка Нижний Новгород
     ],
 }
 
