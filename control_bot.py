@@ -5151,7 +5151,8 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                 if _exe:
                     launch_opts["executable_path"] = _exe
                 browser = pw.chromium.launch(**launch_opts)
-                # Пробуем сначала через прокси (обходит блокировку Railway IP), потом напрямую
+                # Playwright ТОЛЬКО через прокси — Railway IP жёстко заблокирован Авито
+                # При 429 от прокси выходим сразу (временный бан, прямое подключение не поможет)
                 _proxy_attempts = []
                 if AVITO_PROXIES and not _proxy_auth_failed and AVITO_PROXY_USER:
                     _phost = AVITO_PROXY_HOST
@@ -5163,7 +5164,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                         "username": _puser,
                         "password": _ppass,
                     })
-                _proxy_attempts.append(None)  # прямой как резерв
+                # НЕ добавляем None (прямой) — Railway IP заблокирован Авито навсегда
                 html = ""
                 for _proxy_cfg in _proxy_attempts:
                     try:
@@ -5178,16 +5179,22 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                         page = ctx.new_page()
                         _tag_pw = "прокси" if _proxy_cfg else "напрямую"
                         try:
-                            page.goto(f"https://www.avito.ru/{slug}", timeout=12000, wait_until="domcontentloaded")
-                            page.wait_for_timeout(1000)
+                            # Прогрев сессии через главную страницу города (помогает с куки)
+                            page.goto(f"https://www.avito.ru/{slug}", timeout=15000, wait_until="domcontentloaded")
+                            page.wait_for_timeout(1500)
                         except Exception:
                             pass
-                        page.goto(full_url, timeout=20000, wait_until="networkidle")
+                        page.goto(full_url, timeout=25000, wait_until="networkidle")
                         html = page.content()
                         ctx.close()
-                        print(f"  [Playwright {_tag_pw}] стр.{p}: {len(html):,}б")
-                        if "Доступ ограничен" not in html and len(html) > 100_000:
-                            break  # успех — не пробуем следующий вариант
+                        _has_data = '__NEXT_DATA__' in html or '"urlPath"' in html or '"canonicalUrl"' in html
+                        _is_banned = "Доступ ограничен" in html or "проблема с IP" in html
+                        _is_429 = len(html) < 50_000 and ("429" in html or "Too Many" in html)
+                        print(f"  [Playwright {_tag_pw}] стр.{p}: {len(html):,}б {'✅' if _has_data else '❌'}{' [бан-IP]' if _is_banned else ''}{' [429]' if _is_429 else ''}")
+                        if _has_data:
+                            break  # успех
+                        if _is_429:
+                            break  # прокси временно заблокирован — прямое не поможет
                     except Exception as _epw:
                         print(f"  [Playwright {_tag_pw if '_tag_pw' in dir() else '?'}] стр.{p}: {str(_epw)[:80]}")
                 browser.close()
@@ -5699,8 +5706,11 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
     if _use_proxy:
         tasks = (
             [(_try_playwright, 1)] +                             # Playwright (реальный Chrome) — главный
+            [(_try_free_proxies, 1)] +                           # Бесплатные российские прокси (при 429 платного)
             [(_try_yandex_snippets, 1)] +                        # DDG — не зависит от Авито, работает при 429
             [(_try_avito_rss, 1)] +                              # RSS — отдельный endpoint Авито
+            [(_try_avito_json_api, 1)] +                         # Внутренний JSON API Авито
+            [(_try_avito_xhr, 1)] +                              # XHR API Авито
             [(_try_cffi_web, 1)] +                               # curl_cffi стр.1 (прокси → прямой)
             [(_try_web_html, 1)] +                               # requests+прокси стр.1
             [(_try_avito_mobile_api, 1)] +                       # mobileAPI стр.1
@@ -5711,7 +5721,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             [(_try_cffi_web, 3), (_try_cffi_web, 4)]
         )
         _cap = 300
-        _deadline_s = 50
+        _deadline_s = 55
     else:
         tasks = [(m, 1) for m in all_methods]
         _cap = 40
