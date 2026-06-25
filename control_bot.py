@@ -4958,13 +4958,6 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                     print(f"  [Авито mobileAPI] стр.{p}: {str(e)[:60]}")
                     time.sleep(1)
         return []
-                elif r.status_code in (403, 429):
-                    time.sleep(2)
-                    continue
-            except Exception as e:
-                print(f"  [Авито mobileAPI] стр.{p} попытка {attempt+1}: {str(e)[:60]}")
-                time.sleep(1)
-        return []
 
     def _try_avito_json_api(p: int) -> list[dict]:
         """Avito internal JSON listing endpoint — returns structured data without HTML parsing."""
