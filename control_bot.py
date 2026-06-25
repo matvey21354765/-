@@ -6566,6 +6566,86 @@ async def cmd_start(msg: Message, state: FSMContext):
         )
 
 
+@dp.message(Command("avito_debug"))
+async def cmd_avito_debug(msg: Message):
+    """Диагностика прокси и Авито — только для админов."""
+    if msg.from_user.id not in ADMIN_IDS:
+        return
+    await msg.answer("🔍 Тестирую прокси и Авито...")
+    lines = []
+    loop = asyncio.get_running_loop()
+
+    def _run_test():
+        import requests as _rq
+        out = []
+        # 1. Без прокси — Railway IP
+        try:
+            ip = _rq.get("https://api.ipify.org", timeout=5).text.strip()
+            out.append(f"🌐 Railway IP: {ip}")
+        except Exception as e:
+            out.append(f"🌐 Railway IP: ошибка {e}")
+
+        # 2. Через прокси — какой IP
+        if AVITO_PROXIES:
+            try:
+                ip2 = _rq.get("https://api.ipify.org", proxies=_avito_proxies(), timeout=8).text.strip()
+                out.append(f"🔀 Прокси IP: {ip2} ✅")
+            except Exception as e:
+                out.append(f"🔀 Прокси: ❌ {str(e)[:80]}")
+        else:
+            out.append("🔀 Прокси: не настроен")
+
+        # 3. Авито через requests + прокси
+        if AVITO_PROXIES:
+            try:
+                ra = _rq.get("https://www.avito.ru/ekaterinburg/avtomobili",
+                    proxies=_avito_proxies(), timeout=8,
+                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                             "Accept-Language": "ru-RU,ru;q=0.9"})
+                has = '"urlPath"' in ra.text or '"canonicalUrl"' in ra.text or '__NEXT_DATA__' in ra.text
+                out.append(f"🔴 Авито+прокси (requests): HTTP {ra.status_code}, {len(ra.text):,}б, данные: {'✅' if has else '❌'}")
+                if not has:
+                    out.append(f"  → первые 150б: {ra.text[:150]!r}")
+            except Exception as e:
+                out.append(f"🔴 Авито+прокси (requests): ❌ {str(e)[:100]}")
+
+        # 4. Авито через curl_cffi + прокси
+        try:
+            from curl_cffi import requests as _cffi
+            _prx = _avito_proxies() or {}
+            rb = _cffi.get("https://www.avito.ru/ekaterinburg/avtomobili",
+                impersonate="chrome124", timeout=8, proxies=_prx,
+                headers={"Accept-Language": "ru-RU,ru;q=0.9"})
+            has2 = '"urlPath"' in rb.text or '"canonicalUrl"' in rb.text or '__NEXT_DATA__' in rb.text
+            out.append(f"🔴 Авито+прокси (curl_cffi): HTTP {rb.status_code}, {len(rb.text):,}б, данные: {'✅' if has2 else '❌'}")
+            if not has2:
+                out.append(f"  → первые 150б: {rb.text[:150]!r}")
+        except Exception as e:
+            out.append(f"🔴 Авито (curl_cffi): ❌ {str(e)[:100]}")
+
+        # 5. Авито без прокси через curl_cffi
+        try:
+            from curl_cffi import requests as _cffi2
+            rc = _cffi2.get("https://www.avito.ru/ekaterinburg/avtomobili",
+                impersonate="chrome124", timeout=8,
+                headers={"Accept-Language": "ru-RU,ru;q=0.9"})
+            has3 = '"urlPath"' in rc.text or '"canonicalUrl"' in rc.text or '__NEXT_DATA__' in rc.text
+            out.append(f"🔴 Авито без прокси (curl_cffi): HTTP {rc.status_code}, {len(rc.text):,}б, данные: {'✅' if has3 else '❌'}")
+            if not has3:
+                out.append(f"  → первые 150б: {rc.text[:150]!r}")
+        except Exception as e:
+            out.append(f"🔴 Авито без прокси (curl_cffi): ❌ {str(e)[:100]}")
+
+        return out
+
+    try:
+        lines = await loop.run_in_executor(None, _run_test)
+    except Exception as e:
+        lines = [f"Ошибка: {e}"]
+
+    await msg.answer("\n".join(lines)[:4000])
+
+
 @dp.message(Command("stats"))
 async def cmd_stats(msg: Message):
     if msg.from_user.id not in ADMIN_IDS:
