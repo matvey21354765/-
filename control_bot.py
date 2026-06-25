@@ -5561,11 +5561,11 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
     # Поэтому _try_cffi_web (он сам идёт напрямую) — основной метод на всех страницах.
     if _use_proxy:
         tasks = (
-            [(_try_cffi_web, p) for p in range(1, 5)] +         # curl_cffi через прокси — ОСНОВНОЙ
+            [(_try_yandex_snippets, 1)] +                         # DDG — не зависит от Авито, быстрый
+            [(_try_cffi_web, p) for p in range(1, 5)] +         # curl_cffi через прокси
             [(_try_web_html, p) for p in range(1, 4)] +          # requests+прокси (HTML)
             [(_try_avito_mobile_api, p) for p in range(1, 3)] +  # mobileAPI (JSON)
             [(_try_mobile_site, 1)] +                             # m.avito.ru
-            [(_try_yandex_snippets, 1)] +                         # DDG резерв
             [(_try_avito_rss, 1)]
         )
         _cap = 300
@@ -6792,6 +6792,41 @@ async def cmd_avito_debug(msg: Message):
                 out.append(f"   → ответ: {_mob_r.text[:200]!r}")
         except Exception as e:
             out.append(f"📱 Мобильный API: ❌ {str(e)[:100]}")
+
+        # 8. DuckDuckGo поиск Авито (не обращается к Авито напрямую)
+        try:
+            import requests as _rq8
+            _ddg_hdrs = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                "Accept-Language": "ru-RU,ru;q=0.9",
+            }
+            _ddg_q = "site:avito.ru/ekaterinburg/avtomobili до 200000 руб"
+            _ddg_r = _rq8.get("https://html.duckduckgo.com/html/", params={"q": _ddg_q, "kl": "ru-ru"}, headers=_ddg_hdrs, timeout=12)
+            import re as _re8
+            _ddg_urls = _re8.findall(r'avito\.ru/ekaterinburg/avtomobili/[a-z0-9_%-]*\d{6,}', _ddg_r.text)
+            out.append(f"🔍 DuckDuckGo (не Авито): HTTP {_ddg_r.status_code}, {len(_ddg_r.text):,}б, ссылок Авито={len(_ddg_urls)} {'✅' if _ddg_urls else '❌'}")
+            if _ddg_urls:
+                out.append(f"   → пример: {_ddg_urls[0][:80]}")
+            elif _ddg_r.status_code == 202:
+                out.append("   → DDG вернул 202 (rate limit)")
+            # Lite версия
+            _ddg_r2 = _rq8.get("https://lite.duckduckgo.com/lite/", params={"q": _ddg_q, "kl": "ru-ru"}, headers=_ddg_hdrs, timeout=12)
+            _ddg_urls2 = _re8.findall(r'avito\.ru/ekaterinburg/avtomobili/[a-z0-9_%-]*\d{6,}', _ddg_r2.text)
+            out.append(f"🔍 DDG Lite: HTTP {_ddg_r2.status_code}, {len(_ddg_r2.text):,}б, ссылок={len(_ddg_urls2)} {'✅' if _ddg_urls2 else '❌'}")
+        except Exception as e:
+            out.append(f"🔍 DuckDuckGo: ❌ {str(e)[:100]}")
+
+        # 9. Авито RSS (отдельный endpoint, другой rate limit)
+        try:
+            import requests as _rq9
+            _rss_r = _rq9.get("https://www.avito.ru/ekaterinburg/avtomobili?output=rss",
+                headers={"User-Agent": "Mozilla/5.0", "Accept": "application/rss+xml,*/*"},
+                timeout=10)
+            _rss_has = "<item>" in _rss_r.text or "<title>" in _rss_r.text
+            _rss_count = _rss_r.text.count("<item>")
+            out.append(f"📡 Авито RSS: HTTP {_rss_r.status_code}, {len(_rss_r.text):,}б, items={_rss_count} {'✅' if _rss_count > 0 else '❌'}")
+        except Exception as e:
+            out.append(f"📡 Авито RSS: ❌ {str(e)[:80]}")
 
         return out
 
