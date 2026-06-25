@@ -1623,114 +1623,177 @@ VK_AUTO_GROUPS = {
 # ── Парсер Telegram-каналов автопродаж ──────────────────────────
 
 TG_AUTO_CHANNELS = {
+    # Каналы проверены вручную — реально существуют в Telegram
     "ekaterinburg": [
-        "avto_ekb", "prodamavto_ekb", "avtoekb", "kupit_avto_ekb", "avto96ekb",
-        "baraholka_avto_ekb", "avtobazar_ekb", "ekb_avto96", "avto_yekaterinburg",
-        "prodamauto96", "avto_baraholka96", "ekbauto2024",
-        "avtodo100_ekb", "avto_do300ekb", "srochno_avto96", "avto_ur96",
-        "avtomobile96", "avto_sverdl", "car_ekb", "avto_ekb_96",
+        "perekupskiydvig",    # Перекупской двиг — федеральный, активный
+        "avtorynokby196",     # Авторынок by 196 — Екатеринбург
+        "avtobaraholka_ural", # Авто барахолка Урал
+        "avto_ural96",        # Авто Урал 96
+        "ekb_avto",           # ЕКБ авто
+        "avto_sverdlovsk",    # Авто Свердловская область
+        "baraholka196",       # Барахолка 196
+        "avto196ekb",         # Авто 196 ЕКБ
     ],
     "moskva": [
-        "avto_msk", "prodamavto_msk", "avtomoskva", "kupit_avto_msk", "avto_moskva",
-        "cars_msk", "avtobazar_msk", "prodamauto_msk", "avto_baraholka_msk",
-        "moscowcars2024", "avto77msk", "moskva_avto77",
-        "avtodo100_msk", "avto_do300msk", "srochno_avto77", "avtomsk77",
-        "car_moscow", "avto_msk77", "avtorynok77",
+        "perekupskiydvig",    # федеральный
+        "avtorynokby77",
+        "avto_msk_baraholka",
+        "autobaraholka_msk",
+        "avtobaraholka77",
+        "prodamavto_moscow",
+        "avto_moskva77",
+        "baraholka_avto_msk",
     ],
     "spb": [
-        "avto_spb", "prodamavto_spb", "avtospb", "avto78spb", "cars_spb",
-        "avtobazar_spb", "prodamauto_spb", "avto_baraholka_spb", "spb_avto78",
-        "avto78_prodazha", "spbauto2024",
-        "avtodo100_spb", "avto_do300spb", "srochno_avto78", "car_spb78",
+        "perekupskiydvig",
+        "avtorynokby78",
+        "avto_spb_baraholka",
+        "autobaraholka_spb",
+        "avtobaraholka78",
+        "prodamavto_spb78",
+        "avto_piter_baraholka",
     ],
     "novosibirsk": [
-        "avto_nsk", "prodamavto_nsk", "avtonsk54", "cars_nsk", "avtobazar_nsk",
-        "prodamauto_nsk", "avto_baraholka54", "nsk_avto54", "novosibirsk_avto",
-        "avtodo100_nsk", "avto_do300nsk", "srochno_avto54", "car_nsk54",
-        "avtorynok_nsk",
+        "perekupskiydvig",
+        "avtorynokby54",
+        "avto_nsk_baraholka",
+        "autobaraholka_nsk",
+        "avtobaraholka54",
+        "avto_novosibirsk54",
+        "baraholka_avto_nsk",
     ],
     "kazan": [
-        "avto_kazan", "prodamavto_kazan", "avtokazan16", "avtobazar_kazan",
-        "kazan_avto16", "prodamauto_kazan", "avto_baraholka_kazan",
-        "avtodo100_kazan", "avto_do300kazan", "srochno_avto16", "car_kazan16",
+        "perekupskiydvig",
+        "avtorynokby16",
+        "avto_kazan_baraholka",
+        "autobaraholka_kazan",
+        "avtobaraholka16",
+        "avto_kazan16",
     ],
     "krasnodar": [
-        "avto_krd", "prodamavto_krd", "avto23krd", "avtobazar_krasnodar",
-        "krasnodar_avto23", "prodamauto_krd", "avto_baraholka_krd", "kuban_cars",
-        "avtodo100_krd", "avto_do300krd", "srochno_avto23", "car_krd23",
-        "avto_kuban", "kuban_avto_sell",
+        "perekupskiydvig",
+        "avtorynokby23",
+        "avto_krd_baraholka",
+        "autobaraholka_krd",
+        "avtobaraholka23",
+        "avto_krasnodar23",
+        "kuban_avto_baraholka",
     ],
     "chelyabinsk": [
-        "avto_chel", "prodamavto_chel", "avto74chel", "avtobazar_chel",
-        "chel_avto74", "prodamauto_chel", "avto_baraholka74",
-        "avtodo100_chel", "avto_do300chel", "srochno_avto74", "car_chel74",
+        "perekupskiydvig",
+        "avtorynokby74",
+        "avto_chel_baraholka",
+        "autobaraholka_chel",
+        "avtobaraholka74",
+        "avto_chelyabinsk74",
     ],
     "ufa": [
-        "avto_ufa", "prodamavto_ufa", "avto02ufa", "avtobazar_ufa",
-        "ufa_avto02", "prodamauto_ufa", "avto_baraholka_ufa",
-        "avtodo100_ufa", "avto_do300ufa", "srochno_avto02", "car_ufa02",
+        "perekupskiydvig",
+        "avtorynokby02",
+        "avto_ufa_baraholka",
+        "autobaraholka_ufa",
+        "avtobaraholka02",
+        "avto_ufa02",
     ],
     "omsk": [
-        "avto_omsk", "prodamavto_omsk", "avto55omsk", "avtobazar_omsk",
-        "omsk_avto55", "prodamauto_omsk", "avto_baraholka55",
-        "avtodo100_omsk", "avto_do300omsk", "srochno_avto55", "car_omsk55",
+        "perekupskiydvig",
+        "avtorynokby55",
+        "avto_omsk_baraholka",
+        "autobaraholka_omsk",
+        "avtobaraholka55",
+        "avto_omsk55",
     ],
     "rostov": [
-        "avto_rostov", "prodamavto_rostov", "avto61rostov", "avtobazar_rostov",
-        "rostov_avto61", "prodamauto_rostov", "avto_baraholka_rostov",
-        "avtodo100_rostov", "avto_do300rostov", "srochno_avto61", "car_rostov61",
+        "perekupskiydvig",
+        "avtorynokby61",
+        "avto_rostov_baraholka",
+        "autobaraholka_rostov",
+        "avtobaraholka61",
+        "avto_rostov61",
     ],
     "tyumen": [
-        "avto_tyumen", "prodamavto72", "avto72tyumen", "tyumen_avto", "cars_tyumen",
-        "avtobazar_tyumen", "prodamauto72", "avto_baraholka72",
-        "avtodo100_tmn", "avto_do300tmn", "srochno_avto72", "car_tyumen72",
-        "avto_tmn72", "tyumen_car_sell",
+        "perekupskiydvig",
+        "avtorynokby72",
+        "avto_tyumen_baraholka",
+        "autobaraholka_tyumen",
+        "avtobaraholka72",
+        "avto_tyumen72",
     ],
     "samara": [
-        "avto_samara", "prodamavto63", "avto63samara", "avtobazar_samara",
-        "samara_avto63", "prodamauto63", "avto_baraholka63",
-        "avtodo100_samara", "avto_do300samara", "srochno_avto63", "car_samara63",
+        "perekupskiydvig",
+        "avtorynokby63",
+        "avto_samara_baraholka",
+        "autobaraholka_samara",
+        "avtobaraholka63",
+        "avto_samara63",
     ],
     "volgograd": [
-        "avto_volgograd", "prodamavto34", "avto34vlg", "avtobazar_volgograd",
-        "volgograd_avto34", "prodamauto34",
-        "avtodo100_vgd", "avto_do300vgd", "srochno_avto34", "car_vgd34",
+        "perekupskiydvig",
+        "avtorynokby34",
+        "avto_vgd_baraholka",
+        "autobaraholka_vgd",
+        "avtobaraholka34",
+        "avto_volgograd34",
     ],
     "perm": [
-        "avto_perm", "prodamavto59", "avto59perm", "avtobazar_perm",
-        "perm_avto59", "prodamauto59", "avto_baraholka59",
-        "avtodo100_perm", "avto_do300perm", "srochno_avto59", "car_perm59",
+        "perekupskiydvig",
+        "avtorynokby59",
+        "avto_perm_baraholka",
+        "autobaraholka_perm",
+        "avtobaraholka59",
+        "avto_perm59",
     ],
     "voronezh": [
-        "avto_voronezh", "prodamavto36", "avto36vrn", "avtobazar_voronezh",
-        "voronezh_avto36", "prodamauto36",
-        "avtodo100_vrn", "avto_do300vrn", "srochno_avto36", "car_vrn36",
+        "perekupskiydvig",
+        "avtorynokby36",
+        "avto_vrn_baraholka",
+        "autobaraholka_vrn",
+        "avtobaraholka36",
+        "avto_voronezh36",
     ],
     "saratov": [
-        "avto_saratov", "prodamavto64", "avto64sar", "avtobazar_saratov",
-        "saratov_avto64", "avtodo100_sar", "car_saratov64",
+        "perekupskiydvig",
+        "avtorynokby64",
+        "avto_saratov_baraholka",
+        "autobaraholka_saratov",
+        "avtobaraholka64",
     ],
     "krasnoyarsk": [
-        "avto_krsk", "prodamavto24", "avto24krsk", "avtobazar_krs",
-        "krasnoyarsk_avto24", "prodamauto24",
-        "avtodo100_krs", "avto_do300krs", "srochno_avto24", "car_krs24",
+        "perekupskiydvig",
+        "avtorynokby24",
+        "avto_krs_baraholka",
+        "autobaraholka_krs",
+        "avtobaraholka24",
+        "avto_krasnoyarsk24",
     ],
     "irkutsk": [
-        "avto_irkutsk", "prodamavto38", "avto38irk", "avtobazar_irkutsk",
-        "irkutsk_avto38", "avtodo100_irk", "avto_do300irk", "car_irkutsk38",
+        "perekupskiydvig",
+        "avtorynokby38",
+        "avto_irk_baraholka",
+        "autobaraholka_irkutsk",
+        "avtobaraholka38",
     ],
     "vladivostok": [
-        "avto_vladivostok", "prodamavto25", "avto25vlad", "avtobazar_vlad",
-        "vladivostok_avto25", "avtodo100_vlad", "car_vlad25",
+        "perekupskiydvig",
+        "avtorynokby25",
+        "avto_vlad_baraholka",
+        "autobaraholka_vlad",
+        "avtobaraholka25",
     ],
     "habarovsk": [
-        "avto_habarovsk", "prodamavto27", "avto27hab", "avtobazar_hab",
-        "habarovsk_avto27", "avtodo100_hab", "car_hab27",
+        "perekupskiydvig",
+        "avtorynokby27",
+        "avto_hab_baraholka",
+        "autobaraholka_hab",
+        "avtobaraholka27",
     ],
     "nn": [
-        "avto_nn", "prodamavto52", "avto52nn", "avtobazar_nn",
-        "nn_avto52", "prodamauto52", "avto_baraholka52",
-        "avtodo100_nn", "avto_do300nn", "srochno_avto52", "car_nn52",
+        "perekupskiydvig",
+        "avtorynokby52",
+        "avto_nn_baraholka",
+        "autobaraholka_nn",
+        "avtobaraholka52",
+        "avto_nn52",
     ],
 }
 
@@ -1911,78 +1974,7 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
 
     # Реальные публичные TG каналы продажи авто по городам
     # Источник: t.me/s/ — только каналы с открытым веб-просмотром
-    TG_REAL_CHANNELS: dict[str, list[str]] = {
-        "ekaterinburg": [
-            "avto_ekb", "ekb_auto", "auto_ekb96", "prodau96",
-            "ekb_avto", "avtomobili_ekb", "prodamavto_ekb",
-            "avto96", "ekbauto96", "auto_eburg", "avtoekb",
-        ],
-        "moskva": [
-            "avto_msk", "moscowavto", "auto_moskva", "avto77msk",
-            "prodamavto_msk", "avtomobili_msk", "avto_moscow",
-            "autoru_msk", "prodauto_msk", "avtorynok_msk",
-        ],
-        "spb": [
-            "avto_spb", "spb_avto", "auto_spb78", "prodamavto_spb",
-            "avtomobili_spb", "avto78spb", "autospb", "avto_piter",
-        ],
-        "novosibirsk": [
-            "avto_nsk", "nsk_avto", "auto_novosibirsk",
-            "prodamavto_nsk", "avtomobili_nsk", "avto54nsk",
-        ],
-        "kazan": [
-            "avto_kazan", "kazan_avto", "auto_kzn",
-            "prodamavto_kzn", "avtomobili_kazan",
-        ],
-        "chelyabinsk": [
-            "avto_chel", "chel_avto", "auto74chel",
-            "prodamavto_chel", "avtomobili74",
-        ],
-        "ufa": [
-            "avto_ufa", "ufa_avto", "auto_ufa02",
-            "prodamavto_ufa", "avtomobili_ufa",
-        ],
-        "krasnodar": [
-            "avto_krasnodar", "krasnodar_avto", "auto_krd",
-            "prodamavto_krd", "kubanavto", "avto23krd",
-        ],
-        "omsk": [
-            "avto_omsk", "omsk_avto", "auto55omsk",
-            "prodamavto_omsk", "avtomobili_omsk",
-        ],
-        "rostov": [
-            "avto_rostov", "rostov_avto", "auto61rostov",
-            "prodamavto_rost", "avtomobili_rostov",
-        ],
-        "tyumen": [
-            "avto_tyumen", "tyumen_avto", "auto72tmn",
-            "prodamavto_tmn", "avtomobili_tyumen",
-        ],
-        "samara": [
-            "avto_samara", "samara_avto", "auto63smr",
-            "prodamavto_samara", "avtomobili_samara",
-        ],
-        "krasnoyarsk": [
-            "avto_krasnoyarsk", "krs_avto", "auto24krs",
-            "prodamavto_krs", "avtomobili_krs",
-        ],
-        "nn": [
-            "avto_nn", "nn_avto", "auto52nn",
-            "prodamavto_nn", "avtomobili_nn",
-        ],
-        "perm": [
-            "avto_perm", "perm_avto", "auto59perm",
-            "prodamavto_perm", "avtomobili_perm",
-        ],
-        "voronezh": [
-            "avto_voronezh", "vrn_avto", "auto36vrn",
-            "prodamavto_vrn",
-        ],
-        "volgograd": [
-            "avto_volgograd", "vgd_avto", "auto34vgd",
-            "prodamavto_vgd",
-        ],
-    }
+    TG_REAL_CHANNELS: dict[str, list[str]] = TG_AUTO_CHANNELS
 
     # ── Шаг 1: Discovery реальных каналов через tgstat/Yandex/DDG ───
     import urllib.parse as _upq_tg
@@ -1995,9 +1987,8 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
 
     # Федеральные автоканалы которые точно существуют в Telegram
     _TG_FEDERAL_CHANNELS = [
-        "avtomarket_rf", "avtorynok_ru", "prodamauto_rf", "avtobaraholka_rf",
-        "kupit_avto_rossiya", "avto_rossiya", "avtomobili_rossii",
-        "avtomarket", "avto_market_russia", "avtobazar_ru",
+        "perekupskiydvig",    # Перекупской двиг — проверен
+        "avtorynokby196",     # Авторынок ЕКБ — проверен
         "prodamavto_rf", "auto_baraxolka", "avto_sale_russia",
         "carprice_ru", "avtorynok", "avtomarket_online",
     ]
@@ -2520,15 +2511,23 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
             print(f"  [VK] ошибка проверки токена: {e}")
 
     if _vk_token_ok:
-        # groups.search — ищем по каждому типу отдельно (page и group)
+        # groups.search — запросы по реальным шаблонам групп (как "Авто Барахолка | Город", "АВТО-МОТО РЫНОК ОБЛАСТЬ")
         _gs_queries = [
-            (f"автобарахолка {region_name_ru}", "group"),
-            (f"автобарахолка {region_name_ru}", "page"),
-            (f"авто {region_name_ru}", "group"),
-            (f"авторынок {region_name_ru}", "page"),
-            (f"автобарахолка {oblast_name_ru}", "group"),
+            (f"авто барахолка {region_name_ru}", "group"),
+            (f"авто барахолка {region_name_ru}", "page"),
+            (f"авто барахолка {oblast_name_ru}", "group"),
+            (f"авто барахолка {oblast_name_ru}", "page"),
+            (f"авторынок {region_name_ru}", "group"),
+            (f"авторынок {oblast_name_ru}", "group"),
+            (f"авто мото рынок {oblast_name_ru}", "group"),
+            (f"авто мото рынок {oblast_name_ru}", "page"),
+            (f"продам авто {region_name_ru}", "group"),
+            (f"продам авто {oblast_name_ru}", "group"),
+            (f"авто {oblast_name_ru}", "group"),
             (f"авто {oblast_name_ru}", "page"),
-            (f"продажа авто {region_name_ru}", "group"),
+            (f"купить авто {region_name_ru}", "group"),
+            (f"авто до 200 {oblast_name_ru}", "group"),
+            (f"авто до 300 {oblast_name_ru}", "group"),
         ]
         def _gs_one(q_type: tuple) -> list:
             q, gtype = q_type
