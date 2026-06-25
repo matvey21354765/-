@@ -4886,62 +4886,78 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         """Официальный мобильный API Авито (m.avito.ru/api/13/items).
         С российским мобильным IP (Megafone/MTS/Beeline) работает без авторизации.
         Возвращает чистый JSON без необходимости парсить HTML."""
-        _key = "af0deccbgcgidddjgnvljitntccdduijhdinfgjgfjir"
-        params: dict = {
-            "key": _key,
+        _base_params: dict = {
             "locationId": location_id,
             "categoryId": 9,
             "params[109][]": 106,
             "page": p,
             "limit": 50,
             "display": "list",
-            "sort": "date",
+            "sortType": "101",  # по дате
         }
         if price_min > 0:
-            params["priceMin"] = price_min
+            _base_params["priceMin"] = price_min
         if price_max < 99_000_000:
-            params["priceMax"] = price_max
+            _base_params["priceMax"] = price_max
+
+        # Пробуем разные варианты: с ключом и без, версии API 9/13/15
+        _variants = [
+            ("https://m.avito.ru/api/13/items", {**_base_params, "key": "af0deccbgcgidddjgnvljitntccdduijhdinfgjgfjir"}),
+            ("https://m.avito.ru/api/13/items", _base_params),
+            ("https://m.avito.ru/api/9/items", {**_base_params, "key": "af0deccbgcgidddjgnvljitntccdduijhdinfgjgfjir"}),
+        ]
         hdrs = {
             "User-Agent": "ru.avito.avitomobile/18.0 (Android 13; ru_RU)",
             "Accept": "application/json, text/plain, */*",
             "Accept-Language": "ru-RU,ru;q=0.9",
             "x-avito-app-version": "18.0.0",
         }
-        for attempt in range(3):
-            try:
-                r = session.get(
-                    "https://m.avito.ru/api/13/items",
-                    params=params,
-                    headers=hdrs,
-                    timeout=15,
-                    proxies=_avito_proxies(),
-                )
-                print(f"  [Авито mobileAPI] стр.{p} попытка {attempt+1}: HTTP {r.status_code}, {len(r.text):,}б")
-                if r.status_code == 200:
-                    try:
-                        data = r.json()
-                    except Exception:
-                        continue
-                    raw = (
-                        _deep_get(data, "result.items")
-                        or _deep_get(data, "data.items")
-                        or data.get("items")
-                        or _avito_find_items_in_json(data)
+        for _url, _params in _variants:
+            for attempt in range(2):
+                try:
+                    r = session.get(
+                        _url, params=_params, headers=hdrs, timeout=15,
+                        proxies=_avito_proxies(),
                     )
-                    if raw:
-                        out = []
-                        for it in raw:
-                            item = _avito_item_from_json(it, today)
-                            if item:
-                                out.append(item)
-                        if out:
-                            print(f"  [Авито mobileAPI] стр.{p}: {len(out)} объявлений")
-                            return out
-                        print(f"  [Авито mobileAPI] стр.{p}: raw={len(raw)}, после фильтра=0")
+                    print(f"  [Авито mobileAPI] стр.{p} {_url.split('/')[-2]}: HTTP {r.status_code}, {len(r.text):,}б")
+                    if r.status_code == 200:
+                        try:
+                            data = r.json()
+                        except Exception:
+                            print(f"  [Авито mobileAPI] не JSON: {r.text[:100]!r}")
+                            break
+                        raw = (
+                            _deep_get(data, "result.items")
+                            or _deep_get(data, "result.catalog.items")
+                            or _deep_get(data, "result.hits")
+                            or _deep_get(data, "data.items")
+                            or data.get("items")
+                            or _avito_find_items_in_json(data)
+                        )
+                        if raw:
+                            out = []
+                            for it in raw:
+                                item = _avito_item_from_json(it, today)
+                                if item:
+                                    out.append(item)
+                            if out:
+                                print(f"  [Авито mobileAPI] стр.{p}: {len(out)} объявлений")
+                                return out
+                            print(f"  [Авито mobileAPI] стр.{p}: raw={len(raw)}, после фильтра=0 — sample: {list(raw[0].keys())[:8] if raw else '[]'}")
+                        else:
+                            _keys = list(data.keys())[:8] if isinstance(data, dict) else type(data).__name__
+                            print(f"  [Авито mobileAPI] стр.{p}: нет items, ключи: {_keys}")
+                            print(f"  [Авито mobileAPI] ответ: {r.text[:400]!r}")
+                        break  # Ответ получен но items=0 — пробуем следующий вариант
+                    elif r.status_code in (403, 429, 503):
+                        time.sleep(2)
+                        continue
                     else:
-                        # Логируем структуру для диагностики
-                        _keys = list(data.keys())[:10] if isinstance(data, dict) else type(data).__name__
-                        print(f"  [Авито mobileAPI] стр.{p}: нет items, ключи: {_keys}")
+                        break
+                except Exception as e:
+                    print(f"  [Авито mobileAPI] стр.{p}: {str(e)[:60]}")
+                    time.sleep(1)
+        return []
                 elif r.status_code in (403, 429):
                     time.sleep(2)
                     continue
@@ -5390,12 +5406,12 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         all_methods = _no_proxy_methods
     # Список задач. С прокси — страницы с человеческой задержкой между ними.
     if _use_proxy:
-        # С мобильным прокси запускаем страницы с задержкой 1-3с (имитация человека)
-        # Параллелизм ограничен 3 потоками — Авито считает больше подозрительным
+        # С мобильным прокси: mobileAPI первым (5 страниц JSON), потом webHTML
         tasks = (
-            [(_try_web_html, p) for p in range(1, 13)] +
-            [(_try_avito_lite, p) for p in range(1, 5)] +
-            [(_try_avito_rss, 1), (_try_googlebot_ua, 1), (_try_avito_public_api, 1)]
+            [(_try_avito_mobile_api, p) for p in range(1, 6)] +
+            [(_try_web_html, p) for p in range(1, 8)] +
+            [(_try_mobile_site, p) for p in range(1, 4)] +
+            [(_try_avito_rss, 1), (_try_googlebot_ua, 1)]
         )
         _cap = 300
         _deadline_s = 90
