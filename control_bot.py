@@ -2525,66 +2525,45 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
             print(f"  [VK] ошибка проверки токена: {e}")
 
     if _vk_token_ok:
-        # groups.search — запросы по реальным шаблонам групп (как "Авто Барахолка | Город", "АВТО-МОТО РЫНОК ОБЛАСТЬ")
-        _gs_queries = [
-            (f"авто барахолка {region_name_ru}", "group"),
-            (f"авто барахолка {region_name_ru}", "page"),
-            (f"авто барахолка {oblast_name_ru}", "group"),
-            (f"авто барахолка {oblast_name_ru}", "page"),
-            (f"авторынок {region_name_ru}", "group"),
-            (f"авторынок {oblast_name_ru}", "group"),
-            (f"авто мото рынок {oblast_name_ru}", "group"),
-            (f"авто мото рынок {oblast_name_ru}", "page"),
-            (f"продам авто {region_name_ru}", "group"),
-            (f"продам авто {oblast_name_ru}", "group"),
-            (f"авто {oblast_name_ru}", "group"),
-            (f"авто {oblast_name_ru}", "page"),
-            (f"купить авто {region_name_ru}", "group"),
-            (f"авто до 200 {oblast_name_ru}", "group"),
-            (f"авто до 300 {oblast_name_ru}", "group"),
-        ]
-        def _gs_one(q_type: tuple) -> list:
-            q, gtype = q_type
-            try:
-                r = _vk_api.get(f"{VK_API_URL}/groups.search",
-                    params={"q": q, "count": 20, "type": gtype,
-                            "access_token": vk_token, "v": "5.131"}, timeout=10)
-                resp = r.json()
-                if "error" in resp:
-                    print(f"  [VK gs] ошибка для '{q}': {resp['error'].get('error_msg','')}")
-                    return []
-                return resp.get("response", {}).get("items", [])
-            except Exception as e:
-                print(f"  [VK gs] исключение: {e}")
-                return []
-
-        with _TPE_VK(max_workers=6) as _gsex:
-            for res in _gsex.map(_gs_one, _gs_queries, timeout=25):
-                for g in (res or []):
-                    gid = g.get("id")
-                    if gid and gid not in _found_group_ids:
-                        _found_group_ids[gid] = g.get("name", f"club{gid}")
-        print(f"  [VK groups.search] найдено {len(_found_group_ids)} групп")
-
-        # newsfeed.search — прямой поиск постов (работает с user-token, не service)
+        # newsfeed.search — единственный метод работающий с сервисным токеном плагина
+        # groups.search требует standalone-токен → не используем
         _nf_seen: set[str] = set()
-        for _nfq in [f"продам авто {region_name_ru}", f"продам {region_name_ru} пробег"]:
+        _nf_queries = [
+            f"продам авто {region_name_ru}",
+            f"продам {region_name_ru} пробег",
+            f"продаю авто {region_name_ru}",
+            f"авто {region_name_ru} год двигатель",
+            f"продам {oblast_name_ru} тыс.км",
+            f"продаю {oblast_name_ru} пробег",
+            f"авто барахолка {region_name_ru}",
+            f"авторынок {region_name_ru}",
+            f"куплю авто {region_name_ru}",
+        ]
+        def _nf_one(q: str) -> list:
+            local = []
             try:
                 r = _vk_api.get(f"{VK_API_URL}/newsfeed.search",
-                    params={"q": _nfq, "count": 100, "extended": 1,
-                            "access_token": vk_token, "v": "5.131"}, timeout=10)
+                    params={"q": q, "count": 200, "extended": 1,
+                            "access_token": vk_token, "v": "5.131"}, timeout=12)
                 resp = r.json()
                 if resp.get("error"):
-                    break
+                    return []
                 for post in resp.get("response", {}).get("items", []):
                     item = _vk_make_item(post, "newsfeed")
-                    if item and item["url"] not in _nf_seen:
+                    if item:
+                        local.append(item)
+            except Exception:
+                pass
+            return local
+
+        with _TPE_VK(max_workers=6) as _nfex:
+            for batch_nf in _nfex.map(_nf_one, _nf_queries, timeout=40):
+                for item in (batch_nf or []):
+                    if item["url"] not in _nf_seen:
                         _nf_seen.add(item["url"])
                         results.append(item)
-            except Exception:
-                break
         if _nf_seen:
-            print(f"  [VK newsfeed] {len(_nf_seen)} постов")
+            print(f"  [VK newsfeed] {len(_nf_seen)} постов из {len(_nf_queries)} запросов")
 
     # ── Шаг 2: Скрейпим стены найденных групп ────────────────────────
     def _scrape_wall(gid_name: tuple) -> list:
@@ -2616,7 +2595,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
         return local
 
     wall_groups = list(_found_group_ids.items())[:40]
-    _wall_seen: set[str] = set()
+    _wall_seen: set[str] = {it["url"] for it in results}  # уже найденные через newsfeed
     if wall_groups:
         with _TPE_VK(max_workers=12) as _wex:
             for posts in _wex.map(_scrape_wall, wall_groups, timeout=30):
@@ -2624,7 +2603,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                     if item["url"] not in _wall_seen:
                         _wall_seen.add(item["url"])
                         results.append(item)
-        print(f"  [VK wall] {len(_wall_seen)} постов из {len(wall_groups)} групп")
+        print(f"  [VK wall] {len(wall_groups)} групп")
 
     # ── Шаг 3: Seed slugs через utils.resolveScreenName (без токена) ──
     # Реальные VK-слаги групп авто барахолок по регионам
