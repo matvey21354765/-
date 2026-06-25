@@ -1971,6 +1971,19 @@ _SOCIAL_REJECT_KEYWORDS = [
     # Другие новости и нерелевантный контент
     "читайте также", "подробнее на сайте", "источник:", "по данным",
     "сообщает корреспондент", "по информации", "как сообщает",
+    # Промышленное оборудование, инструменты, стройматериалы
+    "клапан", "вентил", "насос", "компрессор", "редуктор", "котёл", "котел",
+    "труба", "трубопровод", "задвижка", "фланец", "кран шаровый",
+    "электродвигател", "генератор", "трансформатор",
+    "пиломатериал", "доска", "брус", "кирпич", "цемент", "стройматери",
+    "инструмент", "дрель", "болгарк", "перфоратор", "сварочн",
+    # Одежда, обувь, техника
+    "куртк", "пальто", "платье", "туфл", "ботинк", "кроссовк",
+    "телефон продам", "смартфон", "айфон", "samsung продам", "ноутбук продам",
+    "холодильник", "стиральн", "посудомоечн",
+    # Сельхоз / животноводство
+    "трактор", "комбайн", "сенокосилк", "культиватор",
+    "корова", "свинья", "поросята", "птица", "куриц",
 ]
 
 def _is_car_sale_social(text: str) -> bool:
@@ -9057,13 +9070,18 @@ async def do_search_for_user(uid: int, reply_to):
     )
     # Дром-эталон — запасной источник медианы когда Авито заблокирован
     # Запрашиваем без фильтра цены чтобы медиана не была зажата бюджетом пользователя
+    # pages=8 → ~160 объявлений, достаточно для медианы по редким моделям (Лада 2106 и т.п.)
     _drom_ref_fut = loop.run_in_executor(
-        None, lambda: scrape_drom(region, pages=4, price_min=0, price_max=99_000_000)
+        None, lambda: scrape_drom(region, pages=8, price_min=0, price_max=99_000_000)
+    )
+    # Auto.ru эталон — добавляем к Дром для лучшего покрытия редких моделей
+    _autoru_ref_fut = loop.run_in_executor(
+        None, lambda: scrape_autoru(region, pages=4, price_min=0, price_max=99_000_000)
     )
     # Запускаем ВСЕ площадки всегда, независимо от настроек пользователя
     src_keys = list(scraper_map.keys())
     futures = [loop.run_in_executor(None, scraper_map[src]) for src in src_keys]
-    all_futs = futures + [_avito_ref_fut, _drom_ref_fut]
+    all_futs = futures + [_avito_ref_fut, _drom_ref_fut, _autoru_ref_fut]
     done, pending = await asyncio.wait(all_futs, timeout=70)
     if pending:
         for f in pending:
@@ -9294,20 +9312,30 @@ async def do_search_for_user(uid: int, reply_to):
         print(f"  [рынок] Дром-эталон ошибка: {_e}")
         _drom_ref = []
 
+    # Получаем Auto.ru-эталон (добавляет редкие модели которых нет на Дроме)
+    try:
+        _autoru_ref = _autoru_ref_fut.result() if (_autoru_ref_fut and _autoru_ref_fut in done) else []
+    except Exception as _e:
+        print(f"  [рынок] Auto.ru-эталон ошибка: {_e}")
+        _autoru_ref = []
+
     if _avito_ref:
         for _ar in _avito_ref:
             _ar["_market_ref_only"] = True
-        items = items + _avito_ref
-        print(f"  [рынок] Авито-эталон: {len(_avito_ref)} записей для медианы цен")
-    elif _drom_ref:
-        # Авито недоступен — используем Дром как эталон рыночных цен
-        # Дром запрашивался без фильтра цены → медиана корректная
-        for _dr in _drom_ref:
-            _dr["_market_ref_only"] = True
-        items = items + _drom_ref
-        print(f"  [рынок] Дром-эталон (Авито недоступен): {len(_drom_ref)} записей для медианы цен")
+        # Добавляем Auto.ru к Авито для лучшего покрытия редких моделей
+        for _arr in _autoru_ref:
+            _arr["_market_ref_only"] = True
+        items = items + _avito_ref + _autoru_ref
+        print(f"  [рынок] Авито-эталон: {len(_avito_ref)} + Auto.ru: {len(_autoru_ref)} записей")
+    elif _drom_ref or _autoru_ref:
+        # Авито недоступен — используем Дром + Auto.ru как эталон рыночных цен
+        _combined_ref = _drom_ref + _autoru_ref
+        for _cr in _combined_ref:
+            _cr["_market_ref_only"] = True
+        items = items + _combined_ref
+        print(f"  [рынок] Дром+Auto.ru-эталон (Авито недоступен): {len(_drom_ref)}+{len(_autoru_ref)} записей")
     else:
-        print(f"  [рынок] Ни Авито, ни Дром не дали эталон — рыночная цена не будет вычислена")
+        print(f"  [рынок] нет эталона — рыночная цена не будет вычислена")
 
     # seen хранит нормализованные URL — сравниваем тоже по нормализованным
     seen_norm = {_norm_url(u) for u in seen}
