@@ -5010,51 +5010,57 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             "Accept-Language": "ru-RU,ru;q=0.9",
             "x-avito-app-version": "18.0.0",
         }
+        # Пробуем сначала напрямую (Railway IP), потом через прокси если есть
+        _proxy_candidates = [None]
+        if AVITO_PROXIES and not _proxy_auth_failed:
+            _proxy_candidates.append(_avito_proxies())
         for _url, _params in _variants:
-            for attempt in range(2):
-                try:
-                    r = session.get(
-                        _url, params=_params, headers=hdrs, timeout=8,
-                        proxies=_avito_proxies(),
-                    )
-                    print(f"  [Авито mobileAPI] стр.{p} {_url.split('/')[-2]}: HTTP {r.status_code}, {len(r.text):,}б")
-                    if r.status_code == 200:
-                        try:
-                            data = r.json()
-                        except Exception:
-                            print(f"  [Авито mobileAPI] не JSON: {r.text[:100]!r}")
-                            break
-                        raw = (
-                            _deep_get(data, "result.items")
-                            or _deep_get(data, "result.catalog.items")
-                            or _deep_get(data, "result.hits")
-                            or _deep_get(data, "data.items")
-                            or data.get("items")
-                            or _avito_find_items_in_json(data)
+            for _px in _proxy_candidates:
+                _tag = "напрямую" if _px is None else "прокси"
+                for attempt in range(2):
+                    try:
+                        r = session.get(
+                            _url, params=_params, headers=hdrs, timeout=8,
+                            proxies=_px,
                         )
-                        if raw:
-                            out = []
-                            for it in raw:
-                                item = _avito_item_from_json(it, today)
-                                if item:
-                                    out.append(item)
-                            if out:
-                                print(f"  [Авито mobileAPI] стр.{p}: {len(out)} объявлений")
-                                return out
-                            print(f"  [Авито mobileAPI] стр.{p}: raw={len(raw)}, после фильтра=0 — sample: {list(raw[0].keys())[:8] if raw else '[]'}")
+                        print(f"  [Авито mobileAPI {_tag}] стр.{p} {_url.split('/')[-2]}: HTTP {r.status_code}, {len(r.text):,}б")
+                        if r.status_code == 200:
+                            try:
+                                data = r.json()
+                            except Exception:
+                                print(f"  [Авито mobileAPI] не JSON: {r.text[:100]!r}")
+                                break
+                            raw = (
+                                _deep_get(data, "result.items")
+                                or _deep_get(data, "result.catalog.items")
+                                or _deep_get(data, "result.hits")
+                                or _deep_get(data, "data.items")
+                                or data.get("items")
+                                or _avito_find_items_in_json(data)
+                            )
+                            if raw:
+                                out = []
+                                for it in raw:
+                                    item = _avito_item_from_json(it, today)
+                                    if item:
+                                        out.append(item)
+                                if out:
+                                    print(f"  [Авито mobileAPI {_tag}] стр.{p}: {len(out)} объявлений ✅")
+                                    return out
+                                print(f"  [Авито mobileAPI {_tag}] стр.{p}: raw={len(raw)}, после фильтра=0 — sample: {list(raw[0].keys())[:8] if raw else '[]'}")
+                            else:
+                                _keys = list(data.keys())[:8] if isinstance(data, dict) else type(data).__name__
+                                print(f"  [Авито mobileAPI {_tag}] стр.{p}: нет items, ключи: {_keys}")
+                                print(f"  [Авито mobileAPI {_tag}] ответ: {r.text[:400]!r}")
+                            break  # Ответ получен но items=0 — пробуем следующий вариант
+                        elif r.status_code in (403, 429, 503):
+                            time.sleep(2)
+                            continue
                         else:
-                            _keys = list(data.keys())[:8] if isinstance(data, dict) else type(data).__name__
-                            print(f"  [Авито mobileAPI] стр.{p}: нет items, ключи: {_keys}")
-                            print(f"  [Авито mobileAPI] ответ: {r.text[:400]!r}")
-                        break  # Ответ получен но items=0 — пробуем следующий вариант
-                    elif r.status_code in (403, 429, 503):
-                        time.sleep(2)
-                        continue
-                    else:
-                        break
-                except Exception as e:
-                    print(f"  [Авито mobileAPI] стр.{p}: {str(e)[:60]}")
-                    time.sleep(1)
+                            break
+                    except Exception as e:
+                        print(f"  [Авито mobileAPI {_tag}] стр.{p}: {str(e)[:60]}")
+                        time.sleep(1)
         return []
 
     def _try_avito_json_api(p: int) -> list[dict]:
@@ -5540,7 +5546,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
     # free_proxies даёт настоящую страницу Авито (десятки объявлений), DuckDuckGo —
     # ещё несколько. Запускаем ВСЁ параллельно и СЛИВАЕМ результаты, а не берём
     # первый ответивший метод (иначе теряем большие пачки, что приходят чуть позже).
-    _no_proxy_methods = [_try_scraperapi_fast, _try_free_proxies, _try_yandex_snippets, _try_cffi_web, _try_curl_cffi, _try_cs_web, _try_mobile_site, _try_web_html, _try_avito_public_api, _try_avito_rss, _try_googlebot_ua, _try_avito_lite, _try_scraperapi, _try_avito_json_api]
+    _no_proxy_methods = [_try_scraperapi_fast, _try_free_proxies, _try_yandex_snippets, _try_cffi_web, _try_curl_cffi, _try_cs_web, _try_mobile_site, _try_web_html, _try_avito_mobile_api, _try_avito_public_api, _try_avito_rss, _try_googlebot_ua, _try_avito_lite, _try_scraperapi, _try_avito_json_api]
     _use_proxy = AVITO_PROXIES and not _proxy_auth_failed
     if _use_proxy:
         # Платный прокси (московский мобильный IP, Megafone/MTS).
@@ -6760,6 +6766,28 @@ async def cmd_avito_debug(msg: Message):
                     out.append(f"   → первое: {parsed6[0].get('title','?')[:50]} | {parsed6[0].get('price','?')}")
         except Exception as e:
             out.append(f"🟢 Авито с прогревом: ❌ {str(e)[:100]}")
+
+        # 7. Мобильный API напрямую (без прокси)
+        try:
+            import requests as _rq7
+            _mob_key = "af0deccbgcgidddjgnvljitntccdduijhdinfgjgfjir"
+            _mob_hdrs = {
+                "User-Agent": "ru.avito.avitomobile/18.0 (Android 13; ru_RU)",
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "ru-RU,ru;q=0.9",
+                "x-avito-app-version": "18.0.0",
+            }
+            _mob_params = {"locationId": 637640, "categoryId": 9, "params[109][]": 106, "page": 1, "limit": 20, "display": "list", "sortType": "101", "key": _mob_key}
+            _mob_r = _rq7.get("https://m.avito.ru/api/16/items", params=_mob_params, headers=_mob_hdrs, timeout=10)
+            _mob_has = isinstance(_mob_r.json() if _mob_r.status_code == 200 else {}, dict)
+            _mob_data = _mob_r.json() if _mob_r.status_code == 200 else {}
+            _mob_raw = (_mob_data.get("result") or {}).get("items") or _mob_data.get("items") or []
+            out.append(f"📱 Мобильный API напрямую: HTTP {_mob_r.status_code}, {len(_mob_r.text):,}б, items={len(_mob_raw)} {'✅' if _mob_raw else '❌'}")
+            if not _mob_raw and _mob_r.status_code == 200:
+                out.append(f"   → ключи: {list(_mob_data.keys())[:8]}")
+                out.append(f"   → ответ: {_mob_r.text[:200]!r}")
+        except Exception as e:
+            out.append(f"📱 Мобильный API: ❌ {str(e)[:100]}")
 
         return out
 
