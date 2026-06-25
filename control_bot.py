@@ -824,8 +824,18 @@ def scrape_drom(region: str, pages: int = 15, price_min: int = 0, price_max: int
                     )
                     seller = seller_el.get_text(strip=True) if seller_el else ""
 
-                    desc_el = card.select_one("[data-ftid='bull_description']")
+                    desc_el = (
+                        card.select_one("[data-ftid='bull_description']")
+                        or card.select_one("p[class*='description']")
+                        or card.select_one("div[class*='description']")
+                        or card.select_one("span[class*='description']")
+                    )
                     desc = desc_el.get_text(strip=True) if desc_el else ""
+                    # Если нет описания — собираем из параметров карточки
+                    if not desc:
+                        params_els = card.select("[data-ftid='bull_tags'] span, [class*='attributes'] span, [class*='params'] span")
+                        if params_els:
+                            desc = " · ".join(el.get_text(strip=True) for el in params_els if el.get_text(strip=True))[:300]
 
                     date_el = (
                         card.select_one("[data-ftid='bull_date']")
@@ -6822,11 +6832,15 @@ async def cmd_new_today(msg: Message):
     for _ar in _avito_ref_today:
         _ar["_market_ref_only"] = True
     suitable = rank_by_market_price(suitable, ref_items=_avito_ref_today, avito_only_median=True)
+    # Только ниже рынка
+    below_today = [i for i in suitable if i.get("_savings_pct", 0) > 0]
+    if below_today:
+        suitable = below_today
     suitable = _sort_by_deal(suitable)
 
     if not suitable:
         await msg.answer(
-            f"😔 Свежих объявлений за последние 24 часа не нашлось.\n"
+            f"😔 Свежих объявлений ниже рынка за последние 24 часа не нашлось.\n"
             f"Попробуй 🔍 Найти авто для более широкого поиска.",
             reply_markup=MAIN_KEYBOARD,
         )
@@ -6934,11 +6948,15 @@ async def cmd_global_search(msg: Message):
         and i["url"] not in seen_norm_g
     ]
     suitable = rank_by_market_price(suitable)
+    # Показываем только те что ниже рынка — остальные не интересны перекупу
+    below_market = [i for i in suitable if i.get("_savings_pct", 0) > 0]
+    if below_market:
+        suitable = below_market
     suitable = _sort_by_deal(suitable)
 
     if not suitable:
         await msg.answer(
-            f"😔 Не нашёл новых объявлений. Нажми ♻️ Сбросить историю и попробуй снова.",
+            f"😔 Не нашёл новых объявлений ниже рынка. Нажми ♻️ Сбросить историю и попробуй снова.",
             reply_markup=MAIN_KEYBOARD,
         )
         return
@@ -6949,8 +6967,8 @@ async def cmd_global_search(msg: Message):
         "global_search", uid=uid, region=region, price_min=pmin, price_max=pmax,
         results=len(suitable),
     )
-    below = sum(1 for x in suitable if x.get("_savings_pct", 0) > 0)
-    await msg.answer(f"✅ Найдено {len(suitable)} объявлений!\n🔥 Ниже рынка: {below} шт. — они первые")
+    below = len(below_market)
+    await msg.answer(f"✅ Найдено {len(suitable)} объявлений ниже рынка!")
     await send_batch(msg.chat.id, uid, 0)
 
 
