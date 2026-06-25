@@ -4460,12 +4460,12 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         return []
 
     def _try_cffi_web(p: int) -> list[dict]:
-        """curl_cffi Chrome impersonation — главный рабочий метод Авито.
+        """curl_cffi Chrome impersonation с прогревом сессии (куки) — главный метод Авито.
 
-        ВАЖНО (проверено через /avito_debug 2026-06): чистый Railway-IP + Chrome TLS
-        отдаёт HTTP 200 с полной страницей (4 МБ), а прокси mproxy.site забанен
-        Авито (403/429). Поэтому здесь НЕ используем прокси — идём напрямую.
-        Если прямой запрос заблокирован — пробуем прокси как резерв."""
+        ВАЖНО (проверено /avito_debug 2026-06): прямой запрос без сессии отдаёт
+        200, но скелет-страницу 339КБ без данных (антибот-challenge). Решение:
+        curl_cffi Session с прогревом — сначала заходим на главную (получаем куки
+        __cf_bm/cookies), потом запрашиваем каталог — тогда отдаёт полную SSR-страницу."""
         try:
             from curl_cffi import requests as _cffi
         except ImportError:
@@ -4480,21 +4480,38 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         if price_max < 99_000_000:
             params["pmax"] = price_max
         _hdrs = {
-            "Accept": "text/html,application/xhtml+xml,*/*;q=0.9",
-            "Accept-Language": "ru-RU,ru;q=0.9",
-            "Referer": "https://www.avito.ru/",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "same-origin",
+            "Sec-Fetch-User": "?1",
+            "Upgrade-Insecure-Requests": "1",
+            "Referer": f"https://www.avito.ru/{slug}",
         }
-        # Сначала БЕЗ прокси (чистый Railway IP работает!), потом с прокси как резерв
+        # Прямой канал (чистый IP) первым, прокси как резерв
         _attempts = [None]
         if AVITO_PROXIES:
             _attempts.append(_avito_proxies())
         for _proxies in _attempts:
             _tag = "напрямую" if _proxies is None else "через прокси"
-            for _imp in ("chrome124", "chrome120"):
+            for _imp in ("chrome124", "chrome120", "chrome116"):
                 try:
-                    r = _cffi.get(url, params=params, impersonate=_imp, timeout=12,
-                                  headers=_hdrs, proxies=_proxies or {})
-                    print(f"  [Авито cffi {_tag}] стр.{p} {_imp}: HTTP {r.status_code}, {len(r.text):,}б")
+                    _sess = _cffi.Session(impersonate=_imp)
+                    if _proxies:
+                        _sess.proxies = _proxies
+                    # Прогрев: заходим на страницу города → получаем куки антибота
+                    if p == 1:
+                        try:
+                            _w = _sess.get(f"https://www.avito.ru/{slug}", timeout=10,
+                                           headers={"Accept-Language": "ru-RU,ru;q=0.9",
+                                                    "Upgrade-Insecure-Requests": "1"})
+                            print(f"  [Авито cffi {_tag}] прогрев {slug}: HTTP {_w.status_code}, куки={len(_sess.cookies)}")
+                            time.sleep(0.5)
+                        except Exception:
+                            pass
+                    r = _sess.get(url, params=params, timeout=14, headers=_hdrs)
+                    print(f"  [Авито cffi {_tag}] стр.{p} {_imp}: HTTP {r.status_code}, {len(r.text):,}б, куки={len(_sess.cookies)}")
                     if r.status_code == 200 and ('"urlPath"' in r.text or '"canonicalUrl"' in r.text
                                                  or 'data-marker="item"' in r.text or '__NEXT_DATA__' in r.text):
                         res = _parse_avito_html(r.text, slug, today)
@@ -4502,8 +4519,12 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                             print(f"  [Авито cffi {_tag}] стр.{p}: {len(res)} объявлений ✅")
                             return res
                         print(f"  [Авито cffi {_tag}] стр.{p}: 200, но парсер 0")
+                    elif r.status_code == 200:
+                        # 200 но скелет-страница без данных — пробуем следующий профиль/сессию
+                        print(f"  [Авито cffi {_tag}] стр.{p} {_imp}: 200 скелет ({len(r.text):,}б), след. профиль")
+                        continue
                     elif r.status_code in (403, 429, 503):
-                        break  # этот канал забанен — переходим к следующему (прокси)
+                        break  # этот канал забанен — следующий
                 except Exception as e:
                     print(f"  [Авито cffi {_tag}] стр.{p}: {str(e)[:80]}")
         return []
@@ -6654,6 +6675,34 @@ async def cmd_avito_debug(msg: Message):
                 headers={"Accept-Language": "ru-RU,ru;q=0.9"})
             has3 = '"urlPath"' in rc.text or '"canonicalUrl"' in rc.text or '__NEXT_DATA__' in rc.text
             out.append(f"🔴 Авито напрямую (curl_cffi): HTTP {rc.status_code}, {len(rc.text):,}б, данные: {'✅' if has3 else '❌'}")
+            # Глубокая диагностика 200-страницы без явных маркеров
+            if not has3 and rc.status_code == 200:
+                import re as _re2
+                _t = rc.text
+                _markers = {
+                    "avtomobili": _t.count("avtomobili"),
+                    "item-link": len(_re2.findall(r'/[a-z0-9_]+/avtomobili/[a-z0-9_%-]*\d{6,}', _t)),
+                    "data-marker": _t.count("data-marker"),
+                    "__NEXT": _t.count("__NEXT"),
+                    "window.__": _t.count("window.__"),
+                    "<script": _t.count("<script"),
+                    "captcha": _t.lower().count("captcha"),
+                    "firewall/робот": _t.lower().count("robot") + _t.count("Доступ огранич") + _t.count("не робот"),
+                    "iva-item": _t.count("iva-item"),
+                    "price": _t.count('"price"'),
+                }
+                out.append("  📋 маркеры: " + ", ".join(f"{k}={v}" for k, v in _markers.items()))
+                # Ищем JSON-блобы window.__ или script с items
+                _wm = _re2.search(r'window\.__([A-Za-z_]+)__\s*=', _t)
+                if _wm:
+                    out.append(f"  → найден window.__{_wm.group(1)}__")
+                # Заголовок страницы
+                _tm = _re2.search(r'<title>([^<]{0,80})', _t)
+                if _tm:
+                    out.append(f"  → title: {_tm.group(1)!r}")
+                # Любая ссылка на объявление
+                _im = _re2.search(r'(https?://www\.avito\.ru)?/[a-z0-9_]+/avtomobili/[a-z0-9_%-]*\d{6,}', _t)
+                out.append(f"  → пример ссылки: {_im.group(0)[:90] if _im else 'НЕТ'}")
             if has3:
                 # Пробуем парсинг
                 import datetime as _dt
@@ -6686,6 +6735,31 @@ async def cmd_avito_debug(msg: Message):
                 out.append(f"  → первые 200б: {rc.text[:200]!r}")
         except Exception as e:
             out.append(f"🔴 Авито напрямую (curl_cffi): ❌ {str(e)[:100]}")
+
+        # 6. С прогревом сессии (куки) — главная → каталог
+        try:
+            from curl_cffi import requests as _cffi3
+            _s = _cffi3.Session(impersonate="chrome124")
+            _w = _s.get("https://www.avito.ru/ekaterinburg", timeout=10,
+                        headers={"Accept-Language": "ru-RU,ru;q=0.9"})
+            import time as _tm
+            _tm.sleep(0.5)
+            rd = _s.get("https://www.avito.ru/ekaterinburg/avtomobili",
+                params={"seller_type": "1", "pmax": 200000}, timeout=14,
+                headers={"Accept-Language": "ru-RU,ru;q=0.9",
+                         "Referer": "https://www.avito.ru/ekaterinburg",
+                         "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Site": "same-origin"})
+            has6 = '"urlPath"' in rd.text or '"canonicalUrl"' in rd.text or '__NEXT_DATA__' in rd.text
+            out.append(f"🟢 Авито с прогревом сессии: прогрев HTTP {_w.status_code}, куки={len(_s.cookies)}")
+            out.append(f"   каталог HTTP {rd.status_code}, {len(rd.text):,}б, данные: {'✅' if has6 else '❌'}")
+            if has6:
+                import datetime as _dt6
+                parsed6 = _parse_avito_html(rd.text, "ekaterinburg", _dt6.date.today())
+                out.append(f"   → парсер: {len(parsed6)} объявлений {'✅' if parsed6 else '❌'}")
+                if parsed6:
+                    out.append(f"   → первое: {parsed6[0].get('title','?')[:50]} | {parsed6[0].get('price','?')}")
+        except Exception as e:
+            out.append(f"🟢 Авито с прогревом: ❌ {str(e)[:100]}")
 
         return out
 
