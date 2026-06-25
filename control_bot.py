@@ -310,17 +310,50 @@ def _norm_url(u: str) -> str:
 
 
 def load_seen(uid: int) -> set:
+    # Try PostgreSQL first (survives Railway restarts)
+    try:
+        db = _get_db()
+        if db:
+            with db.cursor() as cur:
+                cur.execute("SELECT url FROM seen_urls WHERE uid=%s ORDER BY added_at DESC LIMIT 500", (uid,))
+                rows = cur.fetchall()
+                if rows:
+                    return set(r[0] for r in rows)
+    except Exception:
+        pass
+    # Fallback to file
     f = user_dir(uid) / "seen.json"
     try:
         data = json.loads(f.read_text(encoding="utf-8"))
         if isinstance(data, list):
-            return set(data[-300:])  # keep only last 300
+            return set(data[-300:])
     except Exception:
         pass
     return set()
 
 
 def save_seen(uid: int, seen: set):
+    # Save to PostgreSQL (survives Railway restarts)
+    try:
+        db = _get_db()
+        if db:
+            with db.cursor() as cur:
+                # Delete old entries beyond 500
+                cur.execute(
+                    "DELETE FROM seen_urls WHERE uid=%s AND url NOT IN "
+                    "(SELECT url FROM seen_urls WHERE uid=%s ORDER BY added_at DESC LIMIT 400)",
+                    (uid, uid)
+                )
+                # Upsert new URLs
+                for url in seen:
+                    cur.execute(
+                        "INSERT INTO seen_urls(uid, url) VALUES(%s,%s) ON CONFLICT DO NOTHING",
+                        (uid, url)
+                    )
+            return
+    except Exception:
+        pass
+    # Fallback to file
     f = user_dir(uid) / "seen.json"
     f.write_text(json.dumps(list(seen), ensure_ascii=False), encoding="utf-8")
 
@@ -7728,6 +7761,14 @@ def _get_db():
                             updated_at TIMESTAMP DEFAULT NOW()
                         )
                     """)
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS seen_urls (
+                            uid BIGINT,
+                            url TEXT,
+                            added_at TIMESTAMP DEFAULT NOW(),
+                            PRIMARY KEY (uid, url)
+                        )
+                    """)
         except Exception:
             return None
         return _db_conn
@@ -8935,6 +8976,8 @@ async def _global_monitor_loop():
                 all_regions = [u["region"]] + list(u.get("monitor_regions", []))
                 for reg in all_regions:
                     needed.setdefault(reg, set()).update(user_srcs)
+                    # Всегда скрейпим Авито для рыночной цены — даже если пользователь его не выбрал
+                    needed[reg].add("avito")
 
             # Скрейпим только нужные (регион, источник) параллельно
             _src_scrapers = {
@@ -8979,8 +9022,9 @@ async def _global_monitor_loop():
                     all_regions = [u["region"]] + list(u.get("monitor_regions", []))
 
                     raw = []
+                    avito_ref = []  # Авито данные только для рыночной цены (если пользователь Авито не выбрал)
                     for reg in all_regions:
-                        for src in user_srcs:
+                        for src in user_srcs | {"avito"}:  # всегда включаем авито для рыночной цены
                             if src in ("vk", "tg") and not do_vk_tg:
                                 continue
                             key_rs = f"{reg}:{src}"
@@ -8988,7 +9032,11 @@ async def _global_monitor_loop():
                             # Помечаем регион для уведомлений
                             for it in items_rs:
                                 it["_monitor_region"] = reg
-                            raw.extend(items_rs)
+                            if src == "avito" and src not in user_srcs:
+                                # Авито не выбрано пользователем — только для рыночной цены
+                                avito_ref.extend(items_rs)
+                            else:
+                                raw.extend(items_rs)
 
                     if not raw:
                         continue
@@ -9009,9 +9057,9 @@ async def _global_monitor_loop():
                         save_seen(uid, seen)
                         continue
 
-                    # Считаем рыночную цену по ВСЕМУ каталогу (raw) — чем больше, тем точнее
+                    # Считаем рыночную цену по ВСЕМУ каталогу (raw + авито референс) — чем больше, тем точнее
                     cached = _search_cache.get(uid) or _load_cache(uid)
-                    pool = rank_by_market_price(raw + cached + new_items)
+                    pool = rank_by_market_price(raw + avito_ref + cached + new_items)
                     new_urls = {x["url"] for x in new_items}
 
                     new_below = sorted(
