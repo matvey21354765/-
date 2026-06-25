@@ -4489,10 +4489,11 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             "Upgrade-Insecure-Requests": "1",
             "Referer": f"https://www.avito.ru/{slug}",
         }
-        # Прямой канал (чистый IP) первым, прокси как резерв
-        _attempts = [None]
-        if AVITO_PROXIES:
+        # Если прокси работает — идём через прокси первым (прямой IP даёт 339KB скелет-страницу)
+        _attempts = []
+        if AVITO_PROXIES and not _proxy_auth_failed:
             _attempts.append(_avito_proxies())
+        _attempts.append(None)  # прямой как резерв
         for _proxies in _attempts:
             _tag = "напрямую" if _proxies is None else "через прокси"
             for _imp in ("chrome124", "chrome120", "chrome116"):
@@ -5560,8 +5561,11 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
     # Поэтому _try_cffi_web (он сам идёт напрямую) — основной метод на всех страницах.
     if _use_proxy:
         tasks = (
-            [(_try_cffi_web, p) for p in range(1, 9)] +       # curl_cffi напрямую — ОСНОВНОЙ
-            [(_try_avito_mobile_api, p) for p in range(1, 3)] +
+            [(_try_cffi_web, p) for p in range(1, 5)] +         # curl_cffi через прокси — ОСНОВНОЙ
+            [(_try_web_html, p) for p in range(1, 4)] +          # requests+прокси (HTML)
+            [(_try_avito_mobile_api, p) for p in range(1, 3)] +  # mobileAPI (JSON)
+            [(_try_mobile_site, 1)] +                             # m.avito.ru
+            [(_try_yandex_snippets, 1)] +                         # DDG резерв
             [(_try_avito_rss, 1)]
         )
         _cap = 300
