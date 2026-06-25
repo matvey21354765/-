@@ -1985,12 +1985,10 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
                 "robocop","BotFather","gif","stickers","contest","c","bot","notifications",
                 "SpamBot","vote","channel","group"}
 
-    # Федеральные автоканалы которые точно существуют в Telegram
+    # Федеральные автоканалы — только проверенные (t.me/s/ работает только с каналами, не чатами)
     _TG_FEDERAL_CHANNELS = [
-        "perekupskiydvig",    # Перекупской двиг — проверен
-        "avtorynokby196",     # Авторынок ЕКБ — проверен
-        "prodamavto_rf", "auto_baraxolka", "avto_sale_russia",
-        "carprice_ru", "avtorynok", "avtomarket_online",
+        "perekupskiydvig",
+        "avtorynokby196",
     ]
     # Уже известные каналы из справочника (могут быть фейками — проверим t.me/s/)
     _seed_channels = list(dict.fromkeys(
@@ -2509,15 +2507,19 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
 
     if vk_token:
         try:
-            _tr = _vk_api.get(f"{VK_API_URL}/groups.search",
-                params={"q": f"автобарахолка {region_name_ru}", "count": 1,
-                        "access_token": vk_token, "v": "5.131"}, timeout=10)
+            # Проверяем токен через users.get (работает с любым типом токена)
+            _tr = _vk_api.get(f"{VK_API_URL}/users.get",
+                params={"access_token": vk_token, "v": "5.131"}, timeout=10)
             _tr_json = _tr.json()
-            _vk_token_ok = "error" not in _tr_json
-            if not _vk_token_ok:
-                _ec = _tr_json.get("error", {}).get("error_code", 0)
-                print(f"  [VK] токен невалиден: код {_ec} {_tr_json.get('error',{}).get('error_msg','')}")
+            if "error" in _tr_json:
+                _ec = _tr_json["error"].get("error_code", 0)
+                _em = _tr_json["error"].get("error_msg", "")
+                print(f"  [VK] токен невалиден: код {_ec} {_em}")
+                if _ec == 15:
+                    print(f"  [VK] ПОДСКАЗКА: нужен standalone user_token, а не сервисный токен сообщества!")
+                vk_token = ""  # не используем невалидный токен
             else:
+                _vk_token_ok = True
                 print(f"  [VK] токен OK")
         except Exception as e:
             print(f"  [VK] ошибка проверки токена: {e}")
@@ -2625,28 +2627,98 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
         print(f"  [VK wall] {len(_wall_seen)} постов из {len(wall_groups)} групп")
 
     # ── Шаг 3: Seed slugs через utils.resolveScreenName (без токена) ──
+    # Реальные VK-слаги групп авто барахолок по регионам
+    # Паттерны: avtobaraholka_[город], [город]_avto и т.д.
     _VK_SEED_SLUGS = {
-        "ekaterinburg": ["avto_ekb","avtoekb","ekb_avto","avtobaraholka_ekb","avtobazar_ekb","avto96","avto_sverdlovsk","prodamavto_ekb","avtorynok_ekb","avto_ural","baraholka_avto_ekb","car_ekb","avto_yekaterinburg","prodajaavto_ekb"],
-        "moskva": ["avto_msk","avto_moscow","avtomoskva","avto77","avtobazar_msk","avtobaraholka_msk","avto_moskva","prodamavto_msk","avtorynok_msk","moscowcars","avto_msk77"],
-        "spb": ["avto_spb","avtospb","avto78","avto_piter","avtobazar_spb","avtobaraholka_spb","prodamavto_spb","avtorynok_spb","spb_avto","avto78spb"],
-        "novosibirsk": ["avto_nsk","avtonsk","avto54","avtobazar_nsk","avtobaraholka_nsk","prodamavto_nsk","nsk_avto","avtorynok_nsk","avto_novosibirsk"],
-        "kazan": ["avto_kazan","avtokazan","avto16","avtobazar_kazan","avtobaraholka_kazan","prodamavto_kazan","kazan_avto","avtorynok_kazan"],
-        "chelyabinsk": ["avto_chel","avtochel","avto74","avtobazar_chel","avtobaraholka_chel","prodamavto_chel","chel_avto","avtorynok_chel"],
-        "ufa": ["avto_ufa","avtoufa","avto02","avtobazar_ufa","avtobaraholka_ufa","prodamavto_ufa","ufa_avto","avtorynok_ufa"],
-        "krasnodar": ["avto_krd","avtokrd","avto23","avtobazar_krasnodar","avtobaraholka_krd","prodamavto_krd","krd_avto","kuban_avto","avto_kuban"],
-        "omsk": ["avto_omsk","avtoomsk","avto55","avtobazar_omsk","avtobaraholka_omsk","prodamavto_omsk","omsk_avto"],
-        "rostov": ["avto_rostov","avtorostov","avto61","avtobazar_rostov","avtobaraholka_rostov","prodamavto_rostov","rostov_avto","avto_don"],
-        "tyumen": ["avto_tyumen","avtotyumen","avto72","avtobazar_tyumen","avtobaraholka_tyumen","prodamavto_tyumen","tyumen_avto"],
-        "samara": ["avto_samara","avtosamara","avto63","avtobazar_samara","avtobaraholka_samara","prodamavto_samara","samara_avto"],
-        "perm": ["avto_perm","avtoperm","avto59","avtobazar_perm","avtobaraholka_perm","prodamavto_perm","perm_avto"],
-        "voronezh": ["avto_voronezh","avtovoronezh","avto36","avtobazar_voronezh","avtobaraholka_vrn","prodamavto_vrn","vrn_avto","avto_vrn","avtovrn"],
-        "volgograd": ["avto_volgograd","avtovolgograd","avto34","avtobazar_volgograd","avtobaraholka_vgd","prodamavto_vgd","vgd_avto"],
-        "krasnoyarsk": ["avto_krsk","avtokrsk","avto24","avtobazar_krs","avtobaraholka_krs","prodamavto_krs","krsk_avto"],
-        "nn": ["avto_nn","avtonn","avto52","avtobazar_nn","avtobaraholka_nn","prodamavto_nn","nn_avto"],
-        "saratov": ["avto_saratov","avtosaratov","avto64","avtobazar_saratov","prodamavto_saratov","saratov_avto"],
-        "irkutsk": ["avto_irkutsk","avtoirkutsk","avto38","avtobazar_irkutsk","prodamavto_irkutsk","irkutsk_avto"],
-        "vladivostok": ["avto_vladivostok","avtovladivostok","avto25","avtobazar_vlad","prodamavto_vlad","vlad_avto","japancars_vlad"],
-        "habarovsk": ["avto_habarovsk","avtohabarovsk","avto27","avtobazar_hab","prodamavto_hab","hab_avto"],
+        "ekaterinburg": [
+            "avtobaraholka_ekb", "avtobaraholka_sverdlovsk", "avto_baraholka_ural",
+            "ekb_avto_baraholka", "avto_sverdlovsk_oblast", "avtorynok_ekb",
+            "avto_baraholka96", "avtobaraholka96", "sverdlovsk_avto",
+            "avto_do200_sverdlovsk", "avto_ural_baraholka", "prodamavto_ekb",
+            "avtomoto_rynok_sverdlovsk", "avto_do300_sverdlovsk",
+        ],
+        "moskva": [
+            "avtobaraholka_msk", "avtobaraholka_moskva", "avto_baraholka_msk",
+            "msk_avto_baraholka", "avtorynok_moskva", "avto_do200_msk",
+            "avto_do300_msk", "prodamavto_msk77", "avtomoto_rynok_msk",
+        ],
+        "spb": [
+            "avtobaraholka_spb", "avtobaraholka_piter", "avto_baraholka_spb",
+            "spb_avto_baraholka", "avtorynok_spb", "avto_do200_spb",
+            "prodamavto_spb78", "avtomoto_rynok_spb",
+        ],
+        "novosibirsk": [
+            "avtobaraholka_nsk", "avtobaraholka_novosibirsk", "avto_baraholka_nsk",
+            "nsk_avto_baraholka", "avtorynok_nsk54", "avto_do200_nsk",
+            "prodamavto_nsk54", "avtomoto_rynok_nsk",
+        ],
+        "kazan": [
+            "avtobaraholka_kazan", "avtobaraholka_tatarstan", "avto_baraholka_kazan",
+            "kazan_avto_baraholka", "avtorynok_kazan16", "avto_do200_kazan",
+        ],
+        "chelyabinsk": [
+            "avtobaraholka_chel", "avtobaraholka_chelyabinsk", "avto_baraholka_chel",
+            "chel_avto_baraholka", "avtorynok_chel74", "avto_do200_chel",
+            "avtomoto_rynok_chelyabinsk",
+        ],
+        "ufa": [
+            "avtobaraholka_ufa", "avtobaraholka_bashkortostan", "avto_baraholka_ufa",
+            "ufa_avto_baraholka", "avtorynok_ufa02", "avto_do200_ufa",
+        ],
+        "krasnodar": [
+            "avtobaraholka_krd", "avtobaraholka_kuban", "avto_baraholka_krd",
+            "krd_avto_baraholka", "avtorynok_krasnodar", "avto_do200_krd",
+            "avtomoto_rynok_kuban",
+        ],
+        "omsk": [
+            "avtobaraholka_omsk", "avto_baraholka_omsk", "omsk_avto_baraholka",
+            "avtorynok_omsk55", "avto_do200_omsk",
+        ],
+        "rostov": [
+            "avtobaraholka_rostov", "avtobaraholka_don", "avto_baraholka_rostov",
+            "rostov_avto_baraholka", "avtorynok_rostov61",
+        ],
+        "tyumen": [
+            "avtobaraholka_tyumen", "avto_baraholka_tyumen", "tyumen_avto_baraholka",
+            "avtorynok_tyumen72", "avto_do200_tyumen",
+        ],
+        "samara": [
+            "avtobaraholka_samara", "avto_baraholka_samara", "samara_avto_baraholka",
+            "avtorynok_samara63",
+        ],
+        "perm": [
+            "avtobaraholka_perm", "avto_baraholka_perm", "perm_avto_baraholka",
+            "avtorynok_perm59", "avto_do200_perm",
+        ],
+        "voronezh": [
+            "avtobaraholka_vrn", "avtobaraholka_voronezh", "avto_baraholka_vrn",
+            "vrn_avto_baraholka", "avtorynok_voronezh36",
+        ],
+        "volgograd": [
+            "avtobaraholka_vgd", "avtobaraholka_volgograd", "avto_baraholka_vgd",
+            "vgd_avto_baraholka", "avtorynok_volgograd34",
+        ],
+        "krasnoyarsk": [
+            "avtobaraholka_krsk", "avtobaraholka_krasnoyarsk", "avto_baraholka_krs",
+            "krsk_avto_baraholka", "avtorynok_krasnoyarsk24",
+        ],
+        "nn": [
+            "avtobaraholka_nn", "avtobaraholka_nizhniy", "avto_baraholka_nn",
+            "nn_avto_baraholka", "avtorynok_nn52",
+        ],
+        "saratov": [
+            "avtobaraholka_saratov", "avto_baraholka_saratov", "saratov_avto_baraholka",
+        ],
+        "irkutsk": [
+            "avtobaraholka_irkutsk", "avto_baraholka_irk", "irkutsk_avto_baraholka",
+        ],
+        "vladivostok": [
+            "avtobaraholka_vlad", "avtobaraholka_vladivostok", "japancars_vlad",
+            "vlad_avto_baraholka",
+        ],
+        "habarovsk": [
+            "avtobaraholka_hab", "avtobaraholka_habarovsk", "hab_avto_baraholka",
+        ],
     }
     _seed_slugs = _VK_SEED_SLUGS.get(city_key, [])
     # Генерируем доп паттерны из названия города
@@ -2700,14 +2772,6 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                         _wall_seen.add(item["url"])
                         results.append(item)
         print(f"  [VK slugs] {len(_wall_seen)} итого после resolve")
-
-    # Также Yandex/DDG прямые посты
-    _try_yandex_vk_results = _try_yandex_vk()
-    if _try_yandex_vk_results:
-        results.extend(_try_yandex_vk_results)
-    _try_ddg_vk_results = _try_ddg_vk()
-    if _try_ddg_vk_results:
-        results.extend(_try_ddg_vk_results)
 
     # Дедупликация
     def _norm_vk_url(u: str) -> str:
