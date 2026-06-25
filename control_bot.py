@@ -8138,11 +8138,11 @@ async def do_search_for_user(uid: int, reply_to):
         "tg":     lambda: scrape_tg_channels(region, pmin, pmax),
     }
     # Авито-эталон ВСЕГДА запускаем параллельно — рыночная цена берётся с Авито
-    # даже если пользователь ищет только ВК/TG/Дром
     _avito_ref_fut = loop.run_in_executor(
         None, lambda: scrape_avito(region, pages=8, price_min=0, price_max=99_000_000)
     )
-    src_keys = [s for s in enabled_sources if s in scraper_map]
+    # Запускаем ВСЕ площадки всегда, независимо от настроек пользователя
+    src_keys = list(scraper_map.keys())
     futures = [loop.run_in_executor(None, scraper_map[src]) for src in src_keys]
     all_futs = futures + [_avito_ref_fut]
     done, pending = await asyncio.wait(all_futs, timeout=55)
@@ -8560,8 +8560,18 @@ async def do_search_for_user(uid: int, reply_to):
     # Второй price-фильтр убран — первый in_price_range уже отфильтровал.
     # Дополнительно фильтровать не нужно, это только теряет объявления с неизвестной ценой.
     print(f"  [фильтр] suitable после всех фильтров: {len(suitable)}")
-    if not suitable:
+
+    # Оставляем только объявления ниже рыночной цены
+    below_market_only = [i for i in suitable if i.get("_savings_pct", 0) > 0]
+    print(f"  [фильтр] ниже рынка: {len(below_market_only)} из {len(suitable)}")
+    if below_market_only:
+        suitable = below_market_only
+    elif not suitable:
         await reply_to.answer("😔 Не нашёл объявлений в твоём бюджете. Попробуй расширить диапазон цен: /settings")
+        return
+
+    if not suitable:
+        await reply_to.answer("😔 Не нашёл объявлений ниже рынка. Нажми ♻️ Сбросить историю и попробуй снова.")
         return
 
     _search_cache[uid] = suitable
@@ -8570,17 +8580,11 @@ async def do_search_for_user(uid: int, reply_to):
         "search", uid=uid, region=region, price_min=pmin, price_max=pmax,
         source=",".join(enabled_sources), results=len(suitable),
     )
-    _any_below = sum(1 for i in suitable if i.get("_savings_pct", 0) > 0)
-    _seen_cnt  = sum(1 for i in suitable if i.get("_already_seen"))
-
-    if _any_below:
-        _msg = (
-            f"✅ Найдено {len(suitable)} объявлений!\n"
-            f"🟢 {_any_below} ниже рынка — идут первыми."
-        )
-    else:
-        _msg = f"✅ Найдено {len(suitable)} объявлений! Показываю от дешёвых к дорогим."
-
+    _seen_cnt = sum(1 for i in suitable if i.get("_already_seen"))
+    src_found = list(dict.fromkeys(i.get("source","") for i in suitable if i.get("source")))
+    src_icons = {"avito":"🟠","drom":"🔵","autoru":"🔴","vk":"💙","tg":"✈️"}
+    src_str = " ".join(src_icons.get(s,"") for s in src_found if s)
+    _msg = f"✅ {src_str} Найдено {len(suitable)} объявлений ниже рынка!"
     if _seen_cnt:
         _msg += f"\n♻️ {_seen_cnt} уже видел — они в конце."
 
