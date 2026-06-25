@@ -139,11 +139,11 @@ if AVITO_PROXY_HOST and (AVITO_PROXY_PORT or _AVITO_PROXY_PORTS):
 
 # Хардкодный fallback — если env vars не заданы в Railway, используем прокси из кода
 if not AVITO_PROXIES and not _proxy_auth_failed:
-    _HARDCODED_PROXY = "http://VAdPaN:EDNyWFYHyH2Y@mproxy.site:16358"
+    _HARDCODED_PROXY = "http://ilkin:EDNyWFYHyH2Y@mproxy.site:16358"
     AVITO_PROXIES = {"http": _HARDCODED_PROXY, "https": _HARDCODED_PROXY}
     AVITO_PROXY_HOST = "mproxy.site"
     AVITO_PROXY_PORT = "16358"
-    AVITO_PROXY_USER = "VAdPaN"
+    AVITO_PROXY_USER = "ilkin"
     AVITO_PROXY_PASS = "EDNyWFYHyH2Y"
     print("[прокси] ⚡ Используем встроенный прокси mproxy.site")
 
@@ -2052,7 +2052,7 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Accept-Language": "ru-RU,ru;q=0.9",
     })
-    _TG_FALLBACK_PROXY = "http://VAdPaN:EDNyWFYHyH2Y@mproxy.site:16358"
+    _TG_FALLBACK_PROXY = "http://ilkin:EDNyWFYHyH2Y@mproxy.site:16358"
     _tg_proxy_url = (
         os.getenv("PROXY_URL") or
         os.getenv("AVITO_PROXY_URL") or
@@ -2521,7 +2521,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
     })
     # Русский резидентный прокси — обходит блокировки VK API / Yandex / DDG
     # Хардкодим как абсолютный fallback чтобы работало даже без Railway env vars
-    _VK_FALLBACK_PROXY = "http://VAdPaN:EDNyWFYHyH2Y@mproxy.site:16358"
+    _VK_FALLBACK_PROXY = "http://ilkin:EDNyWFYHyH2Y@mproxy.site:16358"
     _vk_proxy_url = (
         os.getenv("PROXY_URL") or
         os.getenv("AVITO_PROXY_URL") or
@@ -5110,11 +5110,21 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             _params.append(("pmax", str(price_max)))
         qs = "&".join(f"{k}={v}" for k, v in _params)
         full_url = f"{url}?{qs}"
-        _exe = (
-            "/opt/pw-browsers/chromium"  # Railway preinstalled
-            if __import__("os").path.exists("/opt/pw-browsers/chromium")
-            else None
-        )
+        import glob as _gl, os as _os2
+        def _find_chromium() -> str | None:
+            for _pat in [
+                "/opt/pw-browsers/chromium-*/chrome-linux/chrome",
+                "/opt/pw-browsers/chromium",
+                "/usr/bin/chromium-browser", "/usr/bin/chromium",
+                "/usr/bin/google-chrome-stable", "/usr/bin/google-chrome",
+            ]:
+                _found = _gl.glob(_pat)
+                if _found:
+                    return _found[0]
+                if _os2.path.exists(_pat):
+                    return _pat
+            return None
+        _exe = _find_chromium()
         try:
             with sync_playwright() as pw:
                 launch_opts = {
@@ -6925,38 +6935,51 @@ async def cmd_avito_debug(msg: Message):
         # 10. Playwright (реальный Chromium — обходит Cloudflare JS-challenge)
         try:
             from playwright.sync_api import sync_playwright as _spw
-            import os as _os
-            _pw_exe = "/opt/pw-browsers/chromium" if _os.path.exists("/opt/pw-browsers/chromium") else None
-            out.append(f"🎭 Playwright: chromium={'найден' if _pw_exe else 'НЕ НАЙДЕН (/opt/pw-browsers/chromium)'}")
-            if _pw_exe:
-                with _spw() as _pw:
-                    _br = _pw.chromium.launch(
-                        executable_path=_pw_exe, headless=True,
-                        args=["--no-sandbox","--disable-setuid-sandbox","--disable-dev-shm-usage","--disable-gpu"],
-                    )
-                    _ctx = _br.new_context(
-                        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                        locale="ru-RU",
-                    )
-                    _pg = _ctx.new_page()
-                    _pg.goto("https://www.avito.ru/ekaterinburg/avtomobili?seller_type=1&pmax=200000",
-                             timeout=25000, wait_until="networkidle")
-                    _pw_html = _pg.content()
-                    _br.close()
-                _pw_has = "__NEXT_DATA__" in _pw_html or '"canonicalUrl"' in _pw_html
-                out.append(f"   → HTTP OK, {len(_pw_html):,}б, данные: {'✅' if _pw_has else '❌'}")
-                if _pw_has:
-                    import datetime as _dt10
-                    _pw_parsed = _parse_avito_html(_pw_html, "ekaterinburg", _dt10.date.today())
-                    out.append(f"   → парсер: {len(_pw_parsed)} объявлений {'✅' if _pw_parsed else '❌'}")
-                    if _pw_parsed:
-                        out.append(f"   → первое: {_pw_parsed[0].get('title','?')[:50]} | {_pw_parsed[0].get('price','?')}")
-                else:
-                    import re as _re10
-                    _t10 = _pw_html
-                    out.append(f"   → captcha={_t10.lower().count('captcha')}, скрипты={_t10.count('<script')}, title={_re10.search(r'<title>([^<]{0,60})',_t10) and _re10.search(r'<title>([^<]{0,60})',_t10).group(1)!r}")
+            import os as _os10, glob as _gl10
+            def _find_pw_exe10():
+                for _pat in [
+                    "/opt/pw-browsers/chromium-*/chrome-linux/chrome",
+                    "/opt/pw-browsers/chromium",
+                    "/usr/bin/chromium-browser", "/usr/bin/chromium",
+                    "/usr/bin/google-chrome-stable",
+                ]:
+                    _f = _gl10.glob(_pat)
+                    if _f: return _f[0]
+                    if _os10.path.exists(_pat): return _pat
+                return None
+            _pw_exe = _find_pw_exe10()
+            out.append(f"🎭 Playwright: chromium={_pw_exe or 'НЕ НАЙДЕН (поиск в /opt/pw-browsers, /usr/bin)'}")
+            with _spw() as _pw10:
+                _largs = ["--no-sandbox","--disable-setuid-sandbox","--disable-dev-shm-usage","--disable-gpu"]
+                _lopts = {"headless": True, "args": _largs}
+                if _pw_exe:
+                    _lopts["executable_path"] = _pw_exe
+                _br10 = _pw10.chromium.launch(**_lopts)
+                _ctx10 = _br10.new_context(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                    locale="ru-RU",
+                )
+                _pg10 = _ctx10.new_page()
+                _pg10.goto("https://www.avito.ru/ekaterinburg/avtomobili?seller_type=1&pmax=200000",
+                           timeout=25000, wait_until="networkidle")
+                _pw_html = _pg10.content()
+                _br10.close()
+            _pw_has = "__NEXT_DATA__" in _pw_html or '"canonicalUrl"' in _pw_html
+            out.append(f"   → {len(_pw_html):,}б, данные: {'✅' if _pw_has else '❌'}")
+            if _pw_has:
+                import datetime as _dt10
+                _pw_parsed = _parse_avito_html(_pw_html, "ekaterinburg", _dt10.date.today())
+                out.append(f"   → парсер: {len(_pw_parsed)} объявлений {'✅' if _pw_parsed else '❌'}")
+                if _pw_parsed:
+                    out.append(f"   → первое: {_pw_parsed[0].get('title','?')[:50]} | {_pw_parsed[0].get('price','?')}")
+            else:
+                import re as _re10
+                _t10 = _pw_html
+                _title10 = _re10.search(r'<title>([^<]{0,60})', _t10)
+                _ttl10 = repr(_title10.group(1)) if _title10 else "'?'"
+                out.append(f"   → captcha={_t10.lower().count('captcha')}, title={_ttl10}")
         except ImportError:
-            out.append("🎭 Playwright: ❌ библиотека не установлена (pip install playwright)")
+            out.append("🎭 Playwright: ❌ библиотека не установлена")
         except Exception as e:
             out.append(f"🎭 Playwright: ❌ {str(e)[:150]}")
 
