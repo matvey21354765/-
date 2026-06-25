@@ -2332,7 +2332,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
     except ImportError:
         return []
 
-    vk_token = os.getenv("VK_TOKEN", "4e23362e4e23362e4e23362e4c4d62ef5f44e234e23362e241bdc8082449c578e8eace8")
+    vk_token = os.getenv("VK_TOKEN", "47e33a5247e33a5247e33a526a44a2d4af447e347e33a522ddfc471e56efb853533d23c")
     city_key = _TG_REGION_MAP.get(region, "")
 
     _vk_region_names = {
