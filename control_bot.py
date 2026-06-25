@@ -1126,9 +1126,37 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
     results = []
     today = datetime.date.today()
 
-    # Метод 1: AJAX API Auto.ru (наиболее надёжный, возвращает JSON)
+    # Создаём сессию и прогреваем куки через GET запрос страницы листинга
+    # Auto.ru требует куки сессии для AJAX — без них возвращает пустой ответ
+    _ar_session = _req.Session()
+    _ar_ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    _ar_base_url = f"https://auto.ru/{slug}/cars/used/?seller_group=PRIVATE"
+    if price_min > 0:
+        _ar_base_url += f"&price_from={price_min}"
+    if price_max < 99_000_000:
+        _ar_base_url += f"&price_to={price_max}"
+    try:
+        _warm = _ar_session.get(_ar_base_url, headers={
+            "User-Agent": _ar_ua,
+            "Accept": "text/html,application/xhtml+xml,*/*;q=0.9",
+            "Accept-Language": "ru-RU,ru;q=0.9",
+        }, proxies=_avito_proxies(), timeout=20)
+        print(f"  [Auto.ru] прогрев сессии: HTTP {_warm.status_code}, куки: {list(_ar_session.cookies.keys())[:5]}")
+        # Если страница вернула данные — сразу парсим
+        if _warm.status_code == 200 and len(_warm.text) > 50_000:
+            _warm_items = _autoru_parse_html(_warm.text, today)
+            if _warm_items:
+                print(f"  [Auto.ru] прогрев дал {len(_warm_items)} объявлений")
+                results.extend(_warm_items)
+    except Exception as _e:
+        print(f"  [Auto.ru] прогрев: {str(_e)[:60]}")
+
+    if results:
+        return results
+
+    # Метод 1: AJAX API Auto.ru с прогретой сессией (возвращает JSON)
     headers_ajax = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "User-Agent": _ar_ua,
         "Accept": "application/json,*/*",
         "Accept-Language": "ru-RU,ru;q=0.9",
         "Content-Type": "application/json",
@@ -1870,7 +1898,11 @@ _SOCIAL_REJECT_KEYWORDS = [
     "номер на гелик", "номер на мерс", "номер на авто", "идеальный номер",
     "подчеркнет статус", "номер авт", "автономер",
     "запчаст", "автозапчаст", "разбор", "на разбор", "на запчаст",
-    "шин", "резин", "покрышк", "колес", "колёс", "диски", "диск р", "диск на",
+    # НЕ добавляем "шин" — оно содержится в "машина", "машины", "машину" → ложное срабатывание
+    "шины б/у", "б/у шин", "продам шин", "зимние шин", "летние шин", "комплект шин",
+    "покрышк", "резина б/у", "б/у резин",
+    "колёса б/у", "колеса б/у", "б/у колёс", "б/у колес",
+    "диски r", "диски р", "диск r", "диск р", "диск на",
     " шт.", "шт,", " шт\n",                        # «4 шт.» — детали поштучно
     "на ваз ", "на lada ", "запчасти на",           # «на ВАЗ 4 шт» — для другого авто
     "сабвуфер", "сабвуф", "автозвук", "усилитель", "магнитол", "колонки", "автоакустик",
