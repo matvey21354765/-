@@ -3146,10 +3146,19 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
     """Преобразует объект Авито JSON в dict объявления. Возвращает None для дилеров."""
     try:
         title = it.get("title", "")
-        url_path = it.get("urlPath") or it.get("url", "")
+        url_path = (
+            it.get("urlPath") or it.get("url") or
+            it.get("canonicalUrl") or it.get("shortUrl") or
+            it.get("slug") or ""
+        )
         if not url_path:
             return None
-        item_url = ("https://www.avito.ru" + url_path) if url_path.startswith("/") else url_path
+        if url_path.startswith("/"):
+            item_url = "https://www.avito.ru" + url_path
+        elif url_path.startswith("http"):
+            item_url = url_path
+        else:
+            item_url = "https://www.avito.ru/" + url_path.lstrip("/")
         if not title or "avito.ru" not in item_url:
             return None
         print(f"  [item] title={title[:30]!r} url={url_path[:40]!r}")
@@ -4318,9 +4327,11 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             print(f"  [Авито mobileAPI0] {str(_e)[:60]}")
 
     # ── Метод 0b: Альтернативные эндпоинты мобильного API ─────────────────────
-    # m.avito.ru/api/14/items (новая версия API 2025) и map/items эндпоинт
+    # Пробуем новые версии API (v14, v15, v16) которые Авито использует сейчас
     if not results and AVITO_PROXIES:
         for _alt_url, _alt_ver in [
+            ("https://m.avito.ru/api/16/items", "api16"),
+            ("https://m.avito.ru/api/15/items", "api15"),
             ("https://m.avito.ru/api/14/items", "api14"),
             ("https://www.avito.ru/web/1/map/items", "mapItems"),
         ]:
@@ -4562,16 +4573,20 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             try:
                 r = session.get(url, params=params, headers=_hdrs, timeout=15, proxies=_avito_proxies())
                 print(f"  [Авито webHTML] стр.{p} попытка {attempt+1}: HTTP {r.status_code}, {len(r.text):,}б")
-                if r.status_code == 200 and ('"urlPath"' in r.text or 'data-marker="item"' in r.text):
+                _has_listing_data = ('"urlPath"' in r.text or '"canonicalUrl"' in r.text or
+                                     'data-marker="item"' in r.text or '"shortUrl"' in r.text)
+                if r.status_code == 200 and _has_listing_data:
                     res = _parse_avito_html(r.text, slug, today)
                     if res:
                         return res
                     # Страница получена, но парсер вернул 0 — диагностика
                     _has_nd = "__NEXT_DATA__" in r.text
-                    _has_items = '"urlPath"' in r.text
-                    _snippet = r.text[r.text.find("__NEXT_DATA__"):r.text.find("__NEXT_DATA__")+200] if _has_nd else r.text[:300]
-                    print(f"  [Авито webHTML] стр.{p} попытка {attempt+1}: парсер 0, NEXT_DATA={_has_nd}, urlPath={_has_items}")
-                    print(f"  [Авито webHTML] snippet: {_snippet[:200]!r}")
+                    _has_items = '"urlPath"' in r.text or '"canonicalUrl"' in r.text
+                    _snippet = r.text[r.text.find("__NEXT_DATA__"):r.text.find("__NEXT_DATA__")+300] if _has_nd else r.text[:300]
+                    print(f"  [Авито webHTML] стр.{p} попытка {attempt+1}: парсер 0, NEXT_DATA={_has_nd}, listing_data={_has_items}")
+                    print(f"  [Авито webHTML] snippet: {_snippet[:300]!r}")
+                elif r.status_code == 200:
+                    print(f"  [Авито webHTML] стр.{p} попытка {attempt+1}: 200 но нет данных объявлений, первые 300б: {r.text[:300]!r}")
                 if r.status_code in (403, 429, 503):
                     time.sleep(random.uniform(2.0, 4.0))
                     continue  # IP в бане — пробуем другой
@@ -4900,11 +4915,16 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         if price_max < 99_000_000:
             _base_params["priceMax"] = price_max
 
-        # Пробуем разные варианты: с ключом и без, версии API 9/13/15
+        # Пробуем разные варианты API: новые версии первыми
+        _key = "af0deccbgcgidddjgnvljitntccdduijhdinfgjgfjir"
         _variants = [
-            ("https://m.avito.ru/api/13/items", {**_base_params, "key": "af0deccbgcgidddjgnvljitntccdduijhdinfgjgfjir"}),
+            ("https://m.avito.ru/api/16/items", {**_base_params, "key": _key}),
+            ("https://m.avito.ru/api/16/items", _base_params),
+            ("https://m.avito.ru/api/15/items", {**_base_params, "key": _key}),
+            ("https://m.avito.ru/api/14/items", {**_base_params, "key": _key}),
+            ("https://m.avito.ru/api/13/items", {**_base_params, "key": _key}),
             ("https://m.avito.ru/api/13/items", _base_params),
-            ("https://m.avito.ru/api/9/items", {**_base_params, "key": "af0deccbgcgidddjgnvljitntccdduijhdinfgjgfjir"}),
+            ("https://m.avito.ru/api/9/items",  {**_base_params, "key": _key}),
         ]
         hdrs = {
             "User-Agent": "ru.avito.avitomobile/18.0 (Android 13; ru_RU)",
@@ -4989,6 +5009,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                 params=params,
                 headers=headers,
                 timeout=30,
+                proxies=_avito_proxies() or {},
             )
             if r.status_code == 404:
                 print(f"  [Авито JSON API] стр.{p}: HTTP 404 — эндпоинт недоступен")
@@ -5021,6 +5042,58 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             return results_out
         except Exception as e:
             print(f"  [Авито JSON API] стр.{p}: {e}")
+        return []
+
+    def _try_avito_xhr(p: int) -> list[dict]:
+        """Авито XHR API — внутренний эндпоинт, который сайт использует при AJAX-пагинации.
+        Работает с российским IP (прокси). Возвращает JSON с полными объявлениями."""
+        if not AVITO_PROXIES:
+            return []
+        _brand_path = f"/{brand}" if brand and brand != "any" else ""
+        _xhr_url = f"https://www.avito.ru/{slug}/avtomobili{_brand_path}"
+        _params: dict = {"seller_type": "1", "forceLocal": "1", "output": "json"}
+        if p > 1:
+            _params["p"] = p
+        if price_min > 0:
+            _params["pmin"] = price_min
+        if price_max < 99_000_000:
+            _params["pmax"] = price_max
+        _hdrs = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "Accept-Language": "ru-RU,ru;q=0.9",
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": f"https://www.avito.ru/{slug}/avtomobili",
+        }
+        for _xurl in [
+            f"https://www.avito.ru/{slug}/avtomobili{_brand_path}",
+            f"https://www.avito.ru/api/11/items?locationId={location_id}&categoryId=9&page={p}",
+        ]:
+            try:
+                r = session.get(_xurl, params=_params, headers=_hdrs, timeout=15, proxies=_avito_proxies())
+                print(f"  [Авито XHR] {_xurl.split('?')[0].split('/')[-1]} стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
+                if r.status_code == 200:
+                    ct = r.headers.get("Content-Type", "")
+                    if "json" in ct:
+                        try:
+                            data = r.json()
+                            raw = (data.get("items") or _deep_get(data, "result.items")
+                                   or _deep_get(data, "data.items") or _avito_find_items_in_json(data))
+                            if raw:
+                                out = [_avito_item_from_json(it, today) for it in raw]
+                                out = [x for x in out if x]
+                                if out:
+                                    print(f"  [Авито XHR] {len(out)} объявлений")
+                                    return out
+                        except Exception:
+                            pass
+                    elif '"urlPath"' in r.text or '"canonicalUrl"' in r.text:
+                        res = _parse_avito_html(r.text, slug, today)
+                        if res:
+                            print(f"  [Авито XHR] HTML fallback: {len(res)} объявлений")
+                            return res
+            except Exception as e:
+                print(f"  [Авито XHR] ошибка: {str(e)[:60]}")
         return []
 
     # Определяем рабочий метод: на стр.1 запускаем ВСЕ методы параллельно и
@@ -5402,6 +5475,8 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         # С мобильным прокси: mobileAPI первым (5 страниц JSON), потом webHTML
         tasks = (
             [(_try_avito_mobile_api, p) for p in range(1, 6)] +
+            [(_try_avito_json_api, p) for p in range(1, 4)] +
+            [(_try_avito_xhr, p) for p in range(1, 4)] +
             [(_try_web_html, p) for p in range(1, 8)] +
             [(_try_mobile_site, p) for p in range(1, 4)] +
             [(_try_avito_rss, 1), (_try_googlebot_ua, 1)]
