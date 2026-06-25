@@ -4106,6 +4106,66 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                 out.append(item)
         return out
 
+    # ── Метод 0: Официальный мобильный JSON API (m.avito.ru/api/13/items) ──────
+    # С российским мобильным IP (Megafone/MTS) работает без авторизации и OAuth.
+    # Возвращает структурированный JSON — не нужно парсить HTML.
+    if AVITO_PROXIES:
+        _key = "af0deccbgcgidddjgnvljitntccdduijhdinfgjgfjir"
+        _mob_params: dict = {
+            "key": _key,
+            "locationId": location_id,
+            "categoryId": 9,
+            "params[109][]": 106,
+            "page": 1,
+            "limit": 100,
+            "display": "list",
+        }
+        if price_min > 0:
+            _mob_params["priceMin"] = price_min
+        if price_max < 99_000_000:
+            _mob_params["priceMax"] = price_max
+        _mob_hdrs = {
+            "User-Agent": "ru.avito.avitomobile/18.0 (Android 13; ru_RU)",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "ru-RU,ru;q=0.9",
+            "x-avito-app-version": "18.0.0",
+        }
+        try:
+            _r_mob = session.get(
+                "https://m.avito.ru/api/13/items",
+                params=_mob_params,
+                headers=_mob_hdrs,
+                timeout=15,
+                proxies=_avito_proxies(),
+            )
+            print(f"  [Авито mobileAPI0] HTTP {_r_mob.status_code}, {len(_r_mob.text):,}б")
+            if _r_mob.status_code == 200:
+                try:
+                    _mob_data = _r_mob.json()
+                    _mob_raw = (
+                        _deep_get(_mob_data, "result.items")
+                        or _deep_get(_mob_data, "data.items")
+                        or _mob_data.get("items")
+                        or _avito_find_items_in_json(_mob_data)
+                    )
+                    if _mob_raw:
+                        _mob_out = [_avito_item_from_json(it, today) for it in _mob_raw]
+                        _mob_out = [x for x in _mob_out if x]
+                        if _mob_out:
+                            print(f"  [Авито mobileAPI0] {len(_mob_out)} объявлений")
+                            results.extend(_mob_out)
+                    else:
+                        _keys = list(_mob_data.keys())[:8] if isinstance(_mob_data, dict) else type(_mob_data).__name__
+                        print(f"  [Авито mobileAPI0] нет items, ключи: {_keys}")
+                except Exception as _e:
+                    print(f"  [Авито mobileAPI0] json: {_e}")
+        except Exception as _e:
+            print(f"  [Авито mobileAPI0] {str(_e)[:60]}")
+
+    if results:
+        print(f"  [Авито API] мобильный API дал {len(results)} объявлений")
+        return results
+
     def _try_mobile_site(p: int) -> list[dict]:
         """m.avito.ru — мобильный сайт, отдельная антибот-цепочка от десктопа.
         Пробует несколько URL-вариантов: с фильтром частников, без фильтра,
@@ -4609,6 +4669,74 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             print(f"  [Авито lite] {e}")
         return []
 
+    def _try_avito_mobile_api(p: int) -> list[dict]:
+        """Официальный мобильный API Авито (m.avito.ru/api/13/items).
+        С российским мобильным IP (Megafone/MTS/Beeline) работает без авторизации.
+        Возвращает чистый JSON без необходимости парсить HTML."""
+        _key = "af0deccbgcgidddjgnvljitntccdduijhdinfgjgfjir"
+        params: dict = {
+            "key": _key,
+            "locationId": location_id,
+            "categoryId": 9,
+            "params[109][]": 106,
+            "page": p,
+            "limit": 50,
+            "display": "list",
+            "sort": "date",
+        }
+        if price_min > 0:
+            params["priceMin"] = price_min
+        if price_max < 99_000_000:
+            params["priceMax"] = price_max
+        hdrs = {
+            "User-Agent": "ru.avito.avitomobile/18.0 (Android 13; ru_RU)",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "ru-RU,ru;q=0.9",
+            "x-avito-app-version": "18.0.0",
+        }
+        for attempt in range(3):
+            try:
+                r = session.get(
+                    "https://m.avito.ru/api/13/items",
+                    params=params,
+                    headers=hdrs,
+                    timeout=15,
+                    proxies=_avito_proxies(),
+                )
+                print(f"  [Авито mobileAPI] стр.{p} попытка {attempt+1}: HTTP {r.status_code}, {len(r.text):,}б")
+                if r.status_code == 200:
+                    try:
+                        data = r.json()
+                    except Exception:
+                        continue
+                    raw = (
+                        _deep_get(data, "result.items")
+                        or _deep_get(data, "data.items")
+                        or data.get("items")
+                        or _avito_find_items_in_json(data)
+                    )
+                    if raw:
+                        out = []
+                        for it in raw:
+                            item = _avito_item_from_json(it, today)
+                            if item:
+                                out.append(item)
+                        if out:
+                            print(f"  [Авито mobileAPI] стр.{p}: {len(out)} объявлений")
+                            return out
+                        print(f"  [Авито mobileAPI] стр.{p}: raw={len(raw)}, после фильтра=0")
+                    else:
+                        # Логируем структуру для диагностики
+                        _keys = list(data.keys())[:10] if isinstance(data, dict) else type(data).__name__
+                        print(f"  [Авито mobileAPI] стр.{p}: нет items, ключи: {_keys}")
+                elif r.status_code in (403, 429):
+                    time.sleep(2)
+                    continue
+            except Exception as e:
+                print(f"  [Авито mobileAPI] стр.{p} попытка {attempt+1}: {str(e)[:60]}")
+                time.sleep(1)
+        return []
+
     def _try_avito_json_api(p: int) -> list[dict]:
         """Avito internal JSON listing endpoint — returns structured data without HTML parsing."""
         try:
@@ -5042,9 +5170,9 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
     _no_proxy_methods = [_try_scraperapi_fast, _try_free_proxies, _try_yandex_snippets, _try_cffi_web, _try_curl_cffi, _try_cs_web, _try_mobile_site, _try_web_html, _try_avito_public_api, _try_avito_rss, _try_googlebot_ua, _try_avito_lite, _try_scraperapi, _try_avito_json_api]
     _use_proxy = AVITO_PROXIES and not _proxy_auth_failed
     if _use_proxy:
-        # Платный прокси. Основной метод — _try_web_html.
-        # Резервные методы: мобильный сайт, RSS, Googlebot UA — если часть IP забанена.
-        all_methods = [_try_web_html, _try_avito_lite, _try_avito_rss, _try_googlebot_ua, _try_avito_public_api]
+        # Платный прокси (московский мобильный IP, Megafone/MTS).
+        # Приоритет: mobileAPI (JSON, без HTML-парсинга) → webHTML → mobile_site → RSS → Googlebot
+        all_methods = [_try_avito_mobile_api, _try_web_html, _try_mobile_site, _try_avito_rss, _try_googlebot_ua, _try_avito_lite, _try_avito_public_api]
     else:
         all_methods = _no_proxy_methods
     # Список задач. С прокси — страницы с человеческой задержкой между ними.
