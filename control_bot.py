@@ -6645,18 +6645,47 @@ async def cmd_avito_debug(msg: Message):
         except Exception as e:
             out.append(f"🔴 Авито (curl_cffi): ❌ {str(e)[:100]}")
 
-        # 5. Авито без прокси через curl_cffi
+        # 5. Авито без прокси через curl_cffi + парсинг
         try:
             from curl_cffi import requests as _cffi2
             rc = _cffi2.get("https://www.avito.ru/ekaterinburg/avtomobili",
-                impersonate="chrome124", timeout=8,
+                params={"seller_type": "1", "pmax": 200000},
+                impersonate="chrome124", timeout=12,
                 headers={"Accept-Language": "ru-RU,ru;q=0.9"})
             has3 = '"urlPath"' in rc.text or '"canonicalUrl"' in rc.text or '__NEXT_DATA__' in rc.text
-            out.append(f"🔴 Авито без прокси (curl_cffi): HTTP {rc.status_code}, {len(rc.text):,}б, данные: {'✅' if has3 else '❌'}")
-            if not has3:
-                out.append(f"  → первые 150б: {rc.text[:150]!r}")
+            out.append(f"🔴 Авито напрямую (curl_cffi): HTTP {rc.status_code}, {len(rc.text):,}б, данные: {'✅' if has3 else '❌'}")
+            if has3:
+                # Пробуем парсинг
+                import datetime as _dt
+                import re as _re, json as _js
+                _nd_m = _re.search(r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>', rc.text, _re.S)
+                if _nd_m:
+                    try:
+                        _nd = _js.loads(_nd_m.group(1))
+                        # Показываем верхние ключи
+                        _top = list(_nd.get("props", {}).get("pageProps", {}).keys())[:10]
+                        out.append(f"  → __NEXT_DATA__ pageProps ключи: {_top}")
+                        # Пробуем парсить
+                        parsed = _parse_avito_html(rc.text, "ekaterinburg", _dt.date.today())
+                        out.append(f"  → парсер вернул: {len(parsed)} объявлений {'✅' if parsed else '❌'}")
+                        if parsed:
+                            out.append(f"  → первое: {parsed[0].get('title','?')[:60]} | {parsed[0].get('price','?')}")
+                        else:
+                            # Ищем urlPath/canonicalUrl вручную
+                            _sample = _re.search(r'"(?:urlPath|canonicalUrl)"\s*:\s*"([^"]+)"', rc.text)
+                            out.append(f"  → пример urlPath/canonicalUrl: {_sample.group(1)[:80] if _sample else 'НЕ НАЙДЕН'}")
+                    except Exception as pe:
+                        out.append(f"  → ошибка парсинга: {pe}")
+                else:
+                    out.append("  → __NEXT_DATA__ НЕ НАЙДЕН в HTML!")
+                    # Проверяем другие признаки
+                    _up = '"urlPath"' in rc.text
+                    _cu = '"canonicalUrl"' in rc.text
+                    out.append(f"  → urlPath={_up}, canonicalUrl={_cu}")
+            else:
+                out.append(f"  → первые 200б: {rc.text[:200]!r}")
         except Exception as e:
-            out.append(f"🔴 Авито без прокси (curl_cffi): ❌ {str(e)[:100]}")
+            out.append(f"🔴 Авито напрямую (curl_cffi): ❌ {str(e)[:100]}")
 
         return out
 
