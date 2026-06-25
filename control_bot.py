@@ -4286,6 +4286,8 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                 out.append(item)
         return out
 
+    _api_start = time.time()
+
     # ── Метод 0: Официальный мобильный JSON API (m.avito.ru/api/13/items) ──────
     # С российским мобильным IP (Megafone/MTS) работает без авторизации и OAuth.
     # Возвращает структурированный JSON — не нужно парсить HTML.
@@ -4315,7 +4317,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                 "https://m.avito.ru/api/13/items",
                 params=_mob_params,
                 headers=_mob_hdrs,
-                timeout=15,
+                timeout=8,
                 proxies=_avito_proxies(),
             )
             print(f"  [Авито mobileAPI0] HTTP {_r_mob.status_code}, {len(_r_mob.text):,}б")
@@ -4350,7 +4352,8 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
 
     # ── Метод 0b: Альтернативные эндпоинты мобильного API ─────────────────────
     # Пробуем новые версии API (v14, v15, v16) которые Авито использует сейчас
-    if not results and AVITO_PROXIES:
+    # Пропускаем если уже потратили >10с на метод 0 (чтобы не превысить 70с таймаут бота)
+    if not results and AVITO_PROXIES and (time.time() - _api_start) < 10:
         for _alt_url, _alt_ver in [
             ("https://m.avito.ru/api/16/items", "api16"),
             ("https://m.avito.ru/api/15/items", "api15"),
@@ -4375,7 +4378,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                     params=_alt_params,
                     headers={"User-Agent": "ru.avito.avitomobile/18.0 (Android 13; ru_RU)",
                              "Accept": "application/json", "Accept-Language": "ru-RU,ru;q=0.9"},
-                    timeout=15,
+                    timeout=8,
                     proxies=_avito_proxies(),
                 )
                 print(f"  [Авито {_alt_ver}] HTTP {_alt_r.status_code}, {len(_alt_r.text):,}б")
@@ -4438,7 +4441,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         ]
         for url, params in urls_to_try:
             try:
-                r = session.get(url, params=params, headers=mobile_headers, timeout=20, proxies=_avito_proxies())
+                r = session.get(url, params=params, headers=mobile_headers, timeout=8, proxies=_avito_proxies())
                 print(f"  [Авито m.] {url} стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
                 if r.status_code == 200 and ('"urlPath"' in r.text or 'data-marker="item"' in r.text or '__NEXT_DATA__' in r.text):
                     result = _parse_avito_html(r.text, slug, today)
@@ -4486,7 +4489,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         if price_max < 99_000_000:
             params["pmax"] = price_max
         try:
-            r = cs_session.get(url, params=params, timeout=20, proxies=_avito_proxies())
+            r = cs_session.get(url, params=params, timeout=8, proxies=_avito_proxies())
             print(f"  [Авито cs] стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
             if r.status_code == 200 and ('"urlPath"' in r.text or 'data-marker="item"' in r.text):
                 return _parse_avito_html(r.text, slug, today)
@@ -4593,7 +4596,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                 "Connection": "keep-alive",
             }
             try:
-                r = session.get(url, params=params, headers=_hdrs, timeout=15, proxies=_avito_proxies())
+                r = session.get(url, params=params, headers=_hdrs, timeout=8, proxies=_avito_proxies())
                 print(f"  [Авито webHTML] стр.{p} попытка {attempt+1}: HTTP {r.status_code}, {len(r.text):,}б")
                 _has_listing_data = ('"urlPath"' in r.text or '"canonicalUrl"' in r.text or
                                      'data-marker="item"' in r.text or '"shortUrl"' in r.text)
@@ -4809,7 +4812,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                     "Accept-Language": "ru-RU,ru;q=0.9",
                 },
-                timeout=15,
+                timeout=8,
             )
             if r.status_code != 200:
                 return []
@@ -4958,7 +4961,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             for attempt in range(2):
                 try:
                     r = session.get(
-                        _url, params=_params, headers=hdrs, timeout=15,
+                        _url, params=_params, headers=hdrs, timeout=8,
                         proxies=_avito_proxies(),
                     )
                     print(f"  [Авито mobileAPI] стр.{p} {_url.split('/')[-2]}: HTTP {r.status_code}, {len(r.text):,}б")
@@ -5092,7 +5095,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             f"https://www.avito.ru/api/11/items?locationId={location_id}&categoryId=9&page={p}",
         ]:
             try:
-                r = session.get(_xurl, params=_params, headers=_hdrs, timeout=15, proxies=_avito_proxies())
+                r = session.get(_xurl, params=_params, headers=_hdrs, timeout=8, proxies=_avito_proxies())
                 print(f"  [Авито XHR] {_xurl.split('?')[0].split('/')[-1]} стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
                 if r.status_code == 200:
                     ct = r.headers.get("Content-Type", "")
@@ -5494,17 +5497,18 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         all_methods = _no_proxy_methods
     # Список задач. С прокси — страницы с человеческой задержкой между ними.
     if _use_proxy:
-        # С мобильным прокси: mobileAPI первым (5 страниц JSON), потом webHTML
+        # С мобильным прокси: параллельно пробуем все методы на стр.1-3
+        # Меньше задач → быстрее → укладываемся в 45с deadline
         tasks = (
-            [(_try_avito_mobile_api, p) for p in range(1, 6)] +
-            [(_try_avito_json_api, p) for p in range(1, 4)] +
-            [(_try_avito_xhr, p) for p in range(1, 4)] +
-            [(_try_web_html, p) for p in range(1, 8)] +
-            [(_try_mobile_site, p) for p in range(1, 4)] +
-            [(_try_avito_rss, 1), (_try_googlebot_ua, 1)]
+            [(_try_avito_mobile_api, p) for p in range(1, 4)] +
+            [(_try_avito_json_api, p) for p in range(1, 3)] +
+            [(_try_avito_xhr, p) for p in range(1, 3)] +
+            [(_try_web_html, p) for p in range(1, 5)] +
+            [(_try_mobile_site, 1)] +
+            [(_try_avito_rss, 1)]
         )
         _cap = 300
-        _deadline_s = 90
+        _deadline_s = 45
     else:
         tasks = [(m, 1) for m in all_methods]
         _cap = 40
@@ -5528,7 +5532,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
     _soft_deadline = time.time() + _deadline_s
     try:
         fut_map = {_ex.submit(m, pg): (m, pg) for (m, pg) in tasks}
-        for fut in _as_completed(fut_map, timeout=70):
+        for fut in _as_completed(fut_map, timeout=45):
             try:
                 b = fut.result()
             except Exception:
