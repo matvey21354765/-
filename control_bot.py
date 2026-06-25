@@ -975,6 +975,11 @@ def _autoru_parse_offers(data: dict, today) -> list[dict]:
         data.get("listing", {}).get("data", {}).get("offers", [])
         or data.get("search", {}).get("offers", {}).get("offers", [])
         or data.get("offers", [])
+        # Новые форматы Auto.ru API 2025
+        or (data.get("response", {}) or {}).get("offers", [])
+        or (data.get("data", {}) or {}).get("offers", [])
+        or (data.get("result", {}) or {}).get("offers", [])
+        or (data.get("listing", {}) or {}).get("offers", [])
     )
     for offer in listing:
         try:
@@ -1026,8 +1031,23 @@ def _autoru_parse_html(text: str, today) -> list[dict]:
     """Извлекает объявления из HTML Auto.ru (__INITIAL_STATE__ или regex)."""
     results = []
 
-    # Метод 1: window.__INITIAL_STATE__
-    for marker in ("window.__INITIAL_STATE__=", "window.__INITIAL_STATE__ ="):
+    # Метод 1: window.__INITIAL_STATE__ и другие встроенные JSON-блоки
+    for marker in ("window.__INITIAL_STATE__=", "window.__INITIAL_STATE__ =",
+                   "window.AUTOCART_STATE=", "window.AUTOCART_STATE =",
+                   "__NEXT_DATA__"):
+        if marker == "__NEXT_DATA__":
+            # Для Next.js страниц Auto.ru (новый формат 2025)
+            nd_m = re.search(r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>', text, re.S)
+            if nd_m:
+                try:
+                    data = json.loads(nd_m.group(1))
+                    found = _autoru_parse_offers(data, today)
+                    if found:
+                        print(f"  [Auto.ru] __NEXT_DATA__: {len(found)} объявлений")
+                        return found
+                except Exception as e:
+                    print(f"  [Auto.ru] __NEXT_DATA__ json error: {e}")
+            continue
         idx = text.find(marker)
         if idx == -1:
             continue
@@ -1040,10 +1060,10 @@ def _autoru_parse_html(text: str, today) -> list[dict]:
             data = json.loads(json_str)
             found = _autoru_parse_offers(data, today)
             if found:
-                print(f"  [Auto.ru] __INITIAL_STATE__: {len(found)} объявлений")
+                print(f"  [Auto.ru] {marker}: {len(found)} объявлений")
                 return found
         except Exception as e:
-            print(f"  [Auto.ru] __INITIAL_STATE__ json error: {e}")
+            print(f"  [Auto.ru] {marker} json error: {e}")
 
     # Метод 2: regex по паттернам Auto.ru в сыром HTML/JSON
     # Auto.ru URLs: https://auto.ru/cars/used/sale/brand/model/id/
@@ -1138,6 +1158,41 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
             html_url += f"&price_from={price_min}"
         if price_max < 99_000_000:
             html_url += f"&price_to={price_max}"
+
+        # Метод 00: Mobile API Auto.ru (менее защищён, чем desktop AJAX)
+        if not batch and AVITO_PROXIES:
+            try:
+                _mob_autoru_params = {
+                    "category": "cars", "section": "used",
+                    "seller_group": "PRIVATE", "page": p, "page_size": 25,
+                    "sort": "fresh_relevance_1-desc",
+                }
+                if geo_ids:
+                    _mob_autoru_params["geo_id"] = ",".join(map(str, geo_ids))
+                if price_min > 0:
+                    _mob_autoru_params["price_from"] = price_min
+                if price_max < 99_000_000:
+                    _mob_autoru_params["price_to"] = price_max
+                _mob_autoru_r = _req.get(
+                    "https://mobile.auto.ru/1.0/search/cars",
+                    params=_mob_autoru_params,
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36",
+                        "Accept": "application/json",
+                        "Accept-Language": "ru-RU,ru;q=0.9",
+                        "x-client-app": "ru.auto.ara",
+                    },
+                    proxies=_avito_proxies(),
+                    timeout=20,
+                )
+                print(f"  [Auto.ru] mobile API стр.{p}: HTTP {_mob_autoru_r.status_code}, {len(_mob_autoru_r.text):,}б")
+                if _mob_autoru_r.status_code == 200:
+                    try:
+                        batch = _autoru_parse_offers(_mob_autoru_r.json(), today)
+                    except Exception:
+                        pass
+            except Exception as e:
+                print(f"  [Auto.ru] mobile API: {str(e)[:80]}")
 
         # Метод 0а: Прямой AJAX API с прокси (наиболее надёжный при наличии РФ IP)
         if not batch and AVITO_PROXIES:
@@ -1887,6 +1942,33 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
         return []
 
     city_key = _TG_REGION_MAP.get(region, "")
+
+    # Названия городов и областей на русском для поисковых запросов
+    _tg_region_names = {
+        "ekaterinburg": "Екатеринбург", "moskva": "Москва", "spb": "Санкт-Петербург",
+        "novosibirsk": "Новосибирск", "kazan": "Казань", "chelyabinsk": "Челябинск",
+        "ufa": "Уфа", "krasnodar": "Краснодар", "omsk": "Омск", "rostov": "Ростов-на-Дону",
+        "tyumen": "Тюмень", "samara": "Самара", "volgograd": "Волгоград",
+        "perm": "Пермь", "voronezh": "Воронеж", "saratov": "Саратов",
+        "krasnoyarsk": "Красноярск", "irkutsk": "Иркутск",
+        "vladivostok": "Владивосток", "habarovsk": "Хабаровск", "nn": "Нижний Новгород",
+    }
+    _tg_oblast_names = {
+        "ekaterinburg": "Свердловская область", "moskva": "Московская область",
+        "spb": "Ленинградская область", "novosibirsk": "Новосибирская область",
+        "kazan": "Татарстан", "chelyabinsk": "Челябинская область",
+        "ufa": "Башкортостан", "krasnodar": "Краснодарский край",
+        "omsk": "Омская область", "rostov": "Ростовская область",
+        "tyumen": "Тюменская область", "samara": "Самарская область",
+        "perm": "Пермский край", "voronezh": "Воронежская область",
+        "krasnoyarsk": "Красноярский край", "nn": "Нижегородская область",
+        "irkutsk": "Иркутская область", "saratov": "Саратовская область",
+        "vladivostok": "Приморский край", "habarovsk": "Хабаровский край",
+        "volgograd": "Волгоградская область",
+    }
+    region_name_ru = _tg_region_names.get(city_key, city_key or region)
+    oblast_name_ru = _tg_oblast_names.get(city_key, region_name_ru)
+    search_locations = list(dict.fromkeys([region_name_ru, oblast_name_ru]))
 
     # Создаём сессию с русским прокси (тот же что и для Авито)
     session = _req.Session()
@@ -3310,24 +3392,39 @@ def _avito_find_items_in_json(obj, depth=0) -> list:
     """Рекурсивно ищет массив объявлений в JSON Авито."""
     if depth > 15 or not isinstance(obj, (dict, list)):
         return []
+    def _looks_like_listing(sample: dict) -> bool:
+        """Проверяет, похож ли dict на объявление Авито."""
+        # Старый формат: urlPath начинается с /
+        url_path = sample.get("urlPath", "")
+        if isinstance(url_path, str) and url_path.startswith("/"):
+            if any(k in sample for k in ("priceDetailed", "price", "images", "gallery", "photos")):
+                return True
+            if "id" in sample and "title" in sample and any(s in url_path for s in ("avto", "auto", "avtomobili")):
+                return True
+        # Новый формат 2025+: поле "slug" или "canonicalUrl" вместо urlPath
+        slug_val = sample.get("slug") or sample.get("canonicalUrl") or sample.get("shortUrl") or ""
+        if isinstance(slug_val, str) and slug_val and any(k in sample for k in ("priceDetailed", "price", "images", "gallery", "photos")):
+            return True
+        # url + price/images (точные признаки листинга)
+        url_val = sample.get("url", "")
+        if isinstance(url_val, str) and ("avito.ru" in url_val or url_val.startswith("/")):
+            if any(k in sample for k in ("priceDetailed", "images", "gallery")):
+                return True
+        # Только по признакам листинга (id + title + price-like + не навигация)
+        if "id" in sample and "title" in sample:
+            if any(k in sample for k in ("priceDetailed", "price", "images", "gallery", "photos", "stats")):
+                # Убеждаемся, что это не навигационный элемент (categories/breadcrumbs)
+                if not any(k in sample for k in ("children", "categoryId", "type")) or any(k in sample for k in ("priceDetailed", "images", "gallery")):
+                    return True
+        return False
+
     if isinstance(obj, list):
         if len(obj) >= 1 and isinstance(obj[0], dict):
             sample = obj[0]
-            # urlPath (начинается с /) + обязательный признак листинга (цена/фото/id)
-            # Проверяем на РЕАЛЬНОЕ объявление, а не навигационный пункт
-            url_path = sample.get("urlPath", "")
-            if isinstance(url_path, str) and url_path.startswith("/") and (
-                any(k in sample for k in ("priceDetailed", "price", "images", "gallery", "photos"))
-                or ("id" in sample and "title" in sample and ("avto" in url_path or "auto" in url_path or "avtomobili" in url_path))
-            ):
+            if _looks_like_listing(sample):
+                url_path = sample.get("urlPath", sample.get("url", ""))
                 print(f"  [findItems] найден массив len={len(obj)}, sample_url={url_path!r}")
                 return obj
-            # Альтернатива: url + priceDetailed/images (точные признаки листинга)
-            if "url" in sample and any(k in sample for k in ("priceDetailed", "images", "gallery")):
-                url_val = sample.get("url", "")
-                if isinstance(url_val, str) and ("avito.ru" in url_val or url_val.startswith("/")):
-                    print(f"  [findItems] найден массив (url+price/images) len={len(obj)}")
-                    return obj
         for x in obj:
             r = _avito_find_items_in_json(x, depth + 1)
             if r:
@@ -3335,19 +3432,14 @@ def _avito_find_items_in_json(obj, depth=0) -> list:
         return []
     if isinstance(obj, dict):
         for key in ("items", "catalog", "listing", "offers", "ads", "cars",
-                    "search", "results", "snippets", "adverts", "data", "list"):
+                    "search", "results", "snippets", "adverts", "data", "list",
+                    "hits", "content", "advertisements", "announcements"):
             val = obj.get(key)
             if isinstance(val, list) and len(val) >= 1 and isinstance(val[0], dict):
                 sample = val[0]
-                url_path = sample.get("urlPath", "")
-                if isinstance(url_path, str) and url_path.startswith("/") and (
-                    any(k in sample for k in ("priceDetailed", "price", "images", "gallery", "photos"))
-                    or ("id" in sample and "title" in sample and ("avto" in url_path or "auto" in url_path or "avtomobili" in url_path))
-                ):
+                if _looks_like_listing(sample):
+                    url_path = sample.get("urlPath", sample.get("url", ""))
                     print(f"  [findItems] найден массив [{key}] len={len(val)}, sample_url={url_path!r}")
-                    return val
-                if any(k in sample for k in ("priceDetailed", "images", "gallery")):
-                    print(f"  [findItems] найден массив [{key}] (price/images) len={len(val)}")
                     return val
         for v in obj.values():
             r = _avito_find_items_in_json(v, depth + 1)
@@ -3394,8 +3486,27 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
     _di8 = _deep_get(nd, "props.pageProps.items")
     _di9 = _deep_get(nd, "props.initialData.catalog.items")
     _di10 = _deep_get(nd, "props.pageProps.initialState.listing.items")
-    print(f"  [parse] nd found={bool(nd)}, paths: {len(_di1) if _di1 else 0}/{len(_di2) if _di2 else 0}/{len(_di3) if _di3 else 0}/{len(_di4) if _di4 else 0}/{len(_di5) if _di5 else 0}/{len(_di6) if _di6 else 0}/{len(_di7) if _di7 else 0}/{len(_di8) if _di8 else 0}/{len(_di9) if _di9 else 0}/{len(_di10) if _di10 else 0}")
-    items_raw = _di1 or _di2 or _di3 or _di4 or _di5 or _di6 or _di7 or _di8 or _di9 or _di10 or _avito_find_items_in_json(nd)
+    # Дополнительные пути 2025-2026 для нового формата Авито
+    _di11 = _deep_get(nd, "props.pageProps.ssrData.catalog.items")
+    _di12 = _deep_get(nd, "props.pageProps.ssrData.items")
+    _di13 = _deep_get(nd, "props.pageProps.dehydratedState.queries") and None  # сложная структура — handled below
+    _di14 = _deep_get(nd, "props.pageProps.initialState.search.items")
+    _di15 = _deep_get(nd, "props.pageProps.initialState.catalog.catalog.items")
+    # Попытка найти items в dehydratedState (React Query, новый формат 2025)
+    _dehydrated = _deep_get(nd, "props.pageProps.dehydratedState.queries") or []
+    _di_dehydrated = None
+    if isinstance(_dehydrated, list):
+        for _q in _dehydrated:
+            _state_data = _deep_get(_q, "state.data") if isinstance(_q, dict) else None
+            if isinstance(_state_data, dict):
+                _cand = (_state_data.get("items") or _deep_get(_state_data, "catalog.items")
+                         or _deep_get(_state_data, "result.items") or _deep_get(_state_data, "data.items"))
+                if isinstance(_cand, list) and len(_cand) >= 1 and isinstance(_cand[0], dict):
+                    _di_dehydrated = _cand
+                    break
+    print(f"  [parse] nd found={bool(nd)}, paths: {len(_di1) if _di1 else 0}/{len(_di2) if _di2 else 0}/{len(_di3) if _di3 else 0}/{len(_di4) if _di4 else 0}/{len(_di5) if _di5 else 0}/{len(_di6) if _di6 else 0}/{len(_di7) if _di7 else 0}/{len(_di8) if _di8 else 0}/{len(_di9) if _di9 else 0}/{len(_di10) if _di10 else 0}/{len(_di11) if _di11 else 0}/{len(_di14) if _di14 else 0}/{len(_di15) if _di15 else 0}/{len(_di_dehydrated) if _di_dehydrated else 0}")
+    items_raw = (_di1 or _di2 or _di3 or _di4 or _di5 or _di6 or _di7 or _di8 or _di9 or _di10
+                 or _di11 or _di12 or _di14 or _di15 or _di_dehydrated or _avito_find_items_in_json(nd))
     print(f"  [parse] items_raw count={len(items_raw) if items_raw else 0}")
     # Авито хранит фото отдельно: catalog.itemsImages = {str(id): [{size: url}]}
     items_images_map: dict = (
@@ -4150,8 +4261,13 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                     _mob_data = _r_mob.json()
                     _mob_raw = (
                         _deep_get(_mob_data, "result.items")
+                        or _deep_get(_mob_data, "result.hits")
+                        or _deep_get(_mob_data, "result.catalog.items")
+                        or _deep_get(_mob_data, "result.catalog")
                         or _deep_get(_mob_data, "data.items")
+                        or _deep_get(_mob_data, "data.catalog.items")
                         or _mob_data.get("items")
+                        or _mob_data.get("hits")
                         or _avito_find_items_in_json(_mob_data)
                     )
                     if _mob_raw:
@@ -4168,6 +4284,60 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                     print(f"  [Авито mobileAPI0] json: {_e}")
         except Exception as _e:
             print(f"  [Авито mobileAPI0] {str(_e)[:60]}")
+
+    # ── Метод 0b: Альтернативные эндпоинты мобильного API ─────────────────────
+    # m.avito.ru/api/14/items (новая версия API 2025) и map/items эндпоинт
+    if not results and AVITO_PROXIES:
+        for _alt_url, _alt_ver in [
+            ("https://m.avito.ru/api/14/items", "api14"),
+            ("https://www.avito.ru/web/1/map/items", "mapItems"),
+        ]:
+            try:
+                _alt_params: dict = {
+                    "locationId": location_id,
+                    "categoryId": 9,
+                    "params[109][]": 106,
+                    "page": 1,
+                    "limit": 50,
+                    "display": "list",
+                }
+                if price_min > 0:
+                    _alt_params["priceMin"] = price_min
+                if price_max < 99_000_000:
+                    _alt_params["priceMax"] = price_max
+                _alt_r = session.get(
+                    _alt_url,
+                    params=_alt_params,
+                    headers={"User-Agent": "ru.avito.avitomobile/18.0 (Android 13; ru_RU)",
+                             "Accept": "application/json", "Accept-Language": "ru-RU,ru;q=0.9"},
+                    timeout=15,
+                    proxies=_avito_proxies(),
+                )
+                print(f"  [Авито {_alt_ver}] HTTP {_alt_r.status_code}, {len(_alt_r.text):,}б")
+                if _alt_r.status_code == 200:
+                    try:
+                        _alt_data = _alt_r.json()
+                        _alt_raw = (
+                            _deep_get(_alt_data, "result.items")
+                            or _deep_get(_alt_data, "result.hits")
+                            or _deep_get(_alt_data, "result.catalog.items")
+                            or _deep_get(_alt_data, "data.items")
+                            or _alt_data.get("items")
+                            or _avito_find_items_in_json(_alt_data)
+                        )
+                        if _alt_raw:
+                            _alt_out = [_avito_item_from_json(it, today) for it in _alt_raw]
+                            _alt_out = [x for x in _alt_out if x]
+                            if _alt_out:
+                                print(f"  [Авито {_alt_ver}] {len(_alt_out)} объявлений")
+                                results.extend(_alt_out)
+                                break
+                        else:
+                            print(f"  [Авито {_alt_ver}] нет items, ответ: {_alt_r.text[:300]}")
+                    except Exception as _e:
+                        print(f"  [Авито {_alt_ver}] json: {_e}")
+            except Exception as _e:
+                print(f"  [Авито {_alt_ver}] {str(_e)[:60]}")
 
     if results:
         print(f"  [Авито API] мобильный API дал {len(results)} объявлений")
