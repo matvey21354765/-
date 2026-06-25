@@ -5695,31 +5695,21 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
     _use_proxy = AVITO_PROXIES and not _proxy_auth_failed
     if _use_proxy:
         # Платный прокси (московский мобильный IP, Megafone/MTS).
-        # Приоритет: mobileAPI (JSON, без HTML-парсинга) → webHTML → mobile_site → RSS → Googlebot
-        all_methods = [_try_avito_mobile_api, _try_web_html, _try_mobile_site, _try_avito_rss, _try_googlebot_ua, _try_avito_lite, _try_avito_public_api]
+        # Приоритет: Playwright → mobileAPI → webHTML → mobile_site → RSS
+        all_methods = [_try_playwright, _try_avito_mobile_api, _try_web_html, _try_mobile_site, _try_avito_rss, _try_avito_json_api, _try_avito_xhr, _try_googlebot_ua, _try_avito_lite, _try_avito_public_api]
     else:
         all_methods = _no_proxy_methods
-    # Список задач.
-    # ГЛАВНОЕ (проверено /avito_debug): curl_cffi БЕЗ прокси (чистый Railway IP +
-    # Chrome TLS) = HTTP 200 с полной страницей. Прокси mproxy.site забанен (403/429).
-    # Поэтому _try_cffi_web (он сам идёт напрямую) — основной метод на всех страницах.
+    # При наличии прокси — пробуем методы ПОСЛЕДОВАТЕЛЬНО (не параллельно).
+    # Параллельные запросы через один IP = мгновенный 429.
+    # Остановиться при первом методе давшем объявления.
     if _use_proxy:
-        tasks = (
-            [(_try_playwright, 1)] +                             # Playwright (реальный Chrome) — главный
-            [(_try_free_proxies, 1)] +                           # Бесплатные российские прокси (при 429 платного)
-            [(_try_yandex_snippets, 1)] +                        # DDG — не зависит от Авито, работает при 429
-            [(_try_avito_rss, 1)] +                              # RSS — отдельный endpoint Авито
-            [(_try_avito_json_api, 1)] +                         # Внутренний JSON API Авито
-            [(_try_avito_xhr, 1)] +                              # XHR API Авито
-            [(_try_cffi_web, 1)] +                               # curl_cffi стр.1 (прокси → прямой)
-            [(_try_web_html, 1)] +                               # requests+прокси стр.1
-            [(_try_avito_mobile_api, 1)] +                       # mobileAPI стр.1
-            [(_try_cffi_web, 2)] +                               # стр.2 после стр.1
-            [(_try_web_html, 2)] +
-            [(_try_avito_mobile_api, 2)] +
-            [(_try_mobile_site, 1)] +
-            [(_try_cffi_web, 3), (_try_cffi_web, 4)]
-        )
+        # Страница 1 — пробуем методы по очереди пока не найдём работающий
+        _p1_methods = [_try_playwright, _try_avito_mobile_api, _try_web_html,
+                       _try_mobile_site, _try_avito_rss, _try_avito_json_api,
+                       _try_avito_xhr, _try_yandex_snippets, _try_free_proxies,
+                       _try_avito_lite, _try_cffi_web]
+        # Доп. страницы добавим тем же методом что сработал
+        tasks = [(m, 1) for m in _p1_methods]
         _cap = 300
         _deadline_s = 55
     else:
@@ -5736,14 +5726,57 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         m = re.search(r'(\d{6,})$', base)
         return m.group(1) if m else base
 
-    # curl_cffi идёт напрямую (без прокси) — можно 6 потоков, Railway IP не банится
-    # за умеренную нагрузку. Это вчетверо быстрее чем 3 потока через прокси.
-    _max_w = min(6, len(tasks))
-    _ex = _TPE(max_workers=_max_w)
     merged: dict[str, dict] = {}
     _seen_keys: set = set()
     _soft_deadline = time.time() + _deadline_s
+
+    if _use_proxy:
+        # Последовательный перебор методов — берём первый давший результат
+        _working_proxy_method = None
+        for _m_seq, _pg_seq in tasks:
+            if time.time() > _soft_deadline:
+                break
+            try:
+                _seq_res = _m_seq(_pg_seq)
+            except Exception:
+                _seq_res = []
+            if _seq_res:
+                _working_proxy_method = _m_seq
+                for it in _seq_res:
+                    u = it.get("url")
+                    key = _listing_key(u)
+                    if u and key and key not in _seen_keys:
+                        _seen_keys.add(key)
+                        merged[u] = it
+                print(f"  [Авито] {_m_seq.__name__} стр.1: {len(_seq_res)} объявлений ✅")
+                break
+        # Если нашли рабочий метод — докачиваем стр. 2-4 через него же
+        if _working_proxy_method and _working_proxy_method not in (_try_yandex_snippets, _try_free_proxies):
+            for _extra_p in [2, 3, 4]:
+                if len(merged) >= _cap or time.time() > _soft_deadline:
+                    break
+                try:
+                    _extra = _working_proxy_method(_extra_p)
+                except Exception:
+                    _extra = []
+                if not _extra:
+                    break
+                added = 0
+                for it in _extra:
+                    u = it.get("url")
+                    key = _listing_key(u)
+                    if u and key and key not in _seen_keys:
+                        _seen_keys.add(key)
+                        merged[u] = it
+                        added += 1
+                print(f"  [Авито] {_working_proxy_method.__name__} стр.{_extra_p}: +{added}")
+                if added == 0:
+                    break
+        _ex = None  # нет пула потоков в proxy-режиме
+    else:
+        _ex = _TPE(max_workers=min(6, len(tasks)))
     try:
+      if not _use_proxy and _ex:
         fut_map = {_ex.submit(m, pg): (m, pg) for (m, pg) in tasks}
         for fut in _as_completed(fut_map, timeout=45):
             try:
@@ -5762,13 +5795,13 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                 if added:
                     _m, _pg = fut_map[fut]
                     print(f"  [Авито API] {_m.__name__} стр.{_pg}: +{added} (всего {len(merged)})")
-            # достаточно набрали или вышло время — больше не ждём медленные методы
             if len(merged) >= _cap or (merged and time.time() > _soft_deadline):
                 break
     except Exception as e:
         print(f"  [Авито API] пул: {str(e)[:60]}")
     finally:
-        _ex.shutdown(wait=False)
+        if _ex:
+            _ex.shutdown(wait=False)
 
     results = list(merged.values())
 
