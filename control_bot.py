@@ -783,6 +783,8 @@ def scrape_drom(region: str, pages: int = 15, price_min: int = 0, price_max: int
     # Используем субдомен города — Дром автоматически показывает всю область
     base = f"https://{region}.drom.ru"
 
+    _drom_proxies = _avito_proxies() if AVITO_PROXIES else None
+
     for p in range(1, pages + 1):
         url = f"{base}/auto/all/" if p == 1 else f"{base}/auto/all/page{p}/"
         params = {}
@@ -793,8 +795,23 @@ def scrape_drom(region: str, pages: int = 15, price_min: int = 0, price_max: int
 
         try:
             r = session.get(url, params=params, timeout=20)
+            print(f"  [Дром {region}] стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
             soup = _BS(r.text, "lxml")
             cards = soup.select("div[data-ftid='bulls-list_bull']")
+            if not cards and p == 1:
+                # Дром блокирует — пробуем через прокси
+                print(f"  [Дром {region}] стр.{p}: cards=0 (первые 300б: {r.text[:300]!r})")
+                if _drom_proxies:
+                    try:
+                        import requests as _rq_d
+                        _r2 = _rq_d.get(url, params=params, timeout=20, proxies=_drom_proxies,
+                            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                                     "Accept-Language": "ru-RU,ru;q=0.9"})
+                        print(f"  [Дром {region}] прокси стр.{p}: HTTP {_r2.status_code}, {len(_r2.text):,}б")
+                        soup = _BS(_r2.text, "lxml")
+                        cards = soup.select("div[data-ftid='bulls-list_bull']")
+                    except Exception as _ep:
+                        print(f"  [Дром {region}] прокси: {str(_ep)[:60]}")
             if not cards:
                 break
 
@@ -1795,6 +1812,10 @@ TG_AUTO_CHANNELS = {
     "krasnoyarsk": [
         "mashiny_v_krasnoyarske", # Авторынок Красноярск — 8.3K
         "AUTO_24RU",              # Авторынок Красноярск
+        "avto_krsk",              # Авто Красноярск
+        "krasnoyarsk_avto",       # Барахолка авто Красноярск
+        "krsk_auto_baraholka",    # Барахолка Красноярск
+        "avto_baraholka_krsk24",  # Авто барахолка 24
     ],
     "irkutsk": [
         "AUTO_38RU",              # Авторынок Иркутск
@@ -2185,7 +2206,8 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
                         print(f"  [TG] @{channel} HTTP {r.status_code}")
                         break
                     if "tgme_widget_message" not in r.text:
-                        print(f"  [TG] @{channel} — нет сообщений (канал закрыт или не существует)")
+                        _why = "канал приватный" if "tgme_page_status" in r.text else ("не найден" if "tgme_page_error" in r.text else f"нет виджета, размер={len(r.text)}")
+                        print(f"  [TG] @{channel} — пропускаем: {_why}")
                         break
                     from bs4 import BeautifulSoup as _BS2
                     soup = _BS2(r.text, "lxml")
