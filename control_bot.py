@@ -8883,10 +8883,15 @@ async def do_search_for_user(uid: int, reply_to):
     _avito_ref_fut = loop.run_in_executor(
         None, lambda: scrape_avito(region, pages=4, price_min=0, price_max=99_000_000)
     )
+    # Дром-эталон — запасной источник медианы когда Авито заблокирован
+    # Запрашиваем без фильтра цены чтобы медиана не была зажата бюджетом пользователя
+    _drom_ref_fut = loop.run_in_executor(
+        None, lambda: scrape_drom(region, pages=4, price_min=0, price_max=99_000_000)
+    )
     # Запускаем ВСЕ площадки всегда, независимо от настроек пользователя
     src_keys = list(scraper_map.keys())
     futures = [loop.run_in_executor(None, scraper_map[src]) for src in src_keys]
-    all_futs = futures + [_avito_ref_fut]
+    all_futs = futures + [_avito_ref_fut, _drom_ref_fut]
     done, pending = await asyncio.wait(all_futs, timeout=70)
     if pending:
         for f in pending:
@@ -9109,15 +9114,28 @@ async def do_search_for_user(uid: int, reply_to):
     except Exception as _e:
         print(f"  [рынок] Авито-эталон ошибка: {_e}")
         _avito_ref = []
+
+    # Получаем Дром-эталон (запасной источник медианы)
+    try:
+        _drom_ref = _drom_ref_fut.result() if (_drom_ref_fut and _drom_ref_fut in done) else []
+    except Exception as _e:
+        print(f"  [рынок] Дром-эталон ошибка: {_e}")
+        _drom_ref = []
+
     if _avito_ref:
         for _ar in _avito_ref:
             _ar["_market_ref_only"] = True
         items = items + _avito_ref
         print(f"  [рынок] Авито-эталон: {len(_avito_ref)} записей для медианы цен")
+    elif _drom_ref:
+        # Авито недоступен — используем Дром как эталон рыночных цен
+        # Дром запрашивался без фильтра цены → медиана корректная
+        for _dr in _drom_ref:
+            _dr["_market_ref_only"] = True
+        items = items + _drom_ref
+        print(f"  [рынок] Дром-эталон (Авито недоступен): {len(_drom_ref)} записей для медианы цен")
     else:
-        # Авито заблокирован — НЕ используем бюджетные результаты как эталон
-        # (они дают неверную медиану: все в диапазоне 100-300к → медиана ~200к для любой машины)
-        print(f"  [рынок] Авито-эталон недоступен — рыночная цена не будет вычислена")
+        print(f"  [рынок] Ни Авито, ни Дром не дали эталон — рыночная цена не будет вычислена")
 
     # seen хранит нормализованные URL — сравниваем тоже по нормализованным
     seen_norm = {_norm_url(u) for u in seen}
@@ -9163,17 +9181,15 @@ async def do_search_for_user(uid: int, reply_to):
         if it.get("url") and _norm_url(it["url"]) in seen_norm:
             it["_already_seen"] = True
 
-    _avito_ref_items = [i for i in items if i.get("_market_ref_only")]
-    _avito_available = len(_avito_ref_items) >= 5
+    _ref_items = [i for i in items if i.get("_market_ref_only")]
+    _avito_available = len(_ref_items) >= 5  # True даже если эталон — Дром
     if _avito_available:
-        print(f"  [рынок] Авито-референс: {len(_avito_ref_items)} объявлений → считаем рыночную цену")
-        suitable = rank_by_market_price(suitable, ref_items=_avito_ref_items, avito_only_median=True)
+        _ref_src = "Авито" if _avito_ref else "Дром"
+        print(f"  [рынок] {_ref_src}-референс: {len(_ref_items)} объявлений → считаем рыночную цену")
+        suitable = rank_by_market_price(suitable, ref_items=_ref_items, avito_only_median=True)
     else:
-        # Авито недоступен — пропускаем расчёт рыночной цены полностью
-        # rank_by_market_price с пустым ref_items всё равно берёт Дром как эталон → неверно
-        print(f"  [рынок] Авито недоступен — рыночная цена не считается, сортируем по дате/цене")
-        # Только deal_score по срочности (без savings_pct) — ни одно поле _savings_pct не ставим
-        pass  # _sort_by_deal вызывается ниже после dealer-штрафа
+        print(f"  [рынок] нет эталона — рыночная цена не считается, сортируем по дате/цене")
+        pass
     # Дилерские объявления — добавляем штраф к deal_score
     for it in suitable:
         if is_dealer(it):
