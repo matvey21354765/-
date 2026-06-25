@@ -5138,20 +5138,45 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                 if _exe:
                     launch_opts["executable_path"] = _exe
                 browser = pw.chromium.launch(**launch_opts)
-                ctx = browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                    locale="ru-RU",
-                    viewport={"width": 1280, "height": 900},
-                )
-                page = ctx.new_page()
-                # Прогрев: зайти на главную города чтобы получить cookies
-                try:
-                    page.goto(f"https://www.avito.ru/{slug}", timeout=15000, wait_until="domcontentloaded")
-                    page.wait_for_timeout(1500)
-                except Exception:
-                    pass
-                page.goto(full_url, timeout=20000, wait_until="networkidle")
-                html = page.content()
+                # Пробуем сначала через прокси (обходит блокировку Railway IP), потом напрямую
+                _proxy_attempts = []
+                if AVITO_PROXIES and not _proxy_auth_failed and AVITO_PROXY_USER:
+                    _phost = AVITO_PROXY_HOST
+                    _pport = AVITO_PROXY_PORT
+                    _puser = AVITO_PROXY_USER
+                    _ppass = AVITO_PROXY_PASS
+                    _proxy_attempts.append({
+                        "server": f"http://{_phost}:{_pport}",
+                        "username": _puser,
+                        "password": _ppass,
+                    })
+                _proxy_attempts.append(None)  # прямой как резерв
+                html = ""
+                for _proxy_cfg in _proxy_attempts:
+                    try:
+                        ctx_opts = {
+                            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                            "locale": "ru-RU",
+                            "viewport": {"width": 1280, "height": 900},
+                        }
+                        if _proxy_cfg:
+                            ctx_opts["proxy"] = _proxy_cfg
+                        ctx = browser.new_context(**ctx_opts)
+                        page = ctx.new_page()
+                        _tag_pw = "прокси" if _proxy_cfg else "напрямую"
+                        try:
+                            page.goto(f"https://www.avito.ru/{slug}", timeout=12000, wait_until="domcontentloaded")
+                            page.wait_for_timeout(1000)
+                        except Exception:
+                            pass
+                        page.goto(full_url, timeout=20000, wait_until="networkidle")
+                        html = page.content()
+                        ctx.close()
+                        print(f"  [Playwright {_tag_pw}] стр.{p}: {len(html):,}б")
+                        if "Доступ ограничен" not in html and len(html) > 100_000:
+                            break  # успех — не пробуем следующий вариант
+                    except Exception as _epw:
+                        print(f"  [Playwright {_tag_pw if '_tag_pw' in dir() else '?'}] стр.{p}: {str(_epw)[:80]}")
                 browser.close()
             print(f"  [Playwright] стр.{p}: {len(html):,}б, данные={'✅' if '__NEXT_DATA__' in html or 'canonicalUrl' in html else '❌'}")
             if '__NEXT_DATA__' in html or '"urlPath"' in html or '"canonicalUrl"' in html:
