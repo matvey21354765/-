@@ -1895,7 +1895,7 @@ _SOCIAL_REJECT_KEYWORDS = [
     "правила группы", "правила канала", "правила чата", "платформа размещения",
     "регистрация в ркн", "администратор", "@tut_admin", "другие города",
     "не проходят ссылк", "поддержку, развитие", "поддержку развитие",
-    "доска объявлений", "барахолка", "обратная связь бота", "бот поддержки",
+    "обратная связь бота", "бот поддержки",
     "вступить в группу", "вступить в чат",
     # Новости о ценах на топливо/бензин — не продажа авто
     "цены на бензин", "стоимость бензина", "цена бензина", "бензин подорожа",
@@ -2134,7 +2134,11 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
                 url_t = f"https://t.me/s/{channel}" if before_id is None else f"https://t.me/s/{channel}?before={before_id}"
                 try:
                     r = _tme_session.get(url_t, timeout=10, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
-                    if r.status_code != 200 or "tgme_widget_message" not in r.text:
+                    if r.status_code != 200:
+                        print(f"  [TG] @{channel} HTTP {r.status_code}")
+                        break
+                    if "tgme_widget_message" not in r.text:
+                        print(f"  [TG] @{channel} — нет сообщений (канал закрыт или не существует)")
                         break
                     from bs4 import BeautifulSoup as _BS2
                     soup = _BS2(r.text, "lxml")
@@ -2158,7 +2162,12 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
                                 mid2 = int(id_m2.group(1))
                                 if min_id is None or mid2 < min_id:
                                     min_id = mid2
-                        if len(text) < 20 or not _is_car_sale_social(text) or _is_moto(text[:200]):
+                        if len(text) < 20:
+                            continue
+                        if _is_moto(text[:200]):
+                            continue
+                        if not _is_car_sale_social(text):
+                            print(f"  [TG] @{channel} отфильтрован пост: {text[:80]!r}")
                             continue
                         price = _tg_parse_price(text)
                         if price > 0 and not (price_min <= price <= price_max):
@@ -2209,8 +2218,11 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
                         break
                 except Exception:
                     break
+            if batch:
+                print(f"  [TG] @{channel}: {len(batch)} объявлений")
             return batch
-        except Exception:
+        except Exception as e:
+            print(f"  [TG] @{channel} исключение: {e}")
             return []
 
     # ── Шаг 3: DDG поиск постов из TG напрямую ───────────────────────
