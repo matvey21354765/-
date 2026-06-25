@@ -5091,6 +5091,68 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                         time.sleep(1)
         return []
 
+    def _try_playwright(p: int) -> list[dict]:
+        """Playwright (реальный Chromium) — обходит Cloudflare JS-challenge полностью.
+        Chromium предустановлен на Railway (/opt/pw-browsers/chromium).
+        Только стр.1 — headless слишком медленный для многих страниц."""
+        if p > 1:
+            return []
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            return []
+        _brand_path = f"/{brand}" if brand and brand != "any" else ""
+        url = f"https://www.avito.ru/{slug}/avtomobili{_brand_path}"
+        _params: list[tuple] = [("seller_type", "1")]
+        if price_min > 0:
+            _params.append(("pmin", str(price_min)))
+        if price_max < 99_000_000:
+            _params.append(("pmax", str(price_max)))
+        qs = "&".join(f"{k}={v}" for k, v in _params)
+        full_url = f"{url}?{qs}"
+        _exe = (
+            "/opt/pw-browsers/chromium"  # Railway preinstalled
+            if __import__("os").path.exists("/opt/pw-browsers/chromium")
+            else None
+        )
+        try:
+            with sync_playwright() as pw:
+                launch_opts = {
+                    "headless": True,
+                    "args": [
+                        "--no-sandbox", "--disable-setuid-sandbox",
+                        "--disable-dev-shm-usage", "--disable-gpu",
+                        "--disable-blink-features=AutomationControlled",
+                    ],
+                }
+                if _exe:
+                    launch_opts["executable_path"] = _exe
+                browser = pw.chromium.launch(**launch_opts)
+                ctx = browser.new_context(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                    locale="ru-RU",
+                    viewport={"width": 1280, "height": 900},
+                )
+                page = ctx.new_page()
+                # Прогрев: зайти на главную города чтобы получить cookies
+                try:
+                    page.goto(f"https://www.avito.ru/{slug}", timeout=15000, wait_until="domcontentloaded")
+                    page.wait_for_timeout(1500)
+                except Exception:
+                    pass
+                page.goto(full_url, timeout=20000, wait_until="networkidle")
+                html = page.content()
+                browser.close()
+            print(f"  [Playwright] стр.{p}: {len(html):,}б, данные={'✅' if '__NEXT_DATA__' in html or 'canonicalUrl' in html else '❌'}")
+            if '__NEXT_DATA__' in html or '"urlPath"' in html or '"canonicalUrl"' in html:
+                res = _parse_avito_html(html, slug, today)
+                if res:
+                    print(f"  [Playwright] стр.{p}: {len(res)} объявлений ✅")
+                return res
+        except Exception as e:
+            print(f"  [Playwright] стр.{p}: {str(e)[:120]}")
+        return []
+
     def _try_avito_json_api(p: int) -> list[dict]:
         """Avito internal JSON listing endpoint — returns structured data without HTML parsing."""
         try:
@@ -5574,7 +5636,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
     # free_proxies даёт настоящую страницу Авито (десятки объявлений), DuckDuckGo —
     # ещё несколько. Запускаем ВСЁ параллельно и СЛИВАЕМ результаты, а не берём
     # первый ответивший метод (иначе теряем большие пачки, что приходят чуть позже).
-    _no_proxy_methods = [_try_scraperapi_fast, _try_free_proxies, _try_yandex_snippets, _try_cffi_web, _try_curl_cffi, _try_cs_web, _try_mobile_site, _try_web_html, _try_avito_mobile_api, _try_avito_public_api, _try_avito_rss, _try_googlebot_ua, _try_avito_lite, _try_scraperapi, _try_avito_json_api]
+    _no_proxy_methods = [_try_playwright, _try_scraperapi_fast, _try_free_proxies, _try_yandex_snippets, _try_cffi_web, _try_curl_cffi, _try_cs_web, _try_mobile_site, _try_web_html, _try_avito_mobile_api, _try_avito_public_api, _try_avito_rss, _try_googlebot_ua, _try_avito_lite, _try_scraperapi, _try_avito_json_api]
     _use_proxy = AVITO_PROXIES and not _proxy_auth_failed
     if _use_proxy:
         # Платный прокси (московский мобильный IP, Megafone/MTS).
@@ -5588,6 +5650,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
     # Поэтому _try_cffi_web (он сам идёт напрямую) — основной метод на всех страницах.
     if _use_proxy:
         tasks = (
+            [(_try_playwright, 1)] +                             # Playwright (реальный Chrome) — главный
             [(_try_yandex_snippets, 1)] +                        # DDG — не зависит от Авито, работает при 429
             [(_try_avito_rss, 1)] +                              # RSS — отдельный endpoint Авито
             [(_try_cffi_web, 1)] +                               # curl_cffi стр.1 (прокси → прямой)
@@ -6858,6 +6921,44 @@ async def cmd_avito_debug(msg: Message):
             out.append(f"📡 Авито RSS: HTTP {_rss_r.status_code}, {len(_rss_r.text):,}б, items={_rss_count} {'✅' if _rss_count > 0 else '❌'}")
         except Exception as e:
             out.append(f"📡 Авито RSS: ❌ {str(e)[:80]}")
+
+        # 10. Playwright (реальный Chromium — обходит Cloudflare JS-challenge)
+        try:
+            from playwright.sync_api import sync_playwright as _spw
+            import os as _os
+            _pw_exe = "/opt/pw-browsers/chromium" if _os.path.exists("/opt/pw-browsers/chromium") else None
+            out.append(f"🎭 Playwright: chromium={'найден' if _pw_exe else 'НЕ НАЙДЕН (/opt/pw-browsers/chromium)'}")
+            if _pw_exe:
+                with _spw() as _pw:
+                    _br = _pw.chromium.launch(
+                        executable_path=_pw_exe, headless=True,
+                        args=["--no-sandbox","--disable-setuid-sandbox","--disable-dev-shm-usage","--disable-gpu"],
+                    )
+                    _ctx = _br.new_context(
+                        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                        locale="ru-RU",
+                    )
+                    _pg = _ctx.new_page()
+                    _pg.goto("https://www.avito.ru/ekaterinburg/avtomobili?seller_type=1&pmax=200000",
+                             timeout=25000, wait_until="networkidle")
+                    _pw_html = _pg.content()
+                    _br.close()
+                _pw_has = "__NEXT_DATA__" in _pw_html or '"canonicalUrl"' in _pw_html
+                out.append(f"   → HTTP OK, {len(_pw_html):,}б, данные: {'✅' if _pw_has else '❌'}")
+                if _pw_has:
+                    import datetime as _dt10
+                    _pw_parsed = _parse_avito_html(_pw_html, "ekaterinburg", _dt10.date.today())
+                    out.append(f"   → парсер: {len(_pw_parsed)} объявлений {'✅' if _pw_parsed else '❌'}")
+                    if _pw_parsed:
+                        out.append(f"   → первое: {_pw_parsed[0].get('title','?')[:50]} | {_pw_parsed[0].get('price','?')}")
+                else:
+                    import re as _re10
+                    _t10 = _pw_html
+                    out.append(f"   → captcha={_t10.lower().count('captcha')}, скрипты={_t10.count('<script')}, title={_re10.search(r'<title>([^<]{0,60})',_t10) and _re10.search(r'<title>([^<]{0,60})',_t10).group(1)!r}")
+        except ImportError:
+            out.append("🎭 Playwright: ❌ библиотека не установлена (pip install playwright)")
+        except Exception as e:
+            out.append(f"🎭 Playwright: ❌ {str(e)[:150]}")
 
         return out
 
