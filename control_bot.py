@@ -248,6 +248,41 @@ DEALER_KEYWORDS = [
     "продвижение объявления",
 ]
 
+# ── Фильтр нерабочих авто ──────────────────────────────────────────
+NOT_RUNNING_KEYWORDS = [
+    # без двигателя / кузов
+    "без двигателя", "без мотора", "кузов без двигателя", "кузов на запчасти",
+    "только кузов", "голый кузов", "кузов отдельно",
+    # на запчасти
+    "на запчасти", "на разбор", "под разбор", "на разборку", "разборка",
+    "запчасти", "по запчастям",
+    # не на ходу
+    "не на ходу", "не едет", "не заводится", "не заводится вообще",
+    "не запускается", "требует буксировки", "под буксир", "на буксире",
+    "под эвакуатор", "на эвакуаторе", "не ездит",
+    # утилизация
+    "под утилизацию", "утиль", "на металлолом", "металлолом",
+    # битая / после аварии
+    "после пожара", "сгоревшая", "сгоревший", "пожарная",
+    # двигатель отсутствует
+    "двигатель отсутствует", "мотор снят", "двигатель снят",
+    "нет двигателя", "нет мотора",
+]
+
+_NOT_RUNNING_RE = re.compile(
+    "|".join(re.escape(k) for k in NOT_RUNNING_KEYWORDS),
+    re.IGNORECASE,
+)
+
+
+def is_not_running(item: dict) -> bool:
+    """Возвращает True если авто нерабочее (без двигателя, на запчасти, не на ходу)."""
+    text = (
+        item.get("title", "") + " " + item.get("description", "")
+    ).lower()
+    return bool(_NOT_RUNNING_RE.search(text))
+
+
 HOT_WORDS = re.compile(
     r"(срочно|торг|уступлю|снижу|скидка|дёшево|дешево|продам быстро|срочная продажа"
     r"|срочно продам|срочно продаю|нужны деньги|уезжаю|переезжаю|не торгуюсь нет"
@@ -6797,6 +6832,7 @@ async def cmd_new_today(msg: Message):
     suitable = [
         i for i in fresh
         if not is_dealer(i)
+        and not is_not_running(i)
         and in_price_range(i, pmin, pmax)
         and i.get("url")
         and i["url"] not in skipped_norm_today
@@ -6914,6 +6950,7 @@ async def cmd_global_search(msg: Message):
     suitable = [
         i for i in items
         if not is_dealer(i)
+        and not is_not_running(i)
         and in_price_range(i, pmin, pmax)
         and i.get("url")
         and i["url"] not in skipped_norm_g
@@ -9050,6 +9087,7 @@ async def _global_monitor_loop():
                         and it["url"] not in seen
                         and it["url"] not in skipped
                         and not is_dealer(it)
+                        and not is_not_running(it)
                         and in_price_range(it, pmin, pmax)
                     ]
                     if not new_items:
