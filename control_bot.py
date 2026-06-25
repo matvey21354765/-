@@ -3388,8 +3388,14 @@ def _parse_avito_html(text: str, slug: str, today) -> list[dict]:
     _di3 = _deep_get(nd, "initialState.catalog.items")
     _di4 = _deep_get(nd, "props.initialState.listing.catalog.items")
     _di5 = _deep_get(nd, "props.pageProps.catalog.items")
-    print(f"  [parse] nd found={bool(nd)}, deep_get paths: {len(_di1) if _di1 else 0}/{len(_di2) if _di2 else 0}/{len(_di3) if _di3 else 0}/{len(_di4) if _di4 else 0}/{len(_di5) if _di5 else 0}")
-    items_raw = _di1 or _di2 or _di3 or _di4 or _di5 or _avito_find_items_in_json(nd)
+    # Новые пути 2025-2026 (Авито меняет структуру с каждым Next.js обновлением)
+    _di6 = _deep_get(nd, "props.pageProps.initialData.catalog.items")
+    _di7 = _deep_get(nd, "props.pageProps.data.items")
+    _di8 = _deep_get(nd, "props.pageProps.items")
+    _di9 = _deep_get(nd, "props.initialData.catalog.items")
+    _di10 = _deep_get(nd, "props.pageProps.initialState.listing.items")
+    print(f"  [parse] nd found={bool(nd)}, paths: {len(_di1) if _di1 else 0}/{len(_di2) if _di2 else 0}/{len(_di3) if _di3 else 0}/{len(_di4) if _di4 else 0}/{len(_di5) if _di5 else 0}/{len(_di6) if _di6 else 0}/{len(_di7) if _di7 else 0}/{len(_di8) if _di8 else 0}/{len(_di9) if _di9 else 0}/{len(_di10) if _di10 else 0}")
+    items_raw = _di1 or _di2 or _di3 or _di4 or _di5 or _di6 or _di7 or _di8 or _di9 or _di10 or _avito_find_items_in_json(nd)
     print(f"  [parse] items_raw count={len(items_raw) if items_raw else 0}")
     # Авито хранит фото отдельно: catalog.itemsImages = {str(id): [{size: url}]}
     items_images_map: dict = (
@@ -4157,6 +4163,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                     else:
                         _keys = list(_mob_data.keys())[:8] if isinstance(_mob_data, dict) else type(_mob_data).__name__
                         print(f"  [Авито mobileAPI0] нет items, ключи: {_keys}")
+                        print(f"  [Авито mobileAPI0] ответ: {_r_mob.text[:500]}")
                 except Exception as _e:
                     print(f"  [Авито mobileAPI0] json: {_e}")
         except Exception as _e:
@@ -4357,8 +4364,12 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                     res = _parse_avito_html(r.text, slug, today)
                     if res:
                         return res
-                    # Страница получена, но парсер вернул 0 — пробуем следующий IP
-                    print(f"  [Авито webHTML] стр.{p} попытка {attempt+1}: парсер 0 объявлений, ретрай")
+                    # Страница получена, но парсер вернул 0 — диагностика
+                    _has_nd = "__NEXT_DATA__" in r.text
+                    _has_items = '"urlPath"' in r.text
+                    _snippet = r.text[r.text.find("__NEXT_DATA__"):r.text.find("__NEXT_DATA__")+200] if _has_nd else r.text[:300]
+                    print(f"  [Авито webHTML] стр.{p} попытка {attempt+1}: парсер 0, NEXT_DATA={_has_nd}, urlPath={_has_items}")
+                    print(f"  [Авито webHTML] snippet: {_snippet[:200]!r}")
                 if r.status_code in (403, 429, 503):
                     time.sleep(random.uniform(2.0, 4.0))
                     continue  # IP в бане — пробуем другой
@@ -8558,10 +8569,11 @@ async def do_search_for_user(uid: int, reply_to):
         print(f"  [рынок] Авито-референс: {len(_avito_ref_items)} объявлений → считаем рыночную цену")
         suitable = rank_by_market_price(suitable, ref_items=_avito_ref_items, avito_only_median=True)
     else:
-        # Авито недоступен — НЕ считаем рыночную цену по Дром/ВК (дают неверные данные)
-        # Просто ранжируем по дате/срочности, показываем все в бюджете
-        print(f"  [рынок] Авито недоступен (0 объявлений) — рыночная цена не определяется, показываем все в бюджете")
-        suitable = rank_by_market_price(suitable, ref_items=[], avito_only_median=False)
+        # Авито недоступен — пропускаем расчёт рыночной цены полностью
+        # rank_by_market_price с пустым ref_items всё равно берёт Дром как эталон → неверно
+        print(f"  [рынок] Авито недоступен — рыночная цена не считается, сортируем по дате/цене")
+        # Только deal_score по срочности (без savings_pct) — ни одно поле _savings_pct не ставим
+        pass  # _sort_by_deal вызывается ниже после dealer-штрафа
     # Дилерские объявления — добавляем штраф к deal_score
     for it in suitable:
         if is_dealer(it):
