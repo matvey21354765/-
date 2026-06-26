@@ -5146,23 +5146,21 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                         "--no-sandbox", "--disable-setuid-sandbox",
                         "--disable-dev-shm-usage", "--disable-gpu",
                         "--disable-blink-features=AutomationControlled",
+                        "--disable-infobars",
+                        "--window-size=1280,900",
+                        "--start-maximized",
                     ],
                 }
                 if _exe:
                     launch_opts["executable_path"] = _exe
                 browser = pw.chromium.launch(**launch_opts)
                 # Playwright ТОЛЬКО через прокси — Railway IP жёстко заблокирован Авито
-                # При 429 от прокси выходим сразу (временный бан, прямое подключение не поможет)
                 _proxy_attempts = []
                 if AVITO_PROXIES and not _proxy_auth_failed and AVITO_PROXY_USER:
-                    _phost = AVITO_PROXY_HOST
-                    _pport = AVITO_PROXY_PORT
-                    _puser = AVITO_PROXY_USER
-                    _ppass = AVITO_PROXY_PASS
                     _proxy_attempts.append({
-                        "server": f"http://{_phost}:{_pport}",
-                        "username": _puser,
-                        "password": _ppass,
+                        "server": f"http://{AVITO_PROXY_HOST}:{AVITO_PROXY_PORT}",
+                        "username": AVITO_PROXY_USER,
+                        "password": AVITO_PROXY_PASS,
                     })
                 # НЕ добавляем None (прямой) — Railway IP заблокирован Авито навсегда
                 html = ""
@@ -5172,29 +5170,52 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                             "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                             "locale": "ru-RU",
                             "viewport": {"width": 1280, "height": 900},
+                            "extra_http_headers": {
+                                "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+                                "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+                                "sec-ch-ua-mobile": "?0",
+                                "sec-ch-ua-platform": '"Windows"',
+                            },
                         }
                         if _proxy_cfg:
                             ctx_opts["proxy"] = _proxy_cfg
                         ctx = browser.new_context(**ctx_opts)
-                        page = ctx.new_page()
+                        # Stealth — скрываем признаки headless/automation
+                        try:
+                            from playwright_stealth import stealth_sync
+                            page = ctx.new_page()
+                            stealth_sync(page)
+                        except ImportError:
+                            page = ctx.new_page()
+                        # Скрываем webdriver через CDP
+                        try:
+                            ctx.add_init_script("""
+                                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                                Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
+                                Object.defineProperty(navigator, 'languages', {get: () => ['ru-RU','ru','en-US','en']});
+                                window.chrome = {runtime: {}};
+                            """)
+                        except Exception:
+                            pass
                         _tag_pw = "прокси" if _proxy_cfg else "напрямую"
                         try:
                             # Прогрев через главную Авито (НЕ через город — ред. по IP-гео ломает регион)
-                            page.goto("https://www.avito.ru/", timeout=12000, wait_until="domcontentloaded")
-                            page.wait_for_timeout(1000)
+                            page.goto("https://www.avito.ru/", timeout=15000, wait_until="domcontentloaded")
+                            page.wait_for_timeout(1500)
                         except Exception:
                             pass
-                        page.goto(full_url, timeout=25000, wait_until="networkidle")
+                        page.goto(full_url, timeout=30000, wait_until="networkidle")
+                        page.wait_for_timeout(2000)
                         html = page.content()
                         ctx.close()
                         _has_data = '__NEXT_DATA__' in html or '"urlPath"' in html or '"canonicalUrl"' in html
-                        _is_banned = "Доступ ограничен" in html or "проблема с IP" in html
+                        _is_banned = "проблема с IP" in html
                         _is_429 = len(html) < 50_000 and ("429" in html or "Too Many" in html)
                         print(f"  [Playwright {_tag_pw}] стр.{p}: {len(html):,}б {'✅' if _has_data else '❌'}{' [бан-IP]' if _is_banned else ''}{' [429]' if _is_429 else ''}")
                         if _has_data:
-                            break  # успех
-                        if _is_429:
-                            break  # прокси временно заблокирован — прямое не поможет
+                            break
+                        if _is_429 or _is_banned:
+                            break
                     except Exception as _epw:
                         print(f"  [Playwright {_tag_pw if '_tag_pw' in dir() else '?'}] стр.{p}: {str(_epw)[:80]}")
                 browser.close()
@@ -6887,15 +6908,25 @@ async def cmd_avito_debug(msg: Message):
                 _exe = _find_pw()
                 out.append(f"🎭 Playwright: {_exe or 'авто-поиск'}")
                 with _spw() as _pw:
-                    _lopts = {"headless": True, "args": ["--no-sandbox","--disable-setuid-sandbox",
-                              "--disable-dev-shm-usage","--disable-gpu",
-                              "--disable-blink-features=AutomationControlled"]}
+                    _lopts = {"headless": True, "args": [
+                        "--no-sandbox","--disable-setuid-sandbox",
+                        "--disable-dev-shm-usage","--disable-gpu",
+                        "--disable-blink-features=AutomationControlled",
+                        "--disable-infobars","--window-size=1280,900",
+                    ]}
                     if _exe:
                         _lopts["executable_path"] = _exe
                     _br = _pw.chromium.launch(**_lopts)
                     _ctx_opts = {
                         "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                         "locale": "ru-RU",
+                        "viewport": {"width": 1280, "height": 900},
+                        "extra_http_headers": {
+                            "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8",
+                            "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+                            "sec-ch-ua-mobile": "?0",
+                            "sec-ch-ua-platform": '"Windows"',
+                        },
                     }
                     if AVITO_PROXIES and not _proxy_auth_failed and AVITO_PROXY_USER:
                         _ctx_opts["proxy"] = {
@@ -6907,11 +6938,25 @@ async def cmd_avito_debug(msg: Message):
                     else:
                         out.append(f"   → ⚠️ прокси не настроен, Railway IP заблокирован")
                     _ctx = _br.new_context(**_ctx_opts)
-                    _pg = _ctx.new_page()
+                    try:
+                        from playwright_stealth import stealth_sync as _stealth
+                        _pg = _ctx.new_page()
+                        _stealth(_pg)
+                        out.append(f"   → stealth ✅")
+                    except ImportError:
+                        _pg = _ctx.new_page()
+                    try:
+                        _ctx.add_init_script("""
+                            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                            Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
+                            window.chrome = {runtime: {}};
+                        """)
+                    except Exception:
+                        pass
                     # Прогрев через главную (НЕ через город — редирект ломает регион)
                     try:
-                        _pg.goto("https://www.avito.ru/", timeout=10000, wait_until="domcontentloaded")
-                        _pg.wait_for_timeout(800)
+                        _pg.goto("https://www.avito.ru/", timeout=12000, wait_until="domcontentloaded")
+                        _pg.wait_for_timeout(1500)
                     except Exception:
                         pass
                     # Используем Москву т.к. прокси московский (без ред. по региону)
