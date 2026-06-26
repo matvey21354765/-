@@ -5728,11 +5728,12 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
     # Параллельные запросы через один IP = мгновенный 429.
     # Остановиться при первом методе давшем объявления.
     if _use_proxy:
-        # Страница 1 — пробуем методы по очереди пока не найдём работающий
-        _p1_methods = [_try_playwright, _try_avito_mobile_api, _try_web_html,
-                       _try_mobile_site, _try_avito_rss, _try_avito_json_api,
-                       _try_avito_xhr, _try_yandex_snippets, _try_free_proxies,
-                       _try_avito_lite, _try_cffi_web]
+        # Страница 1 — пробуем методы по очереди пока не найдём работающий.
+        # Мобильный API первым — JSON, не зависит от Cloudflare/JS, другой rate-limit.
+        # Playwright после — медленнее но обходит JS-challenge если API заблокирован.
+        _p1_methods = [_try_avito_mobile_api, _try_avito_json_api, _try_avito_xhr,
+                       _try_playwright, _try_web_html, _try_mobile_site, _try_avito_rss,
+                       _try_yandex_snippets, _try_free_proxies, _try_avito_lite, _try_cffi_web]
         # Доп. страницы добавим тем же методом что сработал
         tasks = [(m, 1) for m in _p1_methods]
         _cap = 300
@@ -6859,9 +6860,43 @@ async def cmd_avito_debug(msg: Message):
         else:
             out.append("🔀 Прокси: не настроен (PROXY_URL не задан)")
 
-        # 2. ОДИН запрос к Авито — через прокси (curl_cffi = лучший шанс)
+        # 2. Мобильный API Авито — JSON, не зависит от Cloudflare/JS (главный метод)
         _avito_ok = False
         if AVITO_PROXIES:
+            try:
+                _mob_key = "af0deccbgcgidddjgnvljitntccdduijhdinfgjgfjir"
+                _mob_hdrs = {
+                    "User-Agent": "ru.avito.avitomobile/18.0 (Android 13; ru_RU)",
+                    "Accept": "application/json",
+                    "Accept-Language": "ru-RU,ru;q=0.9",
+                    "x-avito-app-version": "18.0.0",
+                }
+                _mob_params = {
+                    "locationId": 637640, "categoryId": 9,
+                    "page": 1, "limit": 30, "display": "list",
+                    "sortType": "101", "key": _mob_key,
+                }
+                _mob_r = _rq.get("https://m.avito.ru/api/16/items",
+                    params=_mob_params, headers=_mob_hdrs,
+                    proxies=_avito_proxies(), timeout=12)
+                _mob_data = _mob_r.json() if _mob_r.status_code == 200 else {}
+                _mob_items = ((_mob_data.get("result") or {}).get("items")
+                              or _mob_data.get("items") or [])
+                _mob_ok = len(_mob_items) > 0
+                out.append(f"📱 Мобильный API через прокси: HTTP {_mob_r.status_code}, items={len(_mob_items)} {'✅' if _mob_ok else '❌'}")
+                if _mob_ok:
+                    _avito_ok = True
+                    out.append(f"   → первое: {_mob_items[0].get('title','?')[:55]}")
+                elif _mob_r.status_code == 429:
+                    out.append(f"   ⏳ rate-limit 429 — подождите 5-10 мин")
+                elif _mob_r.status_code == 200 and not _mob_ok:
+                    out.append(f"   → ключи ответа: {list(_mob_data.keys())[:6]}")
+                    out.append(f"   → ответ: {_mob_r.text[:150]!r}")
+            except Exception as e:
+                out.append(f"📱 Мобильный API: ❌ {str(e)[:100]}")
+
+        # 3. curl_cffi через прокси (веб-интерфейс, нужен JS — для диагностики)
+        if not _avito_ok and AVITO_PROXIES:
             try:
                 from curl_cffi import requests as _cffi
                 _r = _cffi.get(
@@ -6873,27 +6908,21 @@ async def cmd_avito_debug(msg: Message):
                              "Referer": "https://www.avito.ru/",
                              "Accept": "text/html,application/xhtml+xml,*/*;q=0.9"})
                 _has = '"urlPath"' in _r.text or '"canonicalUrl"' in _r.text or '__NEXT_DATA__' in _r.text
-                # Постоянный IP-бан: HTTP 200 + "проблема с IP" (НЕ путать с 429 rate limit)
                 _perm_ban = _r.status_code == 200 and "проблема с IP" in _r.text
                 _rate_limit = _r.status_code == 429
                 _status_emoji = "✅" if _has else ("⛔" if _perm_ban else ("⏳" if _rate_limit else "❌"))
-                out.append(f"🌐 Авито через прокси: HTTP {_r.status_code}, {len(_r.text):,}б {_status_emoji}")
+                out.append(f"🌐 Авито HTML через прокси: HTTP {_r.status_code}, {len(_r.text):,}б {_status_emoji}")
                 if _has:
                     _avito_ok = True
                     _parsed = _parse_avito_html(_r.text, "moskva", _dt.date.today())
-                    out.append(f"   → объявлений найдено: {len(_parsed)} {'✅' if _parsed else '⚠️ (HTML есть, парсер не вернул)'}")
-                    if _parsed:
-                        out.append(f"   → первое: {_parsed[0].get('title','?')[:55]} | {_parsed[0].get('price','?')}")
+                    out.append(f"   → объявлений: {len(_parsed)} {'✅' if _parsed else '⚠️'}")
                 elif _perm_ban:
-                    out.append(f"   ⛔ IP прокси ПОСТОЯННО заблокирован Авито ('проблема с IP')")
-                    out.append(f"   → Смените IP прокси в панели mproxy.site")
+                    out.append(f"   ⛔ IP постоянно заблокирован — смените IP")
                 elif _rate_limit:
-                    out.append(f"   ⏳ Временный rate-limit (429) — подождите 5-10 мин, IP не заблокирован")
-                    out.append(f"   → Бот продолжит пробовать сам, можно подождать")
+                    out.append(f"   ⏳ rate-limit 429")
                 else:
                     _title_m = _re.search(r'<title>([^<]{0,80})', _r.text)
-                    out.append(f"   → title: {repr(_title_m.group(1)) if _title_m else '?'}")
-                    out.append(f"   → первые 200б: {_r.text[:200]!r}")
+                    out.append(f"   → title: {repr(_title_m.group(1)) if _title_m else '?'} (нужен JS для данных)")
             except Exception as e:
                 out.append(f"🌐 Авито через прокси: ❌ {str(e)[:120]}")
 
