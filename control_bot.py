@@ -5179,9 +5179,9 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                         page = ctx.new_page()
                         _tag_pw = "прокси" if _proxy_cfg else "напрямую"
                         try:
-                            # Прогрев сессии через главную страницу города (помогает с куки)
-                            page.goto(f"https://www.avito.ru/{slug}", timeout=15000, wait_until="domcontentloaded")
-                            page.wait_for_timeout(1500)
+                            # Прогрев через главную Авито (НЕ через город — ред. по IP-гео ломает регион)
+                            page.goto("https://www.avito.ru/", timeout=12000, wait_until="domcontentloaded")
+                            page.wait_for_timeout(1000)
                         except Exception:
                             pass
                         page.goto(full_url, timeout=25000, wait_until="networkidle")
@@ -6840,7 +6840,7 @@ async def cmd_avito_debug(msg: Message):
             try:
                 from curl_cffi import requests as _cffi
                 _r = _cffi.get(
-                    "https://www.avito.ru/ekaterinburg/avtomobili",
+                    "https://www.avito.ru/moskva/avtomobili",
                     params={"seller_type": "1", "pmax": "300000"},
                     proxies=_avito_proxies(),
                     impersonate="chrome124", timeout=15,
@@ -6848,26 +6848,31 @@ async def cmd_avito_debug(msg: Message):
                              "Referer": "https://www.avito.ru/",
                              "Accept": "text/html,application/xhtml+xml,*/*;q=0.9"})
                 _has = '"urlPath"' in _r.text or '"canonicalUrl"' in _r.text or '__NEXT_DATA__' in _r.text
-                _banned = "Доступ ограничен" in _r.text or "проблема с IP" in _r.text
-                _status_emoji = "✅" if _has else ("🚫" if _banned else "❌")
+                # Постоянный IP-бан: HTTP 200 + "проблема с IP" (НЕ путать с 429 rate limit)
+                _perm_ban = _r.status_code == 200 and "проблема с IP" in _r.text
+                _rate_limit = _r.status_code == 429
+                _status_emoji = "✅" if _has else ("⛔" if _perm_ban else ("⏳" if _rate_limit else "❌"))
                 out.append(f"🌐 Авито через прокси: HTTP {_r.status_code}, {len(_r.text):,}б {_status_emoji}")
                 if _has:
                     _avito_ok = True
-                    _parsed = _parse_avito_html(_r.text, "ekaterinburg", _dt.date.today())
+                    _parsed = _parse_avito_html(_r.text, "moskva", _dt.date.today())
                     out.append(f"   → объявлений найдено: {len(_parsed)} {'✅' if _parsed else '⚠️ (HTML есть, парсер не вернул)'}")
                     if _parsed:
                         out.append(f"   → первое: {_parsed[0].get('title','?')[:55]} | {_parsed[0].get('price','?')}")
-                elif _banned:
-                    out.append(f"   → IP прокси заблокирован Авито навсегда ('Доступ ограничен')")
-                    out.append(f"   → Смените IP прокси в панели mproxy.site и попробуйте снова")
-                elif _r.status_code == 429:
-                    out.append(f"   → Временный rate-limit (429). Подождите 5-10 мин и попробуйте снова")
+                elif _perm_ban:
+                    out.append(f"   ⛔ IP прокси ПОСТОЯННО заблокирован Авито ('проблема с IP')")
+                    out.append(f"   → Смените IP прокси в панели mproxy.site")
+                elif _rate_limit:
+                    out.append(f"   ⏳ Временный rate-limit (429) — подождите 5-10 мин, IP не заблокирован")
+                    out.append(f"   → Бот продолжит пробовать сам, можно подождать")
                 else:
+                    _title_m = _re.search(r'<title>([^<]{0,80})', _r.text)
+                    out.append(f"   → title: {repr(_title_m.group(1)) if _title_m else '?'}")
                     out.append(f"   → первые 200б: {_r.text[:200]!r}")
             except Exception as e:
                 out.append(f"🌐 Авито через прокси: ❌ {str(e)[:120]}")
 
-        # 3. Playwright через прокси (если первый тест не помог)
+        # 3. Playwright через прокси (если curl_cffi не дал данных)
         if not _avito_ok:
             try:
                 from playwright.sync_api import sync_playwright as _spw
@@ -6892,36 +6897,39 @@ async def cmd_avito_debug(msg: Message):
                         "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                         "locale": "ru-RU",
                     }
-                    # Обязательно используем прокси в Playwright (Railway IP заблокирован навсегда)
                     if AVITO_PROXIES and not _proxy_auth_failed and AVITO_PROXY_USER:
                         _ctx_opts["proxy"] = {
                             "server": f"http://{AVITO_PROXY_HOST}:{AVITO_PROXY_PORT}",
                             "username": AVITO_PROXY_USER,
                             "password": AVITO_PROXY_PASS,
                         }
-                        out.append(f"   → используется прокси: {AVITO_PROXY_HOST}:{AVITO_PROXY_PORT}")
+                        out.append(f"   → прокси: {AVITO_PROXY_HOST}:{AVITO_PROXY_PORT}")
                     else:
-                        out.append(f"   → прокси не настроен, Railway IP заблокирован — результат будет ❌")
+                        out.append(f"   → ⚠️ прокси не настроен, Railway IP заблокирован")
                     _ctx = _br.new_context(**_ctx_opts)
                     _pg = _ctx.new_page()
+                    # Прогрев через главную (НЕ через город — редирект ломает регион)
                     try:
-                        _pg.goto("https://www.avito.ru/ekaterinburg", timeout=12000, wait_until="domcontentloaded")
-                        _pg.wait_for_timeout(1000)
+                        _pg.goto("https://www.avito.ru/", timeout=10000, wait_until="domcontentloaded")
+                        _pg.wait_for_timeout(800)
                     except Exception:
                         pass
-                    _pg.goto("https://www.avito.ru/ekaterinburg/avtomobili?seller_type=1&pmax=300000",
+                    # Используем Москву т.к. прокси московский (без ред. по региону)
+                    _pg.goto("https://www.avito.ru/moskva/avtomobili?seller_type=1&pmax=300000",
                              timeout=25000, wait_until="networkidle")
+                    _cur_url = _pg.url
                     _html = _pg.content()
                     _br.close()
                 _has_pw = "__NEXT_DATA__" in _html or '"canonicalUrl"' in _html
-                _ban_pw = "Доступ ограничен" in _html or "проблема с IP" in _html
-                out.append(f"   → {len(_html):,}б, данные: {'✅' if _has_pw else ('🚫[IP-бан]' if _ban_pw else '❌')}")
+                _perm_pw = _r.status_code == 200 and "проблема с IP" in _html if '_r' in dir() else "проблема с IP" in _html
+                out.append(f"   → URL после загрузки: {_cur_url[:80]}")
+                out.append(f"   → {len(_html):,}б, данные: {'✅' if _has_pw else ('⛔[IP-бан]' if _perm_pw else '❌')}")
                 if _has_pw:
-                    _pp = _parse_avito_html(_html, "ekaterinburg", _dt.date.today())
+                    _pp = _parse_avito_html(_html, "moskva", _dt.date.today())
                     out.append(f"   → парсер: {len(_pp)} объявлений {'✅' if _pp else '⚠️'}")
                     if _pp:
                         out.append(f"   → первое: {_pp[0].get('title','?')[:50]} | {_pp[0].get('price','?')}")
-                elif not _ban_pw:
+                else:
                     _title = _re.search(r'<title>([^<]{0,60})', _html)
                     out.append(f"   → title: {repr(_title.group(1)) if _title else '?'}")
             except ImportError:
