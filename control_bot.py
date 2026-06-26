@@ -6806,263 +6806,128 @@ async def cmd_start(msg: Message, state: FSMContext):
 
 @dp.message(Command("avito_debug"))
 async def cmd_avito_debug(msg: Message):
-    """Диагностика прокси и Авито — только для админов."""
+    """Диагностика прокси и Авито — только для админов.
+    ВАЖНО: делает минимум запросов чтобы не сжигать прокси IP."""
     if msg.from_user.id not in ADMIN_IDS:
         return
-    await msg.answer("🔍 Тестирую прокси и Авито...")
-    lines = []
+    await msg.answer("🔍 Тестирую прокси и Авито (минимум запросов)...")
     loop = asyncio.get_running_loop()
 
     def _run_test():
-        import requests as _rq
+        import requests as _rq, datetime as _dt, re as _re, glob as _gl, os as _os_d
         out = []
-        # 1. Без прокси — Railway IP
+
+        # 1. IP-адреса (безопасно — не трогают Авито)
         try:
             ip = _rq.get("https://api.ipify.org", timeout=5).text.strip()
             out.append(f"🌐 Railway IP: {ip}")
         except Exception as e:
             out.append(f"🌐 Railway IP: ошибка {e}")
 
-        # 2. Через прокси — какой IP
         if AVITO_PROXIES:
             try:
                 ip2 = _rq.get("https://api.ipify.org", proxies=_avito_proxies(), timeout=8).text.strip()
                 out.append(f"🔀 Прокси IP: {ip2} ✅")
+                out.append(f"   Прокси: {AVITO_PROXY_HOST}:{AVITO_PROXY_PORT} / {AVITO_PROXY_USER}:***")
             except Exception as e:
                 out.append(f"🔀 Прокси: ❌ {str(e)[:80]}")
         else:
-            out.append("🔀 Прокси: не настроен")
+            out.append("🔀 Прокси: не настроен (PROXY_URL не задан)")
 
-        # 3. Авито через requests + прокси
+        # 2. ОДИН запрос к Авито — через прокси (curl_cffi = лучший шанс)
+        _avito_ok = False
         if AVITO_PROXIES:
             try:
-                ra = _rq.get("https://www.avito.ru/ekaterinburg/avtomobili",
-                    proxies=_avito_proxies(), timeout=8,
-                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                             "Accept-Language": "ru-RU,ru;q=0.9"})
-                has = '"urlPath"' in ra.text or '"canonicalUrl"' in ra.text or '__NEXT_DATA__' in ra.text
-                out.append(f"🔴 Авито+прокси (requests): HTTP {ra.status_code}, {len(ra.text):,}б, данные: {'✅' if has else '❌'}")
-                if not has:
-                    out.append(f"  → первые 150б: {ra.text[:150]!r}")
-            except Exception as e:
-                out.append(f"🔴 Авито+прокси (requests): ❌ {str(e)[:100]}")
-
-        # 4. Авито через curl_cffi + прокси
-        try:
-            from curl_cffi import requests as _cffi
-            _prx = _avito_proxies() or {}
-            rb = _cffi.get("https://www.avito.ru/ekaterinburg/avtomobili",
-                impersonate="chrome124", timeout=8, proxies=_prx,
-                headers={"Accept-Language": "ru-RU,ru;q=0.9"})
-            has2 = '"urlPath"' in rb.text or '"canonicalUrl"' in rb.text or '__NEXT_DATA__' in rb.text
-            out.append(f"🔴 Авито+прокси (curl_cffi): HTTP {rb.status_code}, {len(rb.text):,}б, данные: {'✅' if has2 else '❌'}")
-            if not has2:
-                out.append(f"  → первые 150б: {rb.text[:150]!r}")
-        except Exception as e:
-            out.append(f"🔴 Авито (curl_cffi): ❌ {str(e)[:100]}")
-
-        # 5. Авито без прокси через curl_cffi + парсинг
-        try:
-            from curl_cffi import requests as _cffi2
-            rc = _cffi2.get("https://www.avito.ru/ekaterinburg/avtomobili",
-                params={"seller_type": "1", "pmax": 200000},
-                impersonate="chrome124", timeout=12,
-                headers={"Accept-Language": "ru-RU,ru;q=0.9"})
-            has3 = '"urlPath"' in rc.text or '"canonicalUrl"' in rc.text or '__NEXT_DATA__' in rc.text
-            out.append(f"🔴 Авито напрямую (curl_cffi): HTTP {rc.status_code}, {len(rc.text):,}б, данные: {'✅' if has3 else '❌'}")
-            # Глубокая диагностика 200-страницы без явных маркеров
-            if not has3 and rc.status_code == 200:
-                import re as _re2
-                _t = rc.text
-                _markers = {
-                    "avtomobili": _t.count("avtomobili"),
-                    "item-link": len(_re2.findall(r'/[a-z0-9_]+/avtomobili/[a-z0-9_%-]*\d{6,}', _t)),
-                    "data-marker": _t.count("data-marker"),
-                    "__NEXT": _t.count("__NEXT"),
-                    "window.__": _t.count("window.__"),
-                    "<script": _t.count("<script"),
-                    "captcha": _t.lower().count("captcha"),
-                    "firewall/робот": _t.lower().count("robot") + _t.count("Доступ огранич") + _t.count("не робот"),
-                    "iva-item": _t.count("iva-item"),
-                    "price": _t.count('"price"'),
-                }
-                out.append("  📋 маркеры: " + ", ".join(f"{k}={v}" for k, v in _markers.items()))
-                # Ищем JSON-блобы window.__ или script с items
-                _wm = _re2.search(r'window\.__([A-Za-z_]+)__\s*=', _t)
-                if _wm:
-                    out.append(f"  → найден window.__{_wm.group(1)}__")
-                # Заголовок страницы
-                _tm = _re2.search(r'<title>([^<]{0,80})', _t)
-                if _tm:
-                    out.append(f"  → title: {_tm.group(1)!r}")
-                # Любая ссылка на объявление
-                _im = _re2.search(r'(https?://www\.avito\.ru)?/[a-z0-9_]+/avtomobili/[a-z0-9_%-]*\d{6,}', _t)
-                out.append(f"  → пример ссылки: {_im.group(0)[:90] if _im else 'НЕТ'}")
-            if has3:
-                # Пробуем парсинг
-                import datetime as _dt
-                import re as _re, json as _js
-                _nd_m = _re.search(r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>', rc.text, _re.S)
-                if _nd_m:
-                    try:
-                        _nd = _js.loads(_nd_m.group(1))
-                        # Показываем верхние ключи
-                        _top = list(_nd.get("props", {}).get("pageProps", {}).keys())[:10]
-                        out.append(f"  → __NEXT_DATA__ pageProps ключи: {_top}")
-                        # Пробуем парсить
-                        parsed = _parse_avito_html(rc.text, "ekaterinburg", _dt.date.today())
-                        out.append(f"  → парсер вернул: {len(parsed)} объявлений {'✅' if parsed else '❌'}")
-                        if parsed:
-                            out.append(f"  → первое: {parsed[0].get('title','?')[:60]} | {parsed[0].get('price','?')}")
-                        else:
-                            # Ищем urlPath/canonicalUrl вручную
-                            _sample = _re.search(r'"(?:urlPath|canonicalUrl)"\s*:\s*"([^"]+)"', rc.text)
-                            out.append(f"  → пример urlPath/canonicalUrl: {_sample.group(1)[:80] if _sample else 'НЕ НАЙДЕН'}")
-                    except Exception as pe:
-                        out.append(f"  → ошибка парсинга: {pe}")
+                from curl_cffi import requests as _cffi
+                _r = _cffi.get(
+                    "https://www.avito.ru/ekaterinburg/avtomobili",
+                    params={"seller_type": "1", "pmax": "300000"},
+                    proxies=_avito_proxies(),
+                    impersonate="chrome124", timeout=15,
+                    headers={"Accept-Language": "ru-RU,ru;q=0.9",
+                             "Referer": "https://www.avito.ru/",
+                             "Accept": "text/html,application/xhtml+xml,*/*;q=0.9"})
+                _has = '"urlPath"' in _r.text or '"canonicalUrl"' in _r.text or '__NEXT_DATA__' in _r.text
+                _banned = "Доступ ограничен" in _r.text or "проблема с IP" in _r.text
+                _status_emoji = "✅" if _has else ("🚫" if _banned else "❌")
+                out.append(f"🌐 Авито через прокси: HTTP {_r.status_code}, {len(_r.text):,}б {_status_emoji}")
+                if _has:
+                    _avito_ok = True
+                    _parsed = _parse_avito_html(_r.text, "ekaterinburg", _dt.date.today())
+                    out.append(f"   → объявлений найдено: {len(_parsed)} {'✅' if _parsed else '⚠️ (HTML есть, парсер не вернул)'}")
+                    if _parsed:
+                        out.append(f"   → первое: {_parsed[0].get('title','?')[:55]} | {_parsed[0].get('price','?')}")
+                elif _banned:
+                    out.append(f"   → IP прокси заблокирован Авито навсегда ('Доступ ограничен')")
+                    out.append(f"   → Смените IP прокси в панели mproxy.site и попробуйте снова")
+                elif _r.status_code == 429:
+                    out.append(f"   → Временный rate-limit (429). Подождите 5-10 мин и попробуйте снова")
                 else:
-                    out.append("  → __NEXT_DATA__ НЕ НАЙДЕН в HTML!")
-                    # Проверяем другие признаки
-                    _up = '"urlPath"' in rc.text
-                    _cu = '"canonicalUrl"' in rc.text
-                    out.append(f"  → urlPath={_up}, canonicalUrl={_cu}")
-            else:
-                out.append(f"  → первые 200б: {rc.text[:200]!r}")
-        except Exception as e:
-            out.append(f"🔴 Авито напрямую (curl_cffi): ❌ {str(e)[:100]}")
+                    out.append(f"   → первые 200б: {_r.text[:200]!r}")
+            except Exception as e:
+                out.append(f"🌐 Авито через прокси: ❌ {str(e)[:120]}")
 
-        # 6. С прогревом сессии (куки) — главная → каталог
-        try:
-            from curl_cffi import requests as _cffi3
-            _s = _cffi3.Session(impersonate="chrome124")
-            _w = _s.get("https://www.avito.ru/ekaterinburg", timeout=10,
-                        headers={"Accept-Language": "ru-RU,ru;q=0.9"})
-            import time as _tm
-            _tm.sleep(0.5)
-            rd = _s.get("https://www.avito.ru/ekaterinburg/avtomobili",
-                params={"seller_type": "1", "pmax": 200000}, timeout=14,
-                headers={"Accept-Language": "ru-RU,ru;q=0.9",
-                         "Referer": "https://www.avito.ru/ekaterinburg",
-                         "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Site": "same-origin"})
-            has6 = '"urlPath"' in rd.text or '"canonicalUrl"' in rd.text or '__NEXT_DATA__' in rd.text
-            out.append(f"🟢 Авито с прогревом сессии: прогрев HTTP {_w.status_code}, куки={len(_s.cookies)}")
-            out.append(f"   каталог HTTP {rd.status_code}, {len(rd.text):,}б, данные: {'✅' if has6 else '❌'}")
-            if has6:
-                import datetime as _dt6
-                parsed6 = _parse_avito_html(rd.text, "ekaterinburg", _dt6.date.today())
-                out.append(f"   → парсер: {len(parsed6)} объявлений {'✅' if parsed6 else '❌'}")
-                if parsed6:
-                    out.append(f"   → первое: {parsed6[0].get('title','?')[:50]} | {parsed6[0].get('price','?')}")
-        except Exception as e:
-            out.append(f"🟢 Авито с прогревом: ❌ {str(e)[:100]}")
-
-        # 7. Мобильный API напрямую (без прокси)
-        try:
-            import requests as _rq7
-            _mob_key = "af0deccbgcgidddjgnvljitntccdduijhdinfgjgfjir"
-            _mob_hdrs = {
-                "User-Agent": "ru.avito.avitomobile/18.0 (Android 13; ru_RU)",
-                "Accept": "application/json, text/plain, */*",
-                "Accept-Language": "ru-RU,ru;q=0.9",
-                "x-avito-app-version": "18.0.0",
-            }
-            _mob_params = {"locationId": 637640, "categoryId": 9, "params[109][]": 106, "page": 1, "limit": 20, "display": "list", "sortType": "101", "key": _mob_key}
-            _mob_r = _rq7.get("https://m.avito.ru/api/16/items", params=_mob_params, headers=_mob_hdrs, timeout=10)
-            _mob_has = isinstance(_mob_r.json() if _mob_r.status_code == 200 else {}, dict)
-            _mob_data = _mob_r.json() if _mob_r.status_code == 200 else {}
-            _mob_raw = (_mob_data.get("result") or {}).get("items") or _mob_data.get("items") or []
-            out.append(f"📱 Мобильный API напрямую: HTTP {_mob_r.status_code}, {len(_mob_r.text):,}б, items={len(_mob_raw)} {'✅' if _mob_raw else '❌'}")
-            if not _mob_raw and _mob_r.status_code == 200:
-                out.append(f"   → ключи: {list(_mob_data.keys())[:8]}")
-                out.append(f"   → ответ: {_mob_r.text[:200]!r}")
-        except Exception as e:
-            out.append(f"📱 Мобильный API: ❌ {str(e)[:100]}")
-
-        # 8. DuckDuckGo поиск Авито (не обращается к Авито напрямую)
-        try:
-            import requests as _rq8
-            _ddg_hdrs = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                "Accept-Language": "ru-RU,ru;q=0.9",
-            }
-            _ddg_q = "site:avito.ru/ekaterinburg/avtomobili до 200000 руб"
-            _ddg_r = _rq8.get("https://html.duckduckgo.com/html/", params={"q": _ddg_q, "kl": "ru-ru"}, headers=_ddg_hdrs, timeout=12)
-            import re as _re8
-            _ddg_urls = _re8.findall(r'avito\.ru/ekaterinburg/avtomobili/[a-z0-9_%-]*\d{6,}', _ddg_r.text)
-            out.append(f"🔍 DuckDuckGo (не Авито): HTTP {_ddg_r.status_code}, {len(_ddg_r.text):,}б, ссылок Авито={len(_ddg_urls)} {'✅' if _ddg_urls else '❌'}")
-            if _ddg_urls:
-                out.append(f"   → пример: {_ddg_urls[0][:80]}")
-            elif _ddg_r.status_code == 202:
-                out.append("   → DDG вернул 202 (rate limit)")
-            # Lite версия
-            _ddg_r2 = _rq8.get("https://lite.duckduckgo.com/lite/", params={"q": _ddg_q, "kl": "ru-ru"}, headers=_ddg_hdrs, timeout=12)
-            _ddg_urls2 = _re8.findall(r'avito\.ru/ekaterinburg/avtomobili/[a-z0-9_%-]*\d{6,}', _ddg_r2.text)
-            out.append(f"🔍 DDG Lite: HTTP {_ddg_r2.status_code}, {len(_ddg_r2.text):,}б, ссылок={len(_ddg_urls2)} {'✅' if _ddg_urls2 else '❌'}")
-        except Exception as e:
-            out.append(f"🔍 DuckDuckGo: ❌ {str(e)[:100]}")
-
-        # 9. Авито RSS (отдельный endpoint, другой rate limit)
-        try:
-            import requests as _rq9
-            _rss_r = _rq9.get("https://www.avito.ru/ekaterinburg/avtomobili?output=rss",
-                headers={"User-Agent": "Mozilla/5.0", "Accept": "application/rss+xml,*/*"},
-                timeout=10)
-            _rss_has = "<item>" in _rss_r.text or "<title>" in _rss_r.text
-            _rss_count = _rss_r.text.count("<item>")
-            out.append(f"📡 Авито RSS: HTTP {_rss_r.status_code}, {len(_rss_r.text):,}б, items={_rss_count} {'✅' if _rss_count > 0 else '❌'}")
-        except Exception as e:
-            out.append(f"📡 Авито RSS: ❌ {str(e)[:80]}")
-
-        # 10. Playwright (реальный Chromium — обходит Cloudflare JS-challenge)
-        try:
-            from playwright.sync_api import sync_playwright as _spw
-            import os as _os10, glob as _gl10
-            def _find_pw_exe10():
-                for _pat in [
-                    "/opt/pw-browsers/chromium-*/chrome-linux/chrome",
-                    "/opt/pw-browsers/chromium",
-                    "/usr/bin/chromium-browser", "/usr/bin/chromium",
-                    "/usr/bin/google-chrome-stable",
-                ]:
-                    _f = _gl10.glob(_pat)
-                    if _f: return _f[0]
-                    if _os10.path.exists(_pat): return _pat
-                return None
-            _pw_exe = _find_pw_exe10()
-            out.append(f"🎭 Playwright: chromium={_pw_exe or 'НЕ НАЙДЕН (поиск в /opt/pw-browsers, /usr/bin)'}")
-            with _spw() as _pw10:
-                _largs = ["--no-sandbox","--disable-setuid-sandbox","--disable-dev-shm-usage","--disable-gpu"]
-                _lopts = {"headless": True, "args": _largs}
-                if _pw_exe:
-                    _lopts["executable_path"] = _pw_exe
-                _br10 = _pw10.chromium.launch(**_lopts)
-                _ctx10 = _br10.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                    locale="ru-RU",
-                )
-                _pg10 = _ctx10.new_page()
-                _pg10.goto("https://www.avito.ru/ekaterinburg/avtomobili?seller_type=1&pmax=200000",
-                           timeout=25000, wait_until="networkidle")
-                _pw_html = _pg10.content()
-                _br10.close()
-            _pw_has = "__NEXT_DATA__" in _pw_html or '"canonicalUrl"' in _pw_html
-            out.append(f"   → {len(_pw_html):,}б, данные: {'✅' if _pw_has else '❌'}")
-            if _pw_has:
-                import datetime as _dt10
-                _pw_parsed = _parse_avito_html(_pw_html, "ekaterinburg", _dt10.date.today())
-                out.append(f"   → парсер: {len(_pw_parsed)} объявлений {'✅' if _pw_parsed else '❌'}")
-                if _pw_parsed:
-                    out.append(f"   → первое: {_pw_parsed[0].get('title','?')[:50]} | {_pw_parsed[0].get('price','?')}")
-            else:
-                import re as _re10
-                _t10 = _pw_html
-                _title10 = _re10.search(r'<title>([^<]{0,60})', _t10)
-                _ttl10 = repr(_title10.group(1)) if _title10 else "'?'"
-                out.append(f"   → captcha={_t10.lower().count('captcha')}, title={_ttl10}")
-        except ImportError:
-            out.append("🎭 Playwright: ❌ библиотека не установлена")
-        except Exception as e:
-            out.append(f"🎭 Playwright: ❌ {str(e)[:150]}")
+        # 3. Playwright через прокси (если первый тест не помог)
+        if not _avito_ok:
+            try:
+                from playwright.sync_api import sync_playwright as _spw
+                def _find_pw():
+                    for _pat in ["/opt/pw-browsers/chromium-*/chrome-linux/chrome",
+                                  "/opt/pw-browsers/chromium", "/usr/bin/chromium-browser",
+                                  "/usr/bin/chromium", "/usr/bin/google-chrome-stable"]:
+                        _f = _gl.glob(_pat)
+                        if _f: return _f[0]
+                        if _os_d.path.exists(_pat): return _pat
+                    return None
+                _exe = _find_pw()
+                out.append(f"🎭 Playwright: {_exe or 'авто-поиск'}")
+                with _spw() as _pw:
+                    _lopts = {"headless": True, "args": ["--no-sandbox","--disable-setuid-sandbox",
+                              "--disable-dev-shm-usage","--disable-gpu",
+                              "--disable-blink-features=AutomationControlled"]}
+                    if _exe:
+                        _lopts["executable_path"] = _exe
+                    _br = _pw.chromium.launch(**_lopts)
+                    _ctx_opts = {
+                        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                        "locale": "ru-RU",
+                    }
+                    # Обязательно используем прокси в Playwright (Railway IP заблокирован навсегда)
+                    if AVITO_PROXIES and not _proxy_auth_failed and AVITO_PROXY_USER:
+                        _ctx_opts["proxy"] = {
+                            "server": f"http://{AVITO_PROXY_HOST}:{AVITO_PROXY_PORT}",
+                            "username": AVITO_PROXY_USER,
+                            "password": AVITO_PROXY_PASS,
+                        }
+                        out.append(f"   → используется прокси: {AVITO_PROXY_HOST}:{AVITO_PROXY_PORT}")
+                    else:
+                        out.append(f"   → прокси не настроен, Railway IP заблокирован — результат будет ❌")
+                    _ctx = _br.new_context(**_ctx_opts)
+                    _pg = _ctx.new_page()
+                    try:
+                        _pg.goto("https://www.avito.ru/ekaterinburg", timeout=12000, wait_until="domcontentloaded")
+                        _pg.wait_for_timeout(1000)
+                    except Exception:
+                        pass
+                    _pg.goto("https://www.avito.ru/ekaterinburg/avtomobili?seller_type=1&pmax=300000",
+                             timeout=25000, wait_until="networkidle")
+                    _html = _pg.content()
+                    _br.close()
+                _has_pw = "__NEXT_DATA__" in _html or '"canonicalUrl"' in _html
+                _ban_pw = "Доступ ограничен" in _html or "проблема с IP" in _html
+                out.append(f"   → {len(_html):,}б, данные: {'✅' if _has_pw else ('🚫[IP-бан]' if _ban_pw else '❌')}")
+                if _has_pw:
+                    _pp = _parse_avito_html(_html, "ekaterinburg", _dt.date.today())
+                    out.append(f"   → парсер: {len(_pp)} объявлений {'✅' if _pp else '⚠️'}")
+                    if _pp:
+                        out.append(f"   → первое: {_pp[0].get('title','?')[:50]} | {_pp[0].get('price','?')}")
+                elif not _ban_pw:
+                    _title = _re.search(r'<title>([^<]{0,60})', _html)
+                    out.append(f"   → title: {repr(_title.group(1)) if _title else '?'}")
+            except ImportError:
+                out.append("🎭 Playwright: ❌ библиотека не установлена")
+            except Exception as e:
+                out.append(f"🎭 Playwright: ❌ {str(e)[:150]}")
 
         return out
 
