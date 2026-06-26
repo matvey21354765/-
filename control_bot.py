@@ -5145,10 +5145,14 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                     "args": [
                         "--no-sandbox", "--disable-setuid-sandbox",
                         "--disable-dev-shm-usage", "--disable-gpu",
+                        "--no-zygote", "--single-process",
                         "--disable-blink-features=AutomationControlled",
                         "--disable-infobars",
                         "--window-size=1280,900",
-                        "--start-maximized",
+                        "--disable-extensions",
+                        "--disable-background-networking",
+                        "--disable-default-apps",
+                        "--mute-audio",
                     ],
                 }
                 if _exe:
@@ -6911,8 +6915,11 @@ async def cmd_avito_debug(msg: Message):
                     _lopts = {"headless": True, "args": [
                         "--no-sandbox","--disable-setuid-sandbox",
                         "--disable-dev-shm-usage","--disable-gpu",
+                        "--no-zygote","--single-process",
                         "--disable-blink-features=AutomationControlled",
                         "--disable-infobars","--window-size=1280,900",
+                        "--disable-extensions","--disable-background-networking",
+                        "--disable-default-apps","--mute-audio",
                     ]}
                     if _exe:
                         _lopts["executable_path"] = _exe
