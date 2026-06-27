@@ -150,6 +150,34 @@ if not AVITO_PROXIES and not _proxy_auth_failed:
 _proxy_display = f"{AVITO_PROXY_PROTOCOL}://{AVITO_PROXY_HOST}:{AVITO_PROXY_PORT}" if AVITO_PROXIES else None
 print(f"[прокси] {'✅ ' + _proxy_display if _proxy_display else '❌ не настроен — Авито/Auto.ru могут не работать'}")
 
+# Ссылка ротации IP мобильного прокси (mobileproxy.space «Ссылка для смены IP»).
+# Если задана — бот сам меняет IP перед скрейпом Авито, обходя rate-limit (429).
+AVITO_PROXY_ROTATE_URL = os.getenv("AVITO_PROXY_ROTATE_URL", "")
+_last_ip_rotate_ts = 0.0
+
+def _rotate_proxy_ip(min_interval: float = 50.0) -> bool:
+    """Меняет IP мобильного прокси через ссылку ротации. Возвращает True при успехе.
+    Защита: не чаще раза в min_interval секунд (ротация имеет лимиты у провайдера)."""
+    global _last_ip_rotate_ts
+    if not AVITO_PROXY_ROTATE_URL:
+        return False
+    import time as _t
+    now = _t.time()
+    if now - _last_ip_rotate_ts < min_interval:
+        return False
+    _last_ip_rotate_ts = now
+    try:
+        import requests as _rq
+        r = _rq.get(AVITO_PROXY_ROTATE_URL, timeout=15)
+        ok = r.status_code == 200
+        print(f"[прокси] ротация IP: HTTP {r.status_code} {'✅' if ok else '❌'} {r.text[:80]!r}")
+        if ok:
+            _t.sleep(3)  # даём прокси применить новый IP
+        return ok
+    except Exception as e:
+        print(f"[прокси] ротация IP ошибка: {str(e)[:80]}")
+        return False
+
 # ── Регионы ─────────────────────────────────────────────────────
 REGIONS = {
     "ekaterinburg": "Екатеринбург",
@@ -6151,6 +6179,11 @@ def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max
     slug = AVITO_SLUGS.get(region, region)
     today = datetime.date.today()
 
+    # Перед сетевым скрейпом (кэш-промах) меняем IP прокси на свежий, чтобы
+    # обойти rate-limit Авито (429). Сработает только если задана ссылка ротации.
+    if AVITO_PROXIES and not _proxy_auth_failed:
+        _rotate_proxy_ip()
+
     try:
         import requests as _req
         from bs4 import BeautifulSoup as _BS
@@ -6939,6 +6972,12 @@ async def cmd_avito_debug(msg: Message):
             out.append(f"🌐 Railway IP: ошибка {e}")
 
         if AVITO_PROXIES:
+            # Ротация IP перед тестом — свежий IP не зарейтлимичен
+            if AVITO_PROXY_ROTATE_URL:
+                _rot_ok = _rotate_proxy_ip(min_interval=0)
+                out.append(f"🔄 Ротация IP: {'✅ выполнена' if _rot_ok else '❌ не сработала'}")
+            else:
+                out.append("🔄 Ротация IP: НЕ настроена (задайте AVITO_PROXY_ROTATE_URL)")
             try:
                 ip2 = _rq.get("https://api.ipify.org", proxies=_avito_proxies(), timeout=8).text.strip()
                 out.append(f"🔀 Прокси IP: {ip2} ✅")
