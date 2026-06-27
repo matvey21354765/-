@@ -9243,11 +9243,11 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                 InlineKeyboardButton(text="📘 Объявление ВК", url=url),
                 InlineKeyboardButton(text="⭐ Сохранить", callback_data=f"fav|{sid}|{uid}"),
             ]
-        elif source == "tg_channel":
+        elif source in ("tg", "tg_channel"):
             caption += f"\n📢 Канал: {seller}" if seller else ""
             seller_url = item.get("_seller_url", url)
             row1 = [
-                InlineKeyboardButton(text="💬 Открыть в TG", url=seller_url),
+                InlineKeyboardButton(text="💬 Открыть в TG", url=url or seller_url),
                 InlineKeyboardButton(text="⭐ Сохранить", callback_data=f"fav|{sid}|{uid}"),
             ]
         else:
@@ -9270,19 +9270,29 @@ async def send_batch(chat_id: int, uid: int, offset: int):
 
                 def _download_photo():
                     _item_source = item.get("source", "")
-                    # Referer зависит от источника
+                    # Referer и прокси зависят от источника.
+                    # TG/VK CDN доступны напрямую с Railway — прокси Авито им мешает.
                     if _item_source == "autoru":
                         _referer = "https://auto.ru/"
+                        _px = _avito_proxies()
                     elif _item_source == "drom":
                         _referer = "https://auto.drom.ru/"
+                        _px = _avito_proxies()
+                    elif _item_source in ("tg", "tg_channel"):
+                        _referer = "https://t.me/"
+                        _px = None  # Telegram CDN — напрямую, без прокси Авито
+                    elif _item_source == "vk":
+                        _referer = "https://vk.com/"
+                        _px = None  # VK CDN — напрямую
                     else:
                         _referer = "https://www.avito.ru/"
+                        _px = _avito_proxies()
                     # 1. curl_cffi — обходит блокировку CDN с Railway IP
                     try:
                         from curl_cffi import requests as _cffi
                         r = _cffi.get(photo_url, impersonate="chrome124", timeout=8,
                                       headers={"Referer": _referer},
-                                      proxies=_avito_proxies())
+                                      proxies=_px)
                         if r.status_code == 200 and len(r.content) > 3_000:
                             return r.content
                     except Exception:
@@ -9293,7 +9303,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                             "Referer": _referer,
                             "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-                        }, proxies=_avito_proxies())
+                        }, proxies=_px)
                         if r2.status_code == 200 and len(r2.content) > 3_000:
                             return r2.content
                     except Exception:
@@ -9912,17 +9922,22 @@ async def do_search_for_user(uid: int, reply_to):
         await reply_to.answer("😔 Не нашёл объявлений в твоём бюджете. Попробуй расширить диапазон цен: /settings")
         return
 
-    # Фильтр "ниже рынка" применяем ТОЛЬКО если Авито дал данные для расчёта рыночной цены
+    # Фильтр витрины: показываем объявления НИЖЕ РЫНКА + те, для кого рынок
+    # неизвестен (часто ВК/ТГ — не нашли аналог на Авито). Выкидываем ТОЛЬКО те,
+    # что ТОЧНО дороже рынка (есть _market_price и savings_pct<=0). Так пользователь
+    # видит все объявления выбранных площадок, а выгодные — первыми (сортировка).
+    _below_count = 0
     if _avito_available:
-        below_market_only = [i for i in suitable if i.get("_savings_pct", 0) > 0]
-        print(f"  [фильтр] ниже рынка: {len(below_market_only)} из {len(suitable)} (Авито-эталон доступен)")
-        if below_market_only:
-            suitable = below_market_only
-        else:
-            # Авито есть, но ни одно не ниже рынка — показываем все и предупреждаем
-            print(f"  [рынок] нет объявлений ниже рынка, показываем все в бюджете")
+        _below_count = sum(1 for i in suitable if i.get("_savings_pct", 0) > 0)
+        shown = [
+            i for i in suitable
+            if i.get("_savings_pct", 0) > 0 or not i.get("_market_price")
+        ]
+        print(f"  [фильтр] ниже рынка: {_below_count}, показываем (вкл. без рынка): {len(shown)} из {len(suitable)}")
+        if shown:
+            suitable = shown
     else:
-        print(f"  [фильтр] Авито недоступен → фильтр 'ниже рынка' отключён, показываем все {len(suitable)} в бюджете")
+        print(f"  [фильтр] Авито недоступен → показываем все {len(suitable)} в бюджете")
 
     _search_cache[uid] = suitable
     _save_cache(uid, suitable)
@@ -9935,7 +9950,10 @@ async def do_search_for_user(uid: int, reply_to):
     src_icons = {"avito":"🟠","drom":"🔵","autoru":"🔴","vk":"💙","tg":"✈️"}
     src_str = " ".join(src_icons.get(s,"") for s in src_found if s)
     if _avito_available:
-        _msg = f"✅ {src_str} Найдено {len(suitable)} объявлений ниже рынка!"
+        _extra = len(suitable) - _below_count
+        _msg = f"✅ {src_str} Найдено {_below_count} объявлений ниже рынка!"
+        if _extra > 0:
+            _msg += f"\n➕ Ещё {_extra} в бюджете (рынок не определён) — ниже в списке."
     else:
         _msg = f"✅ {src_str} Найдено {len(suitable)} объявлений в бюджете!\n⚠️ Авито недоступен — сравнение с рынком отключено"
     if _seen_cnt:
