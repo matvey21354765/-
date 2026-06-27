@@ -6918,6 +6918,24 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
     persistent=True,
 )
 
+# Клавиатура админа = обычная + строка «📊 Статистика»
+_ADMIN_KEYBOARD = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="🔍 Найти авто"), KeyboardButton(text="🌐 Глобальный поиск")],
+        [KeyboardButton(text="🆕 Новые сегодня"), KeyboardButton(text="🎯 Следить за маркой")],
+        [KeyboardButton(text="🔔 Уведомления"), KeyboardButton(text="🚗 Мой гараж")],
+        [KeyboardButton(text="💼 Мои сделки"), KeyboardButton(text="⚙️ Настройки")],
+        [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="❓ Помощь")],
+        [KeyboardButton(text="🤝 Пригласить друга"), KeyboardButton(text="♻️ Сбросить историю")],
+    ],
+    resize_keyboard=True,
+    persistent=True,
+)
+
+
+def kb_for(uid: int) -> ReplyKeyboardMarkup:
+    """Клавиатура с учётом прав: админ видит кнопку «📊 Статистика»."""
+    return _ADMIN_KEYBOARD if uid in ADMIN_IDS else MAIN_KEYBOARD
 
 
 def region_keyboard():
@@ -7195,7 +7213,7 @@ async def cmd_start(msg: Message, state: FSMContext):
             f"3️⃣ Включить поискового агента — бот сам пришлёт новые объявления.\n\n"
             f"👇 Начнём с настройки поиска:",
             parse_mode="Markdown",
-            reply_markup=MAIN_KEYBOARD,
+            reply_markup=kb_for(msg.from_user.id),
         )
         await msg.answer("🔍 Шаг 1/4: Что ищем?", reply_markup=category_keyboard())
         await state.set_state(Setup.category)
@@ -7207,7 +7225,7 @@ async def cmd_start(msg: Message, state: FSMContext):
             f"📊 Сравниваю цены с рынком и нахожу выгодные\n"
             f"🔔 Могу присылать уведомления когда появится новое выгодное авто",
             parse_mode="Markdown",
-            reply_markup=MAIN_KEYBOARD,
+            reply_markup=kb_for(msg.from_user.id),
         )
 
 
@@ -7421,6 +7439,369 @@ async def cmd_avito_debug(msg: Message):
     await msg.answer("\n".join(lines)[:4000])
 
 
+# ════════════════════════════════════════════════════════════════
+# АДМИН-РАЗДЕЛ «СТАТИСТИКА» (только для ADMIN_IDS)
+# Построен на существующем файловом модуле analytics + settings.json.
+# ════════════════════════════════════════════════════════════════
+_MSK = datetime.timezone(datetime.timedelta(hours=3))
+_RU_WD = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+
+
+def _fmt_n(n) -> str:
+    """Число с пробелами-разделителями: 1234 → '1 234'."""
+    try:
+        return f"{int(n):,}".replace(",", " ")
+    except Exception:
+        return str(n)
+
+
+def _msk_date(ts):
+    try:
+        return datetime.datetime.fromtimestamp(ts, _MSK).date()
+    except Exception:
+        return None
+
+
+def _admin_collect():
+    """Собирает сырьё: профили, события, кол-во мониторингов, подписки."""
+    users = analytics.load_users()
+    events = analytics.read_events()
+    mon_count = 0
+    subs = []  # (uid, settings)
+    if USERS_DIR.exists():
+        for p in USERS_DIR.iterdir():
+            if not (p.is_dir() and p.name.isdigit()):
+                continue
+            try:
+                s = json.loads((p / "settings.json").read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if s.get("monitor_enabled"):
+                mon_count += 1
+            st = s.get("subscription_type")
+            if st and st != "free":
+                subs.append((int(p.name), s))
+    return users, events, mon_count, subs
+
+
+def _uname(users: dict, uid) -> str:
+    u = users.get(str(uid)) or {}
+    un = u.get("username")
+    return f"@{un}" if un else f"id{uid}"
+
+
+def _admin_today_text() -> str:
+    users, events, mon_count, subs = _admin_collect()
+    now = datetime.datetime.now(_MSK)
+    today = now.date()
+    active, searches, mon_on, subs_today = set(), 0, 0, 0
+    for ev in events:
+        if _msk_date(ev.get("ts", 0)) != today:
+            continue
+        if ev.get("uid"):
+            active.add(ev["uid"])
+        act = ev.get("action")
+        if act == "search":
+            searches += 1
+        elif act == "monitor_on":
+            mon_on += 1
+        elif act == "subscription":
+            subs_today += 1
+    new_today = sum(1 for u in users.values() if _msk_date(u.get("first_seen", 0)) == today)
+    return (
+        f"📊 <b>Perekup Drive — СЕГОДНЯ ({today.strftime('%d.%m.%Y')})</b>\n\n"
+        f"👤 Всего пользователей: <code>{_fmt_n(len(users))}</code>\n"
+        f"🟢 Активных сегодня: <code>{_fmt_n(len(active))}</code>\n"
+        f"🆕 Новых сегодня: <code>{_fmt_n(new_today)}</code>\n"
+        f"🔍 Поисков выполнено: <code>{_fmt_n(searches)}</code>\n"
+        f"🔔 Включили мониторинг: <code>{_fmt_n(mon_on)}</code>\n"
+        f"💎 Новых подписок: <code>{_fmt_n(subs_today)}</code>\n\n"
+        f"Обновлено: {now.strftime('%H:%M')} МСК"
+    )
+
+
+def _admin_week_text() -> str:
+    users, events, mon_count, subs = _admin_collect()
+    now = datetime.datetime.now(_MSK)
+    today = now.date()
+    week_days = [today - datetime.timedelta(days=i) for i in range(6, -1, -1)]
+    wset = set(week_days)
+    new_total = active_set = searches_total = mon_total = subs_total = 0
+    active_set = set()
+    per_day_new = {d: 0 for d in week_days}
+    per_day_search = {d: 0 for d in week_days}
+    for u in users.values():
+        d = _msk_date(u.get("first_seen", 0))
+        if d in wset:
+            new_total += 1
+            per_day_new[d] += 1
+    for ev in events:
+        d = _msk_date(ev.get("ts", 0))
+        if d not in wset:
+            continue
+        if ev.get("uid"):
+            active_set.add(ev["uid"])
+        act = ev.get("action")
+        if act == "search":
+            searches_total += 1
+            per_day_search[d] += 1
+        elif act == "monitor_on":
+            mon_total += 1
+        elif act == "subscription":
+            subs_total += 1
+    lines = [
+        f"📊 <b>Perekup Drive — НЕДЕЛЯ ({week_days[0].strftime('%d.%m')} – {week_days[-1].strftime('%d.%m')})</b>\n",
+        f"🆕 Новых: <code>{_fmt_n(new_total)}</code>",
+        f"🟢 Активных: <code>{_fmt_n(len(active_set))}</code>",
+        f"🔍 Поисков: <code>{_fmt_n(searches_total)}</code>",
+        f"🔔 Мониторинг: <code>{_fmt_n(mon_total)}</code>",
+        f"💎 Подписок: <code>{_fmt_n(subs_total)}</code>",
+        "\n📈 <b>По дням:</b>",
+    ]
+    for d in week_days:
+        wd = _RU_WD[d.weekday()]
+        n, s = per_day_new[d], per_day_search[d]
+        if n == 0 and s == 0:
+            lines.append(f"{wd}: Нет данных")
+        else:
+            lines.append(f"{wd}: +{_fmt_n(n)} новых, {_fmt_n(s)} поисков")
+    return "\n".join(lines)
+
+
+def _admin_overall_text() -> str:
+    users, events, mon_count, subs = _admin_collect()
+    now = time.time()
+    total = len(users)
+    a7 = a30 = 0
+    for u in users.values():
+        ls = u.get("last_seen", 0)
+        if now - ls <= 7 * 86400:
+            a7 += 1
+        if now - ls <= 30 * 86400:
+            a30 += 1
+    inactive = total - a30
+    searches_total = sum(1 for ev in events if ev.get("action") == "search")
+    paid = len(subs)
+
+    def _pct(x):
+        return f"{(x / total * 100):.1f}%" if total else "0.0%"
+
+    # среднее: поисков в день и дней активности
+    days_active = {}
+    for ev in events:
+        if ev.get("action") == "search" and ev.get("uid"):
+            d = _msk_date(ev.get("ts", 0))
+            days_active.setdefault(ev["uid"], set()).add(d)
+    avg_days = round(sum(len(v) for v in days_active.values()) / total, 1) if total else 0
+    # поисков в день: всего поисков / число уникальных дней с поисками
+    all_days = set()
+    for v in days_active.values():
+        all_days |= v
+    avg_per_day = round(searches_total / len(all_days), 1) if all_days else 0
+    return (
+        f"📊 <b>Perekup Drive — ВСЁ ВРЕМЯ</b>\n\n"
+        f"👤 Всего: <code>{_fmt_n(total)}</code>\n"
+        f"🟢 Активных за 7 дн: <code>{_fmt_n(a7)}</code> ({_pct(a7)})\n"
+        f"🟢 Активных за 30 дн: <code>{_fmt_n(a30)}</code> ({_pct(a30)})\n"
+        f"💤 Неактивных 30+ дн: <code>{_fmt_n(inactive)}</code> ({_pct(inactive)})\n\n"
+        f"🔍 Поисков всего: <code>{_fmt_n(searches_total)}</code>\n"
+        f"🔔 С мониторингом: <code>{_fmt_n(mon_count)}</code> ({_pct(mon_count)})\n"
+        f"💎 Платных: <code>{_fmt_n(paid)}</code> ({_pct(paid)})\n\n"
+        f"📊 <b>Среднее на пользователя:</b>\n"
+        f"• Поисков в день: <code>{avg_per_day}</code>\n"
+        f"• Дней активности: <code>{avg_days}</code>"
+    )
+
+
+def _admin_users_text() -> str:
+    users, events, mon_count, subs = _admin_collect()
+    # топ по поискам
+    by_searches = sorted(users.items(), key=lambda kv: kv[1].get("searches", 0), reverse=True)
+    lines = ["👤 <b>Топ-10 активных:</b>"]
+    any_top = False
+    for i, (uid, u) in enumerate(by_searches[:10], 1):
+        sc = u.get("searches", 0)
+        if sc <= 0:
+            continue
+        any_top = True
+        lines.append(f"{i}. {_uname(users, uid)} — {_fmt_n(sc)} поисков")
+    if not any_top:
+        lines.append("Нет данных")
+    # последние подписки
+    lines.append("\n💎 <b>Последние 5 подписок:</b>")
+    if subs:
+        _s = sorted(subs, key=lambda x: x[1].get("subscription_start", 0), reverse=True)[:5]
+        for uid, s in _s:
+            lines.append(f"{_uname(users, uid)} — {s.get('subscription_type','?')}")
+    else:
+        lines.append("Нет данных")
+    # последние новые
+    lines.append("\n🆕 <b>Последние 5 новых:</b>")
+    by_new = sorted(users.items(), key=lambda kv: kv[1].get("first_seen", 0), reverse=True)[:5]
+    if by_new:
+        for uid, u in by_new:
+            fs = _msk_date(u.get("first_seen", 0))
+            when = datetime.datetime.fromtimestamp(u.get("first_seen", 0), _MSK).strftime("%d.%m %H:%M") if u.get("first_seen") else "?"
+            lines.append(f"{_uname(users, uid)} — {when}")
+    else:
+        lines.append("Нет данных")
+    return "\n".join(lines)
+
+
+def _admin_funnel_text() -> str:
+    users, events, mon_count, subs = _admin_collect()
+    now = time.time()
+    total = len(users)
+    # сделали поиск за 30 дн
+    searched = set()
+    for ev in events:
+        if ev.get("action") == "search" and ev.get("uid") and now - ev.get("ts", 0) <= 30 * 86400:
+            searched.add(ev["uid"])
+    did_search = len(searched)
+    paid = len(subs)
+
+    def _pct(x, base):
+        return f"{(x / base * 100):.1f}%" if base else "0.0%"
+
+    return (
+        f"📊 <b>Воронка (30 дней)</b>\n\n"
+        f"👤 Всего: <code>{_fmt_n(total)}</code> (100%)\n"
+        f"🔍 Сделали поиск: <code>{_fmt_n(did_search)}</code> ({_pct(did_search, total)})\n"
+        f"🔔 Вкл. мониторинг: <code>{_fmt_n(mon_count)}</code> ({_pct(mon_count, total)})\n"
+        f"💎 Подписка: <code>{_fmt_n(paid)}</code> ({_pct(paid, total)})\n\n"
+        f"⚠️ Конверсия в мониторинг: {_pct(mon_count, total)}\n"
+        f"⚠️ Конверсия в подписку: {_pct(paid, total)}\n"
+        f"⚠️ Из мониторинга в подписку: {_pct(paid, mon_count)}"
+    )
+
+
+def _admin_menu_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Сегодня", callback_data="adm|today"),
+         InlineKeyboardButton(text="📈 Неделя", callback_data="adm|week")],
+        [InlineKeyboardButton(text="📋 Общая", callback_data="adm|overall"),
+         InlineKeyboardButton(text="👤 Пользователи", callback_data="adm|users")],
+        [InlineKeyboardButton(text="🔄 Воронка", callback_data="adm|funnel"),
+         InlineKeyboardButton(text="📎 Экспорт", callback_data="adm|export")],
+    ])
+
+
+def _admin_refresh_kb(kind: str) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(text="🔄 Обновить", callback_data=f"adm|{kind}")]]
+    if kind == "users":
+        rows.append([InlineKeyboardButton(text="📎 Экспорт всех", callback_data="adm|export")])
+    rows.append([InlineKeyboardButton(text="⬅ Назад", callback_data="adm|menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _admin_export_csv() -> str:
+    """Выгружает пользователей в CSV, возвращает путь к файлу."""
+    import csv as _csv, tempfile as _tf
+    users, events, mon_count, subs = _admin_collect()
+    path = os.path.join(_tf.gettempdir(), "users_export.csv")
+    with open(path, "w", encoding="utf-8-sig", newline="") as f:
+        w = _csv.writer(f)
+        w.writerow(["user_id", "username", "first_seen", "last_seen", "searches", "region"])
+        for uid, u in users.items():
+            fs = datetime.datetime.fromtimestamp(u.get("first_seen", 0), _MSK).strftime("%Y-%m-%d %H:%M") if u.get("first_seen") else ""
+            ls = datetime.datetime.fromtimestamp(u.get("last_seen", 0), _MSK).strftime("%Y-%m-%d %H:%M") if u.get("last_seen") else ""
+            w.writerow([uid, u.get("username", ""), fs, ls, u.get("searches", 0), u.get("region", "")])
+    return path
+
+
+_ADMIN_BUILDERS = {
+    "today": _admin_today_text,
+    "week": _admin_week_text,
+    "overall": _admin_overall_text,
+    "users": _admin_users_text,
+    "funnel": _admin_funnel_text,
+}
+
+
+@dp.message(Command("admin"))
+@dp.message(F.text == "📊 Статистика")
+async def cmd_admin(msg: Message):
+    if msg.from_user.id not in ADMIN_IDS:
+        return  # не-админам ничего не показываем
+    await msg.answer("📊 <b>Админ-статистика</b>\nВыбери раздел:",
+                     parse_mode="HTML", reply_markup=_admin_menu_kb())
+
+
+@dp.callback_query(F.data.startswith("adm|"))
+async def cb_admin(cb: CallbackQuery):
+    if cb.from_user.id not in ADMIN_IDS:
+        await cb.answer("Только для администраторов", show_alert=True)
+        return
+    kind = cb.data.split("|", 1)[1]
+    try:
+        if kind == "menu":
+            await cb.message.edit_text("📊 <b>Админ-статистика</b>\nВыбери раздел:",
+                                       parse_mode="HTML", reply_markup=_admin_menu_kb())
+            await cb.answer()
+            return
+        if kind == "export":
+            await cb.answer("Готовлю файл…")
+            path = await asyncio.get_running_loop().run_in_executor(None, _admin_export_csv)
+            from aiogram.types import FSInputFile
+            await cb.message.answer_document(FSInputFile(path, filename="users_export.csv"),
+                                             caption="📎 Экспорт пользователей")
+            return
+        builder = _ADMIN_BUILDERS.get(kind)
+        if not builder:
+            await cb.answer()
+            return
+        text = await asyncio.get_running_loop().run_in_executor(None, builder)
+        await cb.message.edit_text(text, parse_mode="HTML", reply_markup=_admin_refresh_kb(kind))
+        await cb.answer("Обновлено")
+    except Exception as e:
+        # Если текст не изменился — Telegram кидает ошибку, гасим
+        if "message is not modified" in str(e).lower():
+            await cb.answer("Без изменений")
+        else:
+            await cb.answer(f"Ошибка: {str(e)[:100]}", show_alert=True)
+
+
+async def notify_admins_subscription(uid: int, username: str, plan: str, amount: int):
+    """Мгновенное уведомление админам о новой подписке. Вызывать при оплате."""
+    analytics.track("subscription", uid=uid, username=username, plan=plan, amount=amount)
+    who = f"@{username}" if username else f"id{uid}"
+    txt = f"💎 {who} оформил {plan} за {_fmt_n(amount)}₽"
+    for aid in ADMIN_IDS:
+        try:
+            await bot.send_message(aid, txt)
+        except Exception:
+            pass
+
+
+async def _admin_report_scheduler():
+    """Ежедневно 09:00 МСК — отчёт «Сегодня»; по понедельникам — «Неделя».
+    Реализовано на asyncio (как остальные фоновые циклы бота), без apscheduler."""
+    await asyncio.sleep(30)
+    _last_sent_date = None
+    while True:
+        try:
+            now = datetime.datetime.now(_MSK)
+            if now.hour == 9 and _last_sent_date != now.date():
+                _last_sent_date = now.date()
+                loop = asyncio.get_running_loop()
+                today_txt = await loop.run_in_executor(None, _admin_today_text)
+                for aid in ADMIN_IDS:
+                    try:
+                        await bot.send_message(aid, "⏰ Ежедневный отчёт\n\n" + today_txt, parse_mode="HTML")
+                    except Exception:
+                        pass
+                if now.weekday() == 0:  # понедельник
+                    week_txt = await loop.run_in_executor(None, _admin_week_text)
+                    for aid in ADMIN_IDS:
+                        try:
+                            await bot.send_message(aid, "📅 Недельный отчёт\n\n" + week_txt, parse_mode="HTML")
+                        except Exception:
+                            pass
+        except Exception as e:
+            print(f"  [admin-scheduler] {str(e)[:80]}")
+        await asyncio.sleep(300)  # проверяем каждые 5 минут
+
+
 @dp.message(Command("stats"))
 async def cmd_stats(msg: Message):
     if msg.from_user.id not in ADMIN_IDS:
@@ -7590,6 +7971,7 @@ async def cb_notify_toggle(cb: CallbackQuery):
     s["monitor_enabled"] = enabled
     save_settings(uid, s)
     if enabled:
+        analytics.track("monitor_on", uid=uid, username=cb.from_user.username)
         _start_monitor(uid)
         region_name = REGIONS.get(s.get("region", ""), s.get("region", ""))
         # Сеем seen текущим каталогом региона: чтобы НЕ завалить пользователя
@@ -11042,6 +11424,8 @@ async def main():
     # Push-уведомления — раз в 2-3 дня всем пользователям
     loop.create_task(_push_notification_loop())
     print("  [push] цикл уведомлений запущен (интервал ~2.5 дня)")
+    loop.create_task(_admin_report_scheduler())
+    print("  [admin] планировщик отчётов запущен (09:00 МСК)")
     # Прогрев кеша бесплатных прокси — тестирует их против Авито и кеширует рабочие
     loop.create_task(_proxy_warmup_loop())
     print("  [прокси-прогрев] запущен фоновый прогрев кеша прокси")

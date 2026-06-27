@@ -85,6 +85,18 @@ def _update_user(uid: int, action: str, username: str | None, fields: dict):
         pass
 
 
+# ── Публичные аксессоры (для админ-раздела бота) ────────────────
+
+def read_events() -> list[dict]:
+    """Все события трекинга (для админ-статистики)."""
+    return _read_events()
+
+
+def load_users() -> dict:
+    """Профили пользователей {uid: {...}} (для админ-статистики)."""
+    return _load_users()
+
+
 # ── Агрегация ───────────────────────────────────────────────────
 
 def _read_events() -> list[dict]:
