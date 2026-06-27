@@ -2927,22 +2927,24 @@ AVITO_SLUGS = {
 }
 
 # ID локаций для Авито API
+# ВНИМАНИЕ: ID проверены через www.avito.ru/web/1/slocations (2026-06).
+# Старые значения были почти все неверными → Авито возвращал 0 по этим городам.
 AVITO_LOCATION_IDS = {
-    "ekaterinburg": 621940,
+    "ekaterinburg": 654070,
     "moscow":       637640,
-    "spb":          638582,
-    "novosibirsk":  661122,
-    "kazan":        621133,
-    "chelyabinsk":  1282,
-    "ufa":          1281,
-    "krasnodar":    13579,
-    "omsk":         665066,
-    "tyumen":       641900,
-    "perm":         656049,
-    "krasnoyarsk":  641901,
-    "voronezh":     621890,
-    "samara":       621540,
-    "rostov":       621900,
+    "spb":          653240,
+    "novosibirsk":  641780,
+    "kazan":        650400,
+    "chelyabinsk":  661420,
+    "ufa":          646600,
+    "krasnodar":    633540,
+    "omsk":         642320,
+    "tyumen":       659020,
+    "perm":         644200,
+    "krasnoyarsk":  635320,
+    "voronezh":     625810,
+    "samara":       653040,
+    "rostov":       652000,
 }
 
 
@@ -6994,9 +6996,11 @@ async def cmd_avito_debug(msg: Message):
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "Accept": "application/json", "Accept-Language": "ru-RU,ru;q=0.9",
             "x-requested-with": "XMLHttpRequest",
-            "Referer": "https://www.avito.ru/moskva/avtomobili",
+            "Referer": "https://www.avito.ru/ekaterinburg/avtomobili",
         }
-        _web_params = {"categoryId": 9, "locationId": 637640, "page": 1, "owner": 1, "pmax": 300000}
+        # Тестируем реальный городской locationId (Екатеринбург), а не Москву —
+        # иначе debug маскирует ошибки в ID конкретных городов.
+        _web_params = {"categoryId": 9, "locationId": AVITO_LOCATION_IDS.get("ekaterinburg", 654070), "page": 1, "owner": 1, "pmax": 300000}
         for _wtag, _wpx in ([("прокси", _avito_proxies())] if AVITO_PROXIES else []) + [("напрямую", None)]:
             if _avito_ok:
                 break
