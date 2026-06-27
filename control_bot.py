@@ -9203,14 +9203,21 @@ async def do_search_for_user(uid: int, reply_to):
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
         "tg":     lambda: scrape_tg_channels(region, pmin, pmax),
     }
-    # Рыночную цену вычисляем из результатов основного поиска (Авито+Дром+Auto.ru),
-    # а НЕ отдельным скрейпом Авито — иначе два запроса к одному прокси-IP
-    # рейт-лимитят друг друга (429) и поиск идёт вдвое дольше.
-    _avito_ref_fut = None
-    # Запускаем ВСЕ площадки всегда, независимо от настроек пользователя
-    src_keys = list(scraper_map.keys())
+    # Ищем ТОЛЬКО выбранные пользователем площадки.
+    src_keys = [src for src in enabled_sources if src in scraper_map]
+    if not src_keys:
+        src_keys = list(scraper_map.keys())  # подстраховка: если выбор пуст — все
     futures = [loop.run_in_executor(None, scraper_map[src]) for src in src_keys]
-    all_futs = futures
+
+    # Рынок ВСЕГДА сравниваем с ценами Авито. Если Авито выбран — его результаты
+    # и так станут эталоном (ниже). Если НЕ выбран — отдельный скрейп Авито только
+    # для эталона рынка (конфликта IP нет, т.к. основной поиск Авито не трогает).
+    _avito_ref_fut = None
+    if "avito" not in src_keys:
+        _avito_ref_fut = loop.run_in_executor(
+            None, lambda: scrape_avito(region, pages=3, price_min=pmin, price_max=pmax)
+        )
+    all_futs = futures + ([_avito_ref_fut] if _avito_ref_fut else [])
     done, pending = await asyncio.wait(all_futs, timeout=70)
     if pending:
         for f in pending:
@@ -9427,20 +9434,35 @@ async def do_search_for_user(uid: int, reply_to):
                     pass
         await asyncio.gather(*[_fetch_price(it) for it in no_price[:5]])
 
-    # Эталон рынка — из результатов основного поиска (Авито + Дром + Auto.ru).
-    # rank_by_market_price группирует по марке+модели+году, поэтому медиана
-    # считается корректно внутри каждой группы даже в пределах бюджета.
-    _ref_src = [i for i in items if i.get("source") in ("avito", "drom", "autoru")]
-    if _ref_src:
-        import copy as _copy
-        _ref_copies = [_copy.copy(i) for i in _ref_src]
+    # Эталон рынка — ВСЕГДА цены Авито (требование: сравнивать с рынком Авито).
+    # Авито-объявления берём из основного поиска (если Авито выбран) либо из
+    # отдельного эталонного скрейпа (если Авито не выбран). rank_by_market_price
+    # группирует по марке+модели+году → медиана корректна даже в пределах бюджета.
+    import copy as _copy
+    _avito_ref_items = [i for i in items if i.get("source") == "avito"]
+    if not _avito_ref_items and _avito_ref_fut is not None and _avito_ref_fut in done:
+        try:
+            _avito_ref_items = _avito_ref_fut.result() or []
+        except Exception as _e:
+            print(f"  [рынок] Авито-эталон ошибка: {_e}")
+            _avito_ref_items = []
+    if _avito_ref_items:
+        _ref_copies = [_copy.copy(i) for i in _avito_ref_items]
         for _rc in _ref_copies:
             _rc["_market_ref_only"] = True
         items = items + _ref_copies
-        _n_av = sum(1 for i in _ref_src if i.get("source") == "avito")
-        print(f"  [рынок] эталон: {len(_ref_copies)} записей (Авито={_n_av}, Дром+Auto.ru={len(_ref_copies)-_n_av})")
+        print(f"  [рынок] Авито-эталон: {len(_ref_copies)} записей для медианы цен")
     else:
-        print(f"  [рынок] нет эталона — рыночная цена не будет вычислена")
+        # Авито недоступен — запасной эталон Дром+Auto.ru, чтобы рынок всё же был
+        _fallback = [i for i in items if i.get("source") in ("drom", "autoru")]
+        if _fallback:
+            _ref_copies = [_copy.copy(i) for i in _fallback]
+            for _rc in _ref_copies:
+                _rc["_market_ref_only"] = True
+            items = items + _ref_copies
+            print(f"  [рынок] запасной эталон Дром+Auto.ru: {len(_ref_copies)} (Авито недоступен)")
+        else:
+            print(f"  [рынок] нет эталона — рыночная цена не будет вычислена")
 
     # seen хранит нормализованные URL — сравниваем тоже по нормализованным
     seen_norm = {_norm_url(u) for u in seen}
