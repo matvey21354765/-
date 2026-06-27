@@ -7687,7 +7687,7 @@ def _admin_menu_kb() -> InlineKeyboardMarkup:
 
 
 def _admin_refresh_kb(kind: str) -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(text="🔄 Обновить", callback_data=f"adm|{kind}")]]
+    rows = []
     if kind == "users":
         rows.append([InlineKeyboardButton(text="📎 Экспорт всех", callback_data="adm|export")])
     rows.append([InlineKeyboardButton(text="⬅ Назад", callback_data="adm|menu")])
