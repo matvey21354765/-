@@ -5815,17 +5815,17 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
     # Параллельные запросы через один IP = мгновенный 429.
     # Остановиться при первом методе давшем объявления.
     if _use_proxy:
-        # Страница 1 — пробуем методы по очереди пока не найдём работающий.
-        # webJSON первым — JSON-каталог Авито без Cloudflare/JS, 1 запрос/страница.
-        # mobileAPI/jsonAPI/xhr — резервные JSON-эндпоинты. Playwright — последний резерв.
-        _p1_methods = [_try_avito_web_json, _try_avito_mobile_api, _try_avito_json_api,
-                       _try_avito_xhr, _try_web_html, _try_mobile_site, _try_avito_rss,
-                       _try_playwright, _try_yandex_snippets, _try_free_proxies,
-                       _try_avito_lite, _try_cffi_web]
+        # ТОЛЬКО быстрые JSON-методы. Каждый = 1 запрос, ~1-2с.
+        # HTML/Playwright методы выброшены: они медленные (25-30с), требуют JS
+        # (отдают Cloudflare-скелет) и детектятся Авито как бот. Через прокси
+        # они только жгут IP и время. Если JSON-методы не прошли (IP в 429) —
+        # быстро выходим и показываем Дром/ВК/TG, а не ждём 55с впустую.
+        _p1_methods = [_try_avito_web_json, _try_avito_mobile_api,
+                       _try_avito_json_api, _try_avito_xhr]
         # Доп. страницы добавим тем же методом что сработал
         tasks = [(m, 1) for m in _p1_methods]
         _cap = 300
-        _deadline_s = 55
+        _deadline_s = 25
     else:
         tasks = [(m, 1) for m in all_methods]
         _cap = 40
