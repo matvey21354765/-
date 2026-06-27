@@ -2484,7 +2484,7 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
         _ddg_fut = _dis_ex.submit(_ddg_tg_posts)
         # Параллельно парсим seed-каналы
         with _TPE_TG(max_workers=10) as _ch_ex:
-            for ch_batch in _ch_ex.map(_parse_channel, _seed_channels, timeout=30):
+            for ch_batch in _ch_ex.map(_parse_channel, _seed_channels, timeout=18):
                 if ch_batch:
                     results.extend(ch_batch)
                     print(f"  [TG seed] {len(ch_batch)} объявлений")
@@ -2502,10 +2502,10 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
             pass
 
     # Парсим обнаруженные каналы
-    new_chs = [c for c in discovered if c not in _seed_channels and c not in _skip_tg][:25]
+    new_chs = [c for c in discovered if c not in _seed_channels and c not in _skip_tg][:15]
     if new_chs:
         with _TPE_TG(max_workers=10) as _ch_ex2:
-            for ch_batch in _ch_ex2.map(_parse_channel, new_chs, timeout=30):
+            for ch_batch in _ch_ex2.map(_parse_channel, new_chs, timeout=16):
                 if ch_batch:
                     results.extend(ch_batch)
 
@@ -2796,8 +2796,8 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                 pass
             return local
 
-        with _TPE_VK(max_workers=6) as _nfex:
-            for batch_nf in _nfex.map(_nf_one, _nf_queries, timeout=40):
+        with _TPE_VK(max_workers=8) as _nfex:
+            for batch_nf in _nfex.map(_nf_one, _nf_queries, timeout=20):
                 for item in (batch_nf or []):
                     if item["url"] not in _nf_seen:
                         _nf_seen.add(item["url"])
@@ -2815,7 +2815,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
             base["access_token"] = vk_token
             search_p["access_token"] = vk_token
         try:
-            rg = _vk_api.get(f"{VK_API_URL}/wall.get", params=base, timeout=10)
+            rg = _vk_api.get(f"{VK_API_URL}/wall.get", params=base, timeout=6)
             resp = rg.json().get("response", {})
             for post in (resp.get("items", []) if isinstance(resp, dict) else []):
                 item = _vk_make_item(post, gname)
@@ -2824,7 +2824,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
         except Exception:
             pass
         try:
-            rw = _vk_api.get(f"{VK_API_URL}/wall.search", params=search_p, timeout=10)
+            rw = _vk_api.get(f"{VK_API_URL}/wall.search", params=search_p, timeout=6)
             resp2 = rw.json().get("response", {})
             for post in (resp2.get("items", []) if isinstance(resp2, dict) else []):
                 item = _vk_make_item(post, gname)
@@ -2838,7 +2838,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
     _wall_seen: set[str] = {it["url"] for it in results}  # уже найденные через newsfeed
     if wall_groups:
         with _TPE_VK(max_workers=12) as _wex:
-            for posts in _wex.map(_scrape_wall, wall_groups, timeout=30):
+            for posts in _wex.map(_scrape_wall, wall_groups, timeout=16):
                 for item in (posts or []):
                     if item["url"] not in _wall_seen:
                         _wall_seen.add(item["url"])
@@ -3034,7 +3034,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
         # utils.resolveScreenName работает БЕЗ токена — используем прямую сессию
         try:
             r = _vk_api.get(f"{VK_API_URL}/utils.resolveScreenName",
-                params={"screen_name": slug, "v": "5.131"}, timeout=6)
+                params={"screen_name": slug, "v": "5.131"}, timeout=4)
             obj = r.json().get("response", False)
             if obj and isinstance(obj, dict) and obj.get("type") in ("group", "page", "public"):
                 gid = obj.get("object_id")
@@ -3042,22 +3042,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                     _found_group_ids[gid] = slug
         except Exception:
             pass
-        # Если resolveScreenName не дал ID — пробуем через redirect URL
-        if not gid:
-            try:
-                _mob = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 Mobile Safari/537.36"
-                r2 = session.get(f"https://m.vk.com/{slug}", timeout=6,
-                    headers={"User-Agent": _mob}, allow_redirects=True)
-                if r2.status_code == 200 and ("wi_body" in r2.text or "wall_item" in r2.text or "data-post-id" in r2.text):
-                    for _gm in re.finditer(r'"group_id"\s*:\s*(\d+)|/club(\d+)|data-group-id="(\d+)"', r2.text):
-                        _gid_val = int(_gm.group(1) or _gm.group(2) or _gm.group(3) or 0)
-                        if _gid_val:
-                            gid = _gid_val
-                            if gid not in _found_group_ids:
-                                _found_group_ids[gid] = slug
-                            break
-            except Exception:
-                pass
+        # resolveScreenName не дал ID — пропускаем (m.vk.com-фолбэк убран ради скорости)
         if not gid:
             return []
         return _scrape_wall((gid, slug))
@@ -3065,7 +3050,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
     if _seed_slugs:
         _already_scraped = {gid for gid, _ in wall_groups}
         with _TPE_VK(max_workers=15) as _sex:
-            for batch_s in _sex.map(_resolve_and_scrape, _seed_slugs[:50], timeout=35):
+            for batch_s in _sex.map(_resolve_and_scrape, _seed_slugs[:24], timeout=18):
                 for item in (batch_s or []):
                     if item["url"] not in _wall_seen:
                         _wall_seen.add(item["url"])
@@ -9955,7 +9940,7 @@ async def do_search_for_user(uid: int, reply_to):
             None, lambda: scrape_avito(region, pages=3, price_min=pmin, price_max=pmax)
         )
     all_futs = futures + ([_avito_ref_fut] if _avito_ref_fut else [])
-    done, pending = await asyncio.wait(all_futs, timeout=70)
+    done, pending = await asyncio.wait(all_futs, timeout=55)
     if pending:
         for f in pending:
             f.cancel()
