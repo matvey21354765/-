@@ -545,6 +545,12 @@ def in_price_range(item: dict, price_min: int, price_max: int) -> bool:
         return False
     if year >= 2020 and price_max < 400_000:
         return False
+    if year >= 2018 and price_max < 250_000:
+        return False
+    if year >= 2015 and price_max < 130_000:
+        return False
+    if year >= 2012 and price_max < 80_000:
+        return False
     # Пропускаем как кандидата: реальная цена нужна, но лучше показать
     # объявление с "—", чем потерять реальную выгодную машину.
     return True
@@ -2615,6 +2621,17 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                     return val
             except Exception:
                 pass
+        # 0b. Цена с разделителями тысяч точка/запятая: "Цена:1.800.000", "55,000₽".
+        #     Группы по 3 цифры через . или , (не путать с "1.6" — там 1 цифра).
+        _sep_re = r'(\d{1,3}(?:[.,]\d{3})+)'
+        for m in re.finditer(rf'(?:цен[аеуы]|стоимост|прошу|за)\s*[:\-]?\s*{_sep_re}', _tl):
+            val = int(re.sub(r'\D', '', m.group(1)))
+            if 30_000 <= val <= 50_000_000:
+                return val
+        for m in re.finditer(rf'{_sep_re}\s*(?:₽|руб|р\.)', text):
+            val = int(re.sub(r'\D', '', m.group(1)))
+            if 30_000 <= val <= 50_000_000:
+                return val
         # Сначала ищем с явным символом валюты
         for m in _vk_price_re.finditer(text):
             raw = re.sub(r"\D", "", m.group(1))
