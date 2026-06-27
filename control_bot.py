@@ -5307,30 +5307,37 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             "x-requested-with": "XMLHttpRequest",
             "Referer": f"https://www.avito.ru/{slug}/avtomobili",
         }
-        # Прокси первым (свежий IP), затем напрямую (для js/items датацентр-IP часто проходит)
+        # Прокси первым (свежий IP), затем напрямую (для js/items датацентр-IP часто проходит).
+        # При firewall/429 на прокси — меняем IP и пробуем прокси ещё раз (до 2 ротаций).
         _proxy_order = []
         if AVITO_PROXIES and not _proxy_auth_failed:
-            _proxy_order.append(_avito_proxies())
-        _proxy_order.append(None)  # напрямую
-        for _px in _proxy_order:
-            _tag = "напрямую" if _px is None else "прокси"
+            _proxy_order.append(("прокси", _avito_proxies()))
+            _proxy_order.append(("прокси-rot1", "ROTATE"))  # сменить IP и повторить
+            _proxy_order.append(("прокси-rot2", "ROTATE"))
+        _proxy_order.append(("напрямую", None))  # напрямую (датацентр-IP)
+        for _tag, _px in _proxy_order:
+            # Маркер ROTATE — сменить IP прокси и использовать его же
+            if _px == "ROTATE":
+                if not _rotate_proxy_ip(min_interval=0):
+                    continue  # ротация недоступна — пропускаем
+                _px = _avito_proxies()
             try:
                 r = _req.get(
                     "https://www.avito.ru/web/1/js/items",
                     params=_params, headers=_hdrs, timeout=20,
                     proxies=_px or {},
                 )
-                if r.status_code != 200:
+                if r.status_code != 200 and r.status_code not in (403, 429):
                     print(f"  [Авито webJSON {_tag}] стр.{p}: HTTP {r.status_code}")
                     continue
                 try:
                     data = r.json()
                 except Exception:
-                    print(f"  [Авито webJSON {_tag}] стр.{p}: не JSON ({len(r.text):,}б)")
+                    print(f"  [Авито webJSON {_tag}] стр.{p}: HTTP {r.status_code}, не JSON ({len(r.text):,}б)")
                     continue
-                # too-many-requests / firewall
+                # too-many-requests / firewall — IP в лимите, пробуем следующий (ротацию)
                 if isinstance(data, dict) and ("too-many-requests" in data or "firewall" in str(data)[:200]):
-                    print(f"  [Авито webJSON {_tag}] стр.{p}: firewall (IP лимит)")
+                    print(f"  [Авито webJSON {_tag}] стр.{p}: firewall (IP лимит) → смена IP")
                     continue
                 raw = (data.get("catalog", {}) or {}).get("items", [])
                 if not raw:
@@ -6182,9 +6189,10 @@ def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max
     today = datetime.date.today()
 
     # Перед сетевым скрейпом (кэш-промах) меняем IP прокси на свежий, чтобы
-    # обойти rate-limit Авито (429). Сработает только если задана ссылка ротации.
+    # обойти rate-limit Авито (429). min_interval=8с — каждый поиск стартует
+    # со свежим IP, но защита от слишком частой ротации (лимиты провайдера).
     if AVITO_PROXIES and not _proxy_auth_failed:
-        _rotate_proxy_ip()
+        _rotate_proxy_ip(min_interval=8)
 
     try:
         import requests as _req
