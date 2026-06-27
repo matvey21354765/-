@@ -2012,6 +2012,11 @@ _SOCIAL_REJECT_KEYWORDS = [
     # Сельхоз / животноводство
     "трактор", "комбайн", "сенокосилк", "культиватор",
     "корова", "свинья", "поросята", "птица", "куриц",
+    # Оружие (карабины, ружья, патроны) — НЕ авто, но тоже пишут год выпуска и продам
+    "карабин", "сайга", "ружьё", "ружье", "ружья", "винтовк", "оружие", "оружия",
+    "патрон", "калибр", "кал.", "нарез", "ствол", "охотнич", "отстрел",
+    "пистолет", "травматик", "пневматик", "глушител", "дтк ", "олрр",
+    "7,62", "5,45", "12х76", "16 калибр", "охотбилет", "разрешение на оружие",
 ]
 
 def _is_car_sale_social(text: str) -> bool:
@@ -9492,14 +9497,35 @@ async def do_search_for_user(uid: int, reply_to):
     suitable = _filter_by_category(suitable, category, brand)
     print(f"  [фильтр] после category({category}/{brand}): {len(suitable)}")
 
-    # Финальная дедупликация suitable (могут быть дубли если разные источники нашли одно)
+    # Финальная дедупликация suitable (могут быть дубли если разные источники нашли одно).
+    # Дедуп по URL И по сигнатуре содержимого (телефон / нормализованный текст) —
+    # один и тот же пост перепубликовывают в разных группах с разными URL.
+    def _content_sig(it: dict) -> str:
+        """Сигнатура объявления: телефон (если есть) или нормализованный текст."""
+        txt = (it.get("description", "") or "") + " " + (it.get("title", "") or "")
+        # Телефон — самый надёжный признак одного продавца/объявления
+        digits = re.sub(r"\D", "", txt)
+        _phones = re.findall(r"[78]\d{10}", digits)
+        if _phones:
+            return "tel:" + _phones[0][-10:]
+        # Иначе — нормализованный текст (буквы+цифры, первые 80 симв)
+        norm = re.sub(r"[^a-zа-я0-9]", "", txt.lower())
+        return "txt:" + norm[:80] if len(norm) >= 20 else ""
+
     _seen_final: set[str] = set()
+    _seen_sig: set[str] = set()
     _deduped_suitable: list[dict] = []
     for _it in suitable:
         _u = _norm_url(_it.get("url", ""))
-        if _u and _u not in _seen_final:
-            _seen_final.add(_u)
-            _deduped_suitable.append(_it)
+        if not _u or _u in _seen_final:
+            continue
+        _sig = _content_sig(_it)
+        if _sig and _sig in _seen_sig:
+            continue  # дубль по содержимому (репост в другой группе)
+        _seen_final.add(_u)
+        if _sig:
+            _seen_sig.add(_sig)
+        _deduped_suitable.append(_it)
     suitable = _deduped_suitable
     print(f"  [фильтр] после финальной дедупликации: {len(suitable)}")
 
