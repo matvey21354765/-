@@ -7773,6 +7773,97 @@ async def notify_admins_subscription(uid: int, username: str, plan: str, amount:
             pass
 
 
+# ── Рассылка всем пользователям (только админ) ──────────────────
+_pending_broadcast: dict[int, dict] = {}  # admin_uid -> {"text":..., "from_chat":..., "msg_id":...}
+
+
+def _all_user_ids() -> list[int]:
+    """Список всех uid пользователей бота (из папок в USERS_DIR)."""
+    ids = []
+    if USERS_DIR.exists():
+        for p in USERS_DIR.iterdir():
+            if p.is_dir() and p.name.isdigit():
+                ids.append(int(p.name))
+    return ids
+
+
+@dp.message(Command("broadcast"))
+async def cmd_broadcast(msg: Message):
+    if msg.from_user.id not in ADMIN_IDS:
+        return
+    total = len(_all_user_ids())
+    # Вариант 1: ответом на сообщение (текст/фото/что угодно) → скопируем его всем
+    if msg.reply_to_message:
+        _pending_broadcast[msg.from_user.id] = {
+            "from_chat": msg.reply_to_message.chat.id,
+            "msg_id": msg.reply_to_message.message_id,
+        }
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text=f"📢 Отправить всем ({total})", callback_data="bcast|go"),
+            InlineKeyboardButton(text="❌ Отмена", callback_data="bcast|cancel"),
+        ]])
+        await msg.answer(f"👆 Это сообщение будет разослано {total} пользователям. Отправляем?", reply_markup=kb)
+        return
+    # Вариант 2: текст после команды
+    text = (msg.text or "").split(maxsplit=1)
+    if len(text) < 2 or not text[1].strip():
+        await msg.answer(
+            "📢 *Рассылка*\n\n"
+            "Способ 1: `/broadcast текст сообщения`\n"
+            "Способ 2: ответь командой `/broadcast` на любое сообщение "
+            "(с фото/форматированием) — оно разошлётся как есть.",
+            parse_mode="Markdown",
+        )
+        return
+    _pending_broadcast[msg.from_user.id] = {"text": text[1].strip()}
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=f"📢 Отправить всем ({total})", callback_data="bcast|go"),
+        InlineKeyboardButton(text="❌ Отмена", callback_data="bcast|cancel"),
+    ]])
+    await msg.answer("📢 *Предпросмотр рассылки:*", parse_mode="Markdown")
+    await msg.answer(text[1].strip())
+    await msg.answer(f"Разослать это {total} пользователям?", reply_markup=kb)
+
+
+@dp.callback_query(F.data.startswith("bcast|"))
+async def cb_broadcast(cb: CallbackQuery):
+    if cb.from_user.id not in ADMIN_IDS:
+        await cb.answer("Только для администраторов", show_alert=True)
+        return
+    action = cb.data.split("|", 1)[1]
+    pend = _pending_broadcast.pop(cb.from_user.id, None)
+    if action == "cancel" or not pend:
+        await cb.message.edit_text("❌ Рассылка отменена.")
+        await cb.answer()
+        return
+    await cb.message.edit_text("📤 Рассылаю…")
+    await cb.answer()
+    uids = _all_user_ids()
+    sent = failed = blocked = 0
+    for uid in uids:
+        try:
+            if "msg_id" in pend:
+                await bot.copy_message(uid, pend["from_chat"], pend["msg_id"])
+            else:
+                await bot.send_message(uid, pend["text"])
+            sent += 1
+        except Exception as e:
+            es = str(e).lower()
+            if "blocked" in es or "deactivated" in es or "chat not found" in es:
+                blocked += 1
+            else:
+                failed += 1
+        await asyncio.sleep(0.05)  # ~20 сообщений/сек — в пределах лимитов Telegram
+    await bot.send_message(
+        cb.from_user.id,
+        f"✅ Рассылка завершена.\n\n"
+        f"📨 Доставлено: {_fmt_n(sent)}\n"
+        f"🚫 Заблокировали бота: {_fmt_n(blocked)}\n"
+        f"⚠️ Ошибок: {_fmt_n(failed)}\n"
+        f"👥 Всего: {_fmt_n(len(uids))}"
+    )
+
+
 async def _admin_report_scheduler():
     """Ежедневно 09:00 МСК — отчёт «Сегодня»; по понедельникам — «Неделя».
     Реализовано на asyncio (как остальные фоновые циклы бота), без apscheduler."""
