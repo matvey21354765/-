@@ -6134,7 +6134,9 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
         bucket = _avito_price_bucket(price_min, price_max)
         cache_key = f"{region}_{bucket}" + (f"_{brand}" if brand else "")
         _scrape_pmin, _scrape_pmax = price_min, price_max
-        _cache_ttl = 90 * 60  # 1.5 часа — чаще обновляем чтобы находить новые ниже рынка
+        # ⚡ Ранний доступ: в режиме мониторинга (sort_by_date) кэш всего 8 мин,
+        # чтобы новые объявления находились почти сразу. Обычный поиск — 90 мин.
+        _cache_ttl = 8 * 60 if sort_by_date else 90 * 60
     else:
         cache_key = region + (f"_{brand}" if brand else "")
         _scrape_pmin, _scrape_pmax = 0, 99_000_000
@@ -10195,7 +10197,7 @@ async def _global_monitor_loop():
 
             # Скрейпим только нужные (регион, источник) параллельно
             _src_scrapers = {
-                "avito":  lambda r: scrape_avito(r, pages=3, sort_by_date=False),
+                "avito":  lambda r: scrape_avito(r, pages=3, sort_by_date=True),  # ⚡ свежие первыми
                 "drom":   lambda r: scrape_drom(r, pages=3, price_min=0, price_max=99_000_000),
                 "autoru": lambda r: scrape_autoru(r, pages=3, price_min=0, price_max=99_000_000),
                 "vk":     lambda r: scrape_vk_groups(r, 0, 99_000_000),
