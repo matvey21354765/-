@@ -593,6 +593,42 @@ def _car_group_key(title: str) -> str:
     return f"{brand_model} {year}".strip()
 
 
+def _traffic_light(item: dict) -> str:
+    """🚦 Светофор выгодности/чистоты объявления (как у Haraba).
+    🟢 — выгодно и чисто; 🟡 — нейтрально; 🔴 — рискованно/дорого."""
+    pct = item.get("_savings_pct", 0)
+    is_junk = item.get("_is_junk")          # битый / не на ходу / на запчасти
+    is_dealer = item.get("_is_dealer")
+    has_market = bool(item.get("_market_price"))
+    # Красный: явный риск или заметно дороже рынка
+    if is_junk:
+        return "🔴"
+    if has_market and pct <= -10:
+        return "🔴"
+    # Зелёный: ощутимо дешевле рынка и без явных рисков
+    if has_market and pct >= 15 and not is_dealer:
+        return "🟢"
+    # Жёлтый: всё остальное (около рынка, небольшая скидка, дилер, нет рынка)
+    return "🟡"
+
+
+def _liquidity_note(item: dict) -> str:
+    """📊 Ликвидность модели: сколько таких в продаже и средний срок продажи."""
+    cnt = item.get("_liq_count", 0)
+    days = item.get("_liq_days", 0)
+    if cnt < 3:
+        return ""
+    parts = [f"в продаже ~{cnt}"]
+    if days and days > 0:
+        if days <= 14:
+            parts.append(f"продаётся быстро (~{days} дн.)")
+        elif days <= 45:
+            parts.append(f"средний срок ~{days} дн.")
+        else:
+            parts.append(f"продаётся долго (~{days} дн.)")
+    return " · ".join(parts)
+
+
 def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
                           avito_only_median: bool = False) -> list[dict]:
     """
@@ -9007,11 +9043,15 @@ async def send_batch(chat_id: int, uid: int, offset: int):
             mileage_str = f"  ·  🛣 {mileage:,} км".replace(",", " ")
 
         dealer_tag = " 🏢" if item.get("_is_dealer") else ""
+        _light = _traffic_light(item)  # 🚦 светофор выгодности/чистоты
         caption = (
-            f"{source_tag} {item.get('title', '')}{hot_tag}{dealer_tag}\n"
+            f"{_light} {source_tag} {item.get('title', '')}{hot_tag}{dealer_tag}\n"
             f"💰 {price_line}{deal_line}\n"
             f"📅 {days_str}{mileage_str}"
         )
+        _liq = _liquidity_note(item)  # 📊 ликвидность модели
+        if _liq:
+            caption += f"\n📊 {_liq}"
         if not item.get("description") and item.get("title"):
             item["description"] = _avito_desc_from_title(item["title"], item.get("mileage", 0))
         if item.get("description"):
@@ -9541,6 +9581,27 @@ async def do_search_for_user(uid: int, reply_to):
         _ref_src = "Авито" if _n_av_ref >= 5 else "Дром+Auto.ru"
         print(f"  [рынок] {_ref_src}-референс: {len(_ref_items)} объявлений → считаем рыночную цену")
         suitable = rank_by_market_price(suitable, ref_items=_ref_items, avito_only_median=True)
+        # 📊 Ликвидность: сколько таких в продаже и средний срок продажи (по эталону)
+        try:
+            from statistics import median as _median
+            _liq_cnt: dict[str, int] = {}
+            _liq_days: dict[str, list] = {}
+            for _r in _ref_items:
+                _k = _car_group_key(_r.get("title", ""))
+                if not _k:
+                    continue
+                _liq_cnt[_k] = _liq_cnt.get(_k, 0) + 1
+                _d = _r.get("_days_on_site", 0)
+                if _d and _d > 0:
+                    _liq_days.setdefault(_k, []).append(_d)
+            for it in suitable:
+                _k = _car_group_key(it.get("title", ""))
+                if _k and _k in _liq_cnt:
+                    it["_liq_count"] = _liq_cnt[_k]
+                    if _liq_days.get(_k):
+                        it["_liq_days"] = int(_median(_liq_days[_k]))
+        except Exception as _le:
+            print(f"  [ликвидность] ошибка: {_le}")
     else:
         print(f"  [рынок] нет эталона — рыночная цена не считается, сортируем по дате/цене")
         pass
