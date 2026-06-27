@@ -3094,7 +3094,8 @@ def _avito_price_from_item(it: dict) -> tuple[str, int]:
         if depth > 5 or not isinstance(obj, dict):
             return "", 0
         # Текстовое значение цены — проверяем ПЕРВЫМ (сохраняем форматирование)
-        for text_key in ("valueText", "text", "label", "displayValue"):
+        # string/fullString — формат веб-JSON API Авито (/web/1/js/items)
+        for text_key in ("valueText", "text", "label", "displayValue", "fullString", "string"):
             t = obj.get(text_key)
             if t and isinstance(t, str):
                 digits = re.sub(r"[^\d]", "", t)
@@ -3122,8 +3123,11 @@ def _avito_price_from_item(it: dict) -> tuple[str, int]:
         if isinstance(info, (int, float)) and 10_000 < info < 99_000_000:
             return f"{int(info):,} ₽".replace(",", " "), int(info)
         if isinstance(info, dict):
-            # Сначала ищем valueText — самый надёжный источник цены
-            vt = info.get("valueText") or info.get("text") or info.get("displayValue") or ""
+            # Сначала ищем valueText — самый надёжный источник цены.
+            # fullString/string — формат веб-JSON API Авито (/web/1/js/items),
+            # напр. priceDetailed={"string":"191 000","fullString":"191 000 ₽"}
+            vt = (info.get("valueText") or info.get("text") or info.get("displayValue")
+                  or info.get("fullString") or info.get("string") or "")
             if vt and isinstance(vt, str):
                 digits = re.sub(r"[^\d]", "", vt)
                 if digits and 10_000 < int(digits) < 99_000_000:
@@ -5233,6 +5237,88 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             print(f"  [Playwright] стр.{p}: {str(e)[:120]}")
         return []
 
+    def _try_avito_web_json(p: int) -> list[dict]:
+        """ГЛАВНЫЙ метод: веб-JSON API Авито (www.avito.ru/web/1/js/items).
+
+        Возвращает структурированный JSON каталога (catalog.items) БЕЗ Cloudflare
+        и БЕЗ JS-рендеринга. Проверено эмпирически (2026-06): отдаёт полные данные
+        объявлений (title, priceDetailed, urlPath, images, location) даже с
+        датацентровых IP. Один запрос на страницу — не сжигает прокси-IP.
+
+        Параметры фильтра (проверено вживую):
+          categoryId=9 — автомобили
+          locationId   — числовой ID региона
+          owner=1      — только частные продавцы
+          pmin/pmax    — диапазон цены
+          s=104        — сортировка по дате (при sort_by_date)
+        """
+        try:
+            import requests as _req
+        except ImportError:
+            return []
+        _loc = AVITO_LOCATION_IDS.get(region, location_id)
+        _params: dict = {
+            "categoryId": 9,
+            "locationId": _loc,
+            "page": p,
+            "owner": 1,  # только частники
+        }
+        if price_min > 0:
+            _params["pmin"] = price_min
+        if price_max < 99_000_000:
+            _params["pmax"] = price_max
+        if sort_by_date:
+            _params["s"] = 104  # по дате (свежие первыми)
+        _hdrs = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept": "application/json",
+            "Accept-Language": "ru-RU,ru;q=0.9",
+            "x-requested-with": "XMLHttpRequest",
+            "Referer": f"https://www.avito.ru/{slug}/avtomobili",
+        }
+        # Прокси первым (свежий IP), затем напрямую (для js/items датацентр-IP часто проходит)
+        _proxy_order = []
+        if AVITO_PROXIES and not _proxy_auth_failed:
+            _proxy_order.append(_avito_proxies())
+        _proxy_order.append(None)  # напрямую
+        for _px in _proxy_order:
+            _tag = "напрямую" if _px is None else "прокси"
+            try:
+                r = _req.get(
+                    "https://www.avito.ru/web/1/js/items",
+                    params=_params, headers=_hdrs, timeout=20,
+                    proxies=_px or {},
+                )
+                if r.status_code != 200:
+                    print(f"  [Авито webJSON {_tag}] стр.{p}: HTTP {r.status_code}")
+                    continue
+                try:
+                    data = r.json()
+                except Exception:
+                    print(f"  [Авито webJSON {_tag}] стр.{p}: не JSON ({len(r.text):,}б)")
+                    continue
+                # too-many-requests / firewall
+                if isinstance(data, dict) and ("too-many-requests" in data or "firewall" in str(data)[:200]):
+                    print(f"  [Авито webJSON {_tag}] стр.{p}: firewall (IP лимит)")
+                    continue
+                raw = (data.get("catalog", {}) or {}).get("items", [])
+                if not raw:
+                    raw = _avito_find_items_in_json(data)
+                out: list[dict] = []
+                for it in raw:
+                    if not isinstance(it, dict) or not it.get("id"):
+                        continue
+                    parsed = _avito_item_from_json(it, today)
+                    if parsed:
+                        out.append(parsed)
+                if out:
+                    print(f"  [Авито webJSON {_tag}] стр.{p}: {len(out)} объявлений ✅ (в каталоге {data.get('count','?')})")
+                    return out
+                print(f"  [Авито webJSON {_tag}] стр.{p}: raw={len(raw)}, после фильтра=0")
+            except Exception as e:
+                print(f"  [Авито webJSON {_tag}] стр.{p}: {str(e)[:70]}")
+        return []
+
     def _try_avito_json_api(p: int) -> list[dict]:
         """Avito internal JSON listing endpoint — returns structured data without HTML parsing."""
         try:
@@ -5716,12 +5802,12 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
     # free_proxies даёт настоящую страницу Авито (десятки объявлений), DuckDuckGo —
     # ещё несколько. Запускаем ВСЁ параллельно и СЛИВАЕМ результаты, а не берём
     # первый ответивший метод (иначе теряем большие пачки, что приходят чуть позже).
-    _no_proxy_methods = [_try_playwright, _try_scraperapi_fast, _try_free_proxies, _try_yandex_snippets, _try_cffi_web, _try_curl_cffi, _try_cs_web, _try_mobile_site, _try_web_html, _try_avito_mobile_api, _try_avito_public_api, _try_avito_rss, _try_googlebot_ua, _try_avito_lite, _try_scraperapi, _try_avito_json_api]
+    # webJSON (/web/1/js/items) первым ВЕЗДЕ — главный рабочий метод (JSON, без JS/Cloudflare).
+    _no_proxy_methods = [_try_avito_web_json, _try_playwright, _try_scraperapi_fast, _try_free_proxies, _try_yandex_snippets, _try_cffi_web, _try_curl_cffi, _try_cs_web, _try_mobile_site, _try_web_html, _try_avito_mobile_api, _try_avito_public_api, _try_avito_rss, _try_googlebot_ua, _try_avito_lite, _try_scraperapi, _try_avito_json_api]
     _use_proxy = AVITO_PROXIES and not _proxy_auth_failed
     if _use_proxy:
         # Платный прокси (московский мобильный IP, Megafone/MTS).
-        # Приоритет: Playwright → mobileAPI → webHTML → mobile_site → RSS
-        all_methods = [_try_playwright, _try_avito_mobile_api, _try_web_html, _try_mobile_site, _try_avito_rss, _try_avito_json_api, _try_avito_xhr, _try_googlebot_ua, _try_avito_lite, _try_avito_public_api]
+        all_methods = [_try_avito_web_json, _try_avito_mobile_api, _try_web_html, _try_mobile_site, _try_avito_rss, _try_avito_json_api, _try_avito_xhr, _try_playwright, _try_googlebot_ua, _try_avito_lite, _try_avito_public_api]
     else:
         all_methods = _no_proxy_methods
     # При наличии прокси — пробуем методы ПОСЛЕДОВАТЕЛЬНО (не параллельно).
@@ -5729,11 +5815,12 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
     # Остановиться при первом методе давшем объявления.
     if _use_proxy:
         # Страница 1 — пробуем методы по очереди пока не найдём работающий.
-        # Мобильный API первым — JSON, не зависит от Cloudflare/JS, другой rate-limit.
-        # Playwright после — медленнее но обходит JS-challenge если API заблокирован.
-        _p1_methods = [_try_avito_mobile_api, _try_avito_json_api, _try_avito_xhr,
-                       _try_playwright, _try_web_html, _try_mobile_site, _try_avito_rss,
-                       _try_yandex_snippets, _try_free_proxies, _try_avito_lite, _try_cffi_web]
+        # webJSON первым — JSON-каталог Авито без Cloudflare/JS, 1 запрос/страница.
+        # mobileAPI/jsonAPI/xhr — резервные JSON-эндпоинты. Playwright — последний резерв.
+        _p1_methods = [_try_avito_web_json, _try_avito_mobile_api, _try_avito_json_api,
+                       _try_avito_xhr, _try_web_html, _try_mobile_site, _try_avito_rss,
+                       _try_playwright, _try_yandex_snippets, _try_free_proxies,
+                       _try_avito_lite, _try_cffi_web]
         # Доп. страницы добавим тем же методом что сработал
         tasks = [(m, 1) for m in _p1_methods]
         _cap = 300
@@ -6860,40 +6947,44 @@ async def cmd_avito_debug(msg: Message):
         else:
             out.append("🔀 Прокси: не настроен (PROXY_URL не задан)")
 
-        # 2. Мобильный API Авито — JSON, не зависит от Cloudflare/JS (главный метод)
+        # 2. ГЛАВНЫЙ метод: веб-JSON API Авито (/web/1/js/items) — структурированный
+        #    каталог без Cloudflare/JS. Сначала через прокси, потом напрямую.
         _avito_ok = False
-        if AVITO_PROXIES:
+        _web_hdrs = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept": "application/json", "Accept-Language": "ru-RU,ru;q=0.9",
+            "x-requested-with": "XMLHttpRequest",
+            "Referer": "https://www.avito.ru/moskva/avtomobili",
+        }
+        _web_params = {"categoryId": 9, "locationId": 637640, "page": 1, "owner": 1, "pmax": 300000}
+        for _wtag, _wpx in ([("прокси", _avito_proxies())] if AVITO_PROXIES else []) + [("напрямую", None)]:
+            if _avito_ok:
+                break
             try:
-                _mob_key = "af0deccbgcgidddjgnvljitntccdduijhdinfgjgfjir"
-                _mob_hdrs = {
-                    "User-Agent": "ru.avito.avitomobile/18.0 (Android 13; ru_RU)",
-                    "Accept": "application/json",
-                    "Accept-Language": "ru-RU,ru;q=0.9",
-                    "x-avito-app-version": "18.0.0",
-                }
-                _mob_params = {
-                    "locationId": 637640, "categoryId": 9,
-                    "page": 1, "limit": 30, "display": "list",
-                    "sortType": "101", "key": _mob_key,
-                }
-                _mob_r = _rq.get("https://m.avito.ru/api/16/items",
-                    params=_mob_params, headers=_mob_hdrs,
-                    proxies=_avito_proxies(), timeout=12)
-                _mob_data = _mob_r.json() if _mob_r.status_code == 200 else {}
-                _mob_items = ((_mob_data.get("result") or {}).get("items")
-                              or _mob_data.get("items") or [])
-                _mob_ok = len(_mob_items) > 0
-                out.append(f"📱 Мобильный API через прокси: HTTP {_mob_r.status_code}, items={len(_mob_items)} {'✅' if _mob_ok else '❌'}")
-                if _mob_ok:
-                    _avito_ok = True
-                    out.append(f"   → первое: {_mob_items[0].get('title','?')[:55]}")
-                elif _mob_r.status_code == 429:
-                    out.append(f"   ⏳ rate-limit 429 — подождите 5-10 мин")
-                elif _mob_r.status_code == 200 and not _mob_ok:
-                    out.append(f"   → ключи ответа: {list(_mob_data.keys())[:6]}")
-                    out.append(f"   → ответ: {_mob_r.text[:150]!r}")
+                _wr = _rq.get("https://www.avito.ru/web/1/js/items",
+                              params=_web_params, headers=_web_hdrs,
+                              proxies=_wpx or {}, timeout=18)
+                if _wr.status_code == 200:
+                    try:
+                        _wd = _wr.json()
+                    except Exception:
+                        _wd = {}
+                    _witems = [x for x in (_wd.get("catalog", {}) or {}).get("items", [])
+                               if isinstance(x, dict) and x.get("id")]
+                    if _witems:
+                        _avito_ok = True
+                        out.append(f"🟢 webJSON {_wtag}: HTTP 200, объявлений={len(_witems)} ✅ (каталог {_wd.get('count','?')})")
+                        out.append(f"   → первое: {_witems[0].get('title','?')[:50]} | {_witems[0].get('priceDetailed',{}).get('string','?')} ₽")
+                    elif "too-many-requests" in _wd:
+                        out.append(f"🟡 webJSON {_wtag}: firewall (IP лимит) — нужен свежий IP")
+                    else:
+                        out.append(f"🟡 webJSON {_wtag}: HTTP 200 но items=0, ключи={list(_wd.keys())[:6]}")
+                elif _wr.status_code == 429:
+                    out.append(f"🟡 webJSON {_wtag}: HTTP 429 (IP лимит) — смените IP или подождите")
+                else:
+                    out.append(f"🟡 webJSON {_wtag}: HTTP {_wr.status_code}")
             except Exception as e:
-                out.append(f"📱 Мобильный API: ❌ {str(e)[:100]}")
+                out.append(f"🟡 webJSON {_wtag}: ❌ {str(e)[:80]}")
 
         # 3. curl_cffi через прокси (веб-интерфейс, нужен JS — для диагностики)
         if not _avito_ok and AVITO_PROXIES:
