@@ -9152,14 +9152,14 @@ async def do_search_for_user(uid: int, reply_to):
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
         "tg":     lambda: scrape_tg_channels(region, pmin, pmax),
     }
-    # Авито-эталон ВСЕГДА запускаем параллельно — рыночная цена берётся с Авито (все цены)
-    _avito_ref_fut = loop.run_in_executor(
-        None, lambda: scrape_avito(region, pages=3, price_min=0, price_max=99_000_000)
-    )
+    # Рыночную цену вычисляем из результатов основного поиска (Авито+Дром+Auto.ru),
+    # а НЕ отдельным скрейпом Авито — иначе два запроса к одному прокси-IP
+    # рейт-лимитят друг друга (429) и поиск идёт вдвое дольше.
+    _avito_ref_fut = None
     # Запускаем ВСЕ площадки всегда, независимо от настроек пользователя
     src_keys = list(scraper_map.keys())
     futures = [loop.run_in_executor(None, scraper_map[src]) for src in src_keys]
-    all_futs = futures + [_avito_ref_fut]
+    all_futs = futures
     done, pending = await asyncio.wait(all_futs, timeout=70)
     if pending:
         for f in pending:
@@ -9376,32 +9376,20 @@ async def do_search_for_user(uid: int, reply_to):
                     pass
         await asyncio.gather(*[_fetch_price(it) for it in no_price[:5]])
 
-    # Получаем результат Авито-эталона (уже запущен параллельно с основными скраперами)
-    try:
-        _avito_ref = _avito_ref_fut.result() if (_avito_ref_fut and _avito_ref_fut in done) else []
-    except Exception as _e:
-        print(f"  [рынок] Авито-эталон ошибка: {_e}")
-        _avito_ref = []
-
-    if _avito_ref:
-        for _ar in _avito_ref:
-            _ar["_market_ref_only"] = True
-        items = items + _avito_ref
-        print(f"  [рынок] Авито-эталон: {len(_avito_ref)} записей для медианы цен")
+    # Эталон рынка — из результатов основного поиска (Авито + Дром + Auto.ru).
+    # rank_by_market_price группирует по марке+модели+году, поэтому медиана
+    # считается корректно внутри каждой группы даже в пределах бюджета.
+    _ref_src = [i for i in items if i.get("source") in ("avito", "drom", "autoru")]
+    if _ref_src:
+        import copy as _copy
+        _ref_copies = [_copy.copy(i) for i in _ref_src]
+        for _rc in _ref_copies:
+            _rc["_market_ref_only"] = True
+        items = items + _ref_copies
+        _n_av = sum(1 for i in _ref_src if i.get("source") == "avito")
+        print(f"  [рынок] эталон: {len(_ref_copies)} записей (Авито={_n_av}, Дром+Auto.ru={len(_ref_copies)-_n_av})")
     else:
-        # Авито недоступен — используем уже полученные Дром+Auto.ru как эталон.
-        # Они в бюджете пользователя, но rank_by_market_price группирует по модели+году,
-        # поэтому медиана рассчитывается корректно внутри каждой группы.
-        _fallback_ref = [i for i in items if i.get("source") in ("drom", "autoru")]
-        if _fallback_ref:
-            import copy as _copy
-            _ref_copies = [_copy.copy(i) for i in _fallback_ref]
-            for _rc in _ref_copies:
-                _rc["_market_ref_only"] = True
-            items = items + _ref_copies
-            print(f"  [рынок] Дром+Auto.ru-эталон (Авито недоступен): {len(_ref_copies)} записей")
-        else:
-            print(f"  [рынок] нет эталона — рыночная цена не будет вычислена")
+        print(f"  [рынок] нет эталона — рыночная цена не будет вычислена")
 
     # seen хранит нормализованные URL — сравниваем тоже по нормализованным
     seen_norm = {_norm_url(u) for u in seen}
@@ -9448,9 +9436,10 @@ async def do_search_for_user(uid: int, reply_to):
             it["_already_seen"] = True
 
     _ref_items = [i for i in items if i.get("_market_ref_only")]
-    _avito_available = len(_ref_items) >= 5  # True даже если эталон — Дром
+    _avito_available = len(_ref_items) >= 5  # True даже если эталон — Дром/Auto.ru
     if _avito_available:
-        _ref_src = "Авито" if _avito_ref else "Дром"
+        _n_av_ref = sum(1 for i in _ref_items if i.get("source") == "avito")
+        _ref_src = "Авито" if _n_av_ref >= 5 else "Дром+Auto.ru"
         print(f"  [рынок] {_ref_src}-референс: {len(_ref_items)} объявлений → считаем рыночную цену")
         suitable = rank_by_market_price(suitable, ref_items=_ref_items, avito_only_median=True)
     else:
