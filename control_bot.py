@@ -2383,6 +2383,7 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
         return batch
 
     # ── Запускаем всё параллельно ─────────────────────────────────────
+    results: list[dict] = []
     with _TPE_TG(max_workers=2) as _dis_ex:
         _disc_fut = _dis_ex.submit(_discover_channels)
         _ddg_fut = _dis_ex.submit(_ddg_tg_posts)
@@ -4274,7 +4275,7 @@ def _avito_get_oauth_token() -> str:
     return ""
 
 
-def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, today) -> list[dict]:
+def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, today, sort_by_date: bool = False, brand: str = "") -> list[dict]:
     """
     Использует внутренний JSON API Авито (как мобильное приложение).
     Пробует несколько эндпоинтов с разными заголовками — мобильный сайт,
@@ -6159,7 +6160,7 @@ def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max
 
     # ── Метод 1: API / мобильный сайт / cloudscraper ─────────────
     print(f"  [Авито] пробуем API-методы для {region}…")
-    api_results = _avito_api_fetch(region, pages, price_min, price_max, today)
+    api_results = _avito_api_fetch(region, pages, price_min, price_max, today, sort_by_date=sort_by_date, brand=brand)
     if api_results:
         print(f"  [Авито] API-метод дал {len(api_results)} объявлений")
         return api_results
