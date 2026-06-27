@@ -2077,7 +2077,15 @@ _SOCIAL_REJECT_KEYWORDS = [
     # Сельхоз / животноводство
     "трактор", "комбайн", "сенокосилк", "культиватор",
     "корова", "свинья", "поросята", "птица", "куриц",
-    # Оружие (карабины, ружья, патроны) — НЕ авто, но тоже пишут год выпуска и продам
+    # Статьи/реклама/оценочные сервисы — не объявления (часто у конкурентов)
+    "ликвидност", "что влияет", "ключевые фактор", "ключевых фактор", "разбираем",
+    "экспресс-анализ", "экспресс анализ", "нижегородец", "факторы оценки",
+    "бесплатный экспресс", "подписывайтес", "подпишитес", "наш канал", "наш чат",
+    "оцени авто", "оценка автомобиля", "узнать стоимость", "рубрика", "полезный пост",
+    "почему одни", "разбор:", "инструкция", "лайфхак", "топ-", "топ ",
+    # Еда/личное/прочее (просачивается из newsfeed)
+    "ягод", "хлебуш", "грибы", "урожай", "рецепт", "магазинчик",
+
     "карабин", "сайга", "ружьё", "ружье", "ружья", "винтовк", "оружие", "оружия",
     "патрон", "калибр", "кал.", "нарез", "ствол", "охотнич", "отстрел",
     "пистолет", "травматик", "пневматик", "глушител", "дтк ", "олрр",
@@ -2092,7 +2100,15 @@ def _is_car_sale_social(text: str) -> bool:
     has_sale = any(sk in tl for sk in _SOCIAL_SALE_KEYWORDS)
     # Нужен «сильный» идентификатор (марка/модель/пробег/год) — "авто" в контексте "на вашем авто" не считается
     has_car = any(ck in tl for ck in _SOCIAL_CAR_STRONG)
-    return has_sale and has_car
+    if not (has_sale and has_car):
+        return False
+    # Дополнительно требуем КОНКРЕТИКУ объявления: марка/модель, ИЛИ год, ИЛИ
+    # признак цены. Это отсекает статьи «про автомобили» без конкретной машины.
+    has_brand = bool(_SOCIAL_TITLE_RE.search(tl))
+    has_year = bool(_SOCIAL_YEAR_RE.search(tl))
+    has_price_hint = bool(re.search(r"\d{2,3}\s*(?:тыс|т\.?р|к\b|₽|руб|млн)", tl)) or \
+                     bool(re.search(r"\d[\d\s]{4,}\s*(?:₽|руб|р\.)", tl))
+    return has_brand or has_year or has_price_hint
 
 _SOCIAL_TITLE_RE = re.compile(
     r"(toyota|honda|kia|hyundai|nissan|mazda|bmw|audi|mercedes|lada|ваз|haval|geely|chery|skoda|volkswagen|vw|renault|peugeot|ford|opel|chevrolet|mitsubishi|subaru|lexus|infiniti|volvo|jeep|suzuki|datsun|changan|exeed|omoda|tank|jaecoo|byd|нива|приора|гранта|калина|vesta|largus|xray|москвич)",
@@ -2589,6 +2605,16 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
 
 
     def _parse_price(text: str) -> int:
+        _tl = text.lower()
+        # 0. Миллионы: "1.2 млн", "1 млн 200", "2 миллиона"
+        _mln = re.search(r"(\d[.,]?\d?)\s*(?:млн|миллион)", _tl)
+        if _mln:
+            try:
+                val = int(float(_mln.group(1).replace(",", ".")) * 1_000_000)
+                if 50_000 <= val <= 50_000_000:
+                    return val
+            except Exception:
+                pass
         # Сначала ищем с явным символом валюты
         for m in _vk_price_re.finditer(text):
             raw = re.sub(r"\D", "", m.group(1))
@@ -2614,14 +2640,30 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                 val *= 1000
             if 50_000 <= val <= 50_000_000:
                 return val
-        # Третий проход: голое число в диапазоне цен авто
-        _bare_num_re = re.compile(r'\b(\d{5,7})\b')
-        for m in _bare_num_re.finditer(text):
+        # Третий проход: число с разделителями-пробелами ("1 200 000") или голое
+        # ("950000"). Исключаем пробег/год/мощность/телефоны по контексту.
+        _SKIP_CTX = ('пробег', 'км', 'год', 'г.в', 'г/в', 'тыс.км', 'л.с', 'лс',
+                     'тел', 'phone', 'whats', 'viber', '+7', 'звон', 'налог', 'каждые')
+        def _looks_like_phone(s: str) -> bool:
+            d = re.sub(r'\D', '', s)
+            return len(d) >= 10 and (d.startswith('89') or d.startswith('79') or d.startswith('7') or d.startswith('8'))
+        # Сначала числа с пробелами-разделителями тысяч
+        for m in re.finditer(r'\b(\d{1,3}(?:\s\d{3})+)\b', text):
+            raw = m.group(1)
+            if _looks_like_phone(raw):
+                continue
+            val = int(re.sub(r'\s', '', raw))
+            ctx = _tl[max(0, m.start() - 25):m.end() + 12]
+            if any(skip in ctx for skip in _SKIP_CTX):
+                continue
+            if 50_000 <= val <= 9_999_999:
+                return val
+        # Затем голое число
+        for m in re.finditer(r'\b(\d{5,7})\b', text):
             val = int(m.group(1))
             if 50_000 <= val <= 9_999_999:
-                # Проверяем что рядом нет слов как "пробег", "год", "км"
-                ctx = text[max(0,m.start()-30):m.end()+30].lower()
-                if any(skip in ctx for skip in ('пробег','км','год','г.в','г/в','тыс.км')):
+                ctx = _tl[max(0, m.start() - 30):m.end() + 30]
+                if any(skip in ctx for skip in _SKIP_CTX):
                     continue
                 return val
         return 0
