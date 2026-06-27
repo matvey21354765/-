@@ -6632,6 +6632,69 @@ class TrackBrand(StatesGroup):
     choosing = State()
 
 
+class MyDeals(StatesGroup):
+    add_title = State()
+    add_buy = State()
+    add_expenses = State()
+    sell_price = State()
+
+
+# ── 🚗 Мои сделки (аналитика перекупа) ───────────────────────────
+def _load_deals(uid: int) -> list[dict]:
+    f = user_dir(uid) / "my_deals.json"
+    if f.exists():
+        try:
+            return json.loads(f.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return []
+
+
+def _save_deals(uid: int, deals: list[dict]):
+    f = user_dir(uid) / "my_deals.json"
+    f.write_text(json.dumps(deals, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _deals_summary(deals: list[dict]) -> str:
+    """Сводка по сделкам: вложено, в работе, продано, прибыль, средний срок, ROI."""
+    in_work = [d for d in deals if d.get("status") == "active"]
+    sold = [d for d in deals if d.get("status") == "sold"]
+    invested = sum(d.get("buy", 0) + d.get("expenses", 0) for d in in_work)
+    total_profit = sum(d.get("profit", 0) for d in sold)
+    total_cost_sold = sum(d.get("buy", 0) + d.get("expenses", 0) for d in sold)
+    roi = (total_profit / total_cost_sold * 100) if total_cost_sold else 0
+    # Средний срок продажи (дней между buy_ts и sell_ts)
+    _days = [
+        int((d["sell_ts"] - d["buy_ts"]) / 86400)
+        for d in sold if d.get("sell_ts") and d.get("buy_ts") and d["sell_ts"] >= d["buy_ts"]
+    ]
+    avg_days = int(sum(_days) / len(_days)) if _days else 0
+    lines = [
+        "💼 *Мои сделки — аналитика*",
+        "",
+        f"🔧 В работе: *{len(in_work)}* (вложено {invested:,} ₽)".replace(",", " "),
+        f"✅ Продано: *{len(sold)}*",
+        f"💰 Прибыль: *{total_profit:+,} ₽*".replace(",", " "),
+    ]
+    if sold:
+        lines.append(f"📈 ROI: *{roi:+.1f}%*")
+        if avg_days:
+            lines.append(f"⏱ Средний срок продажи: *{avg_days} дн.*")
+    return "\n".join(lines)
+
+
+def _deals_keyboard(deals: list[dict]) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(text="➕ Добавить авто", callback_data="deal_add")]]
+    for d in deals:
+        if d.get("status") == "active":
+            did = d.get("id", "")
+            rows.append([
+                InlineKeyboardButton(text=f"✅ Продал: {d.get('title','')[:22]}", callback_data=f"deal_sell|{did}"),
+                InlineKeyboardButton(text="🗑", callback_data=f"deal_del|{did}"),
+            ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 # ── Бот ─────────────────────────────────────────────────────────
 
 bot = Bot(token=BOT_TOKEN)
@@ -6704,7 +6767,8 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
         [KeyboardButton(text="🔍 Найти авто"), KeyboardButton(text="🌐 Глобальный поиск")],
         [KeyboardButton(text="🆕 Новые сегодня"), KeyboardButton(text="🎯 Следить за маркой")],
         [KeyboardButton(text="🔔 Уведомления"), KeyboardButton(text="🚗 Мой гараж")],
-        [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="❓ Помощь")],
+        [KeyboardButton(text="💼 Мои сделки"), KeyboardButton(text="⚙️ Настройки")],
+        [KeyboardButton(text="❓ Помощь")],
         [KeyboardButton(text="🤝 Пригласить друга"), KeyboardButton(text="♻️ Сбросить историю")],
     ],
     resize_keyboard=True,
@@ -9903,6 +9967,137 @@ async def cmd_favorites(msg: Message):
     for it in favs[-20:]:
         lines.append(f"• {it.get('title','')} — {it.get('price','?')}\n  {it.get('url','')}")
     await msg.answer(f"🚗 Мой гараж ({len(favs)} авто):\n\n" + "\n\n".join(lines[-10:]))
+
+
+# ── 🚗 Мои сделки (аналитика перекупа) ───────────────────────────
+@dp.message(F.text == "💼 Мои сделки")
+async def cmd_my_deals(msg: Message):
+    uid = msg.from_user.id
+    deals = _load_deals(uid)
+    if not deals:
+        await msg.answer(
+            "💼 *Мои сделки* — учёт купленных авто: вложения, прибыль, срок продажи.\n\n"
+            "Добавь первую машину, которую купил на перепродажу 👇",
+            parse_mode="Markdown",
+            reply_markup=_deals_keyboard(deals),
+        )
+        return
+    # Список авто в работе с подробностями
+    detail = []
+    for d in deals:
+        if d.get("status") == "active":
+            cost = d.get("buy", 0) + d.get("expenses", 0)
+            detail.append(f"🔧 {d.get('title','')} — вложено {cost:,} ₽".replace(",", " "))
+    for d in deals[-15:]:
+        if d.get("status") == "sold":
+            detail.append(
+                f"✅ {d.get('title','')} — прибыль {d.get('profit',0):+,} ₽".replace(",", " ")
+            )
+    text = _deals_summary(deals) + ("\n\n" + "\n".join(detail) if detail else "")
+    await msg.answer(text, parse_mode="Markdown", reply_markup=_deals_keyboard(deals))
+
+
+@dp.callback_query(F.data == "deal_add")
+async def cb_deal_add(cb: CallbackQuery, state: FSMContext):
+    await state.set_state(MyDeals.add_title)
+    await cb.message.answer("🚗 Введи марку и модель авто (например: Kia Rio 2014):")
+    await cb.answer()
+
+
+@dp.message(MyDeals.add_title)
+async def deal_add_title(msg: Message, state: FSMContext):
+    title = (msg.text or "").strip()[:80]
+    if not title:
+        await msg.answer("Введи название авто текстом.")
+        return
+    await state.update_data(deal_title=title)
+    await state.set_state(MyDeals.add_buy)
+    await msg.answer(f"💰 За сколько купил «{title}»? (только число, ₽):")
+
+
+@dp.message(MyDeals.add_buy)
+async def deal_add_buy(msg: Message, state: FSMContext):
+    buy = re.sub(r"[^\d]", "", msg.text or "")
+    if not buy:
+        await msg.answer("Введи цену покупки числом, например 450000.")
+        return
+    await state.update_data(deal_buy=int(buy))
+    await state.set_state(MyDeals.add_expenses)
+    await msg.answer("🔧 Доп. расходы (ремонт, мойка, перегон)? Число в ₽, или 0:")
+
+
+@dp.message(MyDeals.add_expenses)
+async def deal_add_expenses(msg: Message, state: FSMContext):
+    exp = re.sub(r"[^\d]", "", msg.text or "") or "0"
+    data = await state.get_data()
+    uid = msg.from_user.id
+    deals = _load_deals(uid)
+    deals.append({
+        "id": str(int(time.time())),
+        "title": data.get("deal_title", "Авто"),
+        "buy": data.get("deal_buy", 0),
+        "expenses": int(exp),
+        "status": "active",
+        "buy_ts": time.time(),
+    })
+    _save_deals(uid, deals)
+    await state.clear()
+    await msg.answer(
+        "✅ Добавлено в сделки!",
+        reply_markup=_deals_keyboard(deals),
+    )
+    await msg.answer(_deals_summary(deals), parse_mode="Markdown", reply_markup=_deals_keyboard(deals))
+
+
+@dp.callback_query(F.data.startswith("deal_sell|"))
+async def cb_deal_sell(cb: CallbackQuery, state: FSMContext):
+    did = cb.data.split("|", 1)[1]
+    await state.set_state(MyDeals.sell_price)
+    await state.update_data(sell_id=did)
+    await cb.message.answer("💵 За сколько продал? (число, ₽):")
+    await cb.answer()
+
+
+@dp.message(MyDeals.sell_price)
+async def deal_sell_price(msg: Message, state: FSMContext):
+    sell = re.sub(r"[^\d]", "", msg.text or "")
+    if not sell:
+        await msg.answer("Введи цену продажи числом.")
+        return
+    data = await state.get_data()
+    did = data.get("sell_id")
+    uid = msg.from_user.id
+    deals = _load_deals(uid)
+    for d in deals:
+        if d.get("id") == did and d.get("status") == "active":
+            d["sell"] = int(sell)
+            d["sell_ts"] = time.time()
+            d["status"] = "sold"
+            d["profit"] = int(sell) - d.get("buy", 0) - d.get("expenses", 0)
+            break
+    _save_deals(uid, deals)
+    await state.clear()
+    _sold = next((x for x in deals if x.get("id") == did), None)
+    if _sold:
+        await msg.answer(
+            f"✅ «{_sold['title']}» продано!\n"
+            f"💰 Прибыль: *{_sold.get('profit',0):+,} ₽*".replace(",", " "),
+            parse_mode="Markdown",
+        )
+    await msg.answer(_deals_summary(deals), parse_mode="Markdown", reply_markup=_deals_keyboard(deals))
+
+
+@dp.callback_query(F.data.startswith("deal_del|"))
+async def cb_deal_del(cb: CallbackQuery):
+    did = cb.data.split("|", 1)[1]
+    uid = cb.from_user.id
+    deals = [d for d in _load_deals(uid) if d.get("id") != did]
+    _save_deals(uid, deals)
+    await cb.answer("Удалено")
+    try:
+        await cb.message.edit_reply_markup(reply_markup=_deals_keyboard(deals))
+    except Exception:
+        pass
 
 
 @dp.message(Command("test_avito"))
