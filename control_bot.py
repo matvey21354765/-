@@ -2714,15 +2714,41 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
         owner_id = post.get("owner_id") or post.get("from_id", 0)
         post_id = post.get("id", "")
         url = f"https://vk.com/wall{owner_id}_{post_id}"
-        # Страница автора объявления: from_id (кто опубликовал), иначе owner_id.
-        # Отрицательный id = группа (club), положительный = пользователь (id).
-        _author_id = post.get("from_id") or post.get("owner_id") or 0
-        if _author_id < 0:
-            _author_page = f"https://vk.com/club{-_author_id}"
-        elif _author_id > 0:
-            _author_page = f"https://vk.com/id{_author_id}"
+        # Личная страница продавца. Приоритет:
+        #  1) signer_id — кто подписал пост в группе (реальный автор)
+        #  2) автор репоста (copy_history) если это пользователь
+        #  3) ссылка на vk.com/<профиль> прямо в тексте
+        #  4) from_id/owner_id если это пользователь (положительный id)
+        #  5) иначе — группа (club), помечаем как НЕ личную страницу
+        _signer = post.get("signer_id") or 0
+        _ch = post.get("copy_history") or []
+        _orig_from = (_ch[0].get("from_id") or _ch[0].get("owner_id") or 0) if _ch else 0
+        # Ссылка на профиль в тексте, НО не на сообщество/служебные пути.
+        # club777/public555/event123/wall.../id0 — это НЕ личная страница продавца.
+        _txt_link = re.search(
+            r'vk\.com/(?!club\d|public\d|event\d|wall|feed\b|im\b|id0\b)([a-zA-Z][\w.]{2,30})',
+            text,
+        )
+        _link_slug = _txt_link.group(1) if _txt_link else ""
+        _base = post.get("from_id") or post.get("owner_id") or 0
+        _is_personal = True
+        if _signer > 0:
+            _author_page = f"https://vk.com/id{_signer}"
+        elif _orig_from > 0:
+            _author_page = f"https://vk.com/id{_orig_from}"
+        elif _link_slug:
+            _author_page = f"https://vk.com/{_link_slug}"
+        elif _base > 0:
+            _author_page = f"https://vk.com/id{_base}"
+        elif _base < 0:
+            _author_page = f"https://vk.com/club{-_base}"  # только группа — личной страницы нет
+            _is_personal = False
         else:
             _author_page = url
+            _is_personal = False
+        # Телефон из текста — самый надёжный контакт, если личной страницы нет
+        _ph_m = re.search(r'(?:\+7|8)[\s\-(]*\d{3}[\s\-)]*\d{3}[\s\-]*\d{2}[\s\-]*\d{2}', text)
+        _phone = _ph_m.group(0).strip() if _ph_m else ""
         year_m = _vk_year_re.search(text)
         photo_url = ""
         for att in post.get("attachments", []):
@@ -2740,10 +2766,13 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                 days = max(0, (_dt.date.today() - post_date).days)
             except Exception:
                 pass
-        # Имя продавца: настоящее название группы (source_label), иначе ссылка на
-        # страницу автора (а не служебное "newsfeed").
-        if source_label and source_label.lower() != "newsfeed":
-            seller = source_label
+        # Имя продавца: личная страница → ссылка на профиль; иначе телефон/группа.
+        if _is_personal:
+            seller = _author_page.replace("https://", "")
+        elif _phone:
+            seller = f"тел. {_phone}"
+        elif source_label and source_label.lower() != "newsfeed":
+            seller = source_label  # название группы
         else:
             seller = _author_page.replace("https://", "")
         return {
@@ -2755,7 +2784,9 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
             "description": text[:500],
             "source": "vk",
             "seller": seller,
-            "_seller_url": _author_page,
+            "_seller_url": _author_page if _is_personal else "",
+            "_seller_is_personal": _is_personal,
+            "_phone": _phone,
             "_year": int(year_m.group(1)) if year_m else 0,
             "_days_on_site": days,
             "_no_price": price == 0,
@@ -9882,7 +9913,8 @@ async def send_batch(chat_id: int, uid: int, offset: int):
             caption += f"\n👤 Продавец: {seller}" if seller else ""
             _seller_url = item.get("_seller_url", "")
             row1 = [InlineKeyboardButton(text="📘 Объявление ВК", url=url)]
-            # Кнопка на страницу продавца (профиль/группа), если она отличается от поста
+            # Кнопка на ЛИЧНУЮ страницу продавца (только если она реально найдена;
+            # для постов от имени группы _seller_url пустой → кнопки нет)
             if _seller_url and _seller_url != url:
                 row1.append(InlineKeyboardButton(text="👤 Продавец", url=_seller_url))
             row1.append(InlineKeyboardButton(text="⭐ Сохранить", callback_data=f"fav|{sid}|{uid}"))
