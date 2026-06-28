@@ -7512,13 +7512,13 @@ def _uname(users: dict, uid) -> str:
     return f"@{un}" if un else f"id{uid}"
 
 
-def _admin_today_text() -> str:
+def _admin_today_text(target_date=None) -> str:
     users, events, mon_count, subs = _admin_collect()
     now = datetime.datetime.now(_MSK)
-    today = now.date()
+    day = target_date or now.date()  # счётчики обнуляются в 00:00 МСК
     active, searches, mon_on, subs_today = set(), 0, 0, 0
     for ev in events:
-        if _msk_date(ev.get("ts", 0)) != today:
+        if _msk_date(ev.get("ts", 0)) != day:
             continue
         if ev.get("uid"):
             active.add(ev["uid"])
@@ -7529,12 +7529,13 @@ def _admin_today_text() -> str:
             mon_on += 1
         elif act == "subscription":
             subs_today += 1
-    new_today = sum(1 for u in users.values() if _msk_date(u.get("first_seen", 0)) == today)
+    new_today = sum(1 for u in users.values() if _msk_date(u.get("first_seen", 0)) == day)
+    _label = "СЕГОДНЯ" if (target_date is None) else "ИТОГИ ДНЯ"
     return (
-        f"📊 <b>Perekup Drive — СЕГОДНЯ ({today.strftime('%d.%m.%Y')})</b>\n\n"
+        f"📊 <b>Perekup Drive — {_label} ({day.strftime('%d.%m.%Y')})</b>\n\n"
         f"👤 Всего пользователей: <code>{_fmt_n(len(users))}</code>\n"
-        f"🟢 Активных сегодня: <code>{_fmt_n(len(active))}</code>\n"
-        f"🆕 Новых сегодня: <code>{_fmt_n(new_today)}</code>\n"
+        f"🟢 Активных: <code>{_fmt_n(len(active))}</code>\n"
+        f"🆕 Новых: <code>{_fmt_n(new_today)}</code>\n"
         f"🔍 Поисков выполнено: <code>{_fmt_n(searches)}</code>\n"
         f"🔔 Включили мониторинг: <code>{_fmt_n(mon_on)}</code>\n"
         f"💎 Новых подписок: <code>{_fmt_n(subs_today)}</code>\n\n"
@@ -7887,23 +7888,26 @@ async def cb_broadcast(cb: CallbackQuery):
 
 
 async def _admin_report_scheduler():
-    """Ежедневно 09:00 МСК — отчёт «Сегодня»; по понедельникам — «Неделя».
+    """В 00:00 МСК — итоги завершившегося дня; по понедельникам — «Неделя».
+    Раздел «Сегодня» обнуляется в полночь МСК (счёт по МСК-дню).
     Реализовано на asyncio (как остальные фоновые циклы бота), без apscheduler."""
     await asyncio.sleep(30)
     _last_sent_date = None
     while True:
         try:
             now = datetime.datetime.now(_MSK)
-            if now.hour == 9 and _last_sent_date != now.date():
+            # Фиксируем итоги дня сразу после полуночи МСК (00:00–00:09)
+            if now.hour == 0 and _last_sent_date != now.date():
                 _last_sent_date = now.date()
+                yesterday = now.date() - datetime.timedelta(days=1)
                 loop = asyncio.get_running_loop()
-                today_txt = await loop.run_in_executor(None, _admin_today_text)
+                day_txt = await loop.run_in_executor(None, lambda: _admin_today_text(yesterday))
                 for aid in ADMIN_IDS:
                     try:
-                        await bot.send_message(aid, "⏰ Ежедневный отчёт\n\n" + today_txt, parse_mode="HTML")
+                        await bot.send_message(aid, "🌙 Итоги дня (00:00 МСК)\n\n" + day_txt, parse_mode="HTML")
                     except Exception:
                         pass
-                if now.weekday() == 0:  # понедельник
+                if now.weekday() == 0:  # понедельник — недельный отчёт
                     week_txt = await loop.run_in_executor(None, _admin_week_text)
                     for aid in ADMIN_IDS:
                         try:
