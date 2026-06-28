@@ -871,7 +871,7 @@ def parse_ru_date(text: str):
     return None
 
 
-def scrape_drom(region: str, pages: int = 15, price_min: int = 0, price_max: int = 99_000_000) -> list[dict]:
+def scrape_drom(region: str, pages: int = 15, price_min: int = 0, price_max: int = 99_000_000, brand: str = "") -> list[dict]:
     try:
         import requests as _req
         from bs4 import BeautifulSoup as _BS
@@ -893,11 +893,15 @@ def scrape_drom(region: str, pages: int = 15, price_min: int = 0, price_max: int
 
     # Используем субдомен города — Дром автоматически показывает всю область
     base = f"https://{region}.drom.ru"
+    # Марка: Дром использует путь /lada/all/ вместо /auto/all/
+    _brand_l = (brand or "").strip().lower()
+    _DROM_SLUG = {"mercedes": "mercedes-benz", "land rover": "land_rover", "alfa": "alfa_romeo"}
+    _drom_seg = _DROM_SLUG.get(_brand_l, _brand_l) if _brand_l and _brand_l != "any" else "auto"
 
     _drom_proxies = _avito_proxies() if AVITO_PROXIES else None
 
     for p in range(1, pages + 1):
-        url = f"{base}/auto/all/" if p == 1 else f"{base}/auto/all/page{p}/"
+        url = f"{base}/{_drom_seg}/all/" if p == 1 else f"{base}/{_drom_seg}/all/page{p}/"
         params = {}
         if price_min > 0:
             params["minprice"] = price_min
@@ -1243,7 +1247,7 @@ def _autoru_parse_html(text: str, today) -> list[dict]:
     return results
 
 
-def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: int = 99_000_000) -> list[dict]:
+def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: int = 99_000_000, brand: str = "") -> list[dict]:
     slug = AUTORU_SLUGS.get(region, region)
     geo_ids = AUTORU_GEO_IDS.get(region, [])
     try:
@@ -1253,12 +1257,17 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
 
     results = []
     today = datetime.date.today()
+    # Марка для Auto.ru: путь /cars/lada/used/ и catalog_filter mark=LADA
+    _brand_l = (brand or "").strip().lower()
+    _AR_SLUG = {"land rover": "land_rover", "alfa": "alfa_romeo"}
+    _brand_slug = _AR_SLUG.get(_brand_l, _brand_l)
+    _brand_path = f"{_brand_slug}/" if _brand_l and _brand_l != "any" else ""
 
     # Создаём сессию и прогреваем куки через GET запрос страницы листинга
     # Auto.ru требует куки сессии для AJAX — без них возвращает пустой ответ
     _ar_session = _req.Session()
     _ar_ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    _ar_base_url = f"https://auto.ru/{slug}/cars/used/?seller_group=PRIVATE"
+    _ar_base_url = f"https://auto.ru/{slug}/cars/{_brand_path}used/?seller_group=PRIVATE"
     if price_min > 0:
         _ar_base_url += f"&price_from={price_min}"
     if price_max < 99_000_000:
@@ -1307,9 +1316,11 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
             body["price_from"] = price_min
         if price_max < 99_000_000:
             body["price_to"] = price_max
+        if _brand_l and _brand_l != "any":
+            body["catalog_filter"] = [{"mark": _brand_slug.upper()}]
 
         batch = []
-        html_url = f"https://auto.ru/{slug}/cars/used/?seller_group=PRIVATE&page={p}&sort=fresh_relevance_1-desc"
+        html_url = f"https://auto.ru/{slug}/cars/{_brand_path}used/?seller_group=PRIVATE&page={p}&sort=fresh_relevance_1-desc"
         if price_min > 0:
             html_url += f"&price_from={price_min}"
         if price_max < 99_000_000:
@@ -8652,6 +8663,8 @@ async def cmd_global_search(msg: Message):
     region = s["region"]
     pmin = s.get("price_min", 0)
     pmax = s.get("price_max", 99_000_000)
+    brand = s.get("brand", "")
+    _br = brand if brand and brand != "any" else ""
     region_name = REGIONS.get(region, region)
 
     await msg.answer(
@@ -8665,8 +8678,8 @@ async def cmd_global_search(msg: Message):
 
     # Запускаем все источники + TG-каналы параллельно
     scraper_map = {
-        "drom":   lambda: scrape_drom(region, pages=15, price_min=pmin, price_max=pmax),
-        "autoru": lambda: scrape_autoru(region, pages=12, price_min=pmin, price_max=pmax),
+        "drom":   lambda: scrape_drom(region, pages=15, price_min=pmin, price_max=pmax, brand=_br),
+        "autoru": lambda: scrape_autoru(region, pages=12, price_min=pmin, price_max=pmax, brand=_br),
         "avito":  lambda: scrape_avito(region, pages=10, price_min=pmin, price_max=pmax, sort_by_date=False),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
     }
@@ -9919,8 +9932,8 @@ async def do_search_for_user(uid: int, reply_to):
     loop = asyncio.get_running_loop()
 
     scraper_map = {
-        "drom":   lambda: scrape_drom(region, pages=8, price_min=pmin, price_max=pmax),
-        "autoru": lambda: scrape_autoru(region, pages=4, price_min=pmin, price_max=pmax),
+        "drom":   lambda: scrape_drom(region, pages=8, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
+        "autoru": lambda: scrape_autoru(region, pages=4, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
         "avito":  lambda: scrape_avito(region, pages=6, price_min=pmin, price_max=pmax, sort_by_date=False, brand=(brand if brand and brand != "any" else "")),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
         "tg":     lambda: scrape_tg_channels(region, pmin, pmax),
