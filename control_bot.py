@@ -2098,17 +2098,17 @@ def _is_car_sale_social(text: str) -> bool:
     if any(rk in tl for rk in _SOCIAL_REJECT_KEYWORDS):
         return False
     has_sale = any(sk in tl for sk in _SOCIAL_SALE_KEYWORDS)
-    # Нужен «сильный» идентификатор (марка/модель/пробег/год) — "авто" в контексте "на вашем авто" не считается
-    has_car = any(ck in tl for ck in _SOCIAL_CAR_STRONG)
-    if not (has_sale and has_car):
+    # Считаем сколько «сильных» авто-признаков (марка/пробег/двигатель/год и т.п.)
+    car_hits = sum(1 for ck in _SOCIAL_CAR_STRONG if ck in tl)
+    if not (has_sale and car_hits >= 1):
         return False
-    # Дополнительно требуем КОНКРЕТИКУ объявления: марка/модель, ИЛИ год, ИЛИ
-    # признак цены. Это отсекает статьи «про автомобили» без конкретной машины.
+    # Конкретика объявления: марка (лат/кир), ИЛИ год, ИЛИ цена, ИЛИ ≥2 авто-признака
+    # (реальное объявление почти всегда: марка+пробег+год; статья — 1 общее «авто»).
     has_brand = bool(_SOCIAL_TITLE_RE.search(tl))
     has_year = bool(_SOCIAL_YEAR_RE.search(tl))
-    has_price_hint = bool(re.search(r"\d{2,3}\s*(?:тыс|т\.?р|к\b|₽|руб|млн)", tl)) or \
-                     bool(re.search(r"\d[\d\s]{4,}\s*(?:₽|руб|р\.)", tl))
-    return has_brand or has_year or has_price_hint
+    has_price_hint = bool(re.search(r"\d{2,3}\s*(?:тыс|т\.?\s*р|к\b|₽|руб|млн)", tl)) or \
+                     bool(re.search(r"\d[\d\s.,]{4,}\s*(?:₽|руб|р\b|р\.)", tl))
+    return has_brand or has_year or has_price_hint or car_hits >= 2
 
 _SOCIAL_TITLE_RE = re.compile(
     r"(toyota|honda|kia|hyundai|nissan|mazda|bmw|audi|mercedes|lada|ваз|haval|geely|chery|skoda|volkswagen|vw|renault|peugeot|ford|opel|chevrolet|mitsubishi|subaru|lexus|infiniti|volvo|jeep|suzuki|datsun|changan|exeed|omoda|tank|jaecoo|byd|нива|приора|гранта|калина|vesta|largus|xray|москвич)",
@@ -2593,7 +2593,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
     today = datetime.date.today()
 
     _vk_price_re = re.compile(
-        r"(\d[\d\s]{1,8})\s*(?:₽|тыс\.?\s*(?:р(?:уб(?:лей?|ля)?)?\.?)?|руб(?:лей?|ля)?\.?|р\.|тр\.?|к\b)",
+        r"(\d[\d\s]{1,8})\s*(?:₽|тыс\.?\s*(?:р(?:уб(?:лей?|ля)?)?\.?)?|руб(?:лей?|ля)?\.?|р\b\.?|тр\.?|к\b)",
         re.IGNORECASE,
     )
     # Число рядом с ценовым словом: "цена 150000", "прошу 95 000", "стоимость 80тыс"
