@@ -9614,9 +9614,101 @@ def _get_db():
                             PRIMARY KEY (uid, url)
                         )
                     """)
+                    # Хранилище ключ-значение — переживает рестарт (для аналитики)
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS kv_store (
+                            k TEXT PRIMARY KEY,
+                            v TEXT,
+                            updated_at TIMESTAMP DEFAULT NOW()
+                        )
+                    """)
         except Exception:
             return None
         return _db_conn
+
+
+def _kv_set(key: str, val: str):
+    """Сохранить значение в PG (переживает рестарт контейнера)."""
+    try:
+        db = _get_db()
+        if db:
+            with db.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO kv_store(k, v, updated_at) VALUES(%s,%s,NOW()) "
+                    "ON CONFLICT(k) DO UPDATE SET v=EXCLUDED.v, updated_at=NOW()",
+                    (key, val),
+                )
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _kv_get(key: str) -> "str | None":
+    try:
+        db = _get_db()
+        if db:
+            with db.cursor() as cur:
+                cur.execute("SELECT v FROM kv_store WHERE k=%s", (key,))
+                row = cur.fetchone()
+                return row[0] if row else None
+    except Exception:
+        pass
+    return None
+
+
+def _analytics_persist():
+    """Сохраняет файлы аналитики в PostgreSQL. Старые события (>40 дн) обрезаем,
+    чтобы блоб не разрастался. Безопасно: ошибки гасятся."""
+    try:
+        import analytics as _an
+        # users.json — целиком (небольшой)
+        if _an.USERS_FILE.exists():
+            _kv_set("analytics_users", _an.USERS_FILE.read_text(encoding="utf-8"))
+        # analytics.jsonl — только события за последние 40 дней
+        if _an.EVENTS_FILE.exists():
+            cutoff = time.time() - 40 * 86400
+            keep = []
+            for line in _an.EVENTS_FILE.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    if json.loads(line).get("ts", 0) >= cutoff:
+                        keep.append(line)
+                except Exception:
+                    pass
+            _kv_set("analytics_events", "\n".join(keep))
+    except Exception as e:
+        print(f"  [analytics-persist] {str(e)[:80]}")
+
+
+def _analytics_restore():
+    """При старте восстанавливает аналитику из PostgreSQL, если локальные файлы
+    отсутствуют/пусты (контейнер пересоздан при деплое)."""
+    try:
+        import analytics as _an
+        _an._ensure_dir()
+        u = _kv_get("analytics_users")
+        if u and (not _an.USERS_FILE.exists() or _an.USERS_FILE.stat().st_size < 5):
+            _an.USERS_FILE.write_text(u, encoding="utf-8")
+            print(f"  [analytics-restore] users.json восстановлен ({len(u)}б)")
+        e = _kv_get("analytics_events")
+        if e and (not _an.EVENTS_FILE.exists() or _an.EVENTS_FILE.stat().st_size < 5):
+            _an.EVENTS_FILE.write_text(e + ("\n" if e and not e.endswith("\n") else ""), encoding="utf-8")
+            print(f"  [analytics-restore] analytics.jsonl восстановлен ({len(e)}б)")
+    except Exception as ex:
+        print(f"  [analytics-restore] {str(ex)[:80]}")
+
+
+async def _analytics_persist_loop():
+    """Периодически сохраняет аналитику в PG (раз в 3 минуты)."""
+    while True:
+        await asyncio.sleep(180)
+        try:
+            await asyncio.get_running_loop().run_in_executor(None, _analytics_persist)
+        except Exception:
+            pass
 
 import atexit as _atexit
 _atexit.register(lambda: _db_conn and _db_conn.close())
@@ -11475,6 +11567,7 @@ async def main():
     global BOT_USERNAME
     logging.basicConfig(level=logging.WARNING)
     _load_avito_cache()
+    _analytics_restore()  # восстановить статистику из PG (контейнер эфемерный)
     # Подтягиваем username бота автоматически
     if not BOT_USERNAME:
         try:
@@ -11550,6 +11643,8 @@ async def main():
     print("  [push] цикл уведомлений запущен (интервал ~2.5 дня)")
     loop.create_task(_admin_report_scheduler())
     print("  [admin] планировщик отчётов запущен (09:00 МСК)")
+    loop.create_task(_analytics_persist_loop())
+    print("  [analytics] автосохранение статистики в PG запущено (раз в 3 мин)")
     # Прогрев кеша бесплатных прокси — тестирует их против Авито и кеширует рабочие
     loop.create_task(_proxy_warmup_loop())
     print("  [прокси-прогрев] запущен фоновый прогрев кеша прокси")
