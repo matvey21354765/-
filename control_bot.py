@@ -9777,160 +9777,6 @@ def _load_cache(uid: int) -> list[dict]:
     return []
 
 
-# ── Генерация картинки «Поделиться» для Stories/Reels ───────────
-def _share_font(size: int, bold: bool = True):
-    from PIL import ImageFont
-    _here = os.path.dirname(os.path.abspath(__file__))
-    _name = "LiberationSans-Bold.ttf" if bold else "LiberationSans-Regular.ttf"
-    for c in (
-        os.path.join(_here, "assets", "fonts", _name),
-        f"/usr/share/fonts/truetype/liberation/{_name}",
-        ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold
-         else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
-    ):
-        if os.path.exists(c):
-            try:
-                return ImageFont.truetype(c, size)
-            except Exception:
-                pass
-    return ImageFont.load_default()
-
-
-def _fetch_photo_bytes(photo_url: str, source: str) -> "bytes | None":
-    """Скачивает фото объявления (учитывает прокси/Referer источника)."""
-    if not photo_url:
-        return None
-    if source in ("tg", "tg_channel"):
-        ref, px = "https://t.me/", None
-    elif source == "vk":
-        ref, px = "https://vk.com/", None
-    elif source == "autoru":
-        ref, px = "https://auto.ru/", _avito_proxies()
-    elif source == "drom":
-        ref, px = "https://auto.drom.ru/", _avito_proxies()
-    else:
-        ref, px = "https://www.avito.ru/", _avito_proxies()
-    try:
-        from curl_cffi import requests as _cffi
-        r = _cffi.get(photo_url, impersonate="chrome124", timeout=10,
-                      headers={"Referer": ref}, proxies=px)
-        if r.status_code == 200 and len(r.content) > 3000:
-            return r.content
-    except Exception:
-        pass
-    try:
-        import requests as _rq
-        r2 = _rq.get(photo_url, timeout=10, headers={
-            "User-Agent": "Mozilla/5.0", "Referer": ref}, proxies=px)
-        if r2.status_code == 200 and len(r2.content) > 3000:
-            return r2.content
-    except Exception:
-        pass
-    return None
-
-
-def _wrap_text(draw, text, font, max_w):
-    words = text.split()
-    lines, cur = [], ""
-    for w in words:
-        t = (cur + " " + w).strip()
-        if draw.textlength(t, font=font) <= max_w:
-            cur = t
-        else:
-            if cur:
-                lines.append(cur)
-            cur = w
-    if cur:
-        lines.append(cur)
-    return lines[:2]
-
-
-def _generate_share_image(item: dict) -> "bytes | None":
-    """Картинка для Stories/Reels: фото авто + цена + % ниже рынка + светофор.
-    Возвращает JPEG-байты или None при любой ошибке (без падения бота)."""
-    try:
-        from PIL import Image, ImageDraw
-        import io
-    except Exception:
-        return None
-    try:
-        W, H = 1080, 1350
-        BG = (15, 17, 23)
-        bg = Image.new("RGB", (W, H), BG)
-        draw = ImageDraw.Draw(bg)
-        photo_h = 770
-
-        data = _fetch_photo_bytes(item.get("_photo_url", ""), item.get("source", ""))
-        if data:
-            try:
-                car = Image.open(io.BytesIO(data)).convert("RGB")
-                iw, ih = car.size
-                scale = max(W / iw, photo_h / ih)
-                car = car.resize((int(iw * scale), int(ih * scale)))
-                nw, nh = car.size
-                lft, top = (nw - W) // 2, (nh - photo_h) // 2
-                car = car.crop((lft, top, lft + W, top + photo_h))
-                bg.paste(car, (0, 0))
-                # затемнение снизу фото → плавный переход в фон
-                grad = Image.new("L", (1, photo_h), 0)
-                for y in range(photo_h):
-                    g = max(0.0, (y - photo_h * 0.55) / (photo_h * 0.45))
-                    grad.putpixel((0, y), int(255 * g))
-                bg.paste(Image.new("RGB", (W, photo_h), BG), (0, 0), grad.resize((W, photo_h)))
-            except Exception:
-                draw.rectangle([0, 0, W, photo_h], fill=(26, 29, 46))
-        else:
-            draw.rectangle([0, 0, W, photo_h], fill=(26, 29, 46))
-
-        light = _traffic_light(item)
-        color = {"🟢": (34, 197, 94), "🟡": (234, 179, 8), "🔴": (239, 68, 68)}.get(light, (234, 179, 8))
-        pct = item.get("_savings_pct", 0)
-        if pct > 0:
-            badge = f"НИЖЕ РЫНКА  −{int(round(pct))}%"
-        elif pct < 0:
-            badge = f"ВЫШЕ РЫНКА  +{abs(int(round(pct)))}%"
-        else:
-            badge = "ПО РЫНКУ"
-
-        y = photo_h + 46
-        draw.ellipse([60, y, 116, y + 56], fill=color)
-        draw.text((140, y + 6), badge, fill=color, font=_share_font(44))
-
-        # Заголовок (марка модель год) — до 2 строк
-        title = (item.get("title", "") or "").strip()
-        yt = y + 96
-        for line in _wrap_text(draw, title, _share_font(56), W - 120):
-            draw.text((60, yt), line, fill=(255, 255, 255), font=_share_font(56))
-            yt += 66
-
-        # Цена — крупно. В картинке используем «руб» (глифа ₽ нет в Liberation Sans)
-        pi = item.get("_price_int", 0)
-        if pi:
-            price = f"{pi:,} руб".replace(",", " ")
-        else:
-            price = (item.get("price", "") or "").replace("₽", "руб")
-        draw.text((60, yt + 12), price, fill=(255, 255, 255), font=_share_font(96))
-        yt += 12 + 110
-
-        mk = item.get("_market_price", 0)
-        if mk:
-            draw.text((60, yt), f"рынок ~{mk:,} руб".replace(",", " "),
-                      fill=(148, 163, 184), font=_share_font(42))
-
-        # Подвал — бренд
-        foot = _share_font(40)
-        draw.text((60, H - 96), "PerekupDrive — авто ниже рынка", fill=(59, 130, 246), font=foot)
-        un = (BOT_USERNAME or "PerekupDriveBot")
-        draw.text((60, H - 52), f"@{un}", fill=(100, 116, 139), font=_share_font(34))
-
-        out = io.BytesIO()
-        bg.save(out, "JPEG", quality=88)
-        return out.getvalue()
-    except Exception as e:
-        print(f"  [share-img] {str(e)[:100]}")
-        return None
-
-
 async def send_batch(chat_id: int, uid: int, offset: int):
     """Отправляет 10 объявлений из кеша начиная с offset.
     Список уже отсортирован и отфильтрован — берём напрямую срез [offset:offset+10].
@@ -10056,8 +9902,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
             InlineKeyboardButton(text="❌ Скрыть", callback_data=f"hide|{sid}|{uid}"),
             InlineKeyboardButton(text="📋 Похожие", callback_data=f"sim|{sid}|{uid}"),
         ]
-        row3 = [InlineKeyboardButton(text="📤 Поделиться (для Stories/Reels)", callback_data=f"share|{sid}|{uid}")]
-        kb = InlineKeyboardMarkup(inline_keyboard=[row1, row2, row3])
+        kb = InlineKeyboardMarkup(inline_keyboard=[row1, row2])
 
         photo_url = item.get("_photo_url", "")
         if photo_url:
@@ -10811,34 +10656,6 @@ async def cb_fav(cb: CallbackQuery):
         await cb.answer("⭐ Добавлено в избранное!")
     else:
         await cb.answer("Уже в избранном")
-
-
-@dp.callback_query(F.data.startswith("share|"))
-async def cb_share(cb: CallbackQuery):
-    sid = cb.data.split("|")[1]
-    uid = cb.from_user.id
-    url = id_to_url(sid)
-    items = _search_cache.get(uid) or _load_cache(uid)
-    item = next((it for it in items if it.get("url") == url), None)
-    if not item:
-        await cb.answer("Объявление не найдено", show_alert=True)
-        return
-    await cb.answer("Готовлю картинку…")
-    loop = asyncio.get_running_loop()
-    img = await loop.run_in_executor(None, _generate_share_image, item)
-    if not img:
-        await cb.message.answer("⚠️ Не удалось сделать картинку. Попробуй другое объявление.")
-        return
-    from aiogram.types import BufferedInputFile
-    analytics.track("share", uid=uid, username=cb.from_user.username)
-    cap = (
-        "📤 Готово! Сохрани картинку и выложи в Stories/Reels.\n"
-        "Подпись: «Как перекупы находят авто ниже рынка 👀»\n"
-        f"Не забудь @{BOT_USERNAME or 'PerekupDriveBot'} в описании."
-    )
-    await cb.message.answer_photo(
-        BufferedInputFile(img, "perekupdrive.jpg"), caption=cap
-    )
 
 
 @dp.callback_query(F.data.startswith("sim|"))
