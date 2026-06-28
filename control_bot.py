@@ -1219,7 +1219,11 @@ def _autoru_parse_html(text: str, today) -> list[dict]:
         mark = mark_m.group(1) if mark_m else ""
         model = model_m.group(1) if model_m else ""
         year = year_m.group(1) if year_m else ""
-        title = f"{mark} {model} {year}".strip() or "Авто на Auto.ru"
+        # Нет ни марки, ни модели, ни года → это не объявление о машине
+        # (реклама Auto.ru, промо-блок и т.п.) — пропускаем, не показываем заглушку.
+        if not (mark or model or year):
+            continue
+        title = f"{mark} {model} {year}".strip()
         price_str = f"{price_val:,} ₽".replace(",", " ")
         # Фото: ищем сначала 1200x900, потом любой размер из CDN Яндекса
         photo_m = re.search(r'"1200x900"\s*:\s*"([^"]+)"', ctx)
@@ -7082,9 +7086,27 @@ def _match_brand_item(it: dict, brand: str) -> bool:
     return False
 
 
+_PROMO_PHRASES = (
+    "способ продвижения", "наверху списка", "наверх списка", "просматривают чаще",
+    "поднять объявление", "продвижение объявления", "vip-размещение", "vip размещение",
+    "платное размещение", "поднятие в поиске", "выделить объявление",
+)
+_PLACEHOLDER_TITLES = ("авто на auto.ru", "авто на авито", "авто на дром", "автомобиль")
+
+
+def _is_promo_listing(it: dict) -> bool:
+    """True для рекламы площадки / промо-блоков, а не реальных объявлений."""
+    title = (it.get("title", "") or "").strip().lower()
+    if title in _PLACEHOLDER_TITLES:
+        return True
+    blob = (title + " " + (it.get("description", "") or "")).lower()
+    return any(p in blob for p in _PROMO_PHRASES)
+
+
 def _filter_by_category(items: list[dict], category: str, brand: str) -> list[dict]:
     """Фильтрует список объявлений по категории и марке. Всегда исключает мото/скутеры."""
-    # Всегда убираем скутеры/мотоциклы из поиска авто
+    # Убираем рекламу площадки / промо-блоки и мото/скутеры
+    items = [it for it in items if not _is_promo_listing(it)]
     items = [it for it in items if not _is_moto(it.get("title", ""))]
 
     if not category or category == "all":
