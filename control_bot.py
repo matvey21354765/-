@@ -2714,6 +2714,15 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
         owner_id = post.get("owner_id") or post.get("from_id", 0)
         post_id = post.get("id", "")
         url = f"https://vk.com/wall{owner_id}_{post_id}"
+        # Страница автора объявления: from_id (кто опубликовал), иначе owner_id.
+        # Отрицательный id = группа (club), положительный = пользователь (id).
+        _author_id = post.get("from_id") or post.get("owner_id") or 0
+        if _author_id < 0:
+            _author_page = f"https://vk.com/club{-_author_id}"
+        elif _author_id > 0:
+            _author_page = f"https://vk.com/id{_author_id}"
+        else:
+            _author_page = url
         year_m = _vk_year_re.search(text)
         photo_url = ""
         for att in post.get("attachments", []):
@@ -2731,7 +2740,12 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                 days = max(0, (_dt.date.today() - post_date).days)
             except Exception:
                 pass
-        seller = source_label or f"vk.com/wall{owner_id}"
+        # Имя продавца: настоящее название группы (source_label), иначе ссылка на
+        # страницу автора (а не служебное "newsfeed").
+        if source_label and source_label.lower() != "newsfeed":
+            seller = source_label
+        else:
+            seller = _author_page.replace("https://", "")
         return {
             "title": _social_make_title(text),
             "price": f"{price:,} ₽".replace(",", " ") if price else "цена не указана",
@@ -2741,7 +2755,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
             "description": text[:500],
             "source": "vk",
             "seller": seller,
-            "_seller_url": f"https://vk.com/wall{owner_id}",
+            "_seller_url": _author_page,
             "_year": int(year_m.group(1)) if year_m else 0,
             "_days_on_site": days,
             "_no_price": price == 0,
@@ -9866,10 +9880,12 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         seller = item.get("seller", "")
         if source == "vk":
             caption += f"\n👤 Продавец: {seller}" if seller else ""
-            row1 = [
-                InlineKeyboardButton(text="📘 Объявление ВК", url=url),
-                InlineKeyboardButton(text="⭐ Сохранить", callback_data=f"fav|{sid}|{uid}"),
-            ]
+            _seller_url = item.get("_seller_url", "")
+            row1 = [InlineKeyboardButton(text="📘 Объявление ВК", url=url)]
+            # Кнопка на страницу продавца (профиль/группа), если она отличается от поста
+            if _seller_url and _seller_url != url:
+                row1.append(InlineKeyboardButton(text="👤 Продавец", url=_seller_url))
+            row1.append(InlineKeyboardButton(text="⭐ Сохранить", callback_data=f"fav|{sid}|{uid}"))
         elif source in ("tg", "tg_channel"):
             caption += f"\n📢 Канал: {seller}" if seller else ""
             seller_url = item.get("_seller_url", url)
