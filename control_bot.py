@@ -7923,6 +7923,39 @@ async def cmd_admin(msg: Message):
                      parse_mode="HTML", reply_markup=_admin_menu_kb())
 
 
+@dp.message(Command("dbcheck"))
+async def cmd_dbcheck(msg: Message):
+    """Диагностика хранилища статистики — для админа."""
+    if msg.from_user.id not in ADMIN_IDS:
+        return
+    pg = "✅ подключён" if _get_db() else "❌ НЕ подключён (DATABASE_URL не задан)"
+    in_mem = len(_USER_REGISTRY)
+    pg_cnt = "—"
+    try:
+        db = _get_db()
+        if db:
+            with db.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM bot_users")
+                pg_cnt = cur.fetchone()[0]
+    except Exception:
+        pass
+    backup = "✅ есть закреп" if _BACKUP_MSG_ID else "⏳ ещё не создан (создаётся раз в 15 мин)"
+    await msg.answer(
+        f"🗄 <b>Хранилище статистики</b>\n\n"
+        f"PostgreSQL: {pg}\n"
+        f"В памяти пользователей: <b>{in_mem}</b>\n"
+        f"В PG (bot_users): <b>{pg_cnt}</b>\n"
+        f"Telegram-бэкап: {backup}\n\n"
+        f"Статистика хранится в памяти + дублируется в PG и в закреплённый "
+        f"документ этого чата — переживает деплой даже без БД.",
+        parse_mode="HTML",
+    )
+    # Принудительно делаем бэкап сейчас
+    global _registry_dirty
+    _registry_dirty = True
+    await _tg_backup_save()
+
+
 @dp.message(Command("reflink"))
 async def cmd_reflink(msg: Message):
     """Показывает РЕАЛЬНОЕ имя бота и рабочую реф-ссылку (для проверки)."""
@@ -9867,28 +9900,50 @@ def _kv_get(key: str) -> "str | None":
     return None
 
 
+# Реестр пользователей в ПАМЯТИ — источник правды. Сохраняется и в PG (если есть),
+# и в закреплённое сообщение Telegram (работает БЕЗ внешней БД). При старте
+# восстанавливается из любого доступного источника → статистика не сбрасывается.
+_USER_REGISTRY: "dict[str, dict]" = {}
+_registry_dirty = False
+
+
 def _register_user(uid: int, username: "str | None" = None, is_search: bool = False):
-    """Регистрирует пользователя в надёжном реестре PG. Вызывается на каждое
-    сообщение. is_search=True увеличивает счётчик поисков. Безопасно при ошибках."""
+    """Обновляет реестр (в памяти + PG). Вызывается на каждое сообщение."""
+    global _registry_dirty
+    k = str(uid)
+    now = int(time.time())
+    u = _USER_REGISTRY.get(k) or {"first_seen": now, "searches": 0}
+    u["last_seen"] = now
+    if username:
+        u["username"] = username
+    if is_search:
+        u["searches"] = u.get("searches", 0) + 1
+    _USER_REGISTRY[k] = u
+    _registry_dirty = True
+    # Зеркалим в PG (если подключён)
     try:
         db = _get_db()
-        if not db:
-            return
-        with db.cursor() as cur:
-            cur.execute(
-                "INSERT INTO bot_users(uid, username, first_seen, last_seen, search_count) "
-                "VALUES(%s,%s,NOW(),NOW(),%s) "
-                "ON CONFLICT(uid) DO UPDATE SET "
-                "  last_seen=NOW(), "
-                "  username=COALESCE(EXCLUDED.username, bot_users.username), "
-                "  search_count=bot_users.search_count + %s",
-                (uid, username, 1 if is_search else 0, 1 if is_search else 0),
-            )
+        if db:
+            with db.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO bot_users(uid, username, first_seen, last_seen, search_count) "
+                    "VALUES(%s,%s,NOW(),NOW(),%s) "
+                    "ON CONFLICT(uid) DO UPDATE SET last_seen=NOW(), "
+                    "  username=COALESCE(EXCLUDED.username, bot_users.username), "
+                    "  search_count=bot_users.search_count + %s",
+                    (uid, username, 1 if is_search else 0, 1 if is_search else 0),
+                )
     except Exception:
         pass
 
 
 def _set_user_monitoring(uid: int, on: bool):
+    global _registry_dirty
+    k = str(uid)
+    u = _USER_REGISTRY.get(k) or {"first_seen": int(time.time()), "searches": 0}
+    u["monitoring"] = on
+    _USER_REGISTRY[k] = u
+    _registry_dirty = True
     try:
         db = _get_db()
         if db:
@@ -9899,8 +9954,10 @@ def _set_user_monitoring(uid: int, on: bool):
 
 
 def _db_users() -> dict:
-    """Возвращает реестр пользователей из PG в формате как у analytics
-    ({uid: {first_seen, last_seen, username, searches}}). Пусто, если PG нет."""
+    """Реестр пользователей. Источник — память (всегда полон); при пустой памяти
+    читаем из PG. Формат как у analytics ({uid:{first_seen,last_seen,username,searches}})."""
+    if _USER_REGISTRY:
+        return dict(_USER_REGISTRY)
     out = {}
     try:
         db = _get_db()
@@ -9918,6 +9975,77 @@ def _db_users() -> dict:
     except Exception:
         pass
     return out
+
+
+# ── Бэкап реестра в Telegram (закреплённый документ) — работает без БД ──
+_BACKUP_MSG_ID = None
+
+
+async def _tg_backup_save():
+    """Сохраняет реестр в закреплённый документ в чате админа. Без внешней БД."""
+    global _BACKUP_MSG_ID, _registry_dirty
+    if not ADMIN_IDS or not _USER_REGISTRY or not _registry_dirty:
+        return
+    try:
+        from aiogram.types import BufferedInputFile
+        payload = json.dumps({"users": _USER_REGISTRY, "ts": int(time.time())}, ensure_ascii=False)
+        admin = ADMIN_IDS[0]
+        msg = await bot.send_document(
+            admin, BufferedInputFile(payload.encode("utf-8"), "stats_backup.json"),
+            caption="📦 авто-бэкап статистики (не удаляй закреп)", disable_notification=True,
+        )
+        try:
+            await bot.pin_chat_message(admin, msg.message_id, disable_notification=True)
+        except Exception:
+            pass
+        # Удаляем предыдущий бэкап-документ, чтобы не засорять чат
+        if _BACKUP_MSG_ID and _BACKUP_MSG_ID != msg.message_id:
+            try:
+                await bot.delete_message(admin, _BACKUP_MSG_ID)
+            except Exception:
+                pass
+        _BACKUP_MSG_ID = msg.message_id
+        _registry_dirty = False
+    except Exception as e:
+        print(f"  [tg-backup] {str(e)[:80]}")
+
+
+async def _tg_backup_restore():
+    """Восстанавливает реестр из закреплённого документа в чате админа."""
+    if not ADMIN_IDS:
+        return
+    try:
+        chat = await bot.get_chat(ADMIN_IDS[0])
+        pm = getattr(chat, "pinned_message", None)
+        doc = getattr(pm, "document", None) if pm else None
+        if doc and "stats_backup" in (doc.file_name or ""):
+            global _BACKUP_MSG_ID
+            _BACKUP_MSG_ID = pm.message_id
+            f = await bot.get_file(doc.file_id)
+            buf = await bot.download_file(f.file_path)
+            data = json.loads(buf.read().decode("utf-8"))
+            restored = data.get("users", {})
+            for k, v in restored.items():
+                cur = _USER_REGISTRY.get(k)
+                if not cur:
+                    _USER_REGISTRY[k] = v
+                else:
+                    cur["searches"] = max(cur.get("searches", 0), v.get("searches", 0))
+                    cur["first_seen"] = min(cur.get("first_seen") or v.get("first_seen", 0), v.get("first_seen", 0)) or v.get("first_seen", 0)
+                    cur["last_seen"] = max(cur.get("last_seen", 0), v.get("last_seen", 0))
+            print(f"  [tg-backup] восстановлено {len(restored)} пользователей из Telegram")
+    except Exception as e:
+        print(f"  [tg-backup] restore: {str(e)[:80]}")
+
+
+async def _tg_backup_loop():
+    """Раз в 15 минут сохраняет реестр в Telegram (если были изменения)."""
+    while True:
+        await asyncio.sleep(900)
+        try:
+            await _tg_backup_save()
+        except Exception:
+            pass
 
 
 def _analytics_persist():
@@ -11852,6 +11980,17 @@ async def main():
     _load_avito_cache()
     _analytics_restore()  # восстановить статистику из PG (контейнер эфемерный)
     _restore_referrals()  # восстановить рефералов из PG
+    # Реестр пользователей: сначала из PG (если есть), затем из Telegram-бэкапа
+    try:
+        for _k, _v in (_db_users() or {}).items():  # память пуста → читает PG
+            _USER_REGISTRY.setdefault(_k, _v)
+    except Exception:
+        pass
+    try:
+        await _tg_backup_restore()
+    except Exception:
+        pass
+    print(f"  [реестр] загружено пользователей: {len(_USER_REGISTRY)}")
     # Username бота берём ВСЕГДА из Telegram (get_me) — это единственный
     # достоверный источник. Переменная окружения может содержать опечатку
     # (например 'Perekupilbot' вместо 'Perekupil_bot') и ломать реф-ссылки.
@@ -11932,6 +12071,8 @@ async def main():
     print("  [admin] планировщик отчётов запущен (09:00 МСК)")
     loop.create_task(_analytics_persist_loop())
     print("  [analytics] автосохранение статистики в PG запущено (раз в 3 мин)")
+    loop.create_task(_tg_backup_loop())
+    print("  [реестр] Telegram-бэкап статистики запущен (раз в 15 мин)")
     # Прогрев кеша бесплатных прокси — тестирует их против Авито и кеширует рабочие
     loop.create_task(_proxy_warmup_loop())
     print("  [прокси-прогрев] запущен фоновый прогрев кеша прокси")
