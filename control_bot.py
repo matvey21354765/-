@@ -172,7 +172,7 @@ def _rotate_proxy_ip(min_interval: float = 50.0) -> bool:
         ok = r.status_code == 200
         print(f"[прокси] ротация IP: HTTP {r.status_code} {'✅' if ok else '❌'} {r.text[:80]!r}")
         if ok:
-            _t.sleep(3)  # даём прокси применить новый IP
+            _t.sleep(2)  # даём прокси применить новый IP
         return ok
     except Exception as e:
         print(f"[прокси] ротация IP ошибка: {str(e)[:80]}")
@@ -2380,7 +2380,7 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
             for _page in range(3):
                 url_t = f"https://t.me/s/{channel}" if before_id is None else f"https://t.me/s/{channel}?before={before_id}"
                 try:
-                    r = _tme_session.get(url_t, timeout=10, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+                    r = _tme_session.get(url_t, timeout=7, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
                     if r.status_code != 200:
                         print(f"  [TG] @{channel} HTTP {r.status_code}")
                         break
@@ -2532,7 +2532,7 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
         _ddg_fut = _dis_ex.submit(_ddg_tg_posts)
         # Параллельно парсим seed-каналы
         with _TPE_TG(max_workers=10) as _ch_ex:
-            for ch_batch in _ch_ex.map(_parse_channel, _seed_channels, timeout=18):
+            for ch_batch in _ch_ex.map(_parse_channel, _seed_channels, timeout=13):
                 if ch_batch:
                     results.extend(ch_batch)
                     print(f"  [TG seed] {len(ch_batch)} объявлений")
@@ -2553,7 +2553,7 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
     new_chs = [c for c in discovered if c not in _seed_channels and c not in _skip_tg][:15]
     if new_chs:
         with _TPE_TG(max_workers=10) as _ch_ex2:
-            for ch_batch in _ch_ex2.map(_parse_channel, new_chs, timeout=16):
+            for ch_batch in _ch_ex2.map(_parse_channel, new_chs, timeout=12):
                 if ch_batch:
                     results.extend(ch_batch)
 
@@ -2837,6 +2837,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
     # ── Шаг 1: Проверяем токен и ищем группы через API ──────────────
     _found_group_ids: dict[int, str] = {}
     _vk_token_ok = False
+    _vk_phase_newsfeed = None  # newsfeed-фаза (заполняется ниже, если есть токен)
 
     if vk_token:
         try:
@@ -2889,14 +2890,16 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                 pass
             return local
 
-        with _TPE_VK(max_workers=8) as _nfex:
-            for batch_nf in _nfex.map(_nf_one, _nf_queries, timeout=20):
-                for item in (batch_nf or []):
-                    if item["url"] not in _nf_seen:
-                        _nf_seen.add(item["url"])
-                        results.append(item)
-        if _nf_seen:
-            print(f"  [VK newsfeed] {len(_nf_seen)} постов из {len(_nf_queries)} запросов")
+        def _exec_newsfeed():
+            with _TPE_VK(max_workers=8) as _nfex:
+                for batch_nf in _nfex.map(_nf_one, _nf_queries, timeout=14):
+                    for item in (batch_nf or []):
+                        if item["url"] not in _nf_seen:
+                            _nf_seen.add(item["url"])
+                            results.append(item)
+            if _nf_seen:
+                print(f"  [VK newsfeed] {len(_nf_seen)} постов из {len(_nf_queries)} запросов")
+        _vk_phase_newsfeed = _exec_newsfeed
 
     # ── Шаг 2: Скрейпим стены найденных групп ────────────────────────
     def _scrape_wall(gid_name: tuple) -> list:
@@ -3140,15 +3143,23 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
             return []
         return _scrape_wall((gid, slug))
 
-    if _seed_slugs:
-        _already_scraped = {gid for gid, _ in wall_groups}
+    def _exec_seeds():
+        if not _seed_slugs:
+            return
         with _TPE_VK(max_workers=15) as _sex:
-            for batch_s in _sex.map(_resolve_and_scrape, _seed_slugs[:24], timeout=18):
+            for batch_s in _sex.map(_resolve_and_scrape, _seed_slugs[:20], timeout=12):
                 for item in (batch_s or []):
                     if item["url"] not in _wall_seen:
                         _wall_seen.add(item["url"])
                         results.append(item)
         print(f"  [VK slugs] {len(_wall_seen)} итого после resolve")
+
+    # newsfeed и seed-резолв НЕЗАВИСИМЫ → выполняем их ПАРАЛЛЕЛЬНО
+    # (раньше последовательно ~38с, теперь ~max(фаз) ~14с). Шаг 2 — пустой no-op.
+    _vk_phases = [f for f in (_vk_phase_newsfeed, _exec_seeds) if f]
+    if _vk_phases:
+        with _TPE_VK(max_workers=len(_vk_phases)) as _pex:
+            list(_pex.map(lambda f: f(), _vk_phases))
 
     # Дедупликация
     def _norm_vk_url(u: str) -> str:
@@ -6149,7 +6160,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         # Доп. страницы добавим тем же методом что сработал
         tasks = [(m, 1) for m in _p1_methods]
         _cap = 300
-        _deadline_s = 25
+        _deadline_s = 20
     else:
         tasks = [(m, 1) for m in all_methods]
         _cap = 40
@@ -10326,7 +10337,7 @@ async def do_search_for_user(uid: int, reply_to):
             None, lambda: scrape_avito(region, pages=3, price_min=pmin, price_max=pmax)
         )
     all_futs = futures + ([_avito_ref_fut] if _avito_ref_fut else [])
-    done, pending = await asyncio.wait(all_futs, timeout=55)
+    done, pending = await asyncio.wait(all_futs, timeout=42)
     if pending:
         for f in pending:
             f.cancel()
