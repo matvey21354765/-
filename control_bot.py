@@ -6975,8 +6975,18 @@ from aiogram import BaseMiddleware
 from aiogram.types import TelegramObject, Update
 
 class SubscriptionMiddleware(BaseMiddleware):
-    """Подписка отключена — пропускаем всех."""
+    """Подписка отключена — пропускаем всех. Заодно регистрируем пользователя
+    в надёжном реестре PG (счётчик статистики, переживает деплой)."""
     async def __call__(self, handler, event: TelegramObject, data: dict):
+        try:
+            u = getattr(event, "from_user", None)
+            if u and u.id:
+                # Только регистрация/last_seen; поиск считается в do_search
+                await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: _register_user(u.id, u.username, False)
+                )
+        except Exception:
+            pass
         return await handler(event, data)
 
 async def _check_and_gate(msg_or_cb) -> bool:
@@ -7602,12 +7612,27 @@ def _msk_date(ts):
 
 
 def _admin_collect():
-    """Собирает сырьё: профили, события, кол-во мониторингов, подписки."""
-    users = analytics.load_users()
+    """Собирает сырьё: профили, события, кол-во мониторингов, подписки.
+    Источник пользователей — НАДЁЖНЫЙ реестр PG (переживает деплой); файловая
+    analytics добавляется поверх для тех, кого ещё нет в PG."""
+    users = dict(analytics.load_users())
+    db_users = _db_users()  # PG-реестр (авторитетный)
+    # Сливаем: PG-данные приоритетнее (полнее и сохраняются между деплоями)
+    for uid, du in db_users.items():
+        cur = users.get(uid, {})
+        merged = dict(cur)
+        merged["first_seen"] = min(cur.get("first_seen") or du["first_seen"], du["first_seen"]) if cur.get("first_seen") else du["first_seen"]
+        merged["last_seen"] = max(cur.get("last_seen", 0), du["last_seen"])
+        merged["searches"] = max(cur.get("searches", 0), du["searches"])
+        merged["username"] = du.get("username") or cur.get("username")
+        merged["_monitoring"] = du.get("monitoring", False)
+        users[uid] = merged
     events = analytics.read_events()
-    mon_count = 0
+    # Кол-во мониторингов: из PG-флага, иначе из settings.json
+    mon_count = sum(1 for u in users.values() if u.get("_monitoring"))
     subs = []  # (uid, settings)
     if USERS_DIR.exists():
+        _settings_mon = 0
         for p in USERS_DIR.iterdir():
             if not (p.is_dir() and p.name.isdigit()):
                 continue
@@ -7616,10 +7641,11 @@ def _admin_collect():
             except Exception:
                 continue
             if s.get("monitor_enabled"):
-                mon_count += 1
+                _settings_mon += 1
             st = s.get("subscription_type")
             if st and st != "free":
                 subs.append((int(p.name), s))
+        mon_count = max(mon_count, _settings_mon)
     return users, events, mon_count, subs
 
 
@@ -7720,7 +7746,11 @@ def _admin_overall_text() -> str:
         if now - ls <= 30 * 86400:
             a30 += 1
     inactive = total - a30
-    searches_total = sum(1 for ev in events if ev.get("action") == "search")
+    # Берём бОльшее из событий и PG-счётчика (PG кумулятивный, переживает деплой)
+    searches_total = max(
+        sum(1 for ev in events if ev.get("action") == "search"),
+        sum(u.get("searches", 0) for u in users.values()),
+    )
     paid = len(subs)
 
     def _pct(x):
@@ -8204,6 +8234,7 @@ async def cb_notify_toggle(cb: CallbackQuery):
     enabled = not s.get("monitor_enabled", False)
     s["monitor_enabled"] = enabled
     save_settings(uid, s)
+    _set_user_monitoring(uid, enabled)  # надёжный флаг в PG
     if enabled:
         analytics.track("monitor_on", uid=uid, username=cb.from_user.username)
         _start_monitor(uid)
@@ -9743,6 +9774,17 @@ def _get_db():
                             updated_at TIMESTAMP DEFAULT NOW()
                         )
                     """)
+                    # Реестр пользователей — НАДЁЖНЫЙ счётчик статистики (переживает деплой)
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS bot_users (
+                            uid BIGINT PRIMARY KEY,
+                            username TEXT,
+                            first_seen TIMESTAMP DEFAULT NOW(),
+                            last_seen TIMESTAMP DEFAULT NOW(),
+                            search_count INTEGER DEFAULT 0,
+                            monitoring BOOLEAN DEFAULT FALSE
+                        )
+                    """)
         except Exception:
             return None
         return _db_conn
@@ -9776,6 +9818,59 @@ def _kv_get(key: str) -> "str | None":
     except Exception:
         pass
     return None
+
+
+def _register_user(uid: int, username: "str | None" = None, is_search: bool = False):
+    """Регистрирует пользователя в надёжном реестре PG. Вызывается на каждое
+    сообщение. is_search=True увеличивает счётчик поисков. Безопасно при ошибках."""
+    try:
+        db = _get_db()
+        if not db:
+            return
+        with db.cursor() as cur:
+            cur.execute(
+                "INSERT INTO bot_users(uid, username, first_seen, last_seen, search_count) "
+                "VALUES(%s,%s,NOW(),NOW(),%s) "
+                "ON CONFLICT(uid) DO UPDATE SET "
+                "  last_seen=NOW(), "
+                "  username=COALESCE(EXCLUDED.username, bot_users.username), "
+                "  search_count=bot_users.search_count + %s",
+                (uid, username, 1 if is_search else 0, 1 if is_search else 0),
+            )
+    except Exception:
+        pass
+
+
+def _set_user_monitoring(uid: int, on: bool):
+    try:
+        db = _get_db()
+        if db:
+            with db.cursor() as cur:
+                cur.execute("UPDATE bot_users SET monitoring=%s WHERE uid=%s", (on, uid))
+    except Exception:
+        pass
+
+
+def _db_users() -> dict:
+    """Возвращает реестр пользователей из PG в формате как у analytics
+    ({uid: {first_seen, last_seen, username, searches}}). Пусто, если PG нет."""
+    out = {}
+    try:
+        db = _get_db()
+        if not db:
+            return out
+        with db.cursor() as cur:
+            cur.execute("SELECT uid, username, EXTRACT(EPOCH FROM first_seen), "
+                        "EXTRACT(EPOCH FROM last_seen), search_count, monitoring FROM bot_users")
+            for uid, un, fs, ls, sc, mon in cur.fetchall():
+                out[str(uid)] = {
+                    "username": un, "first_seen": int(fs or 0),
+                    "last_seen": int(ls or 0), "searches": int(sc or 0),
+                    "monitoring": bool(mon),
+                }
+    except Exception:
+        pass
+    return out
 
 
 def _analytics_persist():
@@ -10692,6 +10787,11 @@ async def do_search_for_user(uid: int, reply_to):
         "search", uid=uid, region=region, price_min=pmin, price_max=pmax,
         source=",".join(enabled_sources), results=len(suitable),
     )
+    # Надёжный счётчик поиска в PG (переживает деплой)
+    try:
+        await asyncio.get_running_loop().run_in_executor(None, lambda: _register_user(uid, None, True))
+    except Exception:
+        pass
     _seen_cnt = sum(1 for i in suitable if i.get("_already_seen"))
     src_found = list(dict.fromkeys(i.get("source","") for i in suitable if i.get("source")))
     src_icons = {"avito":"🟠","drom":"🔵","autoru":"🔴","vk":"💙","tg":"✈️"}
