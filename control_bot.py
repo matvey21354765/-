@@ -439,6 +439,24 @@ def _save_referrals(data: dict):
         REFERRALS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
         pass
+    # Дублируем в PostgreSQL — переживает деплой (контейнер эфемерный)
+    try:
+        _kv_set("referrals", json.dumps(data, ensure_ascii=False))
+    except Exception:
+        pass
+
+def _restore_referrals():
+    """Восстанавливает рефералов из PG, если локальный файл пуст (после деплоя)."""
+    try:
+        if REFERRALS_FILE.exists() and REFERRALS_FILE.stat().st_size > 5:
+            return
+        raw = _kv_get("referrals")
+        if raw:
+            REFERRALS_FILE.parent.mkdir(exist_ok=True)
+            REFERRALS_FILE.write_text(raw, encoding="utf-8")
+            print(f"  [referrals-restore] восстановлено из PG ({len(raw)}б)")
+    except Exception as e:
+        print(f"  [referrals-restore] {str(e)[:80]}")
 
 def get_referral_bonus_days(uid: int) -> int:
     """Returns total bonus days accumulated by this user."""
@@ -485,18 +503,24 @@ def _record_referral(new_uid: int, inviter_uid: int):
     
     # Add to inviter's invited list
     invited_list = data[inviter_key].get("invited", [])
-    if new_uid not in invited_list:
+    _is_new = new_uid not in invited_list
+    _milestone = False
+    if _is_new:
         invited_list.append(new_uid)
         data[inviter_key]["invited"] = invited_list
-        
+
         # Give +3 days bonus per invited friend
         data[inviter_key]["bonus_days"] = data[inviter_key].get("bonus_days", 0) + 3
-        
+
         # Milestone: 10 friends = +30 extra days
         if len(invited_list) == 10:
             data[inviter_key]["bonus_days"] = data[inviter_key].get("bonus_days", 0) + 30
-    
+            _milestone = True
+
     _save_referrals(data)
+    # Возвращаем инфо для уведомления пригласившего
+    return {"is_new": _is_new, "count": len(invited_list), "milestone": _milestone,
+            "bonus_days": data[inviter_key].get("bonus_days", 0)}
 
 
 def load_skipped(uid: int) -> set:
@@ -7272,7 +7296,24 @@ async def cmd_start(msg: Message, state: FSMContext):
             try:
                 inviter_uid = int(param[4:])
                 if inviter_uid != msg.from_user.id:
-                    _record_referral(msg.from_user.id, inviter_uid)
+                    _ref_res = _record_referral(msg.from_user.id, inviter_uid)
+                    # Уведомляем пригласившего, что друг перешёл по его ссылке
+                    if _ref_res and _ref_res.get("is_new"):
+                        _fname = msg.from_user.first_name or "Друг"
+                        _un = f" (@{msg.from_user.username})" if msg.from_user.username else ""
+                        _cnt = _ref_res.get("count", 0)
+                        _txt = (
+                            f"🎉 *По твоей ссылке перешёл друг!*\n\n"
+                            f"👤 {_fname}{_un}\n"
+                            f"👥 Всего приглашено: *{_cnt}*\n"
+                            f"🎁 +3 дня доступа (всего бонусом: {_ref_res.get('bonus_days', 0)} дн.)"
+                        )
+                        if _ref_res.get("milestone"):
+                            _txt += "\n\n🏆 *10 друзей — +30 дней сверху!*"
+                        try:
+                            await bot.send_message(inviter_uid, _txt, parse_mode="Markdown")
+                        except Exception:
+                            pass
                     await msg.answer(
                         "👋 *Добро пожаловать в PerekupDrive!*\n\n"
                         "Ты получил *7 дней полного доступа*.\n"
@@ -11469,12 +11510,17 @@ async def cmd_invite(msg: Message):
     bonus_days = entry.get("bonus_days", 0)
     ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{uid}"
     share_text = "Нашёл бота который ищет авто ниже рынка на Авито, Дроме, Авто.ру, ВК и Telegram — попробуй!"
+    _bonus_line = f"🎁 Бонусных дней: *{bonus_days}*\n" if bonus_days else ""
+    _next = 10 - (invited_count % 10) if invited_count < 10 else 0
+    _milestone_line = f"🏆 До +30 дней осталось пригласить: *{10 - invited_count}*\n" if 0 < invited_count < 10 else ""
     await msg.answer(
         f"📲 *Пригласи друга в PerekupDrive*\n\n"
         f"Сейчас идёт тестовый период — бот полностью бесплатен для всех.\n"
-        f"Поделись ссылкой — друг сразу получит доступ к боту.\n\n"
-        f"👥 Приглашено: *{invited_count}* друзей\n\n"
-        f"🔗 *Твоя ссылка:*\n{ref_link}",
+        f"За каждого друга — *+3 дня доступа*, за 10 друзей — *+30 дней*.\n\n"
+        f"👥 Приглашено: *{invited_count}* друзей\n"
+        f"{_bonus_line}{_milestone_line}\n"
+        f"🔗 *Твоя ссылка:*\n{ref_link}\n\n"
+        f"Когда друг перейдёт по ссылке — пришлю тебе уведомление 🔔",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="📤 Поделиться ссылкой", url=f"https://t.me/share/url?url={ref_link}&text={share_text}")],
@@ -11645,6 +11691,7 @@ async def main():
     logging.basicConfig(level=logging.WARNING)
     _load_avito_cache()
     _analytics_restore()  # восстановить статистику из PG (контейнер эфемерный)
+    _restore_referrals()  # восстановить рефералов из PG
     # Подтягиваем username бота автоматически
     if not BOT_USERNAME:
         try:
