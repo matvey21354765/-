@@ -10039,13 +10039,14 @@ async def _tg_backup_restore():
 
 
 async def _tg_backup_loop():
-    """Раз в 15 минут сохраняет реестр в Telegram (если были изменения)."""
+    """Сохраняет реестр в Telegram: первый бэкап через 90с, далее раз в 15 мин."""
+    await asyncio.sleep(90)
     while True:
-        await asyncio.sleep(900)
         try:
             await _tg_backup_save()
         except Exception:
             pass
+        await asyncio.sleep(900)
 
 
 def _analytics_persist():
@@ -11975,21 +11976,57 @@ async def _proxy_warmup_loop() -> None:
 
 
 async def main():
-    global BOT_USERNAME
+    global BOT_USERNAME, _registry_dirty
     logging.basicConfig(level=logging.WARNING)
     _load_avito_cache()
     _analytics_restore()  # восстановить статистику из PG (контейнер эфемерный)
     _restore_referrals()  # восстановить рефералов из PG
-    # Реестр пользователей: сначала из PG (если есть), затем из Telegram-бэкапа
+    # Реестр пользователей собираем из ВСЕХ доступных источников (чтобы не потерять
+    # уже существующих): PG → папки users/ → analytics → Telegram-бэкап.
     try:
         for _k, _v in (_db_users() or {}).items():  # память пуста → читает PG
             _USER_REGISTRY.setdefault(_k, _v)
+    except Exception:
+        pass
+    # Папки users/<uid> — каждый, кто хоть раз пользовался ботом
+    try:
+        if USERS_DIR.exists():
+            for _p in USERS_DIR.iterdir():
+                if not (_p.is_dir() and _p.name.isdigit()):
+                    continue
+                if _p.name in _USER_REGISTRY:
+                    continue
+                try:
+                    _st = (_p / "settings.json").stat()
+                    _fs = int(_st.st_mtime)
+                except Exception:
+                    _fs = int(time.time())
+                _mon = False
+                try:
+                    _s = json.loads((_p / "settings.json").read_text(encoding="utf-8"))
+                    _mon = bool(_s.get("monitor_enabled"))
+                except Exception:
+                    pass
+                _USER_REGISTRY[_p.name] = {"first_seen": _fs, "last_seen": _fs,
+                                           "searches": 0, "monitoring": _mon}
+    except Exception:
+        pass
+    # Файловая analytics (если есть)
+    try:
+        for _k, _v in (analytics.load_users() or {}).items():
+            cur = _USER_REGISTRY.get(_k)
+            if not cur:
+                _USER_REGISTRY[_k] = _v
+            else:
+                cur["searches"] = max(cur.get("searches", 0), _v.get("searches", 0))
+                cur["username"] = cur.get("username") or _v.get("username")
     except Exception:
         pass
     try:
         await _tg_backup_restore()
     except Exception:
         pass
+    _registry_dirty = True  # сохранить собранный реестр при первом бэкапе
     print(f"  [реестр] загружено пользователей: {len(_USER_REGISTRY)}")
     # Username бота берём ВСЕГДА из Telegram (get_me) — это единственный
     # достоверный источник. Переменная окружения может содержать опечатку
