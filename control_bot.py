@@ -2611,7 +2611,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
         if _mln:
             try:
                 val = int(float(_mln.group(1).replace(",", ".")) * 1_000_000)
-                if 50_000 <= val <= 50_000_000:
+                if 15_000 <= val <= 50_000_000:
                     return val
             except Exception:
                 pass
@@ -2620,11 +2620,11 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
         _sep_re = r'(\d{1,3}(?:[.,]\d{3})+)'
         for m in re.finditer(rf'(?:цен[аеуы]|стоимост|прошу|за)\s*[:\-]?\s*{_sep_re}', _tl):
             val = int(re.sub(r'\D', '', m.group(1)))
-            if 30_000 <= val <= 50_000_000:
+            if 15_000 <= val <= 50_000_000:
                 return val
         for m in re.finditer(rf'{_sep_re}\s*(?:₽|руб|р\.)', text):
             val = int(re.sub(r'\D', '', m.group(1)))
-            if 30_000 <= val <= 50_000_000:
+            if 15_000 <= val <= 50_000_000:
                 return val
         # Сначала ищем с явным символом валюты
         for m in _vk_price_re.finditer(text):
@@ -2636,7 +2636,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
             if "тыс" in suffix or "тр" in suffix or (suffix.startswith("к") and not "кузов" in suffix):
                 if val < 1000:
                     val *= 1000
-            if 50_000 <= val <= 50_000_000:
+            if 15_000 <= val <= 50_000_000:
                 return val
         # Затем ищем число рядом с ценовым словом
         for m in _vk_price_ctx_re.finditer(text):
@@ -2649,7 +2649,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                 val *= 1000
             if val < 1000:  # вероятно тысячи без суффикса: "цена 95" → 95000
                 val *= 1000
-            if 50_000 <= val <= 50_000_000:
+            if 15_000 <= val <= 50_000_000:
                 return val
         # Третий проход: число с разделителями-пробелами ("1 200 000") или голое
         # ("950000"). Исключаем пробег/год/мощность/телефоны по контексту.
@@ -2667,12 +2667,12 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
             ctx = _tl[max(0, m.start() - 25):m.end() + 12]
             if any(skip in ctx for skip in _SKIP_CTX):
                 continue
-            if 50_000 <= val <= 9_999_999:
+            if 15_000 <= val <= 9_999_999:
                 return val
         # Затем голое число
         for m in re.finditer(r'\b(\d{5,7})\b', text):
             val = int(m.group(1))
-            if 50_000 <= val <= 9_999_999:
+            if 15_000 <= val <= 9_999_999:
                 ctx = _tl[max(0, m.start() - 30):m.end() + 30]
                 if any(skip in ctx for skip in _SKIP_CTX):
                     continue
