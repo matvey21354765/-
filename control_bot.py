@@ -923,36 +923,43 @@ def scrape_drom(region: str, pages: int = 15, price_min: int = 0, price_max: int
     _drom_seg = _DROM_SLUG.get(_brand_l, _brand_l) if _brand_l and _brand_l != "any" else "auto"
 
     _drom_proxies = _avito_proxies() if AVITO_PROXIES else None
+    _drom_params = {}
+    if price_min > 0:
+        _drom_params["minprice"] = price_min
+    if price_max < 99_000_000:
+        _drom_params["maxprice"] = price_max
 
-    for p in range(1, pages + 1):
+    def _fetch_drom_html(p: int) -> str:
+        """Скачивает HTML страницы Дрома (с прокси-фолбэком). Для параллельной загрузки."""
         url = f"{base}/{_drom_seg}/all/" if p == 1 else f"{base}/{_drom_seg}/all/page{p}/"
-        params = {}
-        if price_min > 0:
-            params["minprice"] = price_min
-        if price_max < 99_000_000:
-            params["maxprice"] = price_max
-
         try:
-            r = session.get(url, params=params, timeout=20)
-            print(f"  [Дром {region}] стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
-            soup = _BS(r.text, "lxml")
+            r = session.get(url, params=_drom_params, timeout=12)
+            html = r.text
+            if "bulls-list_bull" not in html and _drom_proxies:
+                import requests as _rq_d
+                _r2 = _rq_d.get(url, params=_drom_params, timeout=12, proxies=_drom_proxies,
+                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                             "Accept-Language": "ru-RU,ru;q=0.9"})
+                html = _r2.text
+            return html
+        except Exception as e:
+            print(f"  [Дром {region}] стр.{p}: {str(e)[:50]}")
+            return ""
+
+    # Грузим все страницы ПАРАЛЛЕЛЬНО (раньше было последовательно — медленно)
+    from concurrent.futures import ThreadPoolExecutor as _TPE_DROM
+    with _TPE_DROM(max_workers=min(8, pages)) as _dex:
+        _drom_htmls = list(_dex.map(_fetch_drom_html, range(1, pages + 1)))
+
+    for p, _html in enumerate(_drom_htmls, 1):
+        if not _html:
+            continue
+        try:
+            soup = _BS(_html, "lxml")
             cards = soup.select("div[data-ftid='bulls-list_bull']")
-            if not cards and p == 1:
-                # Дром блокирует — пробуем через прокси
-                print(f"  [Дром {region}] стр.{p}: cards=0 (первые 300б: {r.text[:300]!r})")
-                if _drom_proxies:
-                    try:
-                        import requests as _rq_d
-                        _r2 = _rq_d.get(url, params=params, timeout=20, proxies=_drom_proxies,
-                            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                                     "Accept-Language": "ru-RU,ru;q=0.9"})
-                        print(f"  [Дром {region}] прокси стр.{p}: HTTP {_r2.status_code}, {len(_r2.text):,}б")
-                        soup = _BS(_r2.text, "lxml")
-                        cards = soup.select("div[data-ftid='bulls-list_bull']")
-                    except Exception as _ep:
-                        print(f"  [Дром {region}] прокси: {str(_ep)[:60]}")
+            print(f"  [Дром {region}] стр.{p}: {len(cards)} карточек")
             if not cards:
-                break
+                continue
 
             for card in cards:
                 try:
@@ -1094,11 +1101,9 @@ def scrape_drom(region: str, pages: int = 15, price_min: int = 0, price_max: int
                         results.append(item)
                 except Exception:
                     pass
-
-            time.sleep(0.05)
         except Exception as e:
-            print(f"  [Дром {region}] стр.{p}: {e}")
-            break
+            print(f"  [Дром {region}] парс стр.{p}: {e}")
+            continue
 
     return results
 
