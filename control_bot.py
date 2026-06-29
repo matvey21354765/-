@@ -6413,7 +6413,22 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
         items = _scrape_avito_raw(region, pages=pages, price_min=_scrape_pmin, price_max=_scrape_pmax, sort_by_date=sort_by_date, brand=brand)
         if items:
             _AVITO_REGION_CACHE[cache_key] = (now, items)
-            _save_avito_cache()
+            # Запись кэша на диск — в фоне, чтобы не держать пользователя. Делаем
+            # дешёвый shallow-снимок СИНХРОННО (защита от dict-changed-during-iter),
+            # а тяжёлые json.dumps + write выносим в фоновый поток.
+            try:
+                _snap = dict(_AVITO_REGION_CACHE)
+                def _flush_cache(_data=_snap):
+                    try:
+                        _AVITO_CACHE_FILE.write_text(
+                            json.dumps({"version": 4, "data": _data}, ensure_ascii=False),
+                            encoding="utf-8",
+                        )
+                    except Exception:
+                        pass
+                _threading.Thread(target=_flush_cache, daemon=True).start()
+            except Exception:
+                pass
             print(f"  [Авито] скрейп OK: {len(items)} объявлений → кэш ({cache_key})")
         else:
             # Скрейп вернул 0. Ищем любой кэш региона.
@@ -10367,10 +10382,16 @@ async def send_batch(chat_id: int, uid: int, offset: int):
     # Список уже отсортирован в do_search_for_user. Берём срез напрямую.
     batch = items[offset:offset + 10]
 
-    # Дозагружаем фото только для тех у кого нет
-    await asyncio.gather(*[_prefetch(it) for it in batch])
-
-    for item in batch:
+    # Дозагружаем фото ПАРАЛЛЕЛЬНО, но каждую карточку показываем сразу, как только
+    # готово ЕЁ фото — не ждём самую медленную из 10 (фото Дрома грузится до 14с).
+    # Все объявления показываются те же и в том же порядке — теряется только
+    # барьер-ожидание, первая выгодная карточка появляется в разы быстрее.
+    _pf_tasks = [asyncio.ensure_future(_prefetch(it)) for it in batch]
+    for i, item in enumerate(batch):
+        try:
+            await _pf_tasks[i]   # ждём фото ТОЛЬКО этого объявления
+        except Exception:
+            pass
         await _send_item(item)
         await asyncio.sleep(0.01)
 
