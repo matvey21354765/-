@@ -11645,20 +11645,27 @@ async def cmd_invite(msg: Message):
     entry = data.get(str(uid), {})
     invited_count = len(entry.get("invited", []))
     bonus_days = entry.get("bonus_days", 0)
-    ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{uid}"
+    # Берём имя бота из Telegram (надёжно), не из возможно-устаревшей переменной
+    try:
+        me = await bot.get_me()
+        _un = me.username or BOT_USERNAME
+    except Exception:
+        _un = BOT_USERNAME
+    ref_link = f"https://t.me/{_un}?start=ref_{uid}"
     share_text = "Нашёл бота который ищет авто ниже рынка на Авито, Дроме, Авто.ру, ВК и Telegram — попробуй!"
-    _bonus_line = f"🎁 Бонусных дней: *{bonus_days}*\n" if bonus_days else ""
-    _next = 10 - (invited_count % 10) if invited_count < 10 else 0
-    _milestone_line = f"🏆 До +30 дней осталось пригласить: *{10 - invited_count}*\n" if 0 < invited_count < 10 else ""
+    _bonus_line = f"🎁 Бонусных дней: <b>{bonus_days}</b>\n" if bonus_days else ""
+    _milestone_line = f"🏆 До +30 дней осталось пригласить: <b>{10 - invited_count}</b>\n" if 0 < invited_count < 10 else ""
+    # HTML: подчёркивания в ссылке остаются буквальными (Markdown их «съедал» → курсив)
     await msg.answer(
-        f"📲 *Пригласи друга в PerekupDrive*\n\n"
+        f"📲 <b>Пригласи друга в PerekupDrive</b>\n\n"
         f"Сейчас идёт тестовый период — бот полностью бесплатен для всех.\n"
-        f"За каждого друга — *+3 дня доступа*, за 10 друзей — *+30 дней*.\n\n"
-        f"👥 Приглашено: *{invited_count}* друзей\n"
+        f"За каждого друга — <b>+3 дня доступа</b>, за 10 друзей — <b>+30 дней</b>.\n\n"
+        f"👥 Приглашено: <b>{invited_count}</b> друзей\n"
         f"{_bonus_line}{_milestone_line}\n"
-        f"🔗 *Твоя ссылка:*\n{ref_link}\n\n"
+        f"🔗 <b>Твоя ссылка</b> (нажми, чтобы скопировать):\n"
+        f"<code>{ref_link}</code>\n\n"
         f"Когда друг перейдёт по ссылке — пришлю тебе уведомление 🔔",
-        parse_mode="Markdown",
+        parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="📤 Поделиться ссылкой", url=f"https://t.me/share/url?url={ref_link}&text={share_text}")],
         ])
