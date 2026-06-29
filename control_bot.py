@@ -3180,6 +3180,31 @@ AVITO_LOCATION_IDS = {
     "rostov":       652000,
 }
 
+# ID областей/краёв/республик — поиск по ВСЕМУ региону, а не только городу
+# (Екатеринбург → вся Свердловская область и т.д.). Проверено через slocations.
+AVITO_OBLAST_IDS = {
+    "ekaterinburg": 653700,  # Свердловская область
+    "spb":          636370,  # Ленинградская область
+    "novosibirsk":  641470,  # Новосибирская область
+    "kazan":        650130,  # Республика Татарстан
+    "chelyabinsk":  660710,  # Челябинская область
+    "ufa":          645790,  # Республика Башкортостан
+    "krasnodar":    632660,  # Краснодарский край
+    "omsk":         642020,  # Омская область
+    "tyumen":       658170,  # Тюменская область
+    "perm":         643700,  # Пермский край
+    "krasnoyarsk":  634930,  # Красноярский край
+    "voronezh":     625670,  # Воронежская область
+    "samara":       652560,  # Самарская область
+    "rostov":       651110,  # Ростовская область
+    # moscow — федеральный город, остаётся как есть (637640)
+}
+
+
+def _avito_region_loc(region: str) -> int:
+    """locationId для поиска: предпочитаем область (весь регион), иначе город."""
+    return AVITO_OBLAST_IDS.get(region) or AVITO_LOCATION_IDS.get(region, 637640)
+
 
 
 import threading as _threading
@@ -4551,7 +4576,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         return []
 
     slug = AVITO_SLUGS.get(region, region)
-    location_id = AVITO_LOCATION_IDS.get(region, 637640)
+    location_id = _avito_region_loc(region)
     results: list[dict] = []
 
     session = _req.Session()
@@ -5520,7 +5545,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             import requests as _req
         except ImportError:
             return []
-        _loc = AVITO_LOCATION_IDS.get(region, location_id)
+        _loc = _avito_region_loc(region)
         _params: dict = {
             "categoryId": 9,
             "locationId": _loc,
@@ -5596,7 +5621,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             import requests as _req
         except ImportError:
             return []
-        location_id = AVITO_LOCATION_IDS.get(region, 637640)
+        location_id = _avito_region_loc(region)
         params: dict = {
             "categoryId": 9,
             "locationId": location_id,
@@ -10095,7 +10120,7 @@ async def do_search_for_user(uid: int, reply_to):
     enabled_sources = _get_enabled_sources(s)
 
     src_labels = " ".join(SOURCE_TAGS.get(src, src) for src in enabled_sources)
-    await reply_to.answer(f"🔍 Ищу в {region_name} ({pmin:,}–{pmax:,} ₽)\n{src_labels}")
+    await reply_to.answer(f"🔍 Ищу в {region_name} и области ({pmin:,}–{pmax:,} ₽)\n{src_labels}")
 
     skipped = load_skipped(uid)
     seen = load_seen(uid)
