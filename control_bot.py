@@ -7292,9 +7292,15 @@ async def cmd_start(msg: Message, state: FSMContext):
     text_parts = (msg.text or "").split()
     if len(text_parts) > 1:
         param = text_parts[1]
+        # Принимаем оба формата: "ref_123" и "ref123" (на случай старых ссылок)
+        _ref_digits = ""
         if param.startswith("ref_"):
+            _ref_digits = param[4:]
+        elif param.startswith("ref") and param[3:].isdigit():
+            _ref_digits = param[3:]
+        if _ref_digits.isdigit():
             try:
-                inviter_uid = int(param[4:])
+                inviter_uid = int(_ref_digits)
                 if inviter_uid != msg.from_user.id:
                     _ref_res = _record_referral(msg.from_user.id, inviter_uid)
                     # Уведомляем пригласившего, что друг перешёл по его ссылке
@@ -11692,13 +11698,16 @@ async def main():
     _load_avito_cache()
     _analytics_restore()  # восстановить статистику из PG (контейнер эфемерный)
     _restore_referrals()  # восстановить рефералов из PG
-    # Подтягиваем username бота автоматически
-    if not BOT_USERNAME:
-        try:
-            me = await bot.get_me()
-            BOT_USERNAME = me.username or "PerekupDriveBot"
-            print(f"  [бот] username: @{BOT_USERNAME}")
-        except Exception:
+    # Username бота берём ВСЕГДА из Telegram (get_me) — это единственный
+    # достоверный источник. Переменная окружения может содержать опечатку
+    # (например 'Perekupilbot' вместо 'Perekupil_bot') и ломать реф-ссылки.
+    try:
+        me = await bot.get_me()
+        if me.username:
+            BOT_USERNAME = me.username
+        print(f"  [бот] username: @{BOT_USERNAME}")
+    except Exception:
+        if not BOT_USERNAME:
             BOT_USERNAME = "PerekupDriveBot"
     # Глобальный middleware проверки подписки — блокирует все апдейты
     dp.message.middleware(SubscriptionMiddleware())
