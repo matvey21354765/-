@@ -8893,7 +8893,7 @@ async def cmd_global_search(msg: Message):
     # Запускаем все источники + TG-каналы параллельно
     scraper_map = {
         "drom":   lambda: scrape_drom(region, pages=15, price_min=pmin, price_max=pmax, brand=_br),
-        "autoru": lambda: scrape_autoru(region, pages=12, price_min=pmin, price_max=pmax, brand=_br),
+        "autoru": lambda: scrape_autoru(region, pages=4, price_min=pmin, price_max=pmax, brand=_br),
         "avito":  lambda: scrape_avito(region, pages=10, price_min=pmin, price_max=pmax, sort_by_date=False),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
     }
@@ -10306,7 +10306,7 @@ async def do_search_for_user(uid: int, reply_to):
 
     scraper_map = {
         "drom":   lambda: scrape_drom(region, pages=8, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
-        "autoru": lambda: scrape_autoru(region, pages=4, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
+        "autoru": lambda: scrape_autoru(region, pages=3, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
         "avito":  lambda: scrape_avito(region, pages=6, price_min=pmin, price_max=pmax, sort_by_date=False, brand=(brand if brand and brand != "any" else "")),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
         "tg":     lambda: scrape_tg_channels(region, pmin, pmax),
