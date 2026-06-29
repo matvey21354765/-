@@ -7311,7 +7311,17 @@ async def cmd_start(msg: Message, state: FSMContext):
         if _ref_digits.isdigit():
             try:
                 inviter_uid = int(_ref_digits)
-                if inviter_uid != msg.from_user.id:
+                if inviter_uid == msg.from_user.id:
+                    # Пользователь открыл СВОЮ ссылку (тестирует) — подтверждаем, что
+                    # ссылка рабочая, но себя пригласить нельзя.
+                    await msg.answer(
+                        "✅ *Ссылка работает!*\n\n"
+                        "Это твоя реферальная ссылка — себя пригласить нельзя.\n"
+                        "Отправь её другу: когда он перейдёт и запустит бота, "
+                        "я сразу пришлю тебе уведомление 🔔",
+                        parse_mode="Markdown",
+                    )
+                elif inviter_uid != msg.from_user.id:
                     _ref_res = _record_referral(msg.from_user.id, inviter_uid)
                     # Уведомляем пригласившего, что друг перешёл по его ссылке
                     if _ref_res and _ref_res.get("is_new"):
@@ -7895,6 +7905,27 @@ async def cmd_admin(msg: Message):
         return  # не-админам ничего не показываем
     await msg.answer("📊 <b>Админ-статистика</b>\nВыбери раздел:",
                      parse_mode="HTML", reply_markup=_admin_menu_kb())
+
+
+@dp.message(Command("reflink"))
+async def cmd_reflink(msg: Message):
+    """Показывает РЕАЛЬНОЕ имя бота и рабочую реф-ссылку (для проверки)."""
+    uid = msg.from_user.id
+    try:
+        me = await bot.get_me()
+        real_un = me.username or BOT_USERNAME
+    except Exception:
+        real_un = BOT_USERNAME
+    link = f"https://t.me/{real_un}?start=ref_{uid}"
+    await msg.answer(
+        f"🤖 Реальное имя бота: @{real_un}\n\n"
+        f"🔗 Твоя рабочая ссылка:\n{link}\n\n"
+        f"Открой её с ДРУГОГО аккаунта — придёт уведомление.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📤 Поделиться ссылкой",
+                url=f"https://t.me/share/url?url={link}&text=Бот ищет авто ниже рынка — попробуй!")],
+        ]),
+    )
 
 
 @dp.callback_query(F.data.startswith("adm|"))
