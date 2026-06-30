@@ -7954,21 +7954,24 @@ async def cmd_dbcheck(msg: Message):
                 pg_cnt = cur.fetchone()[0]
     except Exception:
         pass
-    backup = "✅ есть закреп" if _BACKUP_MSG_ID else "⏳ ещё не создан (создаётся раз в 15 мин)"
+    # Сразу делаем бэкап и показываем РЕАЛЬНЫЙ результат
+    global _registry_dirty
+    _registry_dirty = True
+    _save_status = await _tg_backup_save(force=True)
+    backup = "✅ закреплён в этом чате" if _BACKUP_MSG_ID else "❌ не создан"
     await msg.answer(
         f"🗄 <b>Хранилище статистики</b>\n\n"
         f"PostgreSQL: {pg}\n"
-        f"В памяти пользователей: <b>{in_mem}</b>\n"
+        f"Пользователей в памяти: <b>{in_mem}</b>\n"
         f"В PG (bot_users): <b>{pg_cnt}</b>\n"
-        f"Telegram-бэкап: {backup}\n\n"
-        f"Статистика хранится в памяти + дублируется в PG и в закреплённый "
-        f"документ этого чата — переживает деплой даже без БД.",
+        f"Telegram-бэкап: {backup}\n"
+        f"Результат сохранения: {_save_status}\n\n"
+        f"⚠️ <b>Не удаляй закреплённый документ</b> «📦 авто-бэкап статистики» — "
+        f"из него восстанавливается список пользователей после деплоя.\n\n"
+        f"Для 100% надёжности подключи PostgreSQL на Railway (New → Database → "
+        f"PostgreSQL) — тогда всё хранится в настоящей таблице.",
         parse_mode="HTML",
     )
-    # Принудительно делаем бэкап сейчас
-    global _registry_dirty
-    _registry_dirty = True
-    await _tg_backup_save()
 
 
 @dp.message(Command("reflink"))
@@ -10009,24 +10012,29 @@ def _db_users() -> dict:
 _BACKUP_MSG_ID = None
 
 
-async def _tg_backup_save():
-    """Сохраняет реестр в закреплённый документ в чате админа. Без внешней БД."""
+async def _tg_backup_save(force: bool = False) -> str:
+    """Сохраняет реестр в закреплённый документ в чате админа. Возвращает статус."""
     global _BACKUP_MSG_ID, _registry_dirty
-    if not ADMIN_IDS or not _USER_REGISTRY or not _registry_dirty:
-        return
+    if not ADMIN_IDS:
+        return "нет ADMIN_IDS"
+    if not _USER_REGISTRY:
+        return "реестр пуст"
+    if not _registry_dirty and not force:
+        return "без изменений"
     try:
         from aiogram.types import BufferedInputFile
         payload = json.dumps({"users": _USER_REGISTRY, "ts": int(time.time())}, ensure_ascii=False)
         admin = ADMIN_IDS[0]
         msg = await bot.send_document(
             admin, BufferedInputFile(payload.encode("utf-8"), "stats_backup.json"),
-            caption="📦 авто-бэкап статистики (не удаляй закреп)", disable_notification=True,
+            caption="📦 авто-бэкап статистики (НЕ удаляй этот закреп)", disable_notification=True,
         )
+        _pinned = False
         try:
             await bot.pin_chat_message(admin, msg.message_id, disable_notification=True)
-        except Exception:
-            pass
-        # Удаляем предыдущий бэкап-документ, чтобы не засорять чат
+            _pinned = True
+        except Exception as pe:
+            print(f"  [tg-backup] закрепить не удалось: {str(pe)[:60]}")
         if _BACKUP_MSG_ID and _BACKUP_MSG_ID != msg.message_id:
             try:
                 await bot.delete_message(admin, _BACKUP_MSG_ID)
@@ -10034,8 +10042,10 @@ async def _tg_backup_save():
                 pass
         _BACKUP_MSG_ID = msg.message_id
         _registry_dirty = False
+        return f"✅ сохранено ({len(_USER_REGISTRY)} польз.)" + ("" if _pinned else " ⚠️ но не закреплено")
     except Exception as e:
         print(f"  [tg-backup] {str(e)[:80]}")
+        return f"❌ ошибка: {str(e)[:80]}"
 
 
 async def _tg_backup_restore():
