@@ -10024,7 +10024,7 @@ async def _tg_backup_save(force: bool = False) -> str:
     try:
         from aiogram.types import BufferedInputFile
         payload = json.dumps({"users": _USER_REGISTRY, "ts": int(time.time())}, ensure_ascii=False)
-        admin = ADMIN_IDS[0]
+        admin = next(iter(ADMIN_IDS))
         msg = await bot.send_document(
             admin, BufferedInputFile(payload.encode("utf-8"), "stats_backup.json"),
             caption="📦 авто-бэкап статистики (НЕ удаляй этот закреп)", disable_notification=True,
@@ -10053,7 +10053,7 @@ async def _tg_backup_restore():
     if not ADMIN_IDS:
         return
     try:
-        chat = await bot.get_chat(ADMIN_IDS[0])
+        chat = await bot.get_chat(next(iter(ADMIN_IDS)))
         pm = getattr(chat, "pinned_message", None)
         doc = getattr(pm, "document", None) if pm else None
         if doc and "stats_backup" in (doc.file_name or ""):
