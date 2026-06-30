@@ -10430,12 +10430,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
 
 
 async def do_search_for_user(uid: int, reply_to):
-    if not await _is_subscribed(uid) and uid not in ADMIN_IDS:
-        await reply_to.answer(
-            "📢 Для поиска нужно подписаться на канал.",
-            reply_markup=_subscribe_keyboard(),
-        )
-        return
+    # Обязательная подписка на канал отключена — поиск доступен всем.
     s = load_settings(uid)
     if not s.get("region"):
         await reply_to.answer("Сначала настрой поиск: /start")
