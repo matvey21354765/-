@@ -8043,13 +8043,22 @@ _pending_broadcast: dict[int, dict] = {}  # admin_uid -> {"text":..., "from_chat
 
 
 def _all_user_ids() -> list[int]:
-    """Список всех uid пользователей бота (из папок в USERS_DIR)."""
-    ids = []
+    """Все uid пользователей бота — объединение надёжного реестра (переживает
+    деплой) и папок USERS_DIR. Используется для рассылки и статистики."""
+    ids = set()
+    # 1) Реестр в памяти/PG/бэкапе — главный источник, переживает деплой
+    try:
+        for k in (_db_users() or {}).keys():
+            if str(k).isdigit():
+                ids.add(int(k))
+    except Exception:
+        pass
+    # 2) Папки users/<uid> — на случай, если кто-то ещё не попал в реестр
     if USERS_DIR.exists():
         for p in USERS_DIR.iterdir():
             if p.is_dir() and p.name.isdigit():
-                ids.append(int(p.name))
-    return ids
+                ids.add(int(p.name))
+    return sorted(ids)
 
 
 @dp.message(Command("broadcast"))
@@ -9920,13 +9929,15 @@ def _kv_get(key: str) -> "str | None":
 # восстанавливается из любого доступного источника → статистика не сбрасывается.
 _USER_REGISTRY: "dict[str, dict]" = {}
 _registry_dirty = False
+_registry_new_user = False  # появился НОВЫЙ пользователь → бэкап в ближайшую минуту
 
 
 def _register_user(uid: int, username: "str | None" = None, is_search: bool = False):
     """Обновляет реестр (в памяти + PG). Вызывается на каждое сообщение."""
-    global _registry_dirty
+    global _registry_dirty, _registry_new_user
     k = str(uid)
     now = int(time.time())
+    _is_new = k not in _USER_REGISTRY
     u = _USER_REGISTRY.get(k) or {"first_seen": now, "searches": 0}
     u["last_seen"] = now
     if username:
@@ -9935,6 +9946,8 @@ def _register_user(uid: int, username: "str | None" = None, is_search: bool = Fa
         u["searches"] = u.get("searches", 0) + 1
     _USER_REGISTRY[k] = u
     _registry_dirty = True
+    if _is_new:
+        _registry_new_user = True  # критично: сохранить нового юзера быстро
     # Зеркалим в PG (если подключён)
     try:
         db = _get_db()
@@ -10054,14 +10067,21 @@ async def _tg_backup_restore():
 
 
 async def _tg_backup_loop():
-    """Сохраняет реестр в Telegram: первый бэкап через 90с, далее раз в 15 мин."""
-    await asyncio.sleep(90)
+    """Сохраняет реестр в Telegram. Новый пользователь → бэкап в течение ~40с
+    (чтобы не потерять его при деплое); иначе — раз в 15 мин для счётчиков."""
+    global _registry_new_user
+    await asyncio.sleep(60)
+    _last_full = 0.0
     while True:
         try:
-            await _tg_backup_save()
+            now = time.time()
+            if _registry_new_user or (now - _last_full > 900 and _registry_dirty):
+                await _tg_backup_save()
+                _registry_new_user = False
+                _last_full = now
         except Exception:
             pass
-        await asyncio.sleep(900)
+        await asyncio.sleep(40)
 
 
 def _analytics_persist():
