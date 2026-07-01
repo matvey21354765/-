@@ -1371,7 +1371,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
     today = datetime.date.today()
     # Жёсткий дедлайн: Auto.ru капча-защищён и часто виснет — не даём тормозить весь
     # поиск. Держим короткий бюджет: если IP чистый — успеваем, если капча — быстро выходим.
-    _ar_deadline = time.time() + 16
+    _ar_deadline = time.time() + 10
     _ar_empty_streak = 0
     # Марка для Auto.ru: путь /cars/lada/used/ и catalog_filter mark=LADA
     _brand_l = (brand or "").strip().lower()
@@ -1608,7 +1608,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
         # Яндекс НЕ режет капчей (в отличие от дата-центра). Пробуем AJAX (JSON)
         # через несколько таких прокси. Работает даже без мобильного прокси.
         if not batch and _working_free_proxies and time.time() < _ar_deadline:
-            for _fp in list(_working_free_proxies)[:3]:
+            for _fp in list(_working_free_proxies)[:2]:
                 if time.time() > _ar_deadline:
                     break
                 try:
@@ -1617,7 +1617,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
                         "https://auto.ru/-/ajax/desktop/listing/",
                         json=body,
                         headers={**headers_ajax, "x-requested-with": "fetch"},
-                        proxies=_fp_prx, timeout=5,
+                        proxies=_fp_prx, timeout=3,
                     )
                     if _rf.status_code == 200 and not _autoru_is_captcha(_rf.text):
                         try:
@@ -10589,7 +10589,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                     # 1. curl_cffi — обходит блокировку CDN с Railway IP
                     try:
                         from curl_cffi import requests as _cffi
-                        r = _cffi.get(photo_url, impersonate="chrome124", timeout=8,
+                        r = _cffi.get(photo_url, impersonate="chrome124", timeout=5,
                                       headers={"Referer": _referer},
                                       proxies=_px)
                         if r.status_code == 200 and len(r.content) > 3_000:
@@ -10598,7 +10598,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                         pass
                     # 2. Обычный requests с Referer
                     try:
-                        r2 = _req.get(photo_url, timeout=8, headers={
+                        r2 = _req.get(photo_url, timeout=5, headers={
                             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                             "Referer": _referer,
                             "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
@@ -10748,7 +10748,7 @@ async def do_search_for_user(uid: int, reply_to):
             None, lambda: scrape_avito(region, pages=3, price_min=pmin, price_max=pmax)
         )
     all_futs = futures + ([_avito_ref_fut] if _avito_ref_fut else [])
-    done, pending = await asyncio.wait(all_futs, timeout=42)
+    done, pending = await asyncio.wait(all_futs, timeout=32)
     if pending:
         for f in pending:
             f.cancel()
