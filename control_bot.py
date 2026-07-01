@@ -1392,6 +1392,34 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
     # ВАЖНО: даже если прогрев поймал капчу — НЕ выходим. AJAX-методы (мобильный
     # API + desktop AJAX через прокси) часто работают, когда HTML-страница
     # отдаёт капчу. Раньше ранний return убивал их — Auto.ru искал мало.
+    # Если прогрев поймал капчу Яндекса — меняем IP мобильного прокси на свежий
+    # РФ-адрес и заново прогреваем сессию. Именно это чаще всего оживляет Auto.ru.
+    if _warm_blocked and AVITO_PROXIES:
+        if _rotate_proxy_ip(min_interval=15.0):
+            try:
+                from curl_cffi import requests as _cffi_ar2
+                _rc2 = _cffi_ar2.get(
+                    _ar_base_url, impersonate="chrome124", timeout=10,
+                    headers={"Accept-Language": "ru-RU,ru;q=0.9",
+                             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                             "Referer": "https://auto.ru/", "Upgrade-Insecure-Requests": "1"},
+                    proxies=_avito_proxies() or {},
+                )
+                _warm_html, _warm_status = _rc2.text, _rc2.status_code
+                try:
+                    for _k, _v in _rc2.cookies.get_dict().items():
+                        _ar_session.cookies.set(_k, _v)
+                except Exception:
+                    pass
+                print(f"  [Auto.ru] прогрев после ротации IP: HTTP {_warm_status}, {len(_warm_html):,}б")
+                if len(_warm_html) > 50_000:
+                    _warm_items2 = _autoru_parse_html(_warm_html, today)
+                    if _warm_items2:
+                        print(f"  [Auto.ru] прогрев (ротация) дал {len(_warm_items2)} объявлений")
+                        results.extend(_warm_items2)
+                        return results
+            except Exception as _ec2:
+                print(f"  [Auto.ru] прогрев после ротации: {str(_ec2)[:60]}")
 
     # Метод 1: AJAX API Auto.ru с прогретой сессией (возвращает JSON)
     headers_ajax = {
@@ -1563,10 +1591,13 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
         print(f"  [Auto.ru] стр.{p}: итого {len(batch)} объявлений")
         if not batch:
             # Одна пустая страница может быть временным сбоем/капчей —
-            # прерываемся только после двух пустых подряд.
+            # прерываемся только после двух пустых подряд. Перед второй
+            # попыткой меняем IP прокси на свежий РФ-адрес (обходит капчу).
             _ar_empty_streak += 1
             if _ar_empty_streak >= 2:
                 break
+            if AVITO_PROXIES:
+                _rotate_proxy_ip(min_interval=15.0)
             time.sleep(0.05)
             continue
         _ar_empty_streak = 0
