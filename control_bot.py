@@ -153,6 +153,12 @@ print(f"[прокси] {'✅ ' + _proxy_display if _proxy_display else '❌ не
 # Ссылка ротации IP мобильного прокси (mobileproxy.space «Ссылка для смены IP»).
 # Если задана — бот сам меняет IP перед скрейпом Авито, обходя rate-limit (429).
 AVITO_PROXY_ROTATE_URL = os.getenv("AVITO_PROXY_ROTATE_URL", "")
+
+# Токен приложения Auto.ru (заголовок x-authorization для apiauto.ru).
+# Эндпоинт apiauto.ru отдаёт чистый JSON без капчи Яндекса — самый надёжный
+# путь для Auto.ru. Токен зашит в мобильное приложение ru.auto.ara; если задан,
+# бот ходит через официальный API вместо капча-стены desktop-версии.
+AUTORU_API_TOKEN = os.getenv("AUTORU_API_TOKEN", "")
 _last_ip_rotate_ts = 0.0
 
 def _rotate_proxy_ip(min_interval: float = 50.0) -> bool:
@@ -1459,40 +1465,47 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
         if price_max < 99_000_000:
             html_url += f"&price_to={price_max}"
 
-        # Метод 00: Mobile API Auto.ru (менее защищён, чем desktop AJAX)
-        if not batch and AVITO_PROXIES:
+        # Метод 00: Официальный API приложения (apiauto.ru) — отдаёт ЧИСТЫЙ JSON
+        # без капчи Яндекса. Работает, только если задан AUTORU_API_TOKEN
+        # (заголовок x-authorization из приложения ru.auto.ara). Самый надёжный
+        # путь: desktop-версия капча-стеной режет всё, а этот API — нет.
+        if not batch and AUTORU_API_TOKEN:
             try:
-                _mob_autoru_params = {
-                    "category": "cars", "section": "used",
-                    "seller_group": "PRIVATE", "page": p, "page_size": 40,
-                    "sort": "fresh_relevance_1-desc",
+                _api_body: dict = {
+                    "category": "cars", "section": "USED",
+                    "seller_group": ["PRIVATE"],
                 }
                 if geo_ids:
-                    _mob_autoru_params["geo_id"] = ",".join(map(str, geo_ids))
+                    _api_body["geo_id"] = geo_ids
                 if price_min > 0:
-                    _mob_autoru_params["price_from"] = price_min
+                    _api_body["price_from"] = price_min
                 if price_max < 99_000_000:
-                    _mob_autoru_params["price_to"] = price_max
-                _mob_autoru_r = _req.get(
-                    "https://mobile.auto.ru/1.0/search/cars",
-                    params=_mob_autoru_params,
+                    _api_body["price_to"] = price_max
+                if _brand_l and _brand_l != "any":
+                    _api_body["catalog_filter"] = [{"mark": _brand_slug.upper()}]
+                _api_r = _req.post(
+                    "https://apiauto.ru/1.0/search/cars",
+                    params={"context": "listing", "sort": "fresh_relevance_1-desc",
+                            "page": p, "page_size": 50},
+                    json=_api_body,
                     headers={
-                        "User-Agent": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36",
+                        "x-authorization": AUTORU_API_TOKEN,
+                        "User-Agent": "ru.auto.ara/11.6.0 (Android)",
                         "Accept": "application/json",
-                        "Accept-Language": "ru-RU,ru;q=0.9",
+                        "Content-Type": "application/json",
                         "x-client-app": "ru.auto.ara",
                     },
                     proxies=_avito_proxies(),
-                    timeout=5,
+                    timeout=8,
                 )
-                print(f"  [Auto.ru] mobile API стр.{p}: HTTP {_mob_autoru_r.status_code}, {len(_mob_autoru_r.text):,}б")
-                if _mob_autoru_r.status_code == 200:
+                print(f"  [Auto.ru] apiauto стр.{p}: HTTP {_api_r.status_code}, {len(_api_r.text):,}б")
+                if _api_r.status_code == 200:
                     try:
-                        batch = _autoru_parse_offers(_mob_autoru_r.json(), today)
+                        batch = _autoru_parse_offers(_api_r.json(), today)
                     except Exception:
                         pass
             except Exception as e:
-                print(f"  [Auto.ru] mobile API: {str(e)[:80]}")
+                print(f"  [Auto.ru] apiauto API: {str(e)[:80]}")
 
         # Метод 0а: Прямой AJAX API с прокси (наиболее надёжный при наличии РФ IP)
         if not batch and AVITO_PROXIES:
