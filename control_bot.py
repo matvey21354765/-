@@ -1372,14 +1372,15 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
         except Exception as _e:
             print(f"  [Auto.ru] requests прогрев: {str(_e)[:60]}")
     _wl = _warm_html.lower()
-    # Капча / антибот / блокировка — дальше бессмысленно, быстро выходим
-    if ("captcha" in _wl or "проверка, что вы не робот" in _wl
-            or "too-many-requests" in _wl or "доступ ограничен" in _wl
-            or _warm_status in (429, 403)
-            or (len(_warm_html) < 40_000 and "mark_info" not in _wl)):
-        print(f"  [Auto.ru] заблокирован (HTTP {_warm_status}, {len(_warm_html)}б) — пропускаем")
-        return results
-    if len(_warm_html) > 50_000:
+    # Определяем, капча ли прогрев (для решения, парсить ли HTML-страницу).
+    # НО не выходим — AJAX-методы могут сработать даже при капче на HTML.
+    _warm_blocked = bool(_wl) and (
+        "captcha" in _wl or "проверка, что вы не робот" in _wl
+        or "too-many-requests" in _wl or "доступ ограничен" in _wl
+        or _warm_status in (429, 403)
+    )
+    # Парсим прогрев, только если он дал полноценную страницу с объявлениями
+    if not _warm_blocked and len(_warm_html) > 50_000:
         _warm_items = _autoru_parse_html(_warm_html, today)
         if _warm_items:
             print(f"  [Auto.ru] прогрев дал {len(_warm_items)} объявлений")
@@ -1387,6 +1388,9 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
 
     if results:
         return results
+    # ВАЖНО: даже если прогрев поймал капчу — НЕ выходим. AJAX-методы (мобильный
+    # API + desktop AJAX через прокси) часто работают, когда HTML-страница
+    # отдаёт капчу. Раньше ранний return убивал их — Auto.ru искал мало.
 
     # Метод 1: AJAX API Auto.ru с прогретой сессией (возвращает JSON)
     headers_ajax = {
