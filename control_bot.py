@@ -176,8 +176,15 @@ AUTORU_PROXIES = [
 ]
 
 def _autoru_proxy_dicts() -> "list[dict]":
-    """Список proxy-словарей для requests/curl_cffi из пула Auto.ru."""
-    return [{"http": p, "https": p} for p in AUTORU_PROXIES]
+    """Список proxy-словарей для requests/curl_cffi из пула Auto.ru.
+    socks5:// → socks5h:// — DNS резолвится НА СТОРОНЕ прокси (РФ), иначе
+    Яндекс видит иностранный DNS-резолвинг и чаще отдаёт капчу."""
+    out = []
+    for p in AUTORU_PROXIES:
+        if p.startswith("socks5://"):
+            p = "socks5h://" + p[len("socks5://"):]
+        out.append({"http": p, "https": p})
+    return out
 
 # Диагностика готовности Auto.ru: Яндекс режет капчей любой «грязный» IP.
 if AUTORU_API_TOKEN:
@@ -1394,7 +1401,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
     today = datetime.date.today()
     # Жёсткий дедлайн: Auto.ru капча-защищён и часто виснет — не даём тормозить весь
     # поиск. Держим короткий бюджет: если IP чистый — успеваем, если капча — быстро выходим.
-    _ar_deadline = time.time() + 12
+    _ar_deadline = time.time() + 15
     _ar_empty_streak = 0
     # Марка для Auto.ru: путь /cars/lada/used/ и catalog_filter mark=LADA
     _brand_l = (brand or "").strip().lower()
@@ -1575,31 +1582,74 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
             except Exception as e:
                 print(f"  [Auto.ru] apiauto API: {str(e)[:80]}")
 
-        # Метод 0*: пул РФ-прокси (SOCKS5/резидентные) — чистые РФ IP, которые
-        # Яндекс НЕ режет капчей. Пробуем AJAX (JSON) через каждый по очереди.
-        # Это основной рабочий путь для Auto.ru, если задан AUTORU_PROXIES.
+        # Метод 0*: пул РФ-прокси через curl_cffi (Chrome TLS-отпечаток).
+        # Ключевой момент: Яндекс режет капчей по ДВУМ признакам — «грязный» IP
+        # И TLS-отпечаток. Чистый РФ IP + обычный python-requests всё равно ловит
+        # капчу, потому что отпечаток не браузерный. curl_cffi (impersonate chrome)
+        # даёт браузерный TLS → чистый РФ IP + браузерный отпечаток = проходит.
+        # Сначала GET страницы листинга (греет cookie spravka), затем берём
+        # объявления прямо из HTML (__NEXT_DATA__) или добиваем AJAX-ом.
         if not batch and AUTORU_PROXIES:
+            try:
+                from curl_cffi import requests as _cffi_ru
+            except Exception:
+                _cffi_ru = None
             for _arp in _autoru_proxy_dicts():
                 if time.time() > _ar_deadline:
                     break
-                try:
-                    _rp = _req.post(
-                        "https://auto.ru/-/ajax/desktop/listing/",
-                        json=body,
-                        headers={**headers_ajax, "x-requested-with": "fetch"},
-                        proxies=_arp, timeout=6,
-                    )
-                    _phost = _arp.get("https", "").split("@")[-1]
-                    print(f"  [Auto.ru] РФ-прокси {_phost} стр.{p}: HTTP {_rp.status_code}, {len(_rp.text):,}б")
-                    if _rp.status_code == 200 and not _autoru_is_captcha(_rp.text):
-                        try:
-                            batch = _autoru_parse_offers(_rp.json(), today)
-                        except Exception:
-                            batch = _autoru_parse_html(_rp.text, today)
+                _phost = _arp.get("https", "").split("@")[-1]
+                # 1) curl_cffi (браузерный TLS) — основной путь
+                if _cffi_ru is not None:
+                    try:
+                        _sess_ru = _cffi_ru.Session()
+                        _gh = _sess_ru.get(
+                            html_url, impersonate="chrome124", timeout=7,
+                            headers={"Accept-Language": "ru-RU,ru;q=0.9",
+                                     "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+                                     "Referer": f"https://auto.ru/{slug}/cars/used/",
+                                     "Upgrade-Insecure-Requests": "1"},
+                            proxies=_arp,
+                        )
+                        print(f"  [Auto.ru] РФ-прокси(cffi) {_phost} стр.{p}: HTTP {_gh.status_code}, {len(_gh.text):,}б")
+                        if _gh.status_code == 200 and not _autoru_is_captcha(_gh.text):
+                            batch = _autoru_parse_html(_gh.text, today)
+                        # добиваем AJAX-ом через ту же прогретую сессию
+                        if not batch and not _autoru_is_captcha(_gh.text):
+                            _aj = _sess_ru.post(
+                                "https://auto.ru/-/ajax/desktop/listing/",
+                                json=body, impersonate="chrome124", timeout=6,
+                                headers={**headers_ajax, "x-requested-with": "fetch"},
+                                proxies=_arp,
+                            )
+                            if _aj.status_code == 200 and not _autoru_is_captcha(_aj.text):
+                                try:
+                                    batch = _autoru_parse_offers(_aj.json(), today)
+                                except Exception:
+                                    batch = _autoru_parse_html(_aj.text, today)
                         if batch:
+                            print(f"  [Auto.ru] РФ-прокси {_phost}: {len(batch)} объявлений ✅")
                             break
-                except Exception as e:
-                    print(f"  [Auto.ru] РФ-прокси: {str(e)[:60]}")
+                    except Exception as e:
+                        print(f"  [Auto.ru] РФ-прокси(cffi) {_phost}: {str(e)[:60]}")
+                # 2) запасной путь — обычный requests (если curl_cffi недоступен)
+                if not batch and _cffi_ru is None:
+                    try:
+                        _rp = _req.post(
+                            "https://auto.ru/-/ajax/desktop/listing/",
+                            json=body,
+                            headers={**headers_ajax, "x-requested-with": "fetch"},
+                            proxies=_arp, timeout=6,
+                        )
+                        print(f"  [Auto.ru] РФ-прокси(req) {_phost} стр.{p}: HTTP {_rp.status_code}, {len(_rp.text):,}б")
+                        if _rp.status_code == 200 and not _autoru_is_captcha(_rp.text):
+                            try:
+                                batch = _autoru_parse_offers(_rp.json(), today)
+                            except Exception:
+                                batch = _autoru_parse_html(_rp.text, today)
+                            if batch:
+                                break
+                    except Exception as e:
+                        print(f"  [Auto.ru] РФ-прокси(req) {_phost}: {str(e)[:60]}")
 
         # Метод 0а: Прямой AJAX API с прокси (наиболее надёжный при наличии РФ IP)
         if not batch and AVITO_PROXIES:
