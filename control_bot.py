@@ -1235,6 +1235,15 @@ def _autoru_parse_offers(data: dict, today) -> list[dict]:
     return results
 
 
+def _autoru_is_captcha(text: str) -> bool:
+    """True, если ответ Auto.ru — капча-заглушка Яндекса, а не страница с авто."""
+    t = (text or "")[:4000].lower()
+    return (
+        "captcha" in t or "вы не робот" in t or "проверка, что вы не робот" in t
+        or "smartcaptcha" in t or "доступ ограничен" in t or "too-many-requests" in t
+    )
+
+
 def _autoru_parse_html(text: str, today) -> list[dict]:
     """Извлекает объявления из HTML Auto.ru (__INITIAL_STATE__ или regex)."""
     results = []
@@ -1398,8 +1407,8 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
         or "too-many-requests" in _wl or "доступ ограничен" in _wl
         or _warm_status in (429, 403)
     )
-    # Парсим прогрев, только если он дал полноценную страницу с объявлениями
-    if not _warm_blocked and len(_warm_html) > 50_000:
+    # Парсим прогрев, если это не капча (мобильная страница бывает и <50К)
+    if not _warm_blocked and len(_warm_html) > 3_000:
         _warm_items = _autoru_parse_html(_warm_html, today)
         if _warm_items:
             print(f"  [Auto.ru] прогрев дал {len(_warm_items)} объявлений")
@@ -1548,7 +1557,8 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
                     "Referer": f"https://auto.ru/{slug}/cars/used/",
                 }, timeout=5, proxies=_avito_proxies())
                 print(f"  [Auto.ru] прокси HTML стр.{p}: HTTP {r0.status_code}, {len(r0.text):,}б")
-                if r0.status_code == 200 and len(r0.text) > 50_000:
+                # Парсим любой не-капча ответ (мобильная страница может быть <50К)
+                if r0.status_code == 200 and not _autoru_is_captcha(r0.text):
                     batch = _autoru_parse_html(r0.text, today)
             except Exception as e:
                 print(f"  [Auto.ru] прокси HTML: {str(e)[:50]}")
@@ -1565,7 +1575,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
                 rc0 = _cffi.get(html_url, impersonate="chrome124", timeout=5, headers=_cffi_hdrs0,
                                 proxies=_avito_proxies())
                 print(f"  [Auto.ru] curl_cffi стр.{p}: HTTP {rc0.status_code}, {len(rc0.text):,}б")
-                if rc0.status_code == 200 and len(rc0.text) > 30_000:
+                if rc0.status_code == 200 and not _autoru_is_captcha(rc0.text):
                     batch = _autoru_parse_html(rc0.text, today)
             except Exception as e:
                 print(f"  [Auto.ru] curl_cffi: {str(e)[:80]}")
