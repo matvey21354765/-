@@ -1320,7 +1320,8 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
     results = []
     today = datetime.date.today()
     # Жёсткий дедлайн: Auto.ru капча-защищён и часто виснет — не даём тормозить весь поиск
-    _ar_deadline = time.time() + 20
+    _ar_deadline = time.time() + 28
+    _ar_empty_streak = 0
     # Марка для Auto.ru: путь /cars/lada/used/ и catalog_filter mark=LADA
     _brand_l = (brand or "").strip().lower()
     _AR_SLUG = {"land rover": "land_rover", "alfa": "alfa_romeo"}
@@ -1410,7 +1411,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
             break
         body: dict = {
             "category": "cars", "section": "used",
-            "seller_type": ["PRIVATE"], "page": p, "page_size": 37,
+            "seller_type": ["PRIVATE"], "page": p, "page_size": 50,
             "sort": "fresh_relevance_1-desc",
             "output_type": "list",
         }
@@ -1435,7 +1436,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
             try:
                 _mob_autoru_params = {
                     "category": "cars", "section": "used",
-                    "seller_group": "PRIVATE", "page": p, "page_size": 25,
+                    "seller_group": "PRIVATE", "page": p, "page_size": 40,
                     "sort": "fresh_relevance_1-desc",
                 }
                 if geo_ids:
@@ -1561,7 +1562,14 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
 
         print(f"  [Auto.ru] стр.{p}: итого {len(batch)} объявлений")
         if not batch:
-            break
+            # Одна пустая страница может быть временным сбоем/капчей —
+            # прерываемся только после двух пустых подряд.
+            _ar_empty_streak += 1
+            if _ar_empty_streak >= 2:
+                break
+            time.sleep(0.05)
+            continue
+        _ar_empty_streak = 0
         results.extend(batch)
         time.sleep(0.05)
 
@@ -9066,7 +9074,7 @@ async def cmd_global_search(msg: Message):
     # Запускаем все источники + TG-каналы параллельно
     scraper_map = {
         "drom":   lambda: scrape_drom(region, pages=15, price_min=pmin, price_max=pmax, brand=_br),
-        "autoru": lambda: scrape_autoru(region, pages=4, price_min=pmin, price_max=pmax, brand=_br),
+        "autoru": lambda: scrape_autoru(region, pages=6, price_min=pmin, price_max=pmax, brand=_br),
         "avito":  lambda: scrape_avito(region, pages=10, price_min=pmin, price_max=pmax, sort_by_date=False),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
     }
@@ -10594,7 +10602,7 @@ async def do_search_for_user(uid: int, reply_to):
 
     scraper_map = {
         "drom":   lambda: scrape_drom(region, pages=8, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
-        "autoru": lambda: scrape_autoru(region, pages=3, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
+        "autoru": lambda: scrape_autoru(region, pages=6, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
         "avito":  lambda: scrape_avito(region, pages=6, price_min=pmin, price_max=pmax, sort_by_date=False, brand=(brand if brand and brand != "any" else "")),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
         "tg":     lambda: scrape_tg_channels(region, pmin, pmax),
