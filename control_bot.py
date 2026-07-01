@@ -705,6 +705,15 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
         all_for_median = list(ref_items) + list(items)
     else:
         all_for_median = list(items)
+    # Чистим эталон: дилеры завышают цену (→ фейковые скидки), битые занижают.
+    # Медиана должна отражать РЕАЛЬНЫЙ рынок частников. Если после чистки данных
+    # мало (<5) — откатываемся к исходному набору, чтобы не потерять оценку.
+    try:
+        _clean = [it for it in all_for_median if not is_dealer(it) and not is_not_running(it)]
+        if len(_clean) >= 5:
+            all_for_median = _clean
+    except Exception:
+        pass
     groups: dict[str, list[int]] = {}
     # Промежуточный уровень: марка+модель+2-летний диапазон (2015→1007, 2017→1008, 2019→1009)
     # Разделяет 2015 Solaris от 2017 Solaris → медиана не искажается новыми моделями
@@ -2676,7 +2685,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
         if _mln:
             try:
                 val = int(float(_mln.group(1).replace(",", ".")) * 1_000_000)
-                if 8_000 <= val <= 50_000_000:
+                if 5_000 <= val <= 50_000_000:
                     return val
             except Exception:
                 pass
@@ -2699,11 +2708,11 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
         _sep_re = r'(\d{1,3}(?:[.,]\d{3})+)'
         for m in re.finditer(rf'(?:цен[аеуы]|стоимост|прошу|за)\s*[:\-]?\s*{_sep_re}', _tl):
             val = int(re.sub(r'\D', '', m.group(1)))
-            if 8_000 <= val <= 50_000_000:
+            if 5_000 <= val <= 50_000_000:
                 return val
         for m in re.finditer(rf'{_sep_re}\s*(?:₽|руб|р\.)', text):
             val = int(re.sub(r'\D', '', m.group(1)))
-            if 8_000 <= val <= 50_000_000:
+            if 5_000 <= val <= 50_000_000:
                 return val
         # Сначала ищем с явным символом валюты
         for m in _vk_price_re.finditer(text):
@@ -2724,7 +2733,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                     continue
                 if val < 1000:
                     val *= 1000
-            if 8_000 <= val <= 50_000_000:
+            if 5_000 <= val <= 50_000_000:
                 return val
         # Затем ищем число рядом с ценовым словом
         for m in _vk_price_ctx_re.finditer(text):
@@ -2737,7 +2746,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                 val *= 1000
             if val < 1000:  # вероятно тысячи без суффикса: "цена 95" → 95000
                 val *= 1000
-            if 8_000 <= val <= 50_000_000:
+            if 5_000 <= val <= 50_000_000:
                 return val
         # Третий проход: число с разделителями-пробелами ("1 200 000") или голое
         # ("950000"). Исключаем пробег/год/мощность/телефоны по контексту.
@@ -2755,12 +2764,12 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
             ctx = _tl[max(0, m.start() - 25):m.end() + 12]
             if any(skip in ctx for skip in _SKIP_CTX):
                 continue
-            if 8_000 <= val <= 9_999_999:
+            if 5_000 <= val <= 9_999_999:
                 return val
         # Затем голое число
         for m in re.finditer(r'\b(\d{5,7})\b', text):
             val = int(m.group(1))
-            if 8_000 <= val <= 9_999_999:
+            if 5_000 <= val <= 9_999_999:
                 ctx = _tl[max(0, m.start() - 30):m.end() + 30]
                 if any(skip in ctx for skip in _SKIP_CTX):
                     continue
