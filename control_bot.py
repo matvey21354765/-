@@ -1290,6 +1290,8 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
 
     results = []
     today = datetime.date.today()
+    # Жёсткий дедлайн: Auto.ru капча-защищён и часто виснет — не даём тормозить весь поиск
+    _ar_deadline = time.time() + 16
     # Марка для Auto.ru: путь /cars/lada/used/ и catalog_filter mark=LADA
     _brand_l = (brand or "").strip().lower()
     _AR_SLUG = {"land rover": "land_rover", "alfa": "alfa_romeo"}
@@ -1310,11 +1312,15 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
             "User-Agent": _ar_ua,
             "Accept": "text/html,application/xhtml+xml,*/*;q=0.9",
             "Accept-Language": "ru-RU,ru;q=0.9",
-        }, proxies=_avito_proxies(), timeout=10)
+        }, proxies=_avito_proxies(), timeout=7)
         _wl = _warm.text.lower()
-        # Капча / антибот — дальше пробовать бессмысленно, быстро выходим
-        if "captcha" in _wl or "проверка, что вы не робот" in _wl or _warm.status_code in (429, 403):
-            print(f"  [Auto.ru] заблокирован (captcha/HTTP {_warm.status_code}) — пропускаем")
+        # Капча / антибот / блокировка — дальше пробовать бессмысленно, быстро выходим.
+        # Короткая страница без данных об авто (mark_info) — тоже блок.
+        if ("captcha" in _wl or "проверка, что вы не робот" in _wl
+                or "too-many-requests" in _wl or "доступ ограничен" in _wl
+                or _warm.status_code in (429, 403)
+                or (len(_warm.text) < 40_000 and "mark_info" not in _wl)):
+            print(f"  [Auto.ru] заблокирован (HTTP {_warm.status_code}, {len(_warm.text)}б) — пропускаем")
             return results
         print(f"  [Auto.ru] прогрев сессии: HTTP {_warm.status_code}, куки: {list(_ar_session.cookies.keys())[:5]}")
         if _warm.status_code == 200 and len(_warm.text) > 50_000:
@@ -1341,6 +1347,9 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
     }
 
     for p in range(1, pages + 1):
+        if time.time() > _ar_deadline:  # не превышаем общий лимит Auto.ru
+            print(f"  [Auto.ru] дедлайн {p-1} стр. — выходим")
+            break
         body: dict = {
             "category": "cars", "section": "used",
             "seller_type": ["PRIVATE"], "page": p, "page_size": 37,
@@ -1387,7 +1396,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
                         "x-client-app": "ru.auto.ara",
                     },
                     proxies=_avito_proxies(),
-                    timeout=8,
+                    timeout=5,
                 )
                 print(f"  [Auto.ru] mobile API стр.{p}: HTTP {_mob_autoru_r.status_code}, {len(_mob_autoru_r.text):,}б")
                 if _mob_autoru_r.status_code == 200:
@@ -1406,7 +1415,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
                     json=body,
                     headers={**headers_ajax, "x-requested-with": "fetch"},
                     proxies=_avito_proxies(),
-                    timeout=8,
+                    timeout=5,
                 )
                 print(f"  [Auto.ru] прокси AJAX стр.{p}: HTTP {r_ajax.status_code}, {len(r_ajax.text):,}б")
                 if r_ajax.status_code == 200:
@@ -1425,7 +1434,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                     "Accept-Language": "ru-RU,ru;q=0.9",
                     "Referer": f"https://auto.ru/{slug}/cars/used/",
-                }, timeout=8, proxies=_avito_proxies())
+                }, timeout=5, proxies=_avito_proxies())
                 print(f"  [Auto.ru] прокси HTML стр.{p}: HTTP {r0.status_code}, {len(r0.text):,}б")
                 if r0.status_code == 200 and len(r0.text) > 50_000:
                     batch = _autoru_parse_html(r0.text, today)
@@ -1441,7 +1450,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
                     "Accept-Language": "ru-RU,ru;q=0.9",
                     "Referer": f"https://auto.ru/{slug}/cars/used/",
                 }
-                rc0 = _cffi.get(html_url, impersonate="chrome124", timeout=8, headers=_cffi_hdrs0,
+                rc0 = _cffi.get(html_url, impersonate="chrome124", timeout=5, headers=_cffi_hdrs0,
                                 proxies=_avito_proxies())
                 print(f"  [Auto.ru] curl_cffi стр.{p}: HTTP {rc0.status_code}, {len(rc0.text):,}б")
                 if rc0.status_code == 200 and len(rc0.text) > 30_000:
