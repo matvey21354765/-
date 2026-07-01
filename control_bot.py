@@ -1603,7 +1603,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
                     try:
                         _sess_ru = _cffi_ru.Session()
                         _gh = _sess_ru.get(
-                            html_url, impersonate="chrome124", timeout=7,
+                            html_url, impersonate="chrome124", timeout=6,
                             headers={"Accept-Language": "ru-RU,ru;q=0.9",
                                      "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
                                      "Referer": f"https://auto.ru/{slug}/cars/used/",
@@ -1613,11 +1613,11 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
                         print(f"  [Auto.ru] РФ-прокси(cffi) {_phost} стр.{p}: HTTP {_gh.status_code}, {len(_gh.text):,}б")
                         if _gh.status_code == 200 and not _autoru_is_captcha(_gh.text):
                             batch = _autoru_parse_html(_gh.text, today)
-                        # добиваем AJAX-ом через ту же прогретую сессию
-                        if not batch and not _autoru_is_captcha(_gh.text):
+                        # добиваем AJAX-ом через ту же прогретую сессию (если есть время)
+                        if not batch and not _autoru_is_captcha(_gh.text) and time.time() < _ar_deadline:
                             _aj = _sess_ru.post(
                                 "https://auto.ru/-/ajax/desktop/listing/",
-                                json=body, impersonate="chrome124", timeout=6,
+                                json=body, impersonate="chrome124", timeout=5,
                                 headers={**headers_ajax, "x-requested-with": "fetch"},
                                 proxies=_arp,
                             )
