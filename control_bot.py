@@ -832,8 +832,14 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
                 # Точное совпадение (тот же год/±2) — разрешаем до 80% скидки
                 # (пользователь хочет видеть самые выгодные). Broad/brand — медиана
                 # завышена от смешения годов, поэтому большие «скидки» фейк → кап 20%.
-                if _lvl in ("broad", "brand"):
-                    _savings_cap = 20
+                # exact/bracket (тот же год/±2) — реальная скидка, кап 80%.
+                # broad (разные годы одной модели) — медиана слегка завышена,
+                #   но пользователь хочет видеть глубокие скидки → кап 40%.
+                # brand (вся марка) — медиана самая грубая → кап 30%.
+                if _lvl == "brand":
+                    _savings_cap = 30
+                elif _lvl == "broad":
+                    _savings_cap = 40
                 else:
                     _savings_cap = 80
                 if savings_pct > _savings_cap:
