@@ -11810,6 +11810,9 @@ async def _send_monitor_item(uid: int, it: dict):
         [
             InlineKeyboardButton(text="❌ Скрыть", callback_data=f"hide|{sid}|{uid}"),
         ],
+        [
+            InlineKeyboardButton(text="🔍 Пробить машину (штрафы, аресты)", callback_data=f"check|{sid}|{uid}"),
+        ],
     ])
     photo_url = it.get("_photo_url", "")
     sent = False
@@ -12001,10 +12004,15 @@ async def _global_monitor_loop():
                                     f"💰 {price_line_tb}\n"
                                     f"🕐 Появилось {days_label_tb}"
                                 )
-                                kb_tb = InlineKeyboardMarkup(inline_keyboard=[[
-                                    InlineKeyboardButton(text="🔗 Открыть", url=url_tb),
-                                    InlineKeyboardButton(text="⭐ Сохранить", callback_data=f"fav|{sid_tb}|{uid}"),
-                                ]])
+                                kb_tb = InlineKeyboardMarkup(inline_keyboard=[
+                                    [
+                                        InlineKeyboardButton(text="🔗 Открыть", url=url_tb),
+                                        InlineKeyboardButton(text="⭐ Сохранить", callback_data=f"fav|{sid_tb}|{uid}"),
+                                    ],
+                                    [
+                                        InlineKeyboardButton(text="🔍 Пробить машину (штрафы, аресты)", callback_data=f"check|{sid_tb}|{uid}"),
+                                    ],
+                                ])
                                 try:
                                     photo_tb = it.get("_photo_url", "")
                                     if photo_tb:
