@@ -10548,7 +10548,10 @@ async def send_batch(chat_id: int, uid: int, offset: int):
             InlineKeyboardButton(text="❌ Скрыть", callback_data=f"hide|{sid}|{uid}"),
             InlineKeyboardButton(text="📋 Похожие", callback_data=f"sim|{sid}|{uid}"),
         ]
-        kb = InlineKeyboardMarkup(inline_keyboard=[row1, row2])
+        row3 = [
+            InlineKeyboardButton(text="🔍 Пробить машину (штрафы, аресты)", callback_data=f"check|{sid}|{uid}"),
+        ]
+        kb = InlineKeyboardMarkup(inline_keyboard=[row1, row2, row3])
 
         photo_url = item.get("_photo_url", "")
         if photo_url:
@@ -11288,6 +11291,59 @@ async def cb_hide(cb: CallbackQuery):
     analytics.track("hide", uid=uid, username=cb.from_user.username)
     await cb.answer("Скрыто")
     await cb.message.delete()
+
+
+@dp.callback_query(F.data.startswith("check|"))
+async def cb_check_car(cb: CallbackQuery):
+    """Пробить машину: штрафы, аресты, залоги, ДТП, ограничения ГИБДД."""
+    sid = cb.data.split("|")[1]
+    uid = cb.from_user.id  # защита от IDOR
+    url = id_to_url(sid)
+    items = _search_cache.get(uid) or _load_cache(uid)
+    item = next((it for it in items if it.get("url") == url), None)
+    analytics.track("check_car", uid=uid, username=cb.from_user.username)
+
+    # Пытаемся вытащить VIN (17 символов, без I,O,Q) и госномер из текста объявления
+    _txt = f"{(item or {}).get('title','')} {(item or {}).get('description','')}"
+    _vin_m = re.search(r'\b([A-HJ-NPR-Z0-9]{17})\b', _txt.upper())
+    vin = _vin_m.group(1) if _vin_m else ""
+    _plate_m = re.search(r'\b([АВЕКМНОРСТУХ]\d{3}[АВЕКМНОРСТУХ]{2}\d{2,3})\b', _txt.upper())
+    plate = _plate_m.group(1) if _plate_m else ""
+
+    title = (item or {}).get("title", "автомобиль")
+    lines = [f"🔍 <b>Проверка авто:</b> {title}", ""]
+    if vin:
+        lines.append(f"🔑 <b>VIN найден в объявлении:</b> <code>{vin}</code>")
+    if plate:
+        lines.append(f"🚘 <b>Госномер:</b> <code>{plate}</code>")
+    if not vin and not plate:
+        lines.append("ℹ️ VIN/госномер не указан в объявлении — узнай его у продавца "
+                     "и введи на сайтах ниже. По ним проверишь штрафы, аресты, залоги, ДТП и ограничения.")
+    lines.append("\nОткрой нужный сервис (все бесплатные, кроме полного отчёта):")
+
+    rows = []
+    # ГИБДД — ДТП, розыск, ограничения (аресты), история регистрации (по VIN)
+    rows.append([InlineKeyboardButton(text="🚔 ГИБДД: ДТП, аресты, розыск", url="https://xn--90adear.xn--p1ai/check/auto")])
+    # ФССП — долги и исполнительные производства
+    rows.append([InlineKeyboardButton(text="⚖️ ФССП: долги, аресты приставов", url="https://fssp.gov.ru/iss/ip")])
+    # Реестр залогов ФНП
+    rows.append([InlineKeyboardButton(text="💰 Реестр залогов (в залоге?)", url="https://www.reestr-zalogov.ru/search/index")])
+    # РСА — полисы ОСАГО
+    rows.append([InlineKeyboardButton(text="🛡 РСА: полисы ОСАГО", url="https://dkbm-web.autoins.ru/dkbm-web-1.0/bsostate.htm")])
+    # Полный отчёт по VIN — Дром (прямая ссылка если VIN есть)
+    if vin:
+        rows.append([InlineKeyboardButton(text="📄 Полный отчёт по VIN (Дром)", url=f"https://vin.drom.ru/{vin}/")])
+    else:
+        rows.append([InlineKeyboardButton(text="📄 Полный отчёт (Автотека)", url="https://avtoteka.ru/")])
+    rows.append([InlineKeyboardButton(text="🔗 Открыть объявление", url=url)])
+
+    await cb.message.answer(
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+        disable_web_page_preview=True,
+    )
+    await cb.answer()
 
 
 @dp.callback_query(F.data.startswith("fav|"))
