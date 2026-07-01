@@ -8652,8 +8652,15 @@ async def cb_notify_favs(cb: CallbackQuery):
     if not favs:
         await cb.message.answer("⭐ Список избранного пуст.")
         return
-    lines = [f"• {it.get('title','')} — {it.get('price','?')}\n  {it.get('url','')}" for it in favs[-10:]]
-    await cb.message.answer(f"⭐ *Избранное* ({len(favs)} шт.):\n\n" + "\n\n".join(lines), parse_mode="Markdown")
+    await cb.message.answer(f"⭐ Избранное ({len(favs)} шт.):")
+    for it in favs[-10:]:
+        url = it.get("url", "")
+        sid = url_to_id(url)
+        kb = InlineKeyboardMarkup(inline_keyboard=[r for r in [
+            [InlineKeyboardButton(text="🔗 Открыть", url=url)] if url else [],
+            [InlineKeyboardButton(text="🔍 Пробить машину (штрафы, аресты)", callback_data=f"check|{sid}|{uid}")],
+        ] if r])
+        await cb.message.answer(f"🚗 {it.get('title','')}\n💰 {it.get('price','?')}", reply_markup=kb)
 
 
 @dp.callback_query(F.data == "notify_back")
@@ -11301,6 +11308,15 @@ async def cb_check_car(cb: CallbackQuery):
     url = id_to_url(sid)
     items = _search_cache.get(uid) or _load_cache(uid)
     item = next((it for it in items if it.get("url") == url), None)
+    # Ищем и в избранном/гараже — кнопка «Пробить» есть и там
+    if item is None:
+        try:
+            _ff = user_dir(uid) / "favorites.json"
+            if _ff.exists():
+                _favs = json.loads(_ff.read_text(encoding="utf-8"))
+                item = next((it for it in _favs if it.get("url") == url), None)
+        except Exception:
+            pass
     analytics.track("check_car", uid=uid, username=cb.from_user.username)
 
     # Пытаемся вытащить VIN (17 символов, без I,O,Q) и госномер из текста объявления
@@ -11441,10 +11457,18 @@ async def cmd_favorites(msg: Message):
     if not favs:
         await msg.answer("🚗 Мой гараж пуст — сохраняй объявления кнопкой ⭐ Сохранить.")
         return
-    lines = []
-    for it in favs[-20:]:
-        lines.append(f"• {it.get('title','')} — {it.get('price','?')}\n  {it.get('url','')}")
-    await msg.answer(f"🚗 Мой гараж ({len(favs)} авто):\n\n" + "\n\n".join(lines[-10:]))
+    await msg.answer(f"🚗 Мой гараж ({len(favs)} авто):")
+    for it in favs[-10:]:
+        url = it.get("url", "")
+        sid = url_to_id(url)
+        caption = f"🚗 {it.get('title','')}\n💰 {it.get('price','?')}"
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔗 Открыть", url=url)] if url else [],
+            [InlineKeyboardButton(text="🔍 Пробить машину (штрафы, аресты)", callback_data=f"check|{sid}|{uid}")],
+        ])
+        # убираем пустой ряд (если url нет)
+        kb.inline_keyboard = [r for r in kb.inline_keyboard if r]
+        await msg.answer(caption, reply_markup=kb)
 
 
 # ── 🚗 Мои сделки (аналитика перекупа) ───────────────────────────
