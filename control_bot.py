@@ -856,14 +856,6 @@ def _sort_by_deal(items: list[dict]) -> list[dict]:
 
       Tier 10 — уже просмотрено: самый конец
     """
-    def _score(x) -> float:
-        pct  = x.get("_savings_pct", 0) or 0
-        days = x.get("_days_on_site", 0) or 0
-        # Бонус за срочность/торг в тексте (уже посчитан в _deal_score)
-        hot  = 10.0 if (x.get("_deal_score", 0) - pct * 3) > 10 else 0.0
-        age_bonus = min(days, 90) * 0.5
-        return pct * 2.0 + age_bonus + hot
-
     def _tier(x) -> int:
         if x.get("_already_seen"):
             return 10
@@ -874,9 +866,26 @@ def _sort_by_deal(items: list[dict]) -> list[dict]:
             return 1
         return 2
 
+    def _primary_savings(x) -> float:
+        """Главный ключ Tier 0: % скидки от рынка. Битые — вниз."""
+        pct = x.get("_savings_pct", 0) or 0
+        if x.get("_is_junk"):
+            pct -= 100  # битые/не на ходу — в самый низ выгодных
+        return pct
+
+    def _secondary(x) -> float:
+        """Тайбрейкер при одинаковой скидке: дольше висит + срочность."""
+        days = x.get("_days_on_site", 0) or 0
+        pct = x.get("_savings_pct", 0) or 0
+        hot = 10.0 if (x.get("_deal_score", 0) - pct * 3) > 10 else 0.0
+        return min(days, 90) * 0.5 + hot
+
+    # Tier 0: СНАЧАЛА самая большая скидка от рынка (что и просил пользователь),
+    # при равной скидке — кто дольше висит / срочная продажа. Остальные тиры — по цене.
     items.sort(key=lambda x: (
         _tier(x),
-        -_score(x) if _tier(x) == 0 else x.get("_price_int", 999_999_999),
+        (-_primary_savings(x), -_secondary(x)) if _tier(x) == 0
+        else (x.get("_price_int", 999_999_999), 0),
     ))
     return items
 
