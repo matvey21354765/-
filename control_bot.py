@@ -750,37 +750,45 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
             key = _car_group_key(it.get("title", ""))
             parts = key.rsplit(" ", 1)
             broad_key = parts[0] if (len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 4) else key
-            # Уровень 1: точный (марка+модель+год)
+            _lvl = ""  # какой уровень сработал: точность падает exact→bracket→broad→brand
+            # Уровень 1: точный (марка+модель+год) — самый надёжный
             med = market.get(key, 0)
-            # Уровень 2: 2-летний диапазон года (2012→1006, 2013→1006, 2014→1007...)
+            if med:
+                _lvl = "exact"
+            # Уровень 2: 2-летний диапазон года
             if not med:
                 try:
                     bracket = int(parts[1]) // 2 if (len(parts) == 2 and parts[1].isdigit()) else 0
                     if bracket:
                         med = market_year_bracket.get(f"{broad_key}_{bracket}", 0)
+                        if med:
+                            _lvl = "bracket"
                 except Exception:
                     pass
-            # Уровень 3: марка+модель (все годы) — только если цена близка к медиане.
-            # Узкие границы: 0.55–1.8 — исключает сравнение старого Golf 2012 с новым Golf 2022
+            # Уровень 3: марка+модель (все годы) — НЕНАДЁЖНО (мешает старые и новые)
             if not med:
                 med_all = market_broad.get(broad_key, 0)
                 if med_all and 0.55 < (p / med_all) < 1.8:
                     med = med_all
-            # Уровень 4: только марка — ещё уже: 0.6–1.5
+                    _lvl = "broad"
+            # Уровень 4: только марка — ещё менее надёжно
             if not med:
                 brand_key_m = key.split(" ", 1)[0]
                 med_brand = market_brand.get(brand_key_m, 0)
                 if med_brand and 0.6 < (p / med_brand) < 1.5:
                     med = med_brand
+                    _lvl = "brand"
             if med > 0:
                 savings_pct = round((1 - p / med) * 100, 1)
-                # Кап: скидка > 50% почти всегда означает неверное сравнение.
-                # Golf 2012 за 820к vs медиана всех Golf 2.5M = 67% → отклоняем.
-                # Реальные скидки >50% бывают, но редки — лучше не показывать,
-                # чем вводить в заблуждение.
-                # Динамический кап: для бюджетных авто (<400к) разрешаем до 60%,
-                # иначе 50%. Golf 2012 за 820к vs медиана 2.5M = 67% → отклоняем.
-                _savings_cap = 60 if p < 400_000 else 50
+                # Кап скидки зависит от НАДЁЖНОСТИ совпадения:
+                #  - exact/bracket (тот же год/±2 года): реальная скидка, кап 50-60%
+                #  - broad/brand (разные годы/комплектации): медиана завышена, поэтому
+                #    большие «скидки» — фейк (напр. Harrier 2004 vs медиана всех Harrier,
+                #    или GAC GS4 vs медиана всех GAC). Кап 18% — иначе не показываем.
+                if _lvl in ("broad", "brand"):
+                    _savings_cap = 18
+                else:
+                    _savings_cap = 60 if p < 400_000 else 50
                 if savings_pct > _savings_cap:
                     med = 0
                     savings_pct = 0.0
