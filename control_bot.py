@@ -161,16 +161,33 @@ AVITO_PROXY_ROTATE_URL = os.getenv("AVITO_PROXY_ROTATE_URL", "")
 AUTORU_API_TOKEN = os.getenv("AUTORU_API_TOKEN", "")
 _last_ip_rotate_ts = 0.0
 
+# Отдельный пул РФ-прокси для Auto.ru. Яндекс режет капчей дата-центр/мобильный
+# IP, но чистые РФ SOCKS5/резидентные IP обычно пропускает. Формат каждого:
+#   socks5://user:pass@host:port  (или http://...). Список через запятую в
+#   переменной AUTORU_PROXIES; ниже — дефолтные РФ-прокси пользователя.
+_AUTORU_PROXIES_DEFAULT = [
+    "socks5://hZoswb:f3dQZ6@193.187.144.4:8000",
+    "socks5://GPL5xs:mM4GHB@193.31.101.131:9928",
+    "socks5://xZ6MTF:9XEWJd@217.29.53.106:10248",
+]
+AUTORU_PROXIES = [
+    p.strip() for p in os.getenv("AUTORU_PROXIES", ",".join(_AUTORU_PROXIES_DEFAULT)).split(",")
+    if p.strip()
+]
+
+def _autoru_proxy_dicts() -> "list[dict]":
+    """Список proxy-словарей для requests/curl_cffi из пула Auto.ru."""
+    return [{"http": p, "https": p} for p in AUTORU_PROXIES]
+
 # Диагностика готовности Auto.ru: Яндекс режет капчей любой «грязный» IP.
-# Обойти можно либо токеном apiauto.ru, либо ротацией IP мобильного прокси.
 if AUTORU_API_TOKEN:
     print("[Auto.ru] ✅ токен apiauto.ru задан — чистый JSON без капчи")
+elif AUTORU_PROXIES:
+    print(f"[Auto.ru] ✅ пул РФ-прокси: {len(AUTORU_PROXIES)} шт. — обход капчи через чистые РФ IP")
 elif AVITO_PROXY_ROTATE_URL:
     print("[Auto.ru] ✅ ротация IP настроена — капча будет обходиться сменой IP")
 else:
-    print("[Auto.ru] ⚠️ НЕТ ни AUTORU_API_TOKEN, ни AVITO_PROXY_ROTATE_URL — "
-          "Яндекс будет отдавать капчу, Auto.ru найдёт мало/ноль. "
-          "Добавь AVITO_PROXY_ROTATE_URL (ссылка смены IP прокси) в переменные.")
+    print("[Auto.ru] ⚠️ нет ни токена, ни РФ-прокси, ни ротации — Auto.ru поймает капчу")
 
 def _rotate_proxy_ip(min_interval: float = 50.0, force: bool = False) -> bool:
     """Меняет IP мобильного прокси через ссылку ротации. Возвращает True при успехе.
@@ -1371,7 +1388,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
     today = datetime.date.today()
     # Жёсткий дедлайн: Auto.ru капча-защищён и часто виснет — не даём тормозить весь
     # поиск. Держим короткий бюджет: если IP чистый — успеваем, если капча — быстро выходим.
-    _ar_deadline = time.time() + 10
+    _ar_deadline = time.time() + 12
     _ar_empty_streak = 0
     # Марка для Auto.ru: путь /cars/lada/used/ и catalog_filter mark=LADA
     _brand_l = (brand or "").strip().lower()
@@ -1551,6 +1568,32 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
                         pass
             except Exception as e:
                 print(f"  [Auto.ru] apiauto API: {str(e)[:80]}")
+
+        # Метод 0*: пул РФ-прокси (SOCKS5/резидентные) — чистые РФ IP, которые
+        # Яндекс НЕ режет капчей. Пробуем AJAX (JSON) через каждый по очереди.
+        # Это основной рабочий путь для Auto.ru, если задан AUTORU_PROXIES.
+        if not batch and AUTORU_PROXIES:
+            for _arp in _autoru_proxy_dicts():
+                if time.time() > _ar_deadline:
+                    break
+                try:
+                    _rp = _req.post(
+                        "https://auto.ru/-/ajax/desktop/listing/",
+                        json=body,
+                        headers={**headers_ajax, "x-requested-with": "fetch"},
+                        proxies=_arp, timeout=6,
+                    )
+                    _phost = _arp.get("https", "").split("@")[-1]
+                    print(f"  [Auto.ru] РФ-прокси {_phost} стр.{p}: HTTP {_rp.status_code}, {len(_rp.text):,}б")
+                    if _rp.status_code == 200 and not _autoru_is_captcha(_rp.text):
+                        try:
+                            batch = _autoru_parse_offers(_rp.json(), today)
+                        except Exception:
+                            batch = _autoru_parse_html(_rp.text, today)
+                        if batch:
+                            break
+                except Exception as e:
+                    print(f"  [Auto.ru] РФ-прокси: {str(e)[:60]}")
 
         # Метод 0а: Прямой AJAX API с прокси (наиболее надёжный при наличии РФ IP)
         if not batch and AVITO_PROXIES:
