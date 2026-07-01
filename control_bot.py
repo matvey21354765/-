@@ -161,15 +161,27 @@ AVITO_PROXY_ROTATE_URL = os.getenv("AVITO_PROXY_ROTATE_URL", "")
 AUTORU_API_TOKEN = os.getenv("AUTORU_API_TOKEN", "")
 _last_ip_rotate_ts = 0.0
 
-def _rotate_proxy_ip(min_interval: float = 50.0) -> bool:
+# Диагностика готовности Auto.ru: Яндекс режет капчей любой «грязный» IP.
+# Обойти можно либо токеном apiauto.ru, либо ротацией IP мобильного прокси.
+if AUTORU_API_TOKEN:
+    print("[Auto.ru] ✅ токен apiauto.ru задан — чистый JSON без капчи")
+elif AVITO_PROXY_ROTATE_URL:
+    print("[Auto.ru] ✅ ротация IP настроена — капча будет обходиться сменой IP")
+else:
+    print("[Auto.ru] ⚠️ НЕТ ни AUTORU_API_TOKEN, ни AVITO_PROXY_ROTATE_URL — "
+          "Яндекс будет отдавать капчу, Auto.ru найдёт мало/ноль. "
+          "Добавь AVITO_PROXY_ROTATE_URL (ссылка смены IP прокси) в переменные.")
+
+def _rotate_proxy_ip(min_interval: float = 50.0, force: bool = False) -> bool:
     """Меняет IP мобильного прокси через ссылку ротации. Возвращает True при успехе.
-    Защита: не чаще раза в min_interval секунд (ротация имеет лимиты у провайдера)."""
+    Защита: не чаще раза в min_interval секунд (ротация имеет лимиты у провайдера).
+    force=True — игнорирует интервал (для критичного обхода капчи Auto.ru)."""
     global _last_ip_rotate_ts
     if not AVITO_PROXY_ROTATE_URL:
         return False
     import time as _t
     now = _t.time()
-    if now - _last_ip_rotate_ts < min_interval:
+    if not force and now - _last_ip_rotate_ts < min_interval:
         return False
     _last_ip_rotate_ts = now
     try:
@@ -1401,7 +1413,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
     # Если прогрев поймал капчу Яндекса — меняем IP мобильного прокси на свежий
     # РФ-адрес и заново прогреваем сессию. Именно это чаще всего оживляет Auto.ru.
     if _warm_blocked and AVITO_PROXIES:
-        if _rotate_proxy_ip(min_interval=15.0):
+        if _rotate_proxy_ip(force=True):
             try:
                 from curl_cffi import requests as _cffi_ar2
                 _rc2 = _cffi_ar2.get(
@@ -1610,7 +1622,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
             if _ar_empty_streak >= 2:
                 break
             if AVITO_PROXIES:
-                _rotate_proxy_ip(min_interval=15.0)
+                _rotate_proxy_ip(force=True)
             time.sleep(0.05)
             continue
         _ar_empty_streak = 0
