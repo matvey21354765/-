@@ -910,11 +910,34 @@ def _sort_by_deal(items: list[dict]) -> list[dict]:
         hot = 10.0 if (x.get("_deal_score", 0) - pct * 3) > 10 else 0.0
         return min(days, 90) * 0.5 + hot
 
-    # Tier 0: СНАЧАЛА самая большая скидка от рынка (что и просил пользователь),
-    # при равной скидке — кто дольше висит / срочная продажа. Остальные тиры — по цене.
+    def _no_photo(x) -> int:
+        """0 — есть фото (выше), 1 — без фото (в конец своего тира)."""
+        return 0 if (x.get("_photo_url") or x.get("photo_url") or x.get("_photos", 0) > 0) else 1
+
+    # Убираем объявления без фото (обычно неинформативные/подозрительные), но
+    # только если объявлений с фото достаточно — иначе показываем что есть.
+    _with_photo = [x for x in items if _no_photo(x) == 0]
+    if len(_with_photo) >= 5:
+        _dropped = len(items) - len(_with_photo)
+        if _dropped:
+            print(f"  [сортировка] убрано без фото: {_dropped}, осталось {len(_with_photo)}")
+        items = _with_photo
+
+    # Порядок ключей:
+    #   1) тир (ниже рынка → по рынку → без цены → просмотренные),
+    #   2) наличие фото (объявления без фото падают вниз своего тира),
+    #   3) внутри Tier 0 — сначала бОльшая скидка, при равной скидке дешевле и «горячее»,
+    #      остальные тиры — дешевле выше.
+    def _savings_band(x) -> int:
+        """Скидку округляем до 5% — внутри одной «полки» выгодности выше идёт
+        более ДЕШЁВОЕ авто (чтобы вверху были и выгодные, и недорогие)."""
+        return int(round(_primary_savings(x) / 5.0))
+
     items.sort(key=lambda x: (
         _tier(x),
-        (-_primary_savings(x), -_secondary(x)) if _tier(x) == 0
+        _no_photo(x),
+        (-_savings_band(x), x.get("_price_int", 999_999_999), -_secondary(x))
+        if _tier(x) == 0
         else (x.get("_price_int", 999_999_999), 0),
     ))
     return items
