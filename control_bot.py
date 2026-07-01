@@ -1346,8 +1346,9 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
 
     results = []
     today = datetime.date.today()
-    # Жёсткий дедлайн: Auto.ru капча-защищён и часто виснет — не даём тормозить весь поиск
-    _ar_deadline = time.time() + 28
+    # Жёсткий дедлайн: Auto.ru капча-защищён и часто виснет — не даём тормозить весь
+    # поиск. Держим короткий бюджет: если IP чистый — успеваем, если капча — быстро выходим.
+    _ar_deadline = time.time() + 13
     _ar_empty_streak = 0
     # Марка для Auto.ru: путь /cars/lada/used/ и catalog_filter mark=LADA
     _brand_l = (brand or "").strip().lower()
@@ -1372,7 +1373,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
     try:
         from curl_cffi import requests as _cffi_ar
         _rc = _cffi_ar.get(
-            _ar_base_url, impersonate="chrome124", timeout=10,
+            _ar_base_url, impersonate="chrome124", timeout=6,
             headers={"Accept-Language": "ru-RU,ru;q=0.9",
                      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                      "Referer": "https://auto.ru/", "Upgrade-Insecure-Requests": "1"},
@@ -1395,7 +1396,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
                 "User-Agent": _ar_ua,
                 "Accept": "text/html,application/xhtml+xml,*/*;q=0.9",
                 "Accept-Language": "ru-RU,ru;q=0.9",
-            }, proxies=_avito_proxies(), timeout=8)
+            }, proxies=_avito_proxies(), timeout=5)
             _warm_html, _warm_status = _warm.text, _warm.status_code
         except Exception as _e:
             print(f"  [Auto.ru] requests прогрев: {str(_e)[:60]}")
@@ -1426,7 +1427,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
             try:
                 from curl_cffi import requests as _cffi_ar2
                 _rc2 = _cffi_ar2.get(
-                    _ar_base_url, impersonate="chrome124", timeout=10,
+                    _ar_base_url, impersonate="chrome124", timeout=6,
                     headers={"Accept-Language": "ru-RU,ru;q=0.9",
                              "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                              "Referer": "https://auto.ru/", "Upgrade-Insecure-Requests": "1"},
@@ -1536,7 +1537,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
                     json=body,
                     headers={**headers_ajax, "x-requested-with": "fetch"},
                     proxies=_avito_proxies(),
-                    timeout=5,
+                    timeout=4,
                 )
                 print(f"  [Auto.ru] прокси AJAX стр.{p}: HTTP {r_ajax.status_code}, {len(r_ajax.text):,}б")
                 if r_ajax.status_code == 200:
@@ -1555,7 +1556,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                     "Accept-Language": "ru-RU,ru;q=0.9",
                     "Referer": f"https://auto.ru/{slug}/cars/used/",
-                }, timeout=5, proxies=_avito_proxies())
+                }, timeout=4, proxies=_avito_proxies())
                 print(f"  [Auto.ru] прокси HTML стр.{p}: HTTP {r0.status_code}, {len(r0.text):,}б")
                 # Парсим любой не-капча ответ (мобильная страница может быть <50К)
                 if r0.status_code == 200 and not _autoru_is_captcha(r0.text):
@@ -1572,7 +1573,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
                     "Accept-Language": "ru-RU,ru;q=0.9",
                     "Referer": f"https://auto.ru/{slug}/cars/used/",
                 }
-                rc0 = _cffi.get(html_url, impersonate="chrome124", timeout=5, headers=_cffi_hdrs0,
+                rc0 = _cffi.get(html_url, impersonate="chrome124", timeout=4, headers=_cffi_hdrs0,
                                 proxies=_avito_proxies())
                 print(f"  [Auto.ru] curl_cffi стр.{p}: HTTP {rc0.status_code}, {len(rc0.text):,}б")
                 if rc0.status_code == 200 and not _autoru_is_captcha(rc0.text):
@@ -9140,7 +9141,7 @@ async def cmd_global_search(msg: Message):
     # Запускаем все источники + TG-каналы параллельно
     scraper_map = {
         "drom":   lambda: scrape_drom(region, pages=15, price_min=pmin, price_max=pmax, brand=_br),
-        "autoru": lambda: scrape_autoru(region, pages=6, price_min=pmin, price_max=pmax, brand=_br),
+        "autoru": lambda: scrape_autoru(region, pages=4, price_min=pmin, price_max=pmax, brand=_br),
         "avito":  lambda: scrape_avito(region, pages=10, price_min=pmin, price_max=pmax, sort_by_date=False),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
     }
@@ -10668,7 +10669,7 @@ async def do_search_for_user(uid: int, reply_to):
 
     scraper_map = {
         "drom":   lambda: scrape_drom(region, pages=8, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
-        "autoru": lambda: scrape_autoru(region, pages=6, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
+        "autoru": lambda: scrape_autoru(region, pages=4, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
         "avito":  lambda: scrape_avito(region, pages=6, price_min=pmin, price_max=pmax, sort_by_date=False, brand=(brand if brand and brand != "any" else "")),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
         "tg":     lambda: scrape_tg_channels(region, pmin, pmax),
