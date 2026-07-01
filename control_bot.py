@@ -1320,7 +1320,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
     results = []
     today = datetime.date.today()
     # Жёсткий дедлайн: Auto.ru капча-защищён и часто виснет — не даём тормозить весь поиск
-    _ar_deadline = time.time() + 16
+    _ar_deadline = time.time() + 20
     # Марка для Auto.ru: путь /cars/lada/used/ и catalog_filter mark=LADA
     _brand_l = (brand or "").strip().lower()
     _AR_SLUG = {"land rover": "land_rover", "alfa": "alfa_romeo"}
@@ -1336,29 +1336,54 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
         _ar_base_url += f"&price_from={price_min}"
     if price_max < 99_000_000:
         _ar_base_url += f"&price_to={price_max}"
+    _warm_html = ""
+    _warm_status = 0
+    # 1) curl_cffi (Chrome TLS-отпечаток) через прокси — ЛУЧШИЙ обход анти-бота
+    #    Яндекса, который проверяет TLS-fingerprint. Обычный requests почти всегда
+    #    ловит капчу, а curl_cffi проходит чаще.
     try:
-        _warm = _ar_session.get(_ar_base_url, headers={
-            "User-Agent": _ar_ua,
-            "Accept": "text/html,application/xhtml+xml,*/*;q=0.9",
-            "Accept-Language": "ru-RU,ru;q=0.9",
-        }, proxies=_avito_proxies(), timeout=7)
-        _wl = _warm.text.lower()
-        # Капча / антибот / блокировка — дальше пробовать бессмысленно, быстро выходим.
-        # Короткая страница без данных об авто (mark_info) — тоже блок.
-        if ("captcha" in _wl or "проверка, что вы не робот" in _wl
-                or "too-many-requests" in _wl or "доступ ограничен" in _wl
-                or _warm.status_code in (429, 403)
-                or (len(_warm.text) < 40_000 and "mark_info" not in _wl)):
-            print(f"  [Auto.ru] заблокирован (HTTP {_warm.status_code}, {len(_warm.text)}б) — пропускаем")
-            return results
-        print(f"  [Auto.ru] прогрев сессии: HTTP {_warm.status_code}, куки: {list(_ar_session.cookies.keys())[:5]}")
-        if _warm.status_code == 200 and len(_warm.text) > 50_000:
-            _warm_items = _autoru_parse_html(_warm.text, today)
-            if _warm_items:
-                print(f"  [Auto.ru] прогрев дал {len(_warm_items)} объявлений")
-                results.extend(_warm_items)
-    except Exception as _e:
-        print(f"  [Auto.ru] прогрев: {str(_e)[:60]}")
+        from curl_cffi import requests as _cffi_ar
+        _rc = _cffi_ar.get(
+            _ar_base_url, impersonate="chrome124", timeout=10,
+            headers={"Accept-Language": "ru-RU,ru;q=0.9",
+                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                     "Referer": "https://auto.ru/", "Upgrade-Insecure-Requests": "1"},
+            proxies=_avito_proxies() or {},
+        )
+        _warm_html, _warm_status = _rc.text, _rc.status_code
+        # Переносим куки (spravka и т.п.) в requests-сессию для AJAX-фолбэка
+        try:
+            for _k, _v in _rc.cookies.get_dict().items():
+                _ar_session.cookies.set(_k, _v)
+        except Exception:
+            pass
+        print(f"  [Auto.ru] curl_cffi прогрев: HTTP {_warm_status}, {len(_warm_html):,}б")
+    except Exception as _ec:
+        print(f"  [Auto.ru] curl_cffi прогрев: {str(_ec)[:60]}")
+    # 2) обычный requests — запасной, если curl_cffi не дал страницу
+    if len(_warm_html) < 5_000:
+        try:
+            _warm = _ar_session.get(_ar_base_url, headers={
+                "User-Agent": _ar_ua,
+                "Accept": "text/html,application/xhtml+xml,*/*;q=0.9",
+                "Accept-Language": "ru-RU,ru;q=0.9",
+            }, proxies=_avito_proxies(), timeout=8)
+            _warm_html, _warm_status = _warm.text, _warm.status_code
+        except Exception as _e:
+            print(f"  [Auto.ru] requests прогрев: {str(_e)[:60]}")
+    _wl = _warm_html.lower()
+    # Капча / антибот / блокировка — дальше бессмысленно, быстро выходим
+    if ("captcha" in _wl or "проверка, что вы не робот" in _wl
+            or "too-many-requests" in _wl or "доступ ограничен" in _wl
+            or _warm_status in (429, 403)
+            or (len(_warm_html) < 40_000 and "mark_info" not in _wl)):
+        print(f"  [Auto.ru] заблокирован (HTTP {_warm_status}, {len(_warm_html)}б) — пропускаем")
+        return results
+    if len(_warm_html) > 50_000:
+        _warm_items = _autoru_parse_html(_warm_html, today)
+        if _warm_items:
+            print(f"  [Auto.ru] прогрев дал {len(_warm_items)} объявлений")
+            results.extend(_warm_items)
 
     if results:
         return results
