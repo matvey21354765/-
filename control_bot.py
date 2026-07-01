@@ -1371,7 +1371,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
     today = datetime.date.today()
     # Жёсткий дедлайн: Auto.ru капча-защищён и часто виснет — не даём тормозить весь
     # поиск. Держим короткий бюджет: если IP чистый — успеваем, если капча — быстро выходим.
-    _ar_deadline = time.time() + 13
+    _ar_deadline = time.time() + 16
     _ar_empty_streak = 0
     # Марка для Auto.ru: путь /cars/lada/used/ и catalog_filter mark=LADA
     _brand_l = (brand or "").strip().lower()
@@ -1603,6 +1603,32 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
                     batch = _autoru_parse_html(rc0.text, today)
             except Exception as e:
                 print(f"  [Auto.ru] curl_cffi: {str(e)[:80]}")
+
+        # Метод 0d: бесплатные РФ-прокси — не требует настроек. Часть РФ ISP-IP
+        # Яндекс НЕ режет капчей (в отличие от дата-центра). Пробуем AJAX (JSON)
+        # через несколько таких прокси. Работает даже без мобильного прокси.
+        if not batch and _working_free_proxies and time.time() < _ar_deadline:
+            for _fp in list(_working_free_proxies)[:3]:
+                if time.time() > _ar_deadline:
+                    break
+                try:
+                    _fp_prx = {"http": f"http://{_fp}", "https": f"http://{_fp}"}
+                    _rf = _req.post(
+                        "https://auto.ru/-/ajax/desktop/listing/",
+                        json=body,
+                        headers={**headers_ajax, "x-requested-with": "fetch"},
+                        proxies=_fp_prx, timeout=5,
+                    )
+                    if _rf.status_code == 200 and not _autoru_is_captcha(_rf.text):
+                        try:
+                            batch = _autoru_parse_offers(_rf.json(), today)
+                        except Exception:
+                            batch = _autoru_parse_html(_rf.text, today)
+                        if batch:
+                            print(f"  [Auto.ru] free-proxy {_fp}: {len(batch)} объявлений")
+                            break
+                except Exception:
+                    continue
 
         # Метод 1: ScraperAPI render=true — JS выполняется, __INITIAL_STATE__ заполняется
         if not batch and SCRAPER_API_KEY:
@@ -12207,18 +12233,19 @@ def _pre_warm_free_proxies_sync() -> None:
 
 
 async def _proxy_warmup_loop() -> None:
-    """Фоновая задача: прогревает кеш бесплатных прокси каждые 15 минут.
-    Если настроен платный ротирующийся прокси — бесплатные не нужны, пропускаем."""
-    if AVITO_PROXIES:
-        print("  [прокси-прогрев] платный прокси активен — бесплатные не нужны, прогрев отключён")
-        return
+    """Фоновая задача: прогревает кеш бесплатных РФ-прокси.
+    Даже при платном мобильном прокси держим пул бесплатных РФ-IP — они нужны
+    как фолбэк для Auto.ru: Яндекс режет капчей мобильный IP, а часть РФ ISP-IP
+    пропускает. Для Авито бесплатные прокси НЕ используются (там мобильный)."""
     loop = asyncio.get_running_loop()
+    # При платном прокси прогреваем реже (пул нужен только для Auto.ru-фолбэка).
+    _interval = 1800 if AVITO_PROXIES else 900
     while True:
         try:
             await loop.run_in_executor(None, _pre_warm_free_proxies_sync)
         except Exception as e:
             print(f"  [прокси-прогрев] ошибка: {e}")
-        await asyncio.sleep(900)  # 15 минут
+        await asyncio.sleep(_interval)
 
 
 async def main():
