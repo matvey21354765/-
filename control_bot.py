@@ -1473,10 +1473,12 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
     # ВАЖНО: даже если прогрев поймал капчу — НЕ выходим. AJAX-методы (мобильный
     # API + desktop AJAX через прокси) часто работают, когда HTML-страница
     # отдаёт капчу. Раньше ранний return убивал их — Auto.ru искал мало.
-    # Если прогрев поймал капчу Яндекса — меняем IP мобильного прокси на свежий
-    # РФ-адрес и заново прогреваем сессию. Именно это чаще всего оживляет Auto.ru.
-    if _warm_blocked and AVITO_PROXIES:
-        if _rotate_proxy_ip(force=True):
+    # Если прогрев поймал капчу Яндекса и НЕТ выделенного РФ-пула для Auto.ru —
+    # как крайняя мера меняем IP общего мобильного прокси. ВАЖНО: не форсируем и
+    # только при отсутствии AUTORU_PROXIES, иначе ротация общего IP ломает Авито
+    # (спам «Already change IP» и смена IP у Авито в середине поиска).
+    if _warm_blocked and AVITO_PROXIES and not AUTORU_PROXIES:
+        if _rotate_proxy_ip():
             try:
                 from curl_cffi import requests as _cffi_ar2
                 _rc2 = _cffi_ar2.get(
@@ -1775,13 +1777,11 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
         print(f"  [Auto.ru] стр.{p}: итого {len(batch)} объявлений")
         if not batch:
             # Одна пустая страница может быть временным сбоем/капчей —
-            # прерываемся только после двух пустых подряд. Перед второй
-            # попыткой меняем IP прокси на свежий РФ-адрес (обходит капчу).
+            # прерываемся только после двух пустых подряд. IP общего мобильного
+            # прокси НЕ трогаем (это ломает Авито) — для Auto.ru есть свой РФ-пул.
             _ar_empty_streak += 1
             if _ar_empty_streak >= 2:
                 break
-            if AVITO_PROXIES:
-                _rotate_proxy_ip(force=True)
             time.sleep(0.05)
             continue
         _ar_empty_streak = 0
@@ -12420,19 +12420,20 @@ def _pre_warm_free_proxies_sync() -> None:
 
 
 async def _proxy_warmup_loop() -> None:
-    """Фоновая задача: прогревает кеш бесплатных РФ-прокси.
-    Даже при платном мобильном прокси держим пул бесплатных РФ-IP — они нужны
-    как фолбэк для Auto.ru: Яндекс режет капчей мобильный IP, а часть РФ ISP-IP
-    пропускает. Для Авито бесплатные прокси НЕ используются (там мобильный)."""
+    """Фоновая задача: прогревает кеш бесплатных прокси каждые 15 минут.
+    Если настроен платный мобильный прокси — бесплатные не нужны (Авито ходит
+    через мобильный, а у Auto.ru есть свой РФ-пул AUTORU_PROXIES), поэтому
+    тяжёлый прогрев (80 запросов к Авито) пропускаем, чтобы не мешать поиску."""
+    if AVITO_PROXIES:
+        print("  [прокси-прогрев] платный прокси активен — прогрев бесплатных отключён")
+        return
     loop = asyncio.get_running_loop()
-    # При платном прокси прогреваем реже (пул нужен только для Auto.ru-фолбэка).
-    _interval = 1800 if AVITO_PROXIES else 900
     while True:
         try:
             await loop.run_in_executor(None, _pre_warm_free_proxies_sync)
         except Exception as e:
             print(f"  [прокси-прогрев] ошибка: {e}")
-        await asyncio.sleep(_interval)
+        await asyncio.sleep(900)
 
 
 async def main():
