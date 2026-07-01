@@ -785,10 +785,13 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
                 #  - broad/brand (разные годы/комплектации): медиана завышена, поэтому
                 #    большие «скидки» — фейк (напр. Harrier 2004 vs медиана всех Harrier,
                 #    или GAC GS4 vs медиана всех GAC). Кап 18% — иначе не показываем.
+                # Точное совпадение (тот же год/±2) — разрешаем до 80% скидки
+                # (пользователь хочет видеть самые выгодные). Broad/brand — медиана
+                # завышена от смешения годов, поэтому большие «скидки» фейк → кап 20%.
                 if _lvl in ("broad", "brand"):
-                    _savings_cap = 18
+                    _savings_cap = 20
                 else:
-                    _savings_cap = 60 if p < 400_000 else 50
+                    _savings_cap = 80
                 if savings_pct > _savings_cap:
                     med = 0
                     savings_pct = 0.0
@@ -2677,6 +2680,20 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                     return val
             except Exception:
                 pass
+        # 0a. 🍋 / "лимон" = миллион (сленг): "6 100 🍋"→6.1млн, "6.1 лимон"→6.1млн
+        _lem = re.search(r"(\d+(?:[.,]\d+)?|\d[\d\s]*\d)\s*(?:🍋|лимон)", _tl)
+        if _lem:
+            try:
+                g = _lem.group(1).strip()
+                if "." in g or "," in g:
+                    val = int(float(g.replace(",", ".").replace(" ", "")) * 1_000_000)
+                else:
+                    d = int(re.sub(r"\D", "", g))
+                    val = d * 1000 if d >= 1000 else d * 1_000_000  # "6100"→6.1млн, "6"→6млн
+                if 100_000 <= val <= 50_000_000:
+                    return val
+            except Exception:
+                pass
         # 0b. Цена с разделителями тысяч точка/запятая: "Цена:1.800.000", "55,000₽".
         #     Группы по 3 цифры через . или , (не путать с "1.6" — там 1 цифра).
         _sep_re = r'(\d{1,3}(?:[.,]\d{3})+)'
@@ -2695,7 +2712,16 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                 continue
             val = int(raw)
             suffix = m.group(0)[len(m.group(1)):].strip().lower()
-            if "тыс" in suffix or "тр" in suffix or (suffix.startswith("к") and not "кузов" in suffix):
+            _is_k = "тыс" in suffix or "тр" in suffix or (suffix.startswith("к") and "кузов" not in suffix)
+            if _is_k:
+                # "110к пробег" / "107 тыс км" — это ПРОБЕГ, а не цена. Суффикс ₽/руб —
+                # всегда цена, а к/тыс рядом с "пробег"/"км" — почти всегда пробег.
+                _after = _tl[m.end():m.end() + 12]
+                _before = _tl[max(0, m.start() - 12):m.start()]
+                if ("пробег" in _after or "пробег" in _before
+                        or _after.lstrip(" .,:") .startswith("км")
+                        or "тыс.км" in _after or "тыс км" in _after):
+                    continue
                 if val < 1000:
                     val *= 1000
             if 8_000 <= val <= 50_000_000:
