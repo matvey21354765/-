@@ -2716,7 +2716,12 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                 return val
         # Сначала ищем с явным символом валюты
         for m in _vk_price_re.finditer(text):
-            raw = re.sub(r"\D", "", m.group(1))
+            _g = m.group(1).strip()
+            # Если число содержит пробел и это НЕ группировка тысяч (110 000),
+            # значит склеились модель+цена ("2107 12 тыс") — берём число у суффикса
+            if " " in _g and not re.fullmatch(r"\d{1,3}(?: \d{3})+", _g):
+                _g = _g.split()[-1]
+            raw = re.sub(r"\D", "", _g)
             if not raw:
                 continue
             val = int(raw)
