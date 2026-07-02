@@ -8689,6 +8689,9 @@ def _notify_keyboard(s: dict) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text=f"⏱ Каждые {interval} мин", callback_data="notify_interval"),
             InlineKeyboardButton(text=f"📉 Скидка от {min_pct}%", callback_data="notify_pct"),
         ],
+        [InlineKeyboardButton(
+            text=("👤 Только частники: ВКЛ" if s.get("private_only") else "👤 Только частники: выкл"),
+            callback_data="toggle_private")],
         [InlineKeyboardButton(text="⭐ Моё избранное", callback_data="notify_favs")],
         [InlineKeyboardButton(text="◀️ Назад", callback_data="notify_back")],
     ])
@@ -8753,6 +8756,20 @@ async def cb_notify_settings(cb: CallbackQuery):
         parse_mode="Markdown",
         reply_markup=_notify_keyboard(s),
     )
+
+
+@dp.callback_query(F.data == "toggle_private")
+async def cb_toggle_private(cb: CallbackQuery):
+    uid = cb.from_user.id
+    s = load_settings(uid)
+    s["private_only"] = not s.get("private_only", False)
+    save_settings(uid, s)
+    await cb.answer("👤 Только частники: ВКЛ — салоны и перекупы скрыты"
+                    if s["private_only"] else "Показываю всех продавцов")
+    try:
+        await cb.message.edit_reply_markup(reply_markup=_notify_keyboard(s))
+    except Exception:
+        pass
 
 
 @dp.callback_query(F.data == "notify_toggle")
@@ -11265,6 +11282,12 @@ async def do_search_for_user(uid: int, reply_to):
     # Фильтр по категории и марке (также убирает скутеры/мото)
     suitable = _filter_by_category(suitable, category, brand)
     print(f"  [фильтр] после category({category}/{brand}): {len(suitable)}")
+
+    # Фильтр «только частники»: скрываем салоны/перекупов, если включён.
+    if load_settings(uid).get("private_only"):
+        _before_priv = len(suitable)
+        suitable = [it for it in suitable if not is_dealer(it)]
+        print(f"  [фильтр] только частники: {len(suitable)}/{_before_priv}")
 
     # Финальная дедупликация suitable (могут быть дубли если разные источники нашли одно).
     # Дедуп по URL И по сигнатуре содержимого (телефон / нормализованный текст) —
