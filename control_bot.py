@@ -892,9 +892,11 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
                 med, _lvl, _n = _market_for(parts[0], int(parts[1]), p)
             if med > 0:
                 savings_pct = round((1 - p / med) * 100, 1)
-                # near/bracket (та же модель, ±1-2 года) — рынок надёжный.
-                # wide (±4 года) — грубее, скидку ограничиваем 35%.
-                _cap = 35 if _lvl.startswith("wide") else 80
+                # Показываем ДАЖЕ очень большие скидки (−80% и глубже). Отсекаем
+                # только явные ошибки парсинга цены: >92% (цена = ~8% рынка — это
+                # почти всегда пробег/опечатка, а не машина). Для широкого окна
+                # (±4 года) чуть строже — 70%, т.к. рынок там грубее.
+                _cap = 70 if _lvl.startswith("wide") else 92
                 if savings_pct > _cap:
                     med = 0
                     savings_pct = 0.0
