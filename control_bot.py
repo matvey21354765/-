@@ -12260,6 +12260,7 @@ async def _send_monitor_item(uid: int, it: dict):
     it_region = it.get("_monitor_region", "")
     region_label = f" · {REGIONS.get(it_region, it_region)}" if it_region else ""
     caption = (
+        f"⚡ 🆕 ТОЛЬКО ЧТО — ты видишь одним из первых\n"
         f"🔔 {it.get('title', '')}\n"
         f"💰 {price_line}\n"
         f"📌 {src_icon}{region_label}"
@@ -12568,7 +12569,10 @@ async def cmd_monitor(msg: Message):
     pmin = s.get("price_min", 0)
     pmax = s.get("price_max", 99_000_000)
     await msg.answer(
-        f"🔔 *Настройки уведомлений*\n\n"
+        f"🔔 *Уведомления · ⚡ Ранний доступ*\n\n"
+        f"Бот каждые ~2 мин проверяет Авито (сортировка «сначала свежие») и "
+        f"присылает новые авто ниже рынка первым — по сути, ты видишь объявления "
+        f"раньше тех, кто листает вручную.\n\n"
         f"Статус: {status}\n"
         f"Интервал проверки: каждые {interval} мин\n"
         f"Минимальная скидка: {min_pct}% ниже рынка\n"
