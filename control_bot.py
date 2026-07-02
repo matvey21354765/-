@@ -631,6 +631,45 @@ def hot_score(item: dict) -> float:
     return round(score, 2)
 
 
+# 1) число с единицей «км/тыс км/т.км/тыс»; 2) «пробег <число>» без единицы.
+_MILEAGE_RE = re.compile(
+    r'(\d[\d\s]{1,7})\s*(тыс\.?\s*км|т\.?\s*км|т\.\s*км|тыс|км)',
+    re.IGNORECASE,
+)
+_MILEAGE_PROBEG_RE = re.compile(r'пробег[:\s]*(\d[\d\s]{2,8})', re.IGNORECASE)
+
+def _extract_mileage(text: str) -> int:
+    """Достаёт пробег (км) из текста объявления Дром/ВК/ТГ, где нет числового
+    поля mileage. Понимает «150 000 км», «150 тыс км», «пробег 150000».
+    Возвращает 0, если не нашёл правдоподобный пробег."""
+    if not text:
+        return 0
+    best = 0
+    for m in _MILEAGE_RE.finditer(text):
+        raw = re.sub(r"\D", "", m.group(1))
+        if not raw:
+            continue
+        val = int(raw)
+        unit = m.group(2).lower()
+        if unit.startswith("тыс") or unit.startswith("т"):
+            val *= 1000
+        if 1000 <= val <= 800_000:
+            best = max(best, val)
+    # «пробег 191500» без единицы измерения
+    for m in _MILEAGE_PROBEG_RE.finditer(text):
+        raw = re.sub(r"\D", "", m.group(1))
+        if not raw:
+            continue
+        val = int(raw)
+        # «пробег 150 тыс» → тысячи
+        _tail = text[m.end():m.end() + 6].lower()
+        if val < 1000 and ("тыс" in _tail or "т." in _tail):
+            val *= 1000
+        if 1000 <= val <= 800_000:
+            best = max(best, val)
+    return best
+
+
 def _car_group_key(title: str) -> str:
     """Извлекает марку+модель+год для группировки (напр. 'toyota camry 2018').
 
@@ -771,6 +810,15 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
         s2 = [x for x in s if 0.4 * m <= x <= 2.5 * m]
         return float(median(s2)) if len(s2) >= 2 else float(m)
 
+    def _eff_km(it: dict) -> int:
+        """Пробег объявления: числовое поле mileage (Авито) либо, если его нет,
+        достаём из заголовка+описания (Дром/ВК/ТГ). Так уточнение рынка по пробегу
+        работает для всех площадок, а не только для Авито."""
+        km = it.get("mileage", 0) or 0
+        if isinstance(km, (int, float)) and 1000 < km < 900_000:
+            return int(km)
+        return _extract_mileage(f"{it.get('title','')} {it.get('description','')}")
+
     # Цены строго по модели И году: model -> {year -> [(price, mileage)]}. Рынок
     # считаем ТОЛЬКО по той же модели в близких годах — никаких «все годы»/«вся
     # марка», иначе 2001 Corolla сравнивается с 2018 и даёт фейковую «скидку».
@@ -785,9 +833,7 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
         if len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 4:
             model, yr = parts[0], int(parts[1])
             if model:
-                _km = it.get("mileage", 0) or 0
-                _km = _km if (isinstance(_km, (int, float)) and 1000 < _km < 900_000) else 0
-                model_year.setdefault(model, {}).setdefault(yr, []).append((p, _km))
+                model_year.setdefault(model, {}).setdefault(yr, []).append((p, _eff_km(it)))
 
     def _est_price(pairs: list, lvl: str, cand_km: int):
         """Оценка рынка по набору (цена, пробег). Если у кандидата и ≥4 эталонов
@@ -839,7 +885,7 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
             _lvl = ""
             # Рынок ТОЛЬКО по той же модели и близкому году, уточняя по пробегу.
             if len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 4:
-                med, _lvl = _market_for(parts[0], int(parts[1]), it.get("mileage", 0) or 0)
+                med, _lvl = _market_for(parts[0], int(parts[1]), _eff_km(it))
             if med > 0:
                 savings_pct = round((1 - p / med) * 100, 1)
                 # near/bracket (та же модель, ±1-2 года) — рынок надёжный, показываем
