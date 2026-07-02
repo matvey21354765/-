@@ -596,6 +596,34 @@ def is_dealer(item: dict) -> bool:
     return any(k in text for k in DEALER_KEYWORDS)
 
 
+_RESELLER_KEYWORDS = (
+    "выкуп авто", "автоподбор", "подбор авто", "обмен с доплат", "трейд-ин",
+    "trade-in", "автосалон", "скупка авто", "продажа авто под ключ",
+    "большой выбор авто", "в наличии авто", "автокредит", "рассрочка",
+)
+
+def _seller_phone(item: dict) -> str:
+    """Последние 10 цифр телефона из объявления (для склейки объявлений продавца)."""
+    txt = f"{item.get('description','')} {item.get('seller','')} {item.get('title','')}"
+    m = re.search(r"[78]\d{10}", re.sub(r"\D", "", txt))
+    return m.group(0)[-10:] if m else ""
+
+def _seller_type(item: dict, phone_counts: dict | None = None) -> str:
+    """Тип продавца: 'dealer' (салон), 'pro' (перекуп/профи) или 'private' (частник).
+    Перекупа определяем по: маркерам услуг ИЛИ одному телефону в ≥3 объявлениях."""
+    if is_dealer(item):
+        return "dealer"
+    text = (item.get("title", "") + " " + item.get("description", "") + " "
+            + item.get("seller", "")).lower()
+    if any(k in text for k in _RESELLER_KEYWORDS):
+        return "pro"
+    if phone_counts:
+        ph = _seller_phone(item)
+        if ph and phone_counts.get(ph, 0) >= 3:
+            return "pro"
+    return "private"
+
+
 def in_price_range(item: dict, price_min: int, price_max: int) -> bool:
     p = item.get("_price_int") or parse_price(item.get("price", ""))
     if p:
@@ -8748,6 +8776,31 @@ def _monitor_sources(s: dict) -> list[str]:
     return src
 
 
+_SELLER_TYPE_LABELS = {"private": "Частник", "pro": "Профи/перекуп", "dealer": "Автодилер"}
+
+def _get_seller_types(s: dict) -> list:
+    """Какие типы продавцов показывать. По умолчанию — все три."""
+    st = s.get("seller_types")
+    if st is None:
+        return ["private"] if s.get("private_only") else ["private", "pro", "dealer"]
+    return st or ["private", "pro", "dealer"]
+
+def _seller_types_label(s: dict) -> str:
+    st = _get_seller_types(s)
+    if len(st) >= 3:
+        return "все"
+    return ", ".join(_SELLER_TYPE_LABELS.get(t, t) for t in st) or "все"
+
+def _seller_types_keyboard(s: dict) -> InlineKeyboardMarkup:
+    st = set(_get_seller_types(s))
+    rows = []
+    for k, lbl in _SELLER_TYPE_LABELS.items():
+        chk = "✅" if k in st else "⬜"
+        rows.append([InlineKeyboardButton(text=f"{chk} {lbl}", callback_data=f"st_toggle|{k}")])
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="seller_types_back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def _notify_keyboard(s: dict) -> InlineKeyboardMarkup:
     enabled = s.get("monitor_enabled", False)
     interval = s.get("monitor_interval_min", 5)
@@ -8765,9 +8818,7 @@ def _notify_keyboard(s: dict) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text=f"⏱ Каждые {interval} мин", callback_data="notify_interval"),
             InlineKeyboardButton(text=f"📉 Скидка от {min_pct}%", callback_data="notify_pct"),
         ],
-        [InlineKeyboardButton(
-            text=("👤 Только частники: ВКЛ" if s.get("private_only") else "👤 Только частники: выкл"),
-            callback_data="toggle_private")],
+        [InlineKeyboardButton(text=f"🧑‍💼 Тип продавца: {_seller_types_label(s)}", callback_data="seller_types")],
         [InlineKeyboardButton(text="⭐ Моё избранное", callback_data="notify_favs")],
         [InlineKeyboardButton(text="◀️ Назад", callback_data="notify_back")],
     ])
@@ -8834,14 +8885,48 @@ async def cb_notify_settings(cb: CallbackQuery):
     )
 
 
-@dp.callback_query(F.data == "toggle_private")
-async def cb_toggle_private(cb: CallbackQuery):
+@dp.callback_query(F.data == "seller_types")
+async def cb_seller_types(cb: CallbackQuery):
+    await cb.answer()
+    s = load_settings(cb.from_user.id)
+    await cb.message.answer(
+        "🧑‍💼 <b>Тип продавца</b> — у кого искать объявления:\n\n"
+        "👤 <b>Частник</b> — продаёт своё авто, не перекуп\n"
+        "💼 <b>Профи/перекуп</b> — перепродаёт (один телефон в 3+ объявлениях или услуги выкупа)\n"
+        "🏢 <b>Автодилер</b> — салоны и дилерские центры\n\n"
+        "Отметь нужные:",
+        parse_mode="HTML", reply_markup=_seller_types_keyboard(s))
+
+
+@dp.callback_query(F.data.startswith("st_toggle|"))
+async def cb_seller_type_toggle(cb: CallbackQuery):
     uid = cb.from_user.id
+    key = cb.data.split("|")[1]
     s = load_settings(uid)
-    s["private_only"] = not s.get("private_only", False)
+    st = set(_get_seller_types(s))
+    if key in st:
+        st.discard(key)
+    else:
+        st.add(key)
+    if not st:                      # хотя бы один тип должен остаться
+        st = {key}
+        await cb.answer("Оставь хотя бы один тип продавца")
+    else:
+        await cb.answer("Обновил")
+    # порядок сохраняем стабильным
+    s["seller_types"] = [k for k in ("private", "pro", "dealer") if k in st]
+    s.pop("private_only", None)     # старый флаг больше не нужен
     save_settings(uid, s)
-    await cb.answer("👤 Только частники: ВКЛ — салоны и перекупы скрыты"
-                    if s["private_only"] else "Показываю всех продавцов")
+    try:
+        await cb.message.edit_reply_markup(reply_markup=_seller_types_keyboard(s))
+    except Exception:
+        pass
+
+
+@dp.callback_query(F.data == "seller_types_back")
+async def cb_seller_types_back(cb: CallbackQuery):
+    await cb.answer()
+    s = load_settings(cb.from_user.id)
     try:
         await cb.message.edit_reply_markup(reply_markup=_notify_keyboard(s))
     except Exception:
@@ -11367,11 +11452,18 @@ async def do_search_for_user(uid: int, reply_to):
     suitable = _filter_by_category(suitable, category, brand)
     print(f"  [фильтр] после category({category}/{brand}): {len(suitable)}")
 
-    # Фильтр «только частники»: скрываем салоны/перекупов, если включён.
-    if load_settings(uid).get("private_only"):
+    # Фильтр по типу продавца (частник / перекуп / автодилер).
+    _allowed_types = set(_get_seller_types(load_settings(uid)))
+    if _allowed_types and _allowed_types != {"private", "pro", "dealer"}:
+        # Считаем телефоны, чтобы отличить перекупа (один номер в 3+ объявлениях)
+        _phone_counts: dict = {}
+        for it in suitable:
+            ph = _seller_phone(it)
+            if ph:
+                _phone_counts[ph] = _phone_counts.get(ph, 0) + 1
         _before_priv = len(suitable)
-        suitable = [it for it in suitable if not is_dealer(it)]
-        print(f"  [фильтр] только частники: {len(suitable)}/{_before_priv}")
+        suitable = [it for it in suitable if _seller_type(it, _phone_counts) in _allowed_types]
+        print(f"  [фильтр] тип продавца {sorted(_allowed_types)}: {len(suitable)}/{_before_priv}")
 
     # Финальная дедупликация suitable (могут быть дубли если разные источники нашли одно).
     # Дедуп по URL И по сигнатуре содержимого (телефон / нормализованный текст) —
