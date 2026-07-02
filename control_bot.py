@@ -1420,39 +1420,43 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
         _ar_base_url += f"&price_to={price_max}"
     _warm_html = ""
     _warm_status = 0
+    # Если задан выделенный РФ-пул (AUTORU_PROXIES) — прогрев через общий мобильный
+    # прокси НЕ делаем: он всё равно ловит капчу и лишь тратит 6-11с, замедляя весь
+    # поиск. Сразу идём в цикл, где Метод 0* берёт объявления через РФ-прокси.
     # 1) curl_cffi (Chrome TLS-отпечаток) через прокси — ЛУЧШИЙ обход анти-бота
     #    Яндекса, который проверяет TLS-fingerprint. Обычный requests почти всегда
     #    ловит капчу, а curl_cffi проходит чаще.
-    try:
-        from curl_cffi import requests as _cffi_ar
-        _rc = _cffi_ar.get(
-            _ar_base_url, impersonate="chrome124", timeout=6,
-            headers={"Accept-Language": "ru-RU,ru;q=0.9",
-                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                     "Referer": "https://auto.ru/", "Upgrade-Insecure-Requests": "1"},
-            proxies=_avito_proxies() or {},
-        )
-        _warm_html, _warm_status = _rc.text, _rc.status_code
-        # Переносим куки (spravka и т.п.) в requests-сессию для AJAX-фолбэка
+    if not AUTORU_PROXIES:
         try:
-            for _k, _v in _rc.cookies.get_dict().items():
-                _ar_session.cookies.set(_k, _v)
-        except Exception:
-            pass
-        print(f"  [Auto.ru] curl_cffi прогрев: HTTP {_warm_status}, {len(_warm_html):,}б")
-    except Exception as _ec:
-        print(f"  [Auto.ru] curl_cffi прогрев: {str(_ec)[:60]}")
-    # 2) обычный requests — запасной, если curl_cffi не дал страницу
-    if len(_warm_html) < 5_000:
-        try:
-            _warm = _ar_session.get(_ar_base_url, headers={
-                "User-Agent": _ar_ua,
-                "Accept": "text/html,application/xhtml+xml,*/*;q=0.9",
-                "Accept-Language": "ru-RU,ru;q=0.9",
-            }, proxies=_avito_proxies(), timeout=5)
-            _warm_html, _warm_status = _warm.text, _warm.status_code
-        except Exception as _e:
-            print(f"  [Auto.ru] requests прогрев: {str(_e)[:60]}")
+            from curl_cffi import requests as _cffi_ar
+            _rc = _cffi_ar.get(
+                _ar_base_url, impersonate="chrome124", timeout=6,
+                headers={"Accept-Language": "ru-RU,ru;q=0.9",
+                         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                         "Referer": "https://auto.ru/", "Upgrade-Insecure-Requests": "1"},
+                proxies=_avito_proxies() or {},
+            )
+            _warm_html, _warm_status = _rc.text, _rc.status_code
+            # Переносим куки (spravka и т.п.) в requests-сессию для AJAX-фолбэка
+            try:
+                for _k, _v in _rc.cookies.get_dict().items():
+                    _ar_session.cookies.set(_k, _v)
+            except Exception:
+                pass
+            print(f"  [Auto.ru] curl_cffi прогрев: HTTP {_warm_status}, {len(_warm_html):,}б")
+        except Exception as _ec:
+            print(f"  [Auto.ru] curl_cffi прогрев: {str(_ec)[:60]}")
+        # 2) обычный requests — запасной, если curl_cffi не дал страницу
+        if len(_warm_html) < 5_000:
+            try:
+                _warm = _ar_session.get(_ar_base_url, headers={
+                    "User-Agent": _ar_ua,
+                    "Accept": "text/html,application/xhtml+xml,*/*;q=0.9",
+                    "Accept-Language": "ru-RU,ru;q=0.9",
+                }, proxies=_avito_proxies(), timeout=5)
+                _warm_html, _warm_status = _warm.text, _warm.status_code
+            except Exception as _e:
+                print(f"  [Auto.ru] requests прогрев: {str(_e)[:60]}")
     _wl = _warm_html.lower()
     # Определяем, капча ли прогрев (для решения, парсить ли HTML-страницу).
     # НО не выходим — AJAX-методы могут сработать даже при капче на HTML.
@@ -1653,8 +1657,9 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
                     except Exception as e:
                         print(f"  [Auto.ru] РФ-прокси(req) {_phost}: {str(e)[:60]}")
 
-        # Метод 0а: Прямой AJAX API с прокси (наиболее надёжный при наличии РФ IP)
-        if not batch and AVITO_PROXIES:
+        # Метод 0а: Прямой AJAX API с общим мобильным прокси. Пропускаем, если
+        # есть выделенный РФ-пул (он уже отработал выше и не ловит капчу).
+        if not batch and AVITO_PROXIES and not AUTORU_PROXIES:
             try:
                 r_ajax = _req.post(
                     "https://auto.ru/-/ajax/desktop/listing/",
@@ -1672,8 +1677,8 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
             except Exception as e:
                 print(f"  [Auto.ru] прокси AJAX: {str(e)[:80]}")
 
-        # Метод 0b: Прямой HTML через прокси (РФ IP, обходит гео-блок)
-        if not batch and AVITO_PROXIES:
+        # Метод 0b: Прямой HTML через общий мобильный прокси (пропускаем при РФ-пуле)
+        if not batch and AVITO_PROXIES and not AUTORU_PROXIES:
             try:
                 r0 = _req.get(html_url, headers={
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -1688,8 +1693,8 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
             except Exception as e:
                 print(f"  [Auto.ru] прокси HTML: {str(e)[:50]}")
 
-        # Метод 0c: curl_cffi — Chrome TLS fingerprint, без зависимости от прокси
-        if not batch:
+        # Метод 0c: curl_cffi через мобильный прокси (пропускаем при РФ-пуле)
+        if not batch and not AUTORU_PROXIES:
             try:
                 from curl_cffi import requests as _cffi
                 _cffi_hdrs0 = {
