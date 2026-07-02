@@ -25,4 +25,5 @@ RUN playwright install chromium
 
 COPY . .
 
+# Production entrypoint: keep in sync with Procfile and README.md.
 CMD ["python", "control_bot.py"]
