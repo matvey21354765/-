@@ -757,6 +757,24 @@ _JUNK_KEYWORDS = [
 # Отрицания, чтобы «не на запчасти», «не на разбор» не считались стопом.
 _JUNK_NEG = ("не на запчаст", "не на разбор", "не по запчаст")
 
+_OWNERS_RE = re.compile(
+    r'(\d)\s*(?:владел|собственник|хозя)', re.IGNORECASE)
+_OWNERS_PTS_RE = re.compile(
+    r'(?:владельц\w*|собственник\w*)[^\d]{0,12}(\d)', re.IGNORECASE)
+
+def _extract_owners(text: str) -> int:
+    """Число владельцев по ПТС из текста объявления (1/2/3…). 0 — не нашли."""
+    if not text:
+        return 0
+    for rx in (_OWNERS_RE, _OWNERS_PTS_RE):
+        m = rx.search(text)
+        if m:
+            n = int(m.group(1))
+            if 1 <= n <= 9:
+                return n
+    return 0
+
+
 def _text_is_junk(title: str, desc: str) -> bool:
     """True ТОЛЬКО если машина не на ходу / на запчасти / утиль. Битые/крашеные/
     после ДТП — НЕ стоп (их тоже показываем), важно лишь чтобы ездила."""
@@ -10809,6 +10827,11 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         _drop = item.get("_price_drop", 0)
         if _drop:
             caption += f"\n📉 продавец снизил цену на ~{_drop:,} ₽ — готов торговаться".replace(",", " ")
+        _owners = _extract_owners(f"{item.get('title','')} {item.get('description','')}")
+        if _owners:
+            _own_word = "владелец" if _owners == 1 else ("владельца" if _owners <= 4 else "владельцев")
+            _own_tag = " 👍" if _owners <= 2 else ""
+            caption += f"\n🧾 {_owners} {_own_word} по ПТС{_own_tag}"
         if not item.get("description") and item.get("title"):
             item["description"] = _avito_desc_from_title(item["title"], item.get("mileage", 0))
         if item.get("description"):
