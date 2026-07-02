@@ -1,4 +1,5 @@
-"""
+if src not in SOURCE_NAMES:
+    continue"""
 Авто-брокер бот — публичная версия.
 Каждый пользователь выбирает регион и бюджет, бот ищет частников ниже рынка.
 """
@@ -9553,13 +9554,18 @@ SOURCE_NAMES = {
 }
 
 
+
 def sources_keyboard(enabled: list[str]) -> InlineKeyboardMarkup:
     rows = []
     for src in ALL_SOURCES:
+        if src not in SOURCE_NAMES:
+            continue
+
         check = "✅" if src in enabled else "☐"
         rows.append([InlineKeyboardButton(
             text=f"{check} {SOURCE_NAMES[src]}",
             callback_data=f"toggle_src|{src}"
+        )])
         )])
     rows.append([
         InlineKeyboardButton(text="🌐 Все площадки", callback_data="src_all"),
