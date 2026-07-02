@@ -3,6 +3,7 @@ __pycache__/
 .claude/
 .avito_cookies.json
 avito_region_cache.json
+price_history.json
 users/
 external_avito/
 
