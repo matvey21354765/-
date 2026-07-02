@@ -3067,6 +3067,103 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
     return deduped_tg
 
 
+# ── Парсер Юлы (youla.ru) ────────────────────────────────────────
+# Координаты городов для гео-поиска Юлы (её API фильтрует по lat/lng+radius).
+YOULA_COORDS = {
+    "ekaterinburg": (56.838, 60.605), "moscow": (55.755, 37.617),
+    "spb": (59.939, 30.315), "novosibirsk": (55.008, 82.935),
+    "kazan": (55.796, 49.108), "chelyabinsk": (55.159, 61.402),
+    "ufa": (54.735, 55.958), "krasnodar": (45.035, 38.975),
+    "omsk": (54.989, 73.368), "tyumen": (57.153, 65.534),
+    "perm": (58.010, 56.229), "krasnoyarsk": (56.010, 92.852),
+    "voronezh": (51.660, 39.200), "samara": (53.195, 50.100),
+    "rostov": (47.222, 39.718),
+}
+
+def scrape_youla(region: str, pages: int = 4, price_min: int = 0,
+                 price_max: int = 99_000_000, brand: str = "") -> list[dict]:
+    """Ищет б/у авто на Юле через её публичный JSON-API (category=23 — легковые).
+    Гео — по координатам города + радиус. Цена приходит в КОПЕЙКАХ."""
+    try:
+        import requests as _req
+    except ImportError:
+        return []
+    coords = YOULA_COORDS.get(region)
+    if not coords:
+        return []
+    lat, lng = coords
+    results: list[dict] = []
+    today = datetime.date.today()
+    now_ts = time.time()
+    _brand_l = (brand or "").strip().lower()
+    hdrs = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "application/json",
+        "Accept-Language": "ru-RU,ru;q=0.9",
+    }
+    seen_ids: set[str] = set()
+    for p in range(1, pages + 1):
+        url = (f"https://youla.ru/api/v1/products?category=23"
+               f"&latitude={lat}&longitude={lng}&radius=100&page={p}")
+        try:
+            r = _req.get(url, headers=hdrs, timeout=10)
+            if r.status_code != 200:
+                print(f"  [Юла] стр.{p}: HTTP {r.status_code}")
+                break
+            data = r.json().get("data", [])
+        except Exception as e:
+            print(f"  [Юла] стр.{p}: {str(e)[:70]}")
+            break
+        if not data:
+            break
+        _added = 0
+        for it in data:
+            try:
+                if it.get("type") != "product" or it.get("is_sold") or it.get("is_blocked"):
+                    continue
+                _id = it.get("id", "")
+                if not _id or _id in seen_ids:
+                    continue
+                seen_ids.add(_id)
+                name = (it.get("name") or "").strip()
+                if not name:
+                    continue
+                if _brand_l and _brand_l != "any" and _brand_l not in name.lower():
+                    continue
+                price_kop = it.get("price") or 0
+                price_rub = int(price_kop) // 100 if price_kop else 0
+                if price_rub and not (price_min <= price_rub <= price_max):
+                    continue
+                _u = it.get("url", "")
+                item_url = ("https://youla.ru" + _u) if _u.startswith("/") else (_u or it.get("short_url", ""))
+                imgs = it.get("images") or []
+                photo_url = imgs[0].get("url", "") if imgs else ""
+                dp = it.get("date_published") or 0
+                days = max(0, int((now_ts - dp) // 86400)) if dp else 0
+                loc = it.get("location") or {}
+                item = {
+                    "source": "youla", "title": name,
+                    "price": f"{price_rub:,} ₽".replace(",", " ") if price_rub else "цена не указана",
+                    "_price_int": price_rub,
+                    "url": item_url, "date": str(today - datetime.timedelta(days=days)),
+                    "_days_on_site": days, "_date_known": True,
+                    "_photo_url": photo_url, "_photos": len(imgs),
+                    "description": (it.get("description") or "")[:400],
+                    "seller": loc.get("city_name", ""), "mileage": 0,
+                }
+                item["_hot_score"] = hot_score(item)
+                results.append(item)
+                _added += 1
+            except Exception:
+                continue
+        print(f"  [Юла] стр.{p}: +{_added} (всего {len(results)})")
+        if _added == 0:
+            break
+        time.sleep(0.1)
+    print(f"  [Юла] итого {len(results)} объявлений")
+    return results
+
+
 def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
     """
     Ищет объявления о продаже авто в пабликах ВКонтакте.
@@ -8764,6 +8861,7 @@ _MONITOR_SOURCES = [
     ("avito",  "Авито"),
     ("drom",   "Дром"),
     ("autoru", "Auto.ru"),
+    ("youla",  "Юла"),
     ("vk",     "ВКонтакте"),
     ("tg",     "Telegram"),
 ]
@@ -9393,7 +9491,7 @@ async def cmd_settings(msg: Message, state: FSMContext):
     await state.set_state(Setup.category)
 
 
-ALL_SOURCES = ["drom", "autoru", "avito", "vk", "tg"]
+ALL_SOURCES = ["drom", "autoru", "avito", "youla", "vk", "tg"]
 SOURCE_NAMES = {
     "drom":   "🔵 Дром",
     "autoru": "🟠 Auto.ru",
@@ -9573,6 +9671,7 @@ async def cmd_global_search(msg: Message):
         "drom":   lambda: scrape_drom(region, pages=15, price_min=pmin, price_max=pmax, brand=_br),
         "autoru": lambda: scrape_autoru(region, pages=4, price_min=pmin, price_max=pmax, brand=_br),
         "avito":  lambda: scrape_avito(region, pages=10, price_min=pmin, price_max=pmax, sort_by_date=False),
+        "youla":  lambda: scrape_youla(region, pages=5, price_min=pmin, price_max=pmax, brand=_br),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
     }
     tg_task = loop.run_in_executor(None, lambda: scrape_tg_channels(region, pmin, pmax))
@@ -10441,6 +10540,7 @@ SOURCE_TAGS = {
     "autoru":     "🟠 Auto.ru",
     "avito":      "🔴 Авито",
     "drom":       "🔵 Дром",
+    "youla":      "🟡 Юла",
     "tg_channel": "📢 TG-канал",
     "tg":         "✈️ Telegram",
     "vk":         "📘 ВКонтакте",
@@ -10980,6 +11080,9 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                     elif _item_source == "vk":
                         _referer = "https://vk.com/"
                         _px = None  # VK CDN — напрямую
+                    elif _item_source == "youla":
+                        _referer = "https://youla.ru/"
+                        _px = None  # Youla CDN — напрямую, без прокси
                     else:
                         _referer = "https://www.avito.ru/"
                         _px = _avito_proxies()
@@ -11138,6 +11241,7 @@ async def do_search_for_user(uid: int, reply_to):
         "drom":   lambda: scrape_drom(region, pages=8, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
         "autoru": lambda: scrape_autoru(region, pages=4, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
         "avito":  lambda: scrape_avito(region, pages=6, price_min=pmin, price_max=pmax, sort_by_date=False, brand=(brand if brand and brand != "any" else "")),
+        "youla":  lambda: scrape_youla(region, pages=5, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
         "tg":     lambda: scrape_tg_channels(region, pmin, pmax),
     }
@@ -12353,6 +12457,7 @@ async def _global_monitor_loop():
                 "avito":  lambda r: scrape_avito(r, pages=3, sort_by_date=True),  # ⚡ свежие первыми
                 "drom":   lambda r: scrape_drom(r, pages=3, price_min=0, price_max=99_000_000),
                 "autoru": lambda r: scrape_autoru(r, pages=3, price_min=0, price_max=99_000_000),
+                "youla":  lambda r: scrape_youla(r, pages=3, price_min=0, price_max=99_000_000),
                 "vk":     lambda r: scrape_vk_groups(r, 0, 99_000_000),
                 "tg":     lambda r: scrape_tg_channels(r, 0, 99_000_000),
             }
