@@ -739,11 +739,11 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
     """
     from statistics import median
 
-    # Для медианы используем либо только Авито-данные, либо всё вместе
-    # Если Авито-эталон пустой (заблокирован) — используем все доступные данные
-    if avito_only_median and ref_items and len(ref_items) >= 5:
-        all_for_median = list(ref_items)
-    elif ref_items:
+    # Для медианы берём МАКСИМУМ данных ради покрытия: и Авито-эталон, и сами
+    # найденные объявления (Дром/ВК/ТГ — тоже реальные цены рынка). Чем больше
+    # выборка по «модель+год», тем больше машин получат рыночную цену и попадут
+    # в список «ниже рынка». Выбросы всё равно отсекает _trimmed_median.
+    if ref_items:
         all_for_median = list(ref_items) + list(items)
     else:
         all_for_median = list(items)
@@ -795,13 +795,20 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
         near = []
         for y in (yr - 1, yr, yr + 1):
             near += yrs.get(y, [])
-        if len(near) >= 3:
+        if len(near) >= 2:
             return _trimmed_median(near), "near"
         wide = list(near)
         for y in (yr - 2, yr + 2):
             wide += yrs.get(y, [])
-        if len(wide) >= 4:
+        if len(wide) >= 3:
             return _trimmed_median(wide), "bracket"
+        # Последний шанс покрытия: та же модель в окне ±4 года (шире, но всё ещё
+        # одна модель — не смешиваем марки). Нужно достаточно образцов.
+        widest = list(wide)
+        for y in (yr - 4, yr - 3, yr + 3, yr + 4):
+            widest += yrs.get(y, [])
+        if len(widest) >= 5:
+            return _trimmed_median(widest), "wide"
         return 0.0, ""
 
     for it in items:
@@ -819,9 +826,12 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
                 med, _lvl = _market_for(parts[0], int(parts[1]))
             if med > 0:
                 savings_pct = round((1 - p / med) * 100, 1)
-                # Рынок надёжный (та же модель, близкий год) → показываем и глубокие
-                # настоящие скидки, но 80% — предохранитель от ошибок парсинга цены.
-                if savings_pct > 80:
+                # near/bracket (та же модель, ±1-2 года) — рынок надёжный, показываем
+                # и глубокие настоящие скидки (кап 80% — предохранитель от ошибок цены).
+                # wide (±4 года) — рынок грубее, ограничиваем 35%, чтобы не показывать
+                # мнимые −60% от разницы поколений.
+                _cap = 35 if _lvl == "wide" else 80
+                if savings_pct > _cap:
                     med = 0
                     savings_pct = 0.0
             if med > 0:
