@@ -836,21 +836,14 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
                 model_year.setdefault(model, {}).setdefault(yr, []).append((p, _eff_km(it)))
 
     def _est_price(pairs: list, lvl: str, cand_km: int):
-        """Оценка рынка по набору (цена, пробег). Если у кандидата и ≥4 эталонов
-        есть пробег — сужаем до машин с ПОХОЖИМ пробегом (реальная рыночная цена
-        именно такого экземпляра). Иначе — медиана по году."""
+        """Рыночная цена = медиана цен той же модели/года с отсечением выбросов.
+        Пробег в РАСЧЁТ РЫНКА НЕ входит (по требованию) — только цена."""
         prices = [p for p, _m in pairs]
-        if cand_km and cand_km > 0:
-            with_km = [(p, m) for p, m in pairs if m and m > 0]
-            if len(with_km) >= 4:
-                band = [p for p, m in with_km if 0.55 * cand_km <= m <= 1.7 * cand_km]
-                if len(band) >= 3:
-                    return _trimmed_median(band), lvl + "+km"
         return _trimmed_median(prices), lvl
 
     def _market_for(model: str, yr: int, cand_km: int = 0):
         """Рыночная цена по той же модели: окно ±1 год (точно), затем ±2, затем
-        ±4 (грубее). Уточняем по пробегу. Возвращает (медиана, уровень)|(0,'')."""
+        ±4 (грубее). Возвращает (медиана, уровень)|(0,'')."""
         yrs = model_year.get(model)
         if not yrs:
             return 0.0, ""
