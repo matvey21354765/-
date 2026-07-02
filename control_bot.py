@@ -10901,10 +10901,12 @@ async def do_search_for_user(uid: int, reply_to):
     # Рынок ВСЕГДА сравниваем с ценами Авито. Если Авито выбран — его результаты
     # и так станут эталоном (ниже). Если НЕ выбран — отдельный скрейп Авито только
     # для эталона рынка (конфликта IP нет, т.к. основной поиск Авито не трогает).
+    # Эталон рынка берём БЕЗ фильтра по бюджету (весь ценовой диапазон), иначе
+    # «рынок» занижен и скидки не видно. price_max большой → полный рынок модели.
     _avito_ref_fut = None
     if "avito" not in src_keys:
         _avito_ref_fut = loop.run_in_executor(
-            None, lambda: scrape_avito(region, pages=3, price_min=pmin, price_max=pmax)
+            None, lambda: scrape_avito(region, pages=3, price_min=0, price_max=99_000_000)
         )
     all_futs = futures + ([_avito_ref_fut] if _avito_ref_fut else [])
     done, pending = await asyncio.wait(all_futs, timeout=32)
@@ -11135,6 +11137,26 @@ async def do_search_for_user(uid: int, reply_to):
         except Exception as _e:
             print(f"  [рынок] Авито-эталон ошибка: {_e}")
             _avito_ref_items = []
+    # ВАЖНО для поиска ниже рынка: результаты Авито отфильтрованы БЮДЖЕТОМ, поэтому
+    # «рынок» из них занижен (только дешёвые машины) и настоящая скидка теряется.
+    # Добавляем полный кэш региона (без фильтра по цене) — он собирается фоновым
+    # прогревом и содержит РЕАЛЬНЫЙ рынок модели во всём ценовом диапазоне.
+    try:
+        _reg_cache = _AVITO_REGION_CACHE.get(region)
+        if not _reg_cache:
+            for _ck, _cv in _AVITO_REGION_CACHE.items():
+                if _ck == region or _ck.startswith(region + "_"):
+                    if not _reg_cache or len(_cv[1]) > len(_reg_cache[1]):
+                        _reg_cache = _cv
+        if _reg_cache and _reg_cache[1]:
+            _seen_ref_u = {_norm_url(i.get("url", "")) for i in _avito_ref_items}
+            _extra = [i for i in _reg_cache[1]
+                      if i.get("_price_int", 0) and _norm_url(i.get("url", "")) not in _seen_ref_u]
+            if _extra:
+                _avito_ref_items = list(_avito_ref_items) + _extra
+                print(f"  [рынок] +{len(_extra)} записей из полного кэша региона (истинный рынок)")
+    except Exception as _e:
+        print(f"  [рынок] кэш-эталон ошибка: {_e}")
     if _avito_ref_items:
         _ref_copies = [_copy.copy(i) for i in _avito_ref_items]
         for _rc in _ref_copies:
