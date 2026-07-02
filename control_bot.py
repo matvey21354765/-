@@ -819,14 +819,14 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
             # Уровень 3: марка+модель (все годы) — НЕНАДЁЖНО (мешает старые и новые)
             if not med:
                 med_all = market_broad.get(broad_key, 0)
-                if med_all and 0.4 < (p / med_all) < 1.8:
+                if med_all and 0.2 < (p / med_all) < 1.8:
                     med = med_all
                     _lvl = "broad"
             # Уровень 4: только марка — ещё менее надёжно
             if not med:
                 brand_key_m = key.split(" ", 1)[0]
                 med_brand = market_brand.get(brand_key_m, 0)
-                if med_brand and 0.45 < (p / med_brand) < 1.5:
+                if med_brand and 0.25 < (p / med_brand) < 1.5:
                     med = med_brand
                     _lvl = "brand"
             if med > 0:
@@ -843,10 +843,13 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
                 # broad (разные годы одной модели) — медиана слегка завышена,
                 #   но пользователь хочет видеть глубокие скидки → кап 40%.
                 # brand (вся марка) — медиана самая грубая → кап 30%.
+                # Пользователь хочет видеть и очень глубокие скидки (>50-60%),
+                # поэтому потолки высокие для всех уровней. Оставляем 80% как
+                # предохранитель от явного мусора (ошибка парсинга цены/пробег).
                 if _lvl == "brand":
-                    _savings_cap = 45
+                    _savings_cap = 75
                 elif _lvl == "broad":
-                    _savings_cap = 55
+                    _savings_cap = 80
                 else:
                     _savings_cap = 80
                 if savings_pct > _savings_cap:
