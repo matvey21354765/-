@@ -12542,6 +12542,39 @@ async def main():
             except Exception as ea:
                 print(f"  [Авито тест] ❌ {ea}")
             # Тест поисковиков через прокси — рабочий путь к Авито в обход блокировки.
+            # (см. ниже; сначала — самопроверка РФ-прокси для Auto.ru)
+            pass
+        except Exception as ep:
+            print(f"  [прокси] ❌ {ep}")
+
+    # Самопроверка РФ-прокси для Auto.ru — сразу видно в логах, пробивают ли
+    # они капчу Яндекса (HTTP 200 + большой размер = ок; ~13КБ = капча).
+    if AUTORU_PROXIES:
+        try:
+            from curl_cffi import requests as _cffi_t
+            for _p in AUTORU_PROXIES:
+                _pu = ("socks5h://" + _p[len("socks5://"):]) if _p.startswith("socks5://") else _p
+                _phost = _pu.split("@")[-1]
+                try:
+                    _rt = _cffi_t.get(
+                        "https://auto.ru/sankt-peterburg/cars/used/?seller_group=PRIVATE",
+                        impersonate="chrome124", timeout=9,
+                        headers={"Accept-Language": "ru-RU,ru;q=0.9",
+                                 "Referer": "https://auto.ru/"},
+                        proxies={"http": _pu, "https": _pu},
+                    )
+                    _cap = _autoru_is_captcha(_rt.text)
+                    _ok = _rt.status_code == 200 and not _cap and len(_rt.text) > 50_000
+                    _verdict = "✅ РАБОТАЕТ" if _ok else ("🧱 капча" if _cap else "⚠️ мало данных")
+                    print(f"  [Auto.ru тест] {_phost}: HTTP {_rt.status_code}, {len(_rt.text):,}б → {_verdict}")
+                except Exception as _et:
+                    print(f"  [Auto.ru тест] {_phost}: ❌ {str(_et)[:70]}")
+        except Exception as _e:
+            print(f"  [Auto.ru тест] curl_cffi недоступен: {str(_e)[:60]}")
+
+    if AVITO_PROXY_HOST:
+        try:
+            import requests as _rq
             # Пробуем все три и смотрим, кто реально отдаёт ссылки на объявления.
             import urllib.parse as _up
             _ua = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"}
