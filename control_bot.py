@@ -756,41 +756,53 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
             all_for_median = _clean
     except Exception:
         pass
-    groups: dict[str, list[int]] = {}
-    # Промежуточный уровень: марка+модель+2-летний диапазон (2015→1007, 2017→1008, 2019→1009)
-    # Разделяет 2015 Solaris от 2017 Solaris → медиана не искажается новыми моделями
-    groups_year_bracket: dict[str, list[int]] = {}
-    # Широкие группы: только марка+модель (без года) — запасной уровень
-    groups_broad: dict[str, list[int]] = {}
-    # Ещё шире: только первое слово (марка) — для совсем маленьких выборок
-    groups_brand: dict[str, list[int]] = {}
+    def _trimmed_median(prices: list) -> float:
+        """Медиана с отсечением выбросов: дилерские/восстановленные экземпляры и
+        ошибки парсинга не задирают/не занижают рыночную цену.
+        1) отбрасываем ~20% с каждого хвоста, 2) убираем всё, что вне 0.4×–2.5× медианы."""
+        s = sorted(prices)
+        n = len(s)
+        if n >= 6:
+            k = max(1, n // 5)
+            s = s[k:n - k] or s
+        m = median(s)
+        if m <= 0:
+            return 0.0
+        s2 = [x for x in s if 0.4 * m <= x <= 2.5 * m]
+        return float(median(s2)) if len(s2) >= 2 else float(m)
+
+    # Цены строго по модели И году: model -> {year -> [prices]}. Рынок считаем
+    # ТОЛЬКО по той же модели в близких годах — никаких «все годы»/«вся марка»,
+    # иначе 2001 Corolla сравнивается с 2018 и даёт фейковую «скидку».
+    model_year: dict[str, dict] = {}
     for it in all_for_median:
         p = it.get("_price_int", 0)
-        if p > 0:
-            key = _car_group_key(it.get("title", ""))
-            groups.setdefault(key, []).append(p)
-            # Year-bracket ключ: марка+модель+диапазон4
-            parts = key.rsplit(" ", 1)
-            if len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 4:
-                broad_key = parts[0]
-                try:
-                    bracket = int(parts[1]) // 2  # 2015→1007, 2016-2017→1008, 2018-2019→1009
-                    groups_year_bracket.setdefault(f"{broad_key}_{bracket}", []).append(p)
-                except Exception:
-                    pass
-            else:
-                broad_key = key
-            groups_broad.setdefault(broad_key, []).append(p)
-            # Ключ марки: только первое слово
-            brand_key_m = key.split(" ", 1)[0]
-            groups_brand.setdefault(brand_key_m, []).append(p)
+        if p <= 0:
+            continue
+        key = _car_group_key(it.get("title", ""))
+        parts = key.rsplit(" ", 1)
+        if len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 4:
+            model, yr = parts[0], int(parts[1])
+            if model:
+                model_year.setdefault(model, {}).setdefault(yr, []).append(p)
 
-    # Требуем минимум 3 объявления — иначе 1-2 объявления дают неверную медиану
-    # (например, 1 Лада 2107 2010 на Дром за 230к → "рынок 230к" при реальных 80-120к)
-    market: dict[str, float] = {k: median(v) for k, v in groups.items() if len(v) >= 3}
-    market_year_bracket: dict[str, float] = {k: median(v) for k, v in groups_year_bracket.items() if len(v) >= 3}
-    market_broad: dict[str, float] = {k: median(v) for k, v in groups_broad.items() if len(v) >= 5}
-    market_brand: dict[str, float] = {k: median(v) for k, v in groups_brand.items() if len(v) >= 8}
+    def _market_for(model: str, yr: int):
+        """Рыночная цена по той же модели: сперва окно ±1 год (точно), затем ±2
+        (запасной). Возвращает (медиана, уровень) или (0, '')."""
+        yrs = model_year.get(model)
+        if not yrs:
+            return 0.0, ""
+        near = []
+        for y in (yr - 1, yr, yr + 1):
+            near += yrs.get(y, [])
+        if len(near) >= 3:
+            return _trimmed_median(near), "near"
+        wide = list(near)
+        for y in (yr - 2, yr + 2):
+            wide += yrs.get(y, [])
+        if len(wide) >= 4:
+            return _trimmed_median(wide), "bracket"
+        return 0.0, ""
 
     for it in items:
         p = it.get("_price_int", 0)
@@ -800,44 +812,16 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
         if p > 0:
             key = _car_group_key(it.get("title", ""))
             parts = key.rsplit(" ", 1)
-            broad_key = parts[0] if (len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 4) else key
-            _lvl = ""  # какой уровень сработал: точность падает exact→bracket→broad→brand
-            # Уровень 1: точный (марка+модель+год) — самый надёжный
-            med = market.get(key, 0)
-            if med:
-                _lvl = "exact"
-            # Уровень 2: 2-летний диапазон года
-            if not med:
-                try:
-                    bracket = int(parts[1]) // 2 if (len(parts) == 2 and parts[1].isdigit()) else 0
-                    if bracket:
-                        med = market_year_bracket.get(f"{broad_key}_{bracket}", 0)
-                        if med:
-                            _lvl = "bracket"
-                except Exception:
-                    pass
-            # Уровень 3: марка+модель, но ТОЛЬКО в близком ценовом сегменте.
-            # «Все годы одной модели» + «вся марка» раньше давали фейковые скидки
-            # (Лада Приора 2011 за 339к vs «рынок лады» 1.3млн из-за новых Largus/
-            # Iskra 2026). Поэтому broad оставляем с ЖЁСТКИМ коридором (цена не ниже
-            # 55% медианы), а уровень «вся марка» УБРАН полностью — он всегда мусор.
-            if not med:
-                med_all = market_broad.get(broad_key, 0)
-                if med_all and 0.55 < (p / med_all) < 1.6:
-                    med = med_all
-                    _lvl = "broad"
+            med = 0.0
+            _lvl = ""
+            # Рынок ТОЛЬКО по той же модели и близкому году (±1, затем ±2).
+            if len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 4:
+                med, _lvl = _market_for(parts[0], int(parts[1]))
             if med > 0:
                 savings_pct = round((1 - p / med) * 100, 1)
-                # Кап скидки по надёжности совпадения:
-                #  - exact/bracket (тот же/±2 года, та же модель): рынок надёжный →
-                #    разрешаем глубокие настоящие скидки до 80%.
-                #  - broad (та же модель, разные годы): медиана грубее → кап 30%,
-                #    чтобы не показывать фейковые −70% от смешения годов.
-                if _lvl == "broad":
-                    _savings_cap = 30
-                else:
-                    _savings_cap = 80
-                if savings_pct > _savings_cap:
+                # Рынок надёжный (та же модель, близкий год) → показываем и глубокие
+                # настоящие скидки, но 80% — предохранитель от ошибок парсинга цены.
+                if savings_pct > 80:
                     med = 0
                     savings_pct = 0.0
             if med > 0:
