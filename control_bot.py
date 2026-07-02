@@ -745,6 +745,36 @@ def _car_group_key(title: str) -> str:
     return f"{brand_model} {year}".strip()
 
 
+_JUNK_KEYWORDS = [
+    "не на ходу", "не ездит", "не заводится", "не заводилась", "не едет",
+    "битый", "битая", "после дтп", "кузовной ремонт", "требует ремонт",
+    "на запчасти", "на запчаст", "на разбор", "аварийный", "аварийна",
+    "восстановлению", "не восстановлен", "требует вложен", "под восстановлен",
+    "распил", "конструктор", "утиль", "на ходу но",
+    "менялся двигатель", "замена двигателя", "двигатель под замену", "нужен двигатель",
+]
+# Жёсткие признаки — срабатывают даже при наличии отрицаний в тексте.
+_JUNK_HARD = [
+    "не на ходу", "не ездит", "не заводится", "не едет", "на запчаст",
+    "на разбор", "распил", "конструктор", "утиль", "кузовной ремонт",
+    "менялся двигатель", "замена двигателя", "двигатель под замену", "нужен двигатель",
+]
+# Явные отрицания «хорошего» состояния — чтобы не помечать чистые авто битыми.
+_JUNK_NEG = ("не бит", "не крашен", "без дтп", "не был в дтп", "не участвовал в дтп",
+             "не требует", "не в дтп")
+
+def _text_is_junk(title: str, desc: str) -> bool:
+    """True, если объявление про битую/не на ходу/распил/утиль машину.
+    Учитывает отрицания («не бита не крашена», «без дтп», «не требует ремонта»),
+    чтобы не путать чистые авто с битыми."""
+    t = f"{title} {desc}".lower()
+    if any(k in t for k in _JUNK_HARD):
+        return True
+    if any(neg in t for neg in _JUNK_NEG):
+        return False  # есть отрицание, а жёстких признаков нет → машина чистая
+    return any(k in t for k in _JUNK_KEYWORDS)
+
+
 def _traffic_light(item: dict) -> str:
     """🚦 Светофор выгодности/чистоты объявления (как у Haraba).
     🟢 — выгодно и чисто; 🟡 — нейтрально; 🔴 — рискованно/дорого."""
@@ -929,14 +959,7 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
             deal_score -= 20.0
 
         # Штраф за битые/не на ходу — сильный (уходят в конец)
-        _desc_low = (it.get("title", "") + " " + it.get("description", "")).lower()
-        _junk_keywords = [
-            "не на ходу", "не ездит", "не заводится", "не заводилась", "не едет",
-            "битый", "битая", "после дтп", "дтп", "кузовной ремонт", "требует ремонт",
-            "на запчасти", "на запчаст", "на разбор", "аварийный", "аварийна",
-            "восстановлению", "не восстановлен", "требует вложений", "под восстановлен",
-        ]
-        if any(kw in _desc_low for kw in _junk_keywords):
+        if _text_is_junk(it.get("title", ""), it.get("description", "")):
             deal_score -= 80.0
             it["_is_junk"] = True
 
@@ -10648,6 +10671,11 @@ async def send_batch(chat_id: int, uid: int, offset: int):
             item.get("price") or
             (f"{_pi:,} ₽".replace(",", " ") if _pi else "—")
         )
+        # Перепроверяем битость на ПОЛНОМ описании (оно подгружается лениво, уже
+        # после ранжирования — иначе битые/не на ходу всплывают как «ВЫГОДНО»).
+        if not item.get("_is_junk") and _text_is_junk(item.get("title", ""), item.get("description", "")):
+            item["_is_junk"] = True
+        _is_junk = bool(item.get("_is_junk"))
         # Рыночную цену показываем на КАЖДОЙ машине, где она известна.
         deal_line = ""
         market = item.get("_market_price", 0)
@@ -10657,8 +10685,12 @@ async def send_batch(chat_id: int, uid: int, offset: int):
             if pct > 0:
                 # Дешевле рынка
                 price_line += f"  🔻 рынок ~{market:,} ₽ (-{pct}%)".replace(",", " ")
-                tier = "🟢 ВЫГОДНО" if pct >= 25 else "🟡 ниже рынка"
-                deal_line = f"\n{tier}: дешевле рынка на ~{saving:,} ₽".replace(",", " ")
+                if _is_junk:
+                    # Битая/не на ходу — это НЕ выгода, а причина низкой цены.
+                    deal_line = "\n🔴 битый / не на ходу — низкая цена не выгода"
+                else:
+                    tier = "🟢 ВЫГОДНО" if pct >= 25 else "🟡 ниже рынка"
+                    deal_line = f"\n{tier}: дешевле рынка на ~{saving:,} ₽".replace(",", " ")
             elif pct < 0:
                 # Дороже рынка
                 price_line += f"  🔺 рынок ~{market:,} ₽ (+{abs(pct)}%)".replace(",", " ")
@@ -10814,11 +10846,22 @@ async def send_batch(chat_id: int, uid: int, offset: int):
     # Все объявления показываются те же и в том же порядке — теряется только
     # барьер-ожидание, первая выгодная карточка появляется в разы быстрее.
     _pf_tasks = [asyncio.ensure_future(_prefetch(it)) for it in batch]
+    _deferred_junk = []
     for i, item in enumerate(batch):
         try:
             await _pf_tasks[i]   # ждём фото ТОЛЬКО этого объявления
         except Exception:
             pass
+        # Битость проверяем на подгруженном (полном) описании. Битые/не на ходу
+        # уводим в КОНЕЦ пачки — они не должны идти как выгодные сделки.
+        if not item.get("_is_junk") and _text_is_junk(item.get("title", ""), item.get("description", "")):
+            item["_is_junk"] = True
+        if item.get("_is_junk"):
+            _deferred_junk.append(item)
+            continue
+        await _send_item(item)
+        await asyncio.sleep(0.01)
+    for item in _deferred_junk:   # битые — в самом конце
         await _send_item(item)
         await asyncio.sleep(0.01)
 
