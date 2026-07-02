@@ -1016,6 +1016,23 @@ def _sort_by_deal(items: list[dict]) -> list[dict]:
         hot = 10.0 if (x.get("_deal_score", 0) - pct * 3) > 10 else 0.0
         return min(days, 90) * 0.5 + hot
 
+    def _deal_rank(x) -> float:
+        """Композитный рейтинг сделки для Tier 0 (больше — выше):
+        1) глубина скидки % (с учётом доверия к рынку) — основной сигнал;
+        2) абсолютная выгода в рублях — −25% на дорогой машине ценнее −40% на дешёвой;
+        3) свежесть — среди равных свежие объявления чуть выше (успеть первым)."""
+        base = _primary_savings(x)
+        market = x.get("_market_price", 0) or 0
+        price = x.get("_price_int", 0) or 0
+        rub_bonus = 0.0
+        if market and price and market > price:
+            rub_bonus = min((market - price) / 25_000.0, 25.0)
+        days = x.get("_days_on_site", 0) or 0
+        fresh_bonus = 6.0 if days <= 1 else (3.0 if days <= 3 else 0.0)
+        if x.get("_is_junk"):
+            rub_bonus = fresh_bonus = 0.0
+        return base + rub_bonus + fresh_bonus
+
     def _no_photo(x) -> int:
         """0 — есть фото (выше), 1 — без фото (в конец своего тира)."""
         return 0 if (x.get("_photo_url") or x.get("photo_url") or x.get("_photos", 0) > 0) else 1
@@ -1038,7 +1055,7 @@ def _sort_by_deal(items: list[dict]) -> list[dict]:
     items.sort(key=lambda x: (
         _tier(x),
         _no_photo(x),
-        (-round(_primary_savings(x), 1), -_secondary(x))
+        (-round(_deal_rank(x), 1), -_secondary(x))
         if _tier(x) == 0
         else (x.get("_price_int", 999_999_999), 0),
     ))
@@ -10686,6 +10703,12 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                 else:
                     tier = "🟢 ВЫГОДНО" if pct >= 25 else "🟡 ниже рынка"
                     deal_line = f"\n{tier}: дешевле рынка на ~{saving:,} ₽".replace(",", " ")
+                    # Потенциальная прибыль перекупа: рынок − цена − примерные
+                    # расходы (комиссия площадки ~4% + подготовка ~10 000 ₽).
+                    _costs = int(_pi * 0.04) + 10_000
+                    _profit = saving - _costs
+                    if _profit >= 15_000:
+                        deal_line += f"\n💵 потенциальная прибыль ~{_profit:,} ₽ (после расходов)".replace(",", " ")
             elif pct < 0:
                 # Дороже рынка
                 price_line += f"  🔺 рынок ~{market:,} ₽ (+{abs(pct)}%)".replace(",", " ")
