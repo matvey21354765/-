@@ -771,9 +771,10 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
         s2 = [x for x in s if 0.4 * m <= x <= 2.5 * m]
         return float(median(s2)) if len(s2) >= 2 else float(m)
 
-    # Цены строго по модели И году: model -> {year -> [prices]}. Рынок считаем
-    # ТОЛЬКО по той же модели в близких годах — никаких «все годы»/«вся марка»,
-    # иначе 2001 Corolla сравнивается с 2018 и даёт фейковую «скидку».
+    # Цены строго по модели И году: model -> {year -> [(price, mileage)]}. Рынок
+    # считаем ТОЛЬКО по той же модели в близких годах — никаких «все годы»/«вся
+    # марка», иначе 2001 Corolla сравнивается с 2018 и даёт фейковую «скидку».
+    # Пробег храним, чтобы уточнять рынок по машинам с похожим пробегом.
     model_year: dict[str, dict] = {}
     for it in all_for_median:
         p = it.get("_price_int", 0)
@@ -784,11 +785,26 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
         if len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 4:
             model, yr = parts[0], int(parts[1])
             if model:
-                model_year.setdefault(model, {}).setdefault(yr, []).append(p)
+                _km = it.get("mileage", 0) or 0
+                _km = _km if (isinstance(_km, (int, float)) and 1000 < _km < 900_000) else 0
+                model_year.setdefault(model, {}).setdefault(yr, []).append((p, _km))
 
-    def _market_for(model: str, yr: int):
-        """Рыночная цена по той же модели: сперва окно ±1 год (точно), затем ±2
-        (запасной). Возвращает (медиана, уровень) или (0, '')."""
+    def _est_price(pairs: list, lvl: str, cand_km: int):
+        """Оценка рынка по набору (цена, пробег). Если у кандидата и ≥4 эталонов
+        есть пробег — сужаем до машин с ПОХОЖИМ пробегом (реальная рыночная цена
+        именно такого экземпляра). Иначе — медиана по году."""
+        prices = [p for p, _m in pairs]
+        if cand_km and cand_km > 0:
+            with_km = [(p, m) for p, m in pairs if m and m > 0]
+            if len(with_km) >= 4:
+                band = [p for p, m in with_km if 0.55 * cand_km <= m <= 1.7 * cand_km]
+                if len(band) >= 3:
+                    return _trimmed_median(band), lvl + "+km"
+        return _trimmed_median(prices), lvl
+
+    def _market_for(model: str, yr: int, cand_km: int = 0):
+        """Рыночная цена по той же модели: окно ±1 год (точно), затем ±2, затем
+        ±4 (грубее). Уточняем по пробегу. Возвращает (медиана, уровень)|(0,'')."""
         yrs = model_year.get(model)
         if not yrs:
             return 0.0, ""
@@ -796,19 +812,19 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
         for y in (yr - 1, yr, yr + 1):
             near += yrs.get(y, [])
         if len(near) >= 2:
-            return _trimmed_median(near), "near"
+            return _est_price(near, "near", cand_km)
         wide = list(near)
         for y in (yr - 2, yr + 2):
             wide += yrs.get(y, [])
         if len(wide) >= 3:
-            return _trimmed_median(wide), "bracket"
+            return _est_price(wide, "bracket", cand_km)
         # Последний шанс покрытия: та же модель в окне ±4 года (шире, но всё ещё
         # одна модель — не смешиваем марки). Нужно достаточно образцов.
         widest = list(wide)
         for y in (yr - 4, yr - 3, yr + 3, yr + 4):
             widest += yrs.get(y, [])
         if len(widest) >= 5:
-            return _trimmed_median(widest), "wide"
+            return _est_price(widest, "wide", cand_km)
         return 0.0, ""
 
     for it in items:
@@ -821,16 +837,16 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
             parts = key.rsplit(" ", 1)
             med = 0.0
             _lvl = ""
-            # Рынок ТОЛЬКО по той же модели и близкому году (±1, затем ±2).
+            # Рынок ТОЛЬКО по той же модели и близкому году, уточняя по пробегу.
             if len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 4:
-                med, _lvl = _market_for(parts[0], int(parts[1]))
+                med, _lvl = _market_for(parts[0], int(parts[1]), it.get("mileage", 0) or 0)
             if med > 0:
                 savings_pct = round((1 - p / med) * 100, 1)
                 # near/bracket (та же модель, ±1-2 года) — рынок надёжный, показываем
                 # и глубокие настоящие скидки (кап 80% — предохранитель от ошибок цены).
                 # wide (±4 года) — рынок грубее, ограничиваем 35%, чтобы не показывать
                 # мнимые −60% от разницы поколений.
-                _cap = 35 if _lvl == "wide" else 80
+                _cap = 35 if _lvl.startswith("wide") else 80
                 if savings_pct > _cap:
                     med = 0
                     savings_pct = 0.0
