@@ -770,6 +770,56 @@ def _text_is_junk(title: str, desc: str) -> bool:
     return True
 
 
+# ── Отслеживание снижения цены ───────────────────────────────────
+# Запоминаем цену объявления по URL. Если при следующей встрече цена ниже —
+# продавец скинул → мотивирован → сигнал перекупу.
+_PRICE_HISTORY: dict[str, int] = {}
+_PRICE_HISTORY_FILE = Path("price_history.json")
+_price_hist_last_save = 0.0
+
+def _load_price_history():
+    global _PRICE_HISTORY
+    try:
+        if _PRICE_HISTORY_FILE.exists():
+            _PRICE_HISTORY = {k: int(v) for k, v in
+                              json.loads(_PRICE_HISTORY_FILE.read_text(encoding="utf-8")).items()}
+            print(f"  [цены] история цен: {len(_PRICE_HISTORY)} объявлений")
+    except Exception as e:
+        print(f"  [цены] не удалось загрузить историю цен: {e}")
+
+def _save_price_history(force: bool = False):
+    global _price_hist_last_save
+    now = time.time()
+    if not force and now - _price_hist_last_save < 60:
+        return
+    _price_hist_last_save = now
+    try:
+        # Не даём файлу расти бесконечно — держим последние 20000 записей.
+        data = _PRICE_HISTORY
+        if len(data) > 20000:
+            data = dict(list(data.items())[-20000:])
+            _PRICE_HISTORY.clear()
+            _PRICE_HISTORY.update(data)
+        _PRICE_HISTORY_FILE.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+def _note_price_drop(url: str, price: int) -> int:
+    """Сохраняет текущую цену и возвращает размер снижения (₽) с прошлой встречи.
+    0 — если цена не снижалась или объявление новое."""
+    if not url or not price or price <= 0:
+        return 0
+    key = _norm_url(url)
+    old = _PRICE_HISTORY.get(key, 0)
+    _PRICE_HISTORY[key] = price
+    if old and price < old:
+        drop = old - price
+        # Игнорируем микро-колебания (<2% и <5000₽)
+        if drop >= 5000 and drop >= old * 0.02:
+            return drop
+    return 0
+
+
 def _traffic_light(item: dict) -> str:
     """🚦 Светофор выгодности/чистоты объявления (как у Haraba).
     🟢 — выгодно и чисто; 🟡 — нейтрально; 🔴 — рискованно/дорого."""
@@ -934,6 +984,13 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
 
                 deal_score += savings_pct * 3.0
 
+        # Снижение цены: продавец скинул → мотивирован. Помечаем и поднимаем в топе.
+        if p > 0:
+            _drop = _note_price_drop(it.get("url", ""), p)
+            if _drop > 0:
+                it["_price_drop"] = _drop
+                deal_score += 12.0
+
         # Бонус за возраст: объявление давно висит → продавец готов к торгу
         # Новые (0-1 дней) — нейтрально. За каждый день после 2-го +1.5 балла, cap 45
         days = it.get("_days_on_site", 0)
@@ -961,6 +1018,7 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
         it["_deal_score"] = round(deal_score, 2)
         it["_hot_score"] = round(it.get("_hot_score", 0) + max(0, deal_score), 2)
 
+    _save_price_history()
     return items
 
 
@@ -10748,6 +10806,9 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         _liq = _liquidity_note(item)  # 📊 ликвидность модели
         if _liq:
             caption += f"\n📊 {_liq}"
+        _drop = item.get("_price_drop", 0)
+        if _drop:
+            caption += f"\n📉 продавец снизил цену на ~{_drop:,} ₽ — готов торговаться".replace(",", " ")
         if not item.get("description") and item.get("title"):
             item["description"] = _avito_desc_from_title(item["title"], item.get("mileage", 0))
         if item.get("description"):
@@ -12608,6 +12669,7 @@ async def main():
     global BOT_USERNAME, _registry_dirty
     logging.basicConfig(level=logging.WARNING)
     _load_avito_cache()
+    _load_price_history()
     _analytics_restore()  # восстановить статистику из PG (контейнер эфемерный)
     _restore_referrals()  # восстановить рефералов из PG
     # Реестр пользователей собираем из ВСЕХ доступных источников (чтобы не потерять
