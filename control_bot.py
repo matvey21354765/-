@@ -1008,8 +1008,12 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
             med = 0.0
             _lvl = ""
             _n = 0
-            # Рынок ТОЛЬКО по той же модели и близкому году.
-            if len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 4:
+            # ПРИОРИТЕТ: собственная рыночная оценка Авито (если её удалось достать)
+            # — она точнее нашей медианы. Иначе считаем по той же модели/году.
+            _avm = it.get("_avito_market", 0) or 0
+            if _avm and 30_000 < _avm < 50_000_000:
+                med, _lvl, _n = float(_avm), "avito", 30
+            elif len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 4:
                 med, _lvl, _n = _market_for(parts[0], int(parts[1]), p)
             if med > 0:
                 savings_pct = round((1 - p / med) * 100, 1)
@@ -1029,6 +1033,12 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
                 it["_market_lvl"] = _lvl
 
                 deal_score += savings_pct * 3.0
+
+        # Оценка самого Авито: если он пометил цену «хорошая»/«ниже рынка» —
+        # это сильное подтверждение выгоды, поднимаем; «выше рынка» — штраф.
+        _ars = it.get("_avito_rating_score")
+        if _ars is not None:
+            deal_score += _ars * 12.0
 
         # Снижение цены: продавец скинул → мотивирован. Помечаем и поднимаем в топе.
         if p > 0:
@@ -4156,6 +4166,40 @@ def _avito_desc_from_title(title: str, mileage: int = 0) -> str:
     return " · ".join(parts)
 
 
+# Оценка цены Авито («хорошая цена», «ниже рынка» и т.п.) → числовой балл.
+_AVITO_RATING_MAP = [
+    ("отличная цена", 2), ("очень хорошая цена", 2), ("хорошая цена", 1),
+    ("ниже рыночной", 1), ("ниже рынка", 1), ("рыночная цена", 0),
+    ("по рынку", 0), ("выше рыночной", -1), ("выше рынка", -1),
+    ("завышенная цена", -1), ("завышена", -1), ("дорого", -1),
+]
+
+def _avito_price_rating(it: dict) -> tuple:
+    """Возвращает (текст_оценки, балл, оценка_рынка_₽) из данных объявления Авито.
+    Авито сам оценивает цену авто («хорошая цена» / «ниже рынка»…). Если оценка и/или
+    числовая рыночная стоимость есть в JSON — берём их (это точнее нашей медианы).
+    Всё пусто — ('', None, 0)."""
+    try:
+        blob = json.dumps(it, ensure_ascii=False).lower()
+    except Exception:
+        return "", None, 0
+    text, score = "", None
+    for phrase, sc in _AVITO_RATING_MAP:
+        if phrase in blob:
+            text, score = phrase, sc
+            break
+    # Числовая рыночная оценка Авито, если попалась в JSON
+    market = 0
+    m = re.search(
+        r'"(?:marketprice|averageprice|avgprice|estimateprice|marketvalue|priceestimate)"\s*:\s*\{?[^}]*?(\d{5,9})',
+        blob)
+    if m:
+        v = int(m.group(1))
+        if 30_000 < v < 50_000_000:
+            market = v
+    return text, score, market
+
+
 def _avito_item_from_json(it: dict, today) -> dict | None:
     """Преобразует объект Авито JSON в dict объявления. Возвращает None для дилеров."""
     try:
@@ -4396,6 +4440,14 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
             # такие объявления не должны доминировать в выдаче.
             "_junk": 1 if mileage >= 900_000 else 0,
         }
+        # Оценка цены самим Авито (если есть) — «хорошая цена»/«ниже рынка» и
+        # числовая рыночная стоимость. От неё отталкиваемся в ранжировании.
+        _ar_text, _ar_score, _ar_market = _avito_price_rating(it)
+        if _ar_text:
+            item["_avito_rating"] = _ar_text
+            item["_avito_rating_score"] = _ar_score
+        if _ar_market:
+            item["_avito_market"] = _ar_market
         item["_hot_score"] = hot_score(item)
         return item
     except Exception:
@@ -11009,6 +11061,11 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         _liq = _liquidity_note(item)  # 📊 ликвидность модели
         if _liq:
             caption += f"\n📊 {_liq}"
+        _av_rating = item.get("_avito_rating")
+        if _av_rating:
+            _rt_score = item.get("_avito_rating_score", 0) or 0
+            _rt_icon = "🟢" if _rt_score > 0 else ("🔴" if _rt_score < 0 else "⚪")
+            caption += f"\n{_rt_icon} оценка Авито: {_av_rating}"
         _drop = item.get("_price_drop", 0)
         if _drop:
             caption += f"\n📉 продавец снизил цену на ~{_drop:,} ₽ — готов торговаться".replace(",", " ")
