@@ -694,6 +694,16 @@ def _car_group_key(title: str) -> str:
     }
     for _ru, _en in _BRAND_SYN.items():
         t = re.sub(rf'\b{_ru}\b', _en, t)
+    # Схлопываем составные марки в одно слово, ЧТОБЫ модель (класс) не терялась
+    # при обрезке до 2 слов: "mercedes-benz e 200" → "mercedes e 200" (E-класс
+    # больше не смешивается с C-классом), "land rover discovery" → "landrover discovery".
+    _MULTIWORD_BRAND = {
+        r'mercedes[\s\-]*benz': 'mercedes', r'land[\s\-]*rover': 'landrover',
+        r'alfa[\s\-]*romeo': 'alfaromeo', r'great[\s\-]*wall': 'greatwall',
+        r'land[\s\-]*cruiser': 'landcruiser', r'aston[\s\-]*martin': 'astonmartin',
+    }
+    for _pat, _repl in _MULTIWORD_BRAND.items():
+        t = re.sub(_pat, _repl, t)
     # Убираем технические характеристики: 1.6 МТ, 156 000 км и т.п.
     t = re.sub(r'\d+[\.,]\d+\s*(л|at|mt|акп|мкп|амт)', '', t)
     t = re.sub(r'\d[\d\s]{2,}км', '', t)
@@ -716,6 +726,8 @@ def _car_group_key(title: str) -> str:
         "куплю", "обменяю", "помощь", "подбор", "выкуп", "куплю", "продаю",
         "отдам", "куплю", "продам", "in", "из", "за", "на", "по", "с", "и",
         "год", "года", "г", "выпуска", "вып", "пробег", "руб",
+        # «bmw 5 series» → «bmw 5», чтоб матчилось с «bmw 520» и т.п.
+        "series", "серия", "класс", "class", "седан", "хэтчбек", "универсал",
     }
     def _is_model_word(w: str) -> bool:
         if w in _NON_MODEL:
@@ -782,7 +794,12 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
     # найденные объявления (Дром/ВК/ТГ — тоже реальные цены рынка). Чем больше
     # выборка по «модель+год», тем больше машин получат рыночную цену и попадут
     # в список «ниже рынка». Выбросы всё равно отсекает _trimmed_median.
-    if ref_items:
+    # Если эталона Авито достаточно (≥8) и запрошен avito_only_median — считаем
+    # рынок ТОЛЬКО по нему. Иначе подмешиваем найденные объявления ради покрытия.
+    # Без этого дешёвые находки занижают собственный «рынок» и скидка теряется.
+    if ref_items and avito_only_median and len(ref_items) >= 8:
+        all_for_median = list(ref_items)
+    elif ref_items:
         all_for_median = list(ref_items) + list(items)
     else:
         all_for_median = list(items)
@@ -810,19 +827,9 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
         s2 = [x for x in s if 0.4 * m <= x <= 2.5 * m]
         return float(median(s2)) if len(s2) >= 2 else float(m)
 
-    def _eff_km(it: dict) -> int:
-        """Пробег объявления: числовое поле mileage (Авито) либо, если его нет,
-        достаём из заголовка+описания (Дром/ВК/ТГ). Так уточнение рынка по пробегу
-        работает для всех площадок, а не только для Авито."""
-        km = it.get("mileage", 0) or 0
-        if isinstance(km, (int, float)) and 1000 < km < 900_000:
-            return int(km)
-        return _extract_mileage(f"{it.get('title','')} {it.get('description','')}")
-
-    # Цены строго по модели И году: model -> {year -> [(price, mileage)]}. Рынок
-    # считаем ТОЛЬКО по той же модели в близких годах — никаких «все годы»/«вся
-    # марка», иначе 2001 Corolla сравнивается с 2018 и даёт фейковую «скидку».
-    # Пробег храним, чтобы уточнять рынок по машинам с похожим пробегом.
+    # Цены строго по модели И году: model -> {year -> [prices]}. Рынок считаем
+    # ТОЛЬКО по той же модели в близких годах — никаких «все годы»/«вся марка»,
+    # иначе 2001 Corolla сравнивается с 2018 и даёт фейковую «скидку».
     model_year: dict[str, dict] = {}
     for it in all_for_median:
         p = it.get("_price_int", 0)
@@ -833,38 +840,41 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
         if len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 4:
             model, yr = parts[0], int(parts[1])
             if model:
-                model_year.setdefault(model, {}).setdefault(yr, []).append((p, _eff_km(it)))
+                model_year.setdefault(model, {}).setdefault(yr, []).append(p)
 
-    def _est_price(pairs: list, lvl: str, cand_km: int):
-        """Рыночная цена = медиана цен той же модели/года с отсечением выбросов.
-        Пробег в РАСЧЁТ РЫНКА НЕ входит (по требованию) — только цена."""
-        prices = [p for p, _m in pairs]
-        return _trimmed_median(prices), lvl
+    def _est_price(prices: list, lvl: str, cand_p):
+        """Медиана цен той же модели/года с отсечением выбросов. Leave-one-out:
+        убираем ОДНУ цену самого кандидата, чтобы дешёвая находка не занижала свой
+        же «рынок». Возвращает (медиана, уровень, число_образцов)."""
+        pr = list(prices)
+        if cand_p is not None and len(pr) > 2 and cand_p in pr:
+            pr.remove(cand_p)
+        return _trimmed_median(pr), lvl, len(pr)
 
-    def _market_for(model: str, yr: int, cand_km: int = 0):
-        """Рыночная цена по той же модели: окно ±1 год (точно), затем ±2, затем
-        ±4 (грубее). Возвращает (медиана, уровень)|(0,'')."""
+    def _market_for(model: str, yr: int, cand_p=None):
+        """Рыночная цена по той же модели: окно ±1 год (точно, ≥3), затем ±2 (≥4),
+        затем ±4 (грубее, ≥6). Возвращает (медиана, уровень, N)|(0,'',0)."""
         yrs = model_year.get(model)
         if not yrs:
-            return 0.0, ""
+            return 0.0, "", 0
         near = []
         for y in (yr - 1, yr, yr + 1):
             near += yrs.get(y, [])
-        if len(near) >= 2:
-            return _est_price(near, "near", cand_km)
+        if len(near) >= 3:
+            return _est_price(near, "near", cand_p)
         wide = list(near)
         for y in (yr - 2, yr + 2):
             wide += yrs.get(y, [])
-        if len(wide) >= 3:
-            return _est_price(wide, "bracket", cand_km)
+        if len(wide) >= 4:
+            return _est_price(wide, "bracket", cand_p)
         # Последний шанс покрытия: та же модель в окне ±4 года (шире, но всё ещё
         # одна модель — не смешиваем марки). Нужно достаточно образцов.
         widest = list(wide)
         for y in (yr - 4, yr - 3, yr + 3, yr + 4):
             widest += yrs.get(y, [])
-        if len(widest) >= 5:
-            return _est_price(widest, "wide", cand_km)
-        return 0.0, ""
+        if len(widest) >= 6:
+            return _est_price(widest, "wide", cand_p)
+        return 0.0, "", 0
 
     for it in items:
         p = it.get("_price_int", 0)
@@ -876,15 +886,14 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
             parts = key.rsplit(" ", 1)
             med = 0.0
             _lvl = ""
-            # Рынок ТОЛЬКО по той же модели и близкому году, уточняя по пробегу.
+            _n = 0
+            # Рынок ТОЛЬКО по той же модели и близкому году.
             if len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 4:
-                med, _lvl = _market_for(parts[0], int(parts[1]), _eff_km(it))
+                med, _lvl, _n = _market_for(parts[0], int(parts[1]), p)
             if med > 0:
                 savings_pct = round((1 - p / med) * 100, 1)
-                # near/bracket (та же модель, ±1-2 года) — рынок надёжный, показываем
-                # и глубокие настоящие скидки (кап 80% — предохранитель от ошибок цены).
-                # wide (±4 года) — рынок грубее, ограничиваем 35%, чтобы не показывать
-                # мнимые −60% от разницы поколений.
+                # near/bracket (та же модель, ±1-2 года) — рынок надёжный.
+                # wide (±4 года) — грубее, скидку ограничиваем 35%.
                 _cap = 35 if _lvl.startswith("wide") else 80
                 if savings_pct > _cap:
                     med = 0
@@ -893,6 +902,8 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
                 it["_savings_pct"] = savings_pct
                 it["_market_price"] = int(med)
                 it["_below_market"] = savings_pct > 0
+                it["_market_n"] = _n          # число аналогов — для доверия в сортировке
+                it["_market_lvl"] = _lvl
 
                 deal_score += savings_pct * 3.0
 
@@ -964,11 +975,19 @@ def _sort_by_deal(items: list[dict]) -> list[dict]:
         return 2
 
     def _primary_savings(x) -> float:
-        """Главный ключ Tier 0: % скидки от рынка. Битые — вниз."""
+        """Главный ключ Tier 0: % скидки от рынка, взвешенный ДОВЕРИЕМ к рынку.
+        Скидка −30% из 2 аналогов ненадёжна и не должна бить −25% из 20 аналогов.
+        Полное доверие при ~8+ аналогах; для широкого окна (±4 года) доверие ниже."""
         pct = x.get("_savings_pct", 0) or 0
         if x.get("_is_junk"):
             pct -= 100  # битые/не на ходу — в самый низ выгодных
-        return pct
+        n = x.get("_market_n", 0) or 0
+        conf = min(1.0, n / 8.0)
+        if str(x.get("_market_lvl", "")).startswith("wide"):
+            conf *= 0.7
+        # Никогда не обнуляем скидку полностью (0.5 — минимум), но хорошо
+        # подкреплённые сделки поднимаются выше шатких.
+        return pct * (0.5 + 0.5 * conf)
 
     def _secondary(x) -> float:
         """Тайбрейкер при одинаковой скидке: дольше висит + срочность."""
