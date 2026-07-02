@@ -2830,37 +2830,40 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
                 pass
         return batch
 
-    # ── Запускаем всё параллельно ─────────────────────────────────────
+    # ── Сначала БЫСТРО парсим seed-каналы (они дают основную массу) ─────
+    # Дискавери через tgstat/bing/google медленный и часто блокируется, из-за
+    # него весь TG не успевал в общий дедлайн поиска и обнулялся. Поэтому:
+    # 1) сперва seed-каналы (параллельно, коротко), 2) дискавери — ТОЛЬКО если
+    # seed дал мало результатов, и с жёстким лимитом времени.
     results: list[dict] = []
-    with _TPE_TG(max_workers=2) as _dis_ex:
-        _disc_fut = _dis_ex.submit(_discover_channels)
-        _ddg_fut = _dis_ex.submit(_ddg_tg_posts)
-        # Параллельно парсим seed-каналы
-        with _TPE_TG(max_workers=10) as _ch_ex:
-            for ch_batch in _ch_ex.map(_parse_channel, _seed_channels, timeout=13):
-                if ch_batch:
-                    results.extend(ch_batch)
-                    print(f"  [TG seed] {len(ch_batch)} объявлений")
+    with _TPE_TG(max_workers=12) as _ch_ex:
+        for ch_batch in _ch_ex.map(_parse_channel, _seed_channels, timeout=11):
+            if ch_batch:
+                results.extend(ch_batch)
+                print(f"  [TG seed] {len(ch_batch)} объявлений")
 
-        try:
-            discovered = _disc_fut.result(timeout=10)
-        except Exception:
-            discovered = []
-        try:
-            ddg_batch = _ddg_fut.result(timeout=5)
-            if ddg_batch:
-                results.extend(ddg_batch)
-                print(f"  [TG DDG] {len(ddg_batch)} постов")
-        except Exception:
-            pass
-
-    # Парсим обнаруженные каналы
-    new_chs = [c for c in discovered if c not in _seed_channels and c not in _skip_tg][:15]
-    if new_chs:
-        with _TPE_TG(max_workers=10) as _ch_ex2:
-            for ch_batch in _ch_ex2.map(_parse_channel, new_chs, timeout=12):
-                if ch_batch:
-                    results.extend(ch_batch)
+    # Если seed-каналы дали достаточно — не тратим время на медленный дискавери.
+    if len(results) < 5:
+        with _TPE_TG(max_workers=2) as _dis_ex:
+            _disc_fut = _dis_ex.submit(_discover_channels)
+            _ddg_fut = _dis_ex.submit(_ddg_tg_posts)
+            try:
+                discovered = _disc_fut.result(timeout=6)
+            except Exception:
+                discovered = []
+            try:
+                ddg_batch = _ddg_fut.result(timeout=4)
+                if ddg_batch:
+                    results.extend(ddg_batch)
+                    print(f"  [TG DDG] {len(ddg_batch)} постов")
+            except Exception:
+                pass
+        new_chs = [c for c in discovered if c not in _seed_channels and c not in _skip_tg][:12]
+        if new_chs:
+            with _TPE_TG(max_workers=12) as _ch_ex2:
+                for ch_batch in _ch_ex2.map(_parse_channel, new_chs, timeout=8):
+                    if ch_batch:
+                        results.extend(ch_batch)
 
     # Дедупликация
     seen_norm_tg: set[str] = set()
