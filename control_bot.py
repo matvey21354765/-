@@ -917,6 +917,166 @@ def _liquidity_note(item: dict) -> str:
     return " · ".join(parts)
 
 
+# ── Haraba.ru анализ конкурентов ───────────────────────────────────────────
+def scrape_haraba(region: str, price_min: int = 0, price_max: int = 99_000_000) -> list[dict]:
+    """Парсит объявления с Haraba.ru для анализа конкурентов."""
+    import requests
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
+        # Haraba URL - например: https://m.haraba.ru/search?region=moscow
+        url = f"https://m.haraba.ru/search"
+        params = {
+            "region": region.lower(),
+            "priceFrom": price_min,
+            "priceTo": price_max,
+            "sort": "-date"  # новые сначала
+        }
+        r = requests.get(url, params=params, headers=headers, timeout=10)
+        if r.status_code != 200:
+            print(f"  [Haraba] HTTP {r.status_code}")
+            return []
+        
+        # Простой парсинг JSON API (если есть) или парсинг HTML
+        items = []
+        try:
+            data = r.json()
+            if "items" in data:
+                for item in data.get("items", []):
+                    items.append({
+                        "title": item.get("title", ""),
+                        "_price_int": item.get("price", 0),
+                        "url": item.get("url", ""),
+                        "description": item.get("description", ""),
+                        "_days_on_site": item.get("daysOnSite", 0),
+                        "source": "haraba",
+                        "_photos_count": len(item.get("photos", [])),
+                    })
+        except:
+            # Fallback на HTML парсинг если JSON не работает
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(r.text, "html.parser")
+            # Простой парсинг структуры
+            for card in soup.find_all("div", class_=["item", "listing", "card"]):
+                title = card.find("h2, h3, a")
+                price = card.find("span", class_=["price", "cost"])
+                if title and price:
+                    items.append({
+                        "title": title.get_text().strip(),
+                        "_price_int": int("".join(filter(str.isdigit, price.get_text() or "0"))) or 0,
+                        "url": card.find("a", href=True)["href"] if card.find("a", href=True) else "",
+                        "description": card.get_text().strip(),
+                        "source": "haraba",
+                    })
+        
+        print(f"  [Haraba] найдено {len(items)} объявлений")
+        return items
+    except Exception as e:
+        print(f"  [Haraba] ошибка: {e}")
+        return []
+
+
+def analyze_competitors(haraba_items: list[dict], our_items: list[dict]) -> dict:
+    """Анализирует конкурентов на Haraba и сравнивает с нашими объявлениями."""
+    analysis = {
+        "haraba_avg_price": 0,
+        "our_avg_price": 0,
+        "haraba_count": len(haraba_items),
+        "our_count": len(our_items),
+        "price_gap_pct": 0,
+        "haraba_advantages": [],
+        "our_advantages": [],
+        "haraba_models": {},
+        "our_models": {},
+        "recommendations": [],
+    }
+    
+    if not haraba_items and not our_items:
+        return analysis
+    
+    # Средние цены
+    if haraba_items:
+        prices = [it.get("_price_int", 0) for it in haraba_items if it.get("_price_int", 0) > 0]
+        if prices:
+            analysis["haraba_avg_price"] = int(sum(prices) / len(prices))
+    
+    if our_items:
+        prices = [it.get("_price_int", 0) for it in our_items if it.get("_price_int", 0) > 0]
+        if prices:
+            analysis["our_avg_price"] = int(sum(prices) / len(prices))
+    
+    # Разница в цене
+    if analysis["haraba_avg_price"] > 0 and analysis["our_avg_price"] > 0:
+        gap = (analysis["haraba_avg_price"] - analysis["our_avg_price"]) / analysis["haraba_avg_price"]
+        analysis["price_gap_pct"] = round(gap * 100, 1)
+    
+    # Анализ фото
+    haraba_with_photos = sum(1 for it in haraba_items if it.get("_photos_count", 0) > 3)
+    our_with_photos = sum(1 for it in our_items if it.get("_photos_count", 0) > 3)
+    
+    # Характеристики
+    haraba_models = {}
+    for it in haraba_items:
+        title = it.get("title", "").lower()
+        for word in title.split():
+            if len(word) > 3:
+                haraba_models[word] = haraba_models.get(word, 0) + 1
+    analysis["haraba_models"] = dict(sorted(haraba_models.items(), key=lambda x: -x[1])[:10])
+    
+    our_models = {}
+    for it in our_items:
+        title = it.get("title", "").lower()
+        for word in title.split():
+            if len(word) > 3:
+                our_models[word] = our_models.get(word, 0) + 1
+    analysis["our_models"] = dict(sorted(our_models.items(), key=lambda x: -x[1])[:10])
+    
+    # Преимущества
+    if haraba_with_photos > our_with_photos:
+        analysis["haraba_advantages"].append(f"Больше фото: {haraba_with_photos} vs {our_with_photos}")
+        analysis["recommendations"].append("📷 Добавить больше фотографий объявлений")
+    
+    if analysis["price_gap_pct"] < -10:
+        analysis["our_advantages"].append(f"Ниже цена на {abs(analysis['price_gap_pct']):.1f}%")
+    elif analysis["price_gap_pct"] > 10:
+        analysis["haraba_advantages"].append(f"На {analysis['price_gap_pct']:.1f}% дешевле")
+        analysis["recommendations"].append("💰 Снизить цены или улучшить предложение")
+    
+    if analysis["haraba_count"] > analysis["our_count"] * 2:
+        analysis["recommendations"].append(f"📈 Добавить объявлений (их {analysis['haraba_count']}, у нас {analysis['our_count']})")
+    
+    if haraba_items and our_items:
+        haraba_avg_desc_len = sum(len(it.get("description", "")) for it in haraba_items) // len(haraba_items)
+        our_avg_desc_len = sum(len(it.get("description", "")) for it in our_items) // len(our_items)
+        if haraba_avg_desc_len > our_avg_desc_len * 1.5:
+            analysis["recommendations"].append("✍️ Писать более подробные описания")
+    
+    return analysis
+
+
+def get_fresh_avito_items(region: str, max_age_minutes: int = 30) -> list[dict]:
+    """Получает САМЫЕ СВЕЖИЕ объявления Авито (только что загруженные, ≤30 мин назад)."""
+    # Парсим с sort_by_date=True чтобы новые были первыми
+    # и берём только первую страницу (10-20 самых свежих)
+    items = scrape_avito(region, pages=1, sort_by_date=True)
+    
+    now = time.time()
+    fresh = []
+    for it in items:
+        upload_time = it.get("_upload_timestamp", now)
+        age_minutes = (now - upload_time) / 60
+        
+        # Если объявление младше max_age_minutes
+        if age_minutes <= max_age_minutes:
+            it["_age_minutes"] = round(age_minutes, 1)
+            it["_is_fresh"] = True
+            fresh.append(it)
+    
+    print(f"  [Авито Fresh] найдено {len(fresh)} свежих объявлений (≤{max_age_minutes} мин)")
+    return fresh
+
+
 def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
                           avito_only_median: bool = False) -> list[dict]:
     """
@@ -8984,6 +9144,80 @@ async def cmd_dashboard(msg: Message):
         disable_web_page_preview=True,
         reply_markup=kb,
     )
+
+
+@dp.message(Command("analyze"))
+async def cmd_analyze_competitors(msg: Message):
+    """Анализ конкурентов на Haraba.ru и свежих объявлений Авито."""
+    if msg.from_user.id not in ADMIN_IDS:
+        await msg.answer("❌ Только для администраторов.")
+        return
+    
+    await msg.answer("🔍 Анализирую конкурентов Haraba.ru и свежие объявления Авито...\n⏳ Это может занять 1-2 минуты")
+    
+    try:
+        # Получаем данные
+        region = "moscow"  # по умолчанию Москва
+        
+        haraba_items = scrape_haraba(region)
+        fresh_avito = get_fresh_avito_items(region, max_age_minutes=30)
+        all_avito = scrape_avito(region, pages=3)
+        
+        # Анализ
+        analysis = analyze_competitors(haraba_items, fresh_avito)
+        
+        # Форматируем результат
+        result = f"""
+📊 **Анализ конкурентов Haraba.ru**
+
+**Статистика:**
+• Haraba объявлений: {analysis['haraba_count']} шт
+• Наши на Авито: {analysis['our_count']} шт
+• Свежие Авито (≤30 мин): {len(fresh_avito)} шт
+
+**Цены:**
+• Средняя цена Haraba: {analysis['haraba_avg_price']:,} ₽
+• Средняя цена наших: {analysis['our_avg_price']:,} ₽
+• Разница: {analysis['price_gap_pct']:+.1f}%
+
+**Их модели (топ-5):**
+"""
+        for model, count in list(analysis['haraba_models'].items())[:5]:
+            result += f"\n  • {model}: {count} шт"
+        
+        result += f"\n\n**Наши модели (топ-5):**"
+        for model, count in list(analysis['our_models'].items())[:5]:
+            result += f"\n  • {model}: {count} шт"
+        
+        if analysis['haraba_advantages']:
+            result += "\n\n**Их преимущества:**"
+            for adv in analysis['haraba_advantages']:
+                result += f"\n  ❌ {adv}"
+        
+        if analysis['our_advantages']:
+            result += "\n\n**Наши преимущества:**"
+            for adv in analysis['our_advantages']:
+                result += f"\n  ✅ {adv}"
+        
+        if analysis['recommendations']:
+            result += "\n\n**📌 Рекомендации:**"
+            for rec in analysis['recommendations']:
+                result += f"\n  • {rec}"
+        
+        if fresh_avito:
+            result += f"\n\n**🔥 Свежие Авито объявления (последние 30 мин):**"
+            for it in fresh_avito[:5]:
+                price = it.get("_price_int", 0)
+                age = it.get("_age_minutes", 0)
+                result += f"\n  • {it.get('title', 'N/A')[:50]} — {price:,} ₽ ({age:.0f} мин назад)"
+        
+        await msg.answer(result, parse_mode="Markdown")
+        
+    except Exception as e:
+        print(f"[анализ] ошибка: {e}")
+        import traceback
+        traceback.print_exc()
+        await msg.answer(f"❌ Ошибка при анализе: {e}")
 
 
 # Все возможные площадки для мониторинга
