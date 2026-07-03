@@ -40,6 +40,27 @@ def _parse_admin_ids() -> set[int]:
 
 ADMIN_IDS = _parse_admin_ids()
 
+
+def _deploy_revision() -> str:
+    """Возвращает ревизию, которую реально запустил Railway/контейнер."""
+    for key in ("RAILWAY_GIT_COMMIT_SHA", "GIT_COMMIT_SHA", "SOURCE_COMMIT", "COMMIT_SHA"):
+        value = os.getenv(key, "").strip()
+        if value:
+            return value[:12]
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short=12", "HEAD"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except Exception:
+        return "unknown"
+
+
+DEPLOY_REVISION = _deploy_revision()
+DEPLOY_SERVICE = os.getenv("RAILWAY_SERVICE_NAME", "-")
+DEPLOY_ENVIRONMENT = os.getenv("RAILWAY_ENVIRONMENT_NAME", "-")
+
 # ── Токен ───────────────────────────────────────────────────────
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8923014188:AAHvNW2B5fin2XCmbVhlaLNjWhLwI3JhZ90")
 SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY", "b317ae63b4d847805e2f91a1dc073b40")
@@ -788,6 +809,23 @@ def _car_group_key(title: str) -> str:
     return f"{brand_model} {year}".strip()
 
 
+
+# Минимальная скидка, чтобы объявление считалось реальным «ниже рынка» и попадало
+# в верхний тир выдачи. −5…−8% — это фактически около рынка: такие машины можно
+# показывать, но не как первые выгодные сделки.
+MARKET_DEAL_MIN_PCT = 10.0
+
+
+def _is_strong_below_market(it: dict) -> bool:
+    """True только для сильного сигнала ниже рынка, а не для погрешности медианы."""
+    pct = it.get("_savings_pct", 0) or 0
+    if pct >= MARKET_DEAL_MIN_PCT:
+        return True
+    # Если сам Авито пометил объявление как «отличная/очень хорошая цена»,
+    # используем этот сигнал даже без нашей глубокой медианы. Обычная
+    # «хорошая цена» без >=10% — не топ, чтобы −8% не считались находкой.
+    return (it.get("_avito_rating_score") or 0) >= 2
+
 # СТОП только если машина НЕ НА ХОДУ / на запчасти / утиль. Битые, крашеные,
 # после ДТП, требующие ремонта — это НЕ стоп (пользователю такие нужны), лишь бы
 # ездили. Поэтому список узкий — только «нерабочие» состояния.
@@ -1246,7 +1284,7 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
             if med > 0:
                 it["_savings_pct"] = savings_pct
                 it["_market_price"] = int(med)
-                it["_below_market"] = savings_pct > 0
+                it["_below_market"] = _is_strong_below_market(it)
                 it["_market_n"] = _n          # число аналогов — для доверия в сортировке
                 it["_market_lvl"] = _lvl
 
@@ -1321,7 +1359,7 @@ def _sort_by_deal(items: list[dict]) -> list[dict]:
     Идеальная сортировка: сначала самые выгодные + висящие дольше.
 
     Логика:
-      Tier 0 — ниже рынка (savings_pct > 0):
+      Tier 0 — реально ниже рынка (savings_pct >= MARKET_DEAL_MIN_PCT):
         Ключ: -(savings_pct * 2 + age_bonus)
         age_bonus = min(days, 90) * 0.5   → макс 45 очков за 90 дней
         savings   = pct * 2               → -30% даёт 60 очков
@@ -1340,7 +1378,7 @@ def _sort_by_deal(items: list[dict]) -> list[dict]:
         if x.get("_already_seen"):
             return 10
         pct = x.get("_savings_pct", 0) or 0
-        if pct > 0:
+        if _is_strong_below_market(x):
             return 0
         if x.get("_price_int", 0) > 0:
             return 1
@@ -2800,6 +2838,10 @@ _SOCIAL_REJECT_KEYWORDS = [
     "номер на гелик", "номер на мерс", "номер на авто", "идеальный номер",
     "подчеркнет статус", "номер авт", "автономер",
     "запчаст", "автозапчаст", "разбор", "на разбор", "на запчаст",
+    # Салонные/кузовные детали: «дверные карты ВАЗ 2106» не автомобиль.
+    "дверные карты", "карты двер", "карта двери", "карты ваз", "карты 210",
+    "обшивка двер", "обшивки двер", "обшивку двер", "обшивк салона",
+    "салон ваз", "салон на ваз", "комплект салона", "комплект карт",
     # НЕ добавляем "шин" — оно содержится в "машина", "машины", "машину" → ложное срабатывание
     "шины б/у", "б/у шин", "продам шин", "зимние шин", "летние шин", "комплект шин",
     "покрышк", "резина б/у", "б/у резин",
@@ -4406,8 +4448,9 @@ def _avito_desc_from_title(title: str, mileage: int = 0) -> str:
 
 # Оценка цены Авито («хорошая цена», «ниже рынка» и т.п.) → числовой балл.
 _AVITO_RATING_MAP = [
-    ("отличная цена", 2), ("очень хорошая цена", 2), ("хорошая цена", 1),
-    ("ниже рыночной", 1), ("ниже рынка", 1), ("рыночная цена", 0),
+    ("отличная цена", 2), ("очень хорошая цена", 2),
+    ("ниже рыночной", 2), ("ниже рынка", 2),
+    ("хорошая цена", 1), ("рыночная цена", 0),
     ("по рынку", 0), ("выше рыночной", -1), ("выше рынка", -1),
     ("завышенная цена", -1), ("завышена", -1), ("дорого", -1),
 ]
@@ -8086,7 +8129,7 @@ def _match_brand(title: str, brand_key: str) -> bool:
 _MOTO_KEYWORDS = [
     "скутер", "мотоцикл", "мопед", "квадроцикл", "питбайк", "мотобайк",
     "scooter", "moto", "motorcycle", "atv", "квадро", "enduro", "эндуро",
-    "питбайк", "мотик", "vespa", "yamaha ybr", "honda cbr",
+    "питбайк", "мотик", "мотороллер", "вятка электрон", "вятка", "vespa", "yamaha ybr", "honda cbr",
     "kawasaki", "suzuki gsx", "yamaha r1", "yamaha r6", "ktm",
     "2-колесный", "двухколесный", "снегоход", "гидроцикл",
     "кубов", "куб.см", "cc ",
@@ -8157,9 +8200,14 @@ def _is_promo_listing(it: dict) -> bool:
 
 def _filter_by_category(items: list[dict], category: str, brand: str) -> list[dict]:
     """Фильтрует список объявлений по категории и марке. Всегда исключает мото/скутеры."""
-    # Убираем рекламу площадки / промо-блоки и мото/скутеры
+    # Убираем рекламу площадки / промо-блоки и мото/скутеры.
+    # Для VK/TG обязательно смотрим не только title, но и описание: заголовок часто
+    # короткий («Продам Вятку электрон.»), а признаки мото/деталей лежат в тексте.
     items = [it for it in items if not _is_promo_listing(it)]
-    items = [it for it in items if not _is_moto(it.get("title", ""))]
+    items = [
+        it for it in items
+        if not _is_moto(f'{it.get("title", "")} {it.get("description", "")}'[:700])
+    ]
 
     if not category or category == "all":
         pass  # без фильтра по марке
@@ -8849,6 +8897,22 @@ async def cmd_admin(msg: Message):
         return  # не-админам ничего не показываем
     await msg.answer("📊 <b>Админ-статистика</b>\nВыбери раздел:",
                      parse_mode="HTML", reply_markup=_admin_menu_kb())
+
+
+@dp.message(Command("deploy"))
+async def cmd_deploy(msg: Message):
+    """Показывает, какая версия кода реально запущена в Railway."""
+    if msg.from_user.id not in ADMIN_IDS:
+        return
+    await msg.answer(
+        "🚂 <b>Railway deploy</b>\n"
+        f"• commit: <code>{DEPLOY_REVISION}</code>\n"
+        f"• service: <code>{DEPLOY_SERVICE}</code>\n"
+        f"• environment: <code>{DEPLOY_ENVIRONMENT}</code>\n\n"
+        "Если commit здесь старый — Railway запустил старый GitHub commit. "
+        "Нужно запушить/смёржить последнюю ветку и сделать Redeploy.",
+        parse_mode="HTML",
+    )
 
 
 @dp.message(Command("dbcheck"))
@@ -9743,10 +9807,8 @@ async def cb_price_range(cb: CallbackQuery, state: FSMContext):
         f"📍 Регион: {region_name}\n"
         f"🔍 Категория: {cat_label}{brand_label}\n"
         f"💰 Бюджет: {pmin:,} – {pmax:,} ₽\n\n"
-        f"Нажми кнопку чтобы найти авто:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔍 Найти авто", callback_data="do_search")],
-        ])
+        f"Выбери площадки для поиска:",
+        reply_markup=sources_keyboard(_get_enabled_sources(settings), show_back=False)
     )
 
 
@@ -9799,10 +9861,8 @@ async def fsm_price_max(msg: Message, state: FSMContext):
         f"📍 Регион: {region_name}\n"
         f"🔍 Категория: {cat_label}{brand_label}\n"
         f"💰 Бюджет: {pmin:,} – {pmax:,} ₽\n\n"
-        f"Нажми кнопку чтобы найти авто:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔍 Найти авто", callback_data="do_search")],
-        ])
+        f"Выбери площадки для поиска:",
+        reply_markup=sources_keyboard(_get_enabled_sources(s), show_back=False)
     )
 
 
@@ -9867,22 +9927,22 @@ SOURCE_NAMES = {
 
 
 
-def sources_keyboard(enabled: list[str]) -> InlineKeyboardMarkup:
+def sources_keyboard(enabled: list[str], show_back: bool = True) -> InlineKeyboardMarkup:
     rows = []
+    enabled_set = set(enabled or [])
     for src in ALL_SOURCES:
-        if src not in SOURCE_NAMES:
-            continue
-
-        check = "✅" if src in enabled else "☐"
+        check = "✅" if src in enabled_set else "☐"
+        source_name = SOURCE_NAMES.get(src, src)
         rows.append([InlineKeyboardButton(
-            text=f"{check} {SOURCE_NAMES[src]}",
+            text=f"{check} {source_name}",
             callback_data=f"toggle_src|{src}"
         )])
     rows.append([
         InlineKeyboardButton(text="🌐 Все площадки", callback_data="src_all"),
         InlineKeyboardButton(text="🔍 Искать", callback_data="start_search"),
     ])
-    rows.append([InlineKeyboardButton(text="◀️ Назад (цена)", callback_data="setup_back_to_price")])
+    if show_back:
+        rows.append([InlineKeyboardButton(text="◀️ Назад (цена)", callback_data="setup_back_to_price")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -9891,7 +9951,8 @@ def _get_enabled_sources(s: dict) -> list[str]:
     enabled = s.get("sources", [])
     if not enabled:
         return list(ALL_SOURCES)
-    return enabled
+    filtered = [src for src in enabled if src in ALL_SOURCES]
+    return filtered or list(ALL_SOURCES)
 
 
 @dp.message(Command("search"))
@@ -9977,7 +10038,7 @@ async def cmd_new_today(msg: Message):
         _ar["_market_ref_only"] = True
     suitable = rank_by_market_price(suitable, ref_items=_avito_ref_today, avito_only_median=True)
     # Только ниже рынка
-    below_today = [i for i in suitable if i.get("_savings_pct", 0) > 0]
+    below_today = [i for i in suitable if _is_strong_below_market(i)]
     if below_today:
         suitable = below_today
     suitable = _sort_by_deal(suitable)
@@ -9993,7 +10054,7 @@ async def cmd_new_today(msg: Message):
     _search_cache[uid] = suitable
     _save_cache(uid, suitable)
     analytics.track("new_today", uid=uid, region=region, results=len(suitable))
-    below = sum(1 for x in suitable if x.get("_savings_pct", 0) > 0)
+    below = sum(1 for x in suitable if _is_strong_below_market(x))
     await msg.answer(
         f"✅ Найдено {len(suitable)} свежих объявлений!\n"
         f"🔥 Ниже рынка: {below} шт. — они первые"
@@ -10096,7 +10157,7 @@ async def cmd_global_search(msg: Message):
     ]
     suitable = rank_by_market_price(suitable)
     # Показываем только те что ниже рынка — остальные не интересны перекупу
-    below_market = [i for i in suitable if i.get("_savings_pct", 0) > 0]
+    below_market = [i for i in suitable if _is_strong_below_market(i)]
     if below_market:
         suitable = below_market
     suitable = _sort_by_deal(suitable)
@@ -10208,7 +10269,7 @@ async def cmd_vk_tg_search(msg: Message):
     _search_cache[uid] = suitable
     _save_cache(uid, suitable)
     analytics.track("vk_tg_search", uid=uid, region=region, results=len(suitable))
-    below = sum(1 for x in suitable if x.get("_savings_pct", 0) > 0)
+    below = sum(1 for x in suitable if _is_strong_below_market(x))
     await msg.answer(
         f"✅ Найдено {len(suitable)} объявлений в VK+TG пабликах!\n"
         f"🔥 Ниже рынка: {below} шт. — они первые"
@@ -10267,7 +10328,7 @@ async def cb_do_search(cb: CallbackQuery):
         return
     await cb.answer()
     enabled = _get_enabled_sources(s)
-    await cb.message.answer("Выбери площадки для поиска:", reply_markup=sources_keyboard(enabled))
+    await cb.message.edit_text("Выбери площадки для поиска:", reply_markup=sources_keyboard(enabled))
 
 
 @dp.callback_query(F.data == "start_search")
@@ -11347,7 +11408,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                 if _is_junk:
                     # Не на ходу / на запчасти — это НЕ выгода, а причина низкой цены.
                     deal_line = "\n🔴 не на ходу / на запчасти — низкая цена не выгода"
-                else:
+                elif pct >= MARKET_DEAL_MIN_PCT:
                     tier = "🟢 ВЫГОДНО" if pct >= 25 else "🟡 ниже рынка"
                     deal_line = f"\n{tier}: дешевле рынка на ~{saving:,} ₽".replace(",", " ")
                     # Потенциальная прибыль перекупа: рынок − цена − примерные
@@ -11356,12 +11417,16 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                     _profit = saving - _costs
                     if _profit >= 15_000:
                         deal_line += f"\n💵 потенциальная прибыль ~{_profit:,} ₽ (после расходов)".replace(",", " ")
+                else:
+                    deal_line = "\n⚪ около рынка: скидка меньше 10%, не считаю сильной выгодой"
             elif pct < 0:
                 # Дороже рынка
                 price_line += f"  🔺 рынок ~{market:,} ₽ (+{abs(pct)}%)".replace(",", " ")
             else:
                 # По рынку
                 price_line += f"  ≈ рынок ~{market:,} ₽".replace(",", " ")
+        elif _pi:
+            deal_line = "\n📊 рынок: мало похожих авто для точной оценки"
 
         mileage = item.get("mileage", 0)
         mileage_str = ""
@@ -12149,10 +12214,10 @@ async def do_search_for_user(uid: int, reply_to):
     # видит все объявления выбранных площадок, а выгодные — первыми (сортировка).
     _below_count = 0
     if _avito_available:
-        _below_count = sum(1 for i in suitable if i.get("_savings_pct", 0) > 0)
+        _below_count = sum(1 for i in suitable if _is_strong_below_market(i))
         shown = [
             i for i in suitable
-            if i.get("_savings_pct", 0) > 0 or not i.get("_market_price")
+            if _is_strong_below_market(i) or not i.get("_market_price")
         ]
         print(f"  [фильтр] ниже рынка: {_below_count}, показываем (вкл. без рынка): {len(shown)} из {len(suitable)}")
         if shown:
@@ -12177,9 +12242,9 @@ async def do_search_for_user(uid: int, reply_to):
     src_str = " ".join(src_icons.get(s,"") for s in src_found if s)
     if _avito_available:
         _extra = len(suitable) - _below_count
-        _msg = f"✅ {src_str} Найдено {_below_count} объявлений ниже рынка!"
+        _msg = f"✅ {src_str} Найдено {_below_count} объявлений реально ниже рынка (≥{MARKET_DEAL_MIN_PCT:.0f}%)!"
         if _extra > 0:
-            _msg += f"\n➕ Ещё {_extra} в бюджете (рынок не определён) — ниже в списке."
+            _msg += f"\n➕ Ещё {_extra} в бюджете без сильной скидки или без точной оценки — ниже в списке."
     else:
         _msg = f"✅ {src_str} Найдено {len(suitable)} объявлений в бюджете!\n⚠️ Авито недоступен — сравнение с рынком отключено"
     if _seen_cnt:
@@ -12914,7 +12979,7 @@ async def _global_monitor_loop():
                     new_below = sorted(
                         [it for it in pool
                          if it.get("url") in new_urls
-                         and it.get("_below_market")
+                         and _is_strong_below_market(it)
                          and it.get("_savings_pct", 0) >= min_pct],
                         key=lambda x: -x.get("_savings_pct", 0)
                     )
@@ -13333,7 +13398,8 @@ async def main():
     dp.callback_query.middleware(SubscriptionMiddleware())
 
     print("✅ Авто-брокер бот запущен!")
-    print("  [ВЕРСИЯ] 2026-06-22-v18 :: subscription middleware")
+    print(f"  [DEPLOY] commit={DEPLOY_REVISION} service={DEPLOY_SERVICE} env={DEPLOY_ENVIRONMENT}")
+    print("  [ВЕРСИЯ] 2026-07-02-v19 :: source selection + deploy revision")
 
     # Логируем Railway IP (нужен для добавления в whitelist прокси)
     try:
@@ -13458,6 +13524,7 @@ async def main():
     admin_commands = public_commands + [
         BotCommand(command="stats",     description="📊 Статистика"),
         BotCommand(command="dashboard", description="📈 Дашборд аналитики"),
+        BotCommand(command="deploy",    description="🚂 Версия Railway"),
     ]
     # Обычным пользователям — только публичные команды
     await bot.set_my_commands(public_commands)
