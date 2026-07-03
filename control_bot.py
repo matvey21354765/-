@@ -415,7 +415,8 @@ def _env_int(name: str, default: int, min_value: int = 1) -> int:
 
 
 SEARCH_COOLDOWN_SEC = 45
-SEARCH_SOURCE_TIMEOUT_SEC = _env_int("SEARCH_SOURCE_TIMEOUT_SEC", 22)
+SEARCH_SOURCE_TIMEOUT_SEC = _env_int("SEARCH_SOURCE_TIMEOUT_SEC", 35)
+SEARCH_AUTORU_DEADLINE_SEC = _env_int("SEARCH_AUTORU_DEADLINE_SEC", 24)
 SEARCH_PRICE_FILL_LIMIT = _env_int("SEARCH_PRICE_FILL_LIMIT", 3, 0)
 SEARCH_PRICE_FILL_TIMEOUT_SEC = _env_int("SEARCH_PRICE_FILL_TIMEOUT_SEC", 4)
 SEARCH_DETAIL_CHECK_LIMIT = _env_int("SEARCH_DETAIL_CHECK_LIMIT", 8, 0)
@@ -1893,7 +1894,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
     today = datetime.date.today()
     # Жёсткий дедлайн: Auto.ru капча-защищён и часто виснет — не даём тормозить весь
     # поиск. Держим короткий бюджет: если IP чистый — успеваем, если капча — быстро выходим.
-    _ar_deadline = time.time() + 15
+    _ar_deadline = time.time() + SEARCH_AUTORU_DEADLINE_SEC
     _ar_empty_streak = 0
     # Марка для Auto.ru: путь /cars/lada/used/ и catalog_filter mark=LADA
     _brand_l = (brand or "").strip().lower()
@@ -3407,7 +3408,7 @@ def scrape_youla(region: str, pages: int = 4, price_min: int = 0,
     seen_ids: set[str] = set()
     for p in range(1, pages + 1):
         url = (f"https://youla.ru/api/v1/products?category=23"
-               f"&latitude={lat}&longitude={lng}&radius=100&page={p}")
+               f"&latitude={lat}&longitude={lng}&radius=250&page={p}&per_page=50")
         try:
             r = _req.get(url, headers=hdrs, timeout=10)
             if r.status_code != 200:
@@ -3461,7 +3462,7 @@ def scrape_youla(region: str, pages: int = 4, price_min: int = 0,
                 continue
         print(f"  [Юла] стр.{p}: +{_added} (всего {len(results)})")
         if _added == 0:
-            break
+            continue
         time.sleep(0.1)
     print(f"  [Юла] итого {len(results)} объявлений")
     return results
@@ -10112,9 +10113,9 @@ async def cmd_global_search(msg: Message):
     # Запускаем все источники + TG-каналы параллельно
     scraper_map = {
         "drom":   lambda: scrape_drom(region, pages=15, price_min=pmin, price_max=pmax, brand=_br),
-        "autoru": lambda: scrape_autoru(region, pages=4, price_min=pmin, price_max=pmax, brand=_br),
-        "avito":  lambda: scrape_avito(region, pages=10, price_min=pmin, price_max=pmax, sort_by_date=False),
-        "youla":  lambda: scrape_youla(region, pages=5, price_min=pmin, price_max=pmax, brand=_br),
+        "autoru": lambda: scrape_autoru(region, pages=6, price_min=pmin, price_max=pmax, brand=_br),
+        "avito":  lambda: scrape_avito(region, pages=12, price_min=pmin, price_max=pmax, sort_by_date=False),
+        "youla":  lambda: scrape_youla(region, pages=8, price_min=pmin, price_max=pmax, brand=_br),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
     }
     task_pairs = [
@@ -10126,7 +10127,7 @@ async def cmd_global_search(msg: Message):
     if pending:
         for task in pending:
             task.cancel()
-        await msg.answer("⏱ Глобальный поиск занял слишком долго, показываю что успели найти...")
+        print(f"  [global search] timeout: {len(pending)} source(s) still running, showing completed results")
 
     items: list[dict] = []
     stat_parts: list[str] = []
@@ -11702,9 +11703,9 @@ async def do_search_for_user(uid: int, reply_to):
 
     scraper_map = {
         "drom":   lambda: scrape_drom(region, pages=8, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
-        "autoru": lambda: scrape_autoru(region, pages=4, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
-        "avito":  lambda: scrape_avito(region, pages=6, price_min=pmin, price_max=pmax, sort_by_date=False, brand=(brand if brand and brand != "any" else "")),
-        "youla":  lambda: scrape_youla(region, pages=5, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
+        "autoru": lambda: scrape_autoru(region, pages=6, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
+        "avito":  lambda: scrape_avito(region, pages=9, price_min=pmin, price_max=pmax, sort_by_date=False, brand=(brand if brand and brand != "any" else "")),
+        "youla":  lambda: scrape_youla(region, pages=8, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
         "tg":     lambda: scrape_tg_channels(region, pmin, pmax),
     }
@@ -11722,14 +11723,14 @@ async def do_search_for_user(uid: int, reply_to):
     _avito_ref_fut = None
     if "avito" not in src_keys:
         _avito_ref_fut = loop.run_in_executor(
-            None, lambda: scrape_avito(region, pages=3, price_min=0, price_max=99_000_000)
+            None, lambda: scrape_avito(region, pages=5, price_min=0, price_max=99_000_000)
         )
     all_futs = futures + ([_avito_ref_fut] if _avito_ref_fut else [])
     done, pending = await asyncio.wait(all_futs, timeout=SEARCH_SOURCE_TIMEOUT_SEC)
     if pending:
         for f in pending:
             f.cancel()
-        await reply_to.answer("⏱ Поиск занял слишком долго, показываю что успели найти...")
+        print(f"  [search] timeout: {len(pending)} source(s) still running, showing completed results")
     results = []
     for f in futures:
         if f in done:
