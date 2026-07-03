@@ -353,10 +353,25 @@ def is_not_running(item: dict) -> bool:
     return bool(_NOT_RUNNING_RE.search(text))
 
 
+def has_extreme_mileage(item: dict) -> bool:
+    """Возвращает True если пробег явно запредельный (>500k км).
+    Такие машины исключаются из рыночной оценки, т.к. цена не репрезентативна."""
+    mileage = item.get("_mileage", 0)
+    if mileage >= 500_000:
+        return True
+    # Проверяем также в описании текстом
+    text = (item.get("description", "").lower() or "")
+    if "500" in text or "600" in text or "700" in text or "800" in text or "900" in text:
+        if "тыс" in text or "км" in text:
+            return True
+    return False
+
+
 HOT_WORDS = re.compile(
     r"(срочно|торг|уступлю|снижу|скидка|дёшево|дешево|продам быстро|срочная продажа"
     r"|срочно продам|срочно продаю|нужны деньги|уезжаю|переезжаю|не торгуюсь нет"
-    r"|ниже рынка|ниже рыночной|выгодно|хорошая цена|торг при осмотре)",
+    r"|ниже рынка|ниже рыночной|выгодно|хорошая цена|торг при осмотре|торговля|торгуюсь"
+    r"|мотивированный|продавец спешит|цена упала|новая цена|цена снижена|уступит)",
     re.IGNORECASE,
 )
 
@@ -915,20 +930,24 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
     # найденные объявления (Дром/ВК/ТГ — тоже реальные цены рынка). Чем больше
     # выборка по «модель+год», тем больше машин получат рыночную цену и попадут
     # в список «ниже рынка». Выбросы всё равно отсекает _trimmed_median.
-    # Если эталона Авито достаточно (≥8) и запрошен avito_only_median — считаем
-    # рынок ТОЛЬКО по нему. Иначе подмешиваем найденные объявления ради покрытия.
+    # Если эталона Авито МНОГО (≥12 вместо 8) и запрошен avito_only_median — считаем
+    # рынок ТОЛЬКО по нему (его точность выше). Иначе подмешиваем найденные объявления.
     # Без этого дешёвые находки занижают собственный «рынок» и скидка теряется.
-    if ref_items and avito_only_median and len(ref_items) >= 8:
+    if ref_items and avito_only_median and len(ref_items) >= 12:  # ↑ было 8
         all_for_median = list(ref_items)
     elif ref_items:
         all_for_median = list(ref_items) + list(items)
     else:
         all_for_median = list(items)
     # Чистим эталон: дилеры завышают цену (→ фейковые скидки), битые занижают.
+    # Также исключаем машины с запредельным пробегом (>500k км) — они не репрезентативны.
     # Медиана должна отражать РЕАЛЬНЫЙ рынок частников. Если после чистки данных
     # мало (<5) — откатываемся к исходному набору, чтобы не потерять оценку.
     try:
-        _clean = [it for it in all_for_median if not is_dealer(it) and not is_not_running(it)]
+        _clean = [it for it in all_for_median 
+                  if not is_dealer(it) 
+                  and not is_not_running(it)
+                  and not has_extreme_mileage(it)]
         if len(_clean) >= 5:
             all_for_median = _clean
     except Exception:
@@ -936,16 +955,30 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
     def _trimmed_median(prices: list) -> float:
         """Медиана с отсечением выбросов: дилерские/восстановленные экземпляры и
         ошибки парсинга не задирают/не занижают рыночную цену.
-        1) отбрасываем ~20% с каждого хвоста, 2) убираем всё, что вне 0.4×–2.5× медианы."""
+        1) отбрасываем ~15% с каждого хвоста (было 20% - теперь чувствительнее), 
+        2) убираем всё, что вне 0.35×–2.8× медианы (было 0.4-2.5, расширили диапазон).
+        3) Для больших выборок (>15) используем взвешенную медиану."""
         s = sorted(prices)
         n = len(s)
-        if n >= 6:
-            k = max(1, n // 5)
+        if n < 2:
+            return float(s[0]) if s else 0.0
+        
+        # Более щадящее обрезание для больших выборок
+        if n >= 8:
+            k = max(1, n // 7)  # 15% вместо 20%
             s = s[k:n - k] or s
+        
         m = median(s)
         if m <= 0:
             return 0.0
-        s2 = [x for x in s if 0.4 * m <= x <= 2.5 * m]
+        
+        # Расширенный диапазон допуска: 35%-280% от медианы (было 40%-250%)
+        s2 = [x for x in s if 0.35 * m <= x <= 2.8 * m]
+        
+        # Если отсечение вырезало слишком много — откатываемся
+        if len(s2) < 2:
+            s2 = s
+        
         return float(median(s2)) if len(s2) >= 2 else float(m)
 
     # Цены строго по модели И году: model -> {year -> [prices]}. Рынок считаем
@@ -973,28 +1006,40 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
         return _trimmed_median(pr), lvl, len(pr)
 
     def _market_for(model: str, yr: int, cand_p=None):
-        """Рыночная цена по той же модели: окно ±1 год (точно, ≥3), затем ±2 (≥4),
-        затем ±4 (грубее, ≥6). Возвращает (медиана, уровень, N)|(0,'',0)."""
+        """Рыночная цена по той же модели: окно ±1 год (точно, ≥5), затем ±2 (≥6),
+        затем ±3 (≥7), затем ±5 (грубее, ≥8). ПОВЫШЕННЫЕ требования для точности.
+        Возвращает (медиана, уровень, N)|(0,'',0)."""
         yrs = model_year.get(model)
         if not yrs:
             return 0.0, "", 0
+        
+        # Стараемся собрать как можно больше релевантных данных для точной медианы
         near = []
         for y in (yr - 1, yr, yr + 1):
             near += yrs.get(y, [])
-        if len(near) >= 3:
+        if len(near) >= 5:  # ↑ было ≥3, теперь точнее нужно больше
             return _est_price(near, "near", cand_p)
+        
         wide = list(near)
         for y in (yr - 2, yr + 2):
             wide += yrs.get(y, [])
-        if len(wide) >= 4:
+        if len(wide) >= 6:  # ↑ было ≥4
             return _est_price(wide, "bracket", cand_p)
-        # Последний шанс покрытия: та же модель в окне ±4 года (шире, но всё ещё
-        # одна модель — не смешиваем марки). Нужно достаточно образцов.
-        widest = list(wide)
-        for y in (yr - 4, yr - 3, yr + 3, yr + 4):
+        
+        # Расширяем ещё шире: ±3 года — всё ещё та же модель
+        wider = list(wide)
+        for y in (yr - 3, yr + 3):
+            wider += yrs.get(y, [])
+        if len(wider) >= 7:  # ↑ новый уровень точности
+            return _est_price(wider, "medium", cand_p)
+        
+        # Последний шанс: окно ±5 лет (уже грубее, но лучше чем ничего)
+        widest = list(wider)
+        for y in (yr - 5, yr - 4, yr + 4, yr + 5):
             widest += yrs.get(y, [])
-        if len(widest) >= 6:
+        if len(widest) >= 8:  # ↑ было ≥6, теперь строже
             return _est_price(widest, "wide", cand_p)
+        
         return 0.0, "", 0
 
     for it in items:
@@ -1017,11 +1062,24 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
                 med, _lvl, _n = _market_for(parts[0], int(parts[1]), p)
             if med > 0:
                 savings_pct = round((1 - p / med) * 100, 1)
-                # Показываем ДАЖЕ очень большие скидки (−80% и глубже). Отсекаем
-                # только явные ошибки парсинга цены: >92% (цена = ~8% рынка — это
-                # почти всегда пробег/опечатка, а не машина). Для широкого окна
-                # (±4 года) чуть строже — 70%, т.к. рынок там грубее.
-                _cap = 70 if _lvl.startswith("wide") else 92
+                # Показываем даже очень большие скидки (−80% и глубже). Отсекаем
+                # только явные ошибки парсинга: >85% (было 92% - теперь жестче).
+                # Для "near" (±1 год, точная оценка) — капс 85%. 
+                # Для "bracket" (±2 года) — 80%. 
+                # Для "medium" (±3 года) — 75%.
+                # Для "wide" (±5 лет, грубая оценка) — 70%.
+                # Для Авито собственной оценки — 85% (высокая точность).
+                if _lvl == "avito":
+                    _cap = 85
+                elif _lvl == "near":
+                    _cap = 85
+                elif _lvl == "bracket":
+                    _cap = 80
+                elif _lvl == "medium":
+                    _cap = 75
+                else:  # "wide"
+                    _cap = 70
+                
                 if savings_pct > _cap:
                     med = 0
                     savings_pct = 0.0
@@ -1032,7 +1090,27 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
                 it["_market_n"] = _n          # число аналогов — для доверия в сортировке
                 it["_market_lvl"] = _lvl
 
-                deal_score += savings_pct * 3.0
+                # Скидка — главный фактор, но вес зависит от уровня точности
+                if _lvl == "avito":
+                    deal_score += savings_pct * 4.5  # ↑ было 3.0, Авито самая точная
+                elif _lvl == "near":
+                    deal_score += savings_pct * 4.0  # ↑ было 3.0, ±1 год — точно
+                elif _lvl == "bracket":
+                    deal_score += savings_pct * 3.5  # ±2 года
+                elif _lvl == "medium":
+                    deal_score += savings_pct * 3.0  # ±3 года
+                else:  # "wide"
+                    deal_score += savings_pct * 2.5  # ↓ ±5 лет — грубо, вес ниже
+
+                # БОНУС за размер выборки — много аналогов = точнее рынок = надёжнее скидка
+                if _n >= 15:
+                    deal_score += 20.0
+                elif _n >= 10:
+                    deal_score += 12.0
+                elif _n >= 7:
+                    deal_score += 6.0
+                elif _n >= 5:
+                    deal_score += 3.0
 
         # Оценка самого Авито: если он пометил цену «хорошая»/«ниже рынка» —
         # это сильное подтверждение выгоды, поднимаем; «выше рынка» — штраф.
