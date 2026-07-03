@@ -9549,6 +9549,7 @@ SOURCE_NAMES = {
     "drom":   "🔵 Дром",
     "autoru": "🟠 Auto.ru",
     "avito":  "🔴 Авито",
+    "youla":  "🟡 Юла",
     "vk":     "📘 ВКонтакте",
     "tg":     "✈️ Telegram",
 }
@@ -9565,7 +9566,6 @@ def sources_keyboard(enabled: list[str]) -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton(
             text=f"{check} {SOURCE_NAMES[src]}",
             callback_data=f"toggle_src|{src}"
-        )])
         )])
     rows.append([
         InlineKeyboardButton(text="🌐 Все площадки", callback_data="src_all"),

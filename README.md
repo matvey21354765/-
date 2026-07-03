@@ -30,6 +30,6 @@ Railway настроен на сборку через Dockerfile (`railway.toml`
 | `DATABASE_URL` | PostgreSQL для сохранения состояния между рестартами Railway. |
 | `SCRAPER_API_KEY` | Ключ ScraperAPI для резервного получения страниц, если прямой доступ или прокси недоступны. |
 | `AVITO_CLIENT_ID` и `AVITO_CLIENT_SECRET` | Официальный API Авито, если используется интеграция с Avito OAuth/API. |
-| `PROXY_URL` или `AVITO_PROXY_URL` | Резидентный прокси для Авито, когда Railway IP получает блокировку. |
-| `AVITO_PROXY_HOST`, `AVITO_PROXY_PORT`, `AVITO_PROXY_USER`, `AVITO_PROXY_PASS`, `AVITO_PROXY_PROTOCOL` | Альтернативная настройка прокси отдельными полями. |
+| `PROXY_URL` | Резидентный прокси для Авито, когда Railway IP получает блокировку (формат: `http://user:pass@host:port`). |
+| `AVITO_PROXY_HOST`, `AVITO_PROXY_PORT`, `AVITO_PROXY_USER`, `AVITO_PROXY_PASS`, `AVITO_PROXY_PROTOCOL` | Альтернативная настройка прокси отдельными полями (вместо `PROXY_URL`). |
 | `RAILWAY_PUBLIC_DOMAIN` | Публичный домен Railway для ссылок на веб-дашборд, если автодетект домена недоступен. |
