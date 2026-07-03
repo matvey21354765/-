@@ -407,7 +407,20 @@ USERS_DIR.mkdir(exist_ok=True)
 
 # Лимит частоты поиска на пользователя — защита от спама запросами,
 # чтобы один человек не нагружал площадки слишком часто.
+def _env_int(name: str, default: int, min_value: int = 1) -> int:
+    try:
+        return max(min_value, int(os.getenv(name, str(default))))
+    except Exception:
+        return default
+
+
 SEARCH_COOLDOWN_SEC = 45
+SEARCH_SOURCE_TIMEOUT_SEC = _env_int("SEARCH_SOURCE_TIMEOUT_SEC", 22)
+SEARCH_PRICE_FILL_LIMIT = _env_int("SEARCH_PRICE_FILL_LIMIT", 3, 0)
+SEARCH_PRICE_FILL_TIMEOUT_SEC = _env_int("SEARCH_PRICE_FILL_TIMEOUT_SEC", 4)
+SEARCH_DETAIL_CHECK_LIMIT = _env_int("SEARCH_DETAIL_CHECK_LIMIT", 8, 0)
+SEARCH_DETAIL_CHECK_TIMEOUT_SEC = _env_int("SEARCH_DETAIL_CHECK_TIMEOUT_SEC", 5)
+SEARCH_DETAIL_TOTAL_TIMEOUT_SEC = _env_int("SEARCH_DETAIL_TOTAL_TIMEOUT_SEC", 12)
 _last_search_at: dict[int, float] = {}
 
 # Мониторинг новых объявлений
@@ -10104,24 +10117,35 @@ async def cmd_global_search(msg: Message):
         "youla":  lambda: scrape_youla(region, pages=5, price_min=pmin, price_max=pmax, brand=_br),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
     }
-    tg_task = loop.run_in_executor(None, lambda: scrape_tg_channels(region, pmin, pmax))
-    tasks = [loop.run_in_executor(None, fn) for fn in scraper_map.values()]
-    all_results = await asyncio.gather(*tasks, tg_task, return_exceptions=True)
+    task_pairs = [
+        (src, loop.run_in_executor(None, fn))
+        for src, fn in scraper_map.items()
+    ]
+    task_pairs.append(("tg", loop.run_in_executor(None, lambda: scrape_tg_channels(region, pmin, pmax))))
+    done, pending = await asyncio.wait([task for _, task in task_pairs], timeout=SEARCH_SOURCE_TIMEOUT_SEC)
+    if pending:
+        for task in pending:
+            task.cancel()
+        await msg.answer("⏱ Глобальный поиск занял слишком долго, показываю что успели найти...")
 
     items: list[dict] = []
-    src_names = list(scraper_map.keys())
     stat_parts: list[str] = []
-    for src, batch in zip(src_names, all_results[:-1]):
+    for src, task in task_pairs:
+        if task not in done:
+            batch = []
+        else:
+            try:
+                batch = task.result()
+            except Exception as e:
+                print(f"  [global scraper] {src} error: {e}")
+                batch = []
         if isinstance(batch, list):
             items.extend(batch)
-        tag = SOURCE_TAGS.get(src, src)
-        cnt = len(batch) if isinstance(batch, list) else 0
+            cnt = len(batch)
+        else:
+            cnt = 0
+        tag = "✈️ Telegram" if src == "tg" else SOURCE_TAGS.get(src, src)
         stat_parts.append(f"{tag}: {cnt}")
-
-    tg_batch = all_results[-1]
-    if isinstance(tg_batch, list):
-        items.extend(tg_batch)
-        stat_parts.append(f"✈️ Telegram: {len(tg_batch)}")
 
     if stat_parts:
         await msg.answer("📊 " + " | ".join(stat_parts))
@@ -11701,7 +11725,7 @@ async def do_search_for_user(uid: int, reply_to):
             None, lambda: scrape_avito(region, pages=3, price_min=0, price_max=99_000_000)
         )
     all_futs = futures + ([_avito_ref_fut] if _avito_ref_fut else [])
-    done, pending = await asyncio.wait(all_futs, timeout=32)
+    done, pending = await asyncio.wait(all_futs, timeout=SEARCH_SOURCE_TIMEOUT_SEC)
     if pending:
         for f in pending:
             f.cancel()
@@ -11912,10 +11936,13 @@ async def do_search_for_user(uid: int, reply_to):
         async def _fetch_price(it):
             async with sem_price:
                 try:
-                    await asyncio.wait_for(loop2.run_in_executor(None, _fetch_price_sync, it), timeout=7)
+                    await asyncio.wait_for(
+                        loop2.run_in_executor(None, _fetch_price_sync, it),
+                        timeout=SEARCH_PRICE_FILL_TIMEOUT_SEC,
+                    )
                 except Exception:
                     pass
-        await asyncio.gather(*[_fetch_price(it) for it in no_price[:5]])
+        await asyncio.gather(*[_fetch_price(it) for it in no_price[:SEARCH_PRICE_FILL_LIMIT]])
 
     # Эталон рынка — ВСЕГДА цены Авито (требование: сравнивать с рынком Авито).
     # Авито-объявления берём из основного поиска (если Авито выбран) либо из
@@ -12151,9 +12178,9 @@ async def do_search_for_user(uid: int, reply_to):
         )
         return
 
-    # Проверяем первые 15 объявлений: убираем проданные, загружаем фото+описание
-    check_batch = suitable[:15]
-    rest_batch = suitable[15:]
+    # Быстро проверяем первые объявления: убираем проданные, загружаем фото+описание.
+    check_batch = suitable[:SEARCH_DETAIL_CHECK_LIMIT]
+    rest_batch = suitable[SEARCH_DETAIL_CHECK_LIMIT:]
     loop_pre = asyncio.get_running_loop()
     sem_pre = asyncio.Semaphore(8)
 
@@ -12169,7 +12196,7 @@ async def do_search_for_user(uid: int, reply_to):
             try:
                 details = await asyncio.wait_for(
                     loop_pre.run_in_executor(None, _fetch_and_check, it["url"], source),
-                    timeout=8
+                    timeout=SEARCH_DETAIL_CHECK_TIMEOUT_SEC
                 )
                 if details is None:
                     return None  # снято с продажи (Дром/Авито/Авто.ру)
@@ -12186,7 +12213,7 @@ async def do_search_for_user(uid: int, reply_to):
     try:
         checked = await asyncio.wait_for(
             asyncio.gather(*[_check_item(it) for it in check_batch]),
-            timeout=25
+            timeout=SEARCH_DETAIL_TOTAL_TIMEOUT_SEC
         ) if check_batch else []
     except asyncio.TimeoutError:
         checked = check_batch  # при таймауте — не удаляем объявления
