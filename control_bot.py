@@ -377,7 +377,7 @@ def is_not_running(item: dict) -> bool:
 def has_extreme_mileage(item: dict) -> bool:
     """Возвращает True если пробег явно запредельный (>500k км).
     Такие машины исключаются из рыночной оценки, т.к. цена не репрезентативна."""
-    mileage = item.get("_mileage", 0)
+    mileage = _item_mileage(item)
     if mileage >= 500_000:
         return True
     # Проверяем также в описании текстом
@@ -386,6 +386,35 @@ def has_extreme_mileage(item: dict) -> bool:
         if "тыс" in text or "км" in text:
             return True
     return False
+
+
+def _item_mileage(item: dict) -> int:
+    """Returns mileage in km from normalized fields or listing text."""
+    for key in ("mileage", "_mileage"):
+        try:
+            mileage = int(item.get(key, 0) or 0)
+            if mileage > 0:
+                return mileage
+        except Exception:
+            pass
+    try:
+        return _extract_mileage(f"{item.get('title', '')} {item.get('description', '')}")
+    except Exception:
+        return 0
+
+
+def _market_mileage_factor(item: dict) -> float:
+    """Conservative market discount for high-mileage cars when no Avito AI price is available."""
+    mileage = _item_mileage(item)
+    if mileage >= 400_000:
+        return 0.82
+    if mileage >= 350_000:
+        return 0.88
+    if mileage >= 300_000:
+        return 0.92
+    if mileage >= 250_000:
+        return 0.95
+    return 1.0
 
 
 HOT_WORDS = re.compile(
@@ -1273,6 +1302,11 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
             elif len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 4:
                 med, _lvl, _n = _market_for(parts[0], int(parts[1]), p)
             if med > 0:
+                if _lvl != "avito":
+                    _mileage_factor = _market_mileage_factor(it)
+                    if _mileage_factor < 1.0:
+                        med *= _mileage_factor
+                        it["_market_mileage_factor"] = _mileage_factor
                 savings_pct = round((1 - p / med) * 100, 1)
                 # Показываем даже очень большие скидки (−80% и глубже). Отсекаем
                 # только явные ошибки парсинга: >85% (было 92% - теперь жестче).
@@ -11427,9 +11461,10 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         pct = item.get("_savings_pct", 0)
         if market and _pi:
             saving = market - _pi
+            market_note = " с учётом пробега" if item.get("_market_mileage_factor") else ""
             if pct > 0:
                 # Дешевле рынка
-                price_line += f"  🔻 рынок ~{market:,} ₽ (-{pct}%)".replace(",", " ")
+                price_line += f"  🔻 рынок{market_note} ~{market:,} ₽ (-{pct}%)".replace(",", " ")
                 if _is_junk:
                     # Не на ходу / на запчасти — это НЕ выгода, а причина низкой цены.
                     deal_line = "\n🔴 не на ходу / на запчасти — низкая цена не выгода"
@@ -11446,10 +11481,10 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                     deal_line = "\n⚪ около рынка: скидка меньше 10%, не считаю сильной выгодой"
             elif pct < 0:
                 # Дороже рынка
-                price_line += f"  🔺 рынок ~{market:,} ₽ (+{abs(pct)}%)".replace(",", " ")
+                price_line += f"  🔺 рынок{market_note} ~{market:,} ₽ (+{abs(pct)}%)".replace(",", " ")
             else:
                 # По рынку
-                price_line += f"  ≈ рынок ~{market:,} ₽".replace(",", " ")
+                price_line += f"  ≈ рынок{market_note} ~{market:,} ₽".replace(",", " ")
         elif _pi:
             deal_line = "\n📊 рынок: мало похожих авто для точной оценки"
 
