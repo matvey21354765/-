@@ -12515,6 +12515,8 @@ async def do_search_for_user(uid: int, reply_to):
     # и скидка действительно сильная. Иначе в выдачу попадают карточки
     # "мало похожих авто для точной оценки", что выглядит как отсутствие анализа.
     _below_count = 0
+    _showing_best_market = False
+    _showing_without_market = False
     if _avito_available:
         _below_count = sum(1 for i in suitable if _is_strong_below_market(i))
         shown = [i for i in suitable if _is_strong_below_market(i)]
@@ -12522,8 +12524,15 @@ async def do_search_for_user(uid: int, reply_to):
         if shown:
             suitable = shown
         else:
-            await reply_to.answer("😔 Не нашёл авто ниже рынка с точной оценкой цены. Попробуй расширить бюджет или регион.")
-            return
+            market_ranked = [i for i in suitable if i.get("_market_price") and i.get("_price_int")]
+            if market_ranked:
+                suitable = market_ranked[:30]
+                _showing_best_market = True
+                print(f"  [фильтр] сильных скидок нет → показываем {len(suitable)} лучших с Авито-оценкой")
+            else:
+                suitable = suitable[:30]
+                _showing_without_market = True
+                print(f"  [фильтр] точных оценок нет → показываем {len(suitable)} лучших в бюджете")
     else:
         print("  [фильтр] нет Авито-эталона → не показываем выдачу без проверки рынка")
         await reply_to.answer("😔 Сейчас не смог получить рынок Авито для сравнения. Попробуй повторить поиск чуть позже.")
@@ -12546,8 +12555,19 @@ async def do_search_for_user(uid: int, reply_to):
     src_str = " ".join(src_icons.get(s,"") for s in src_found if s)
     if _avito_available:
         _extra = len(suitable) - _below_count
-        _msg = f"✅ {src_str} Найдено {_below_count} объявлений реально ниже рынка (≥{MARKET_DEAL_MIN_PCT:.0f}%)!"
-        if _extra > 0:
+        if _showing_best_market:
+            _msg = (
+                f"✅ {src_str} Сильных скидок ≥{MARKET_DEAL_MIN_PCT:.0f}% сейчас нет.\n"
+                f"Показываю {len(suitable)} лучших объявлений с Авито-оценкой рынка."
+            )
+        elif _showing_without_market:
+            _msg = (
+                f"✅ {src_str} Ниже рынка с точной оценкой сейчас нет.\n"
+                f"Показываю {len(suitable)} лучших объявлений в бюджете."
+            )
+        else:
+            _msg = f"✅ {src_str} Найдено {_below_count} объявлений реально ниже рынка (≥{MARKET_DEAL_MIN_PCT:.0f}%)!"
+        if _extra > 0 and not (_showing_best_market or _showing_without_market):
             _msg += f"\n➕ Ещё {_extra} в бюджете без сильной скидки или без точной оценки — ниже в списке."
     else:
         _msg = f"✅ {src_str} Найдено {len(suitable)} объявлений в бюджете!\n⚠️ Авито недоступен — сравнение с рынком отключено"
