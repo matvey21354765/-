@@ -1177,19 +1177,16 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
     """
     from statistics import median
 
-    # Для медианы берём МАКСИМУМ данных ради покрытия: и Авито-эталон, и сами
-    # найденные объявления (Дром/ВК/ТГ — тоже реальные цены рынка). Чем больше
-    # выборка по «модель+год», тем больше машин получат рыночную цену и попадут
-    # в список «ниже рынка». Выбросы всё равно отсекает _trimmed_median.
-    # Если эталона Авито МНОГО (≥12 вместо 8) и запрошен avito_only_median — считаем
-    # рынок ТОЛЬКО по нему (его точность выше). Иначе подмешиваем найденные объявления.
-    # Без этого дешёвые находки занижают собственный «рынок» и скидка теряется.
-    if ref_items and avito_only_median and len(ref_items) >= 12:  # ↑ было 8
-        all_for_median = list(ref_items)
-    elif ref_items:
-        all_for_median = list(ref_items) + list(items)
+    # Рынок считаем строго по Авито. Дром/Юла/VK/TG/Auto.ru используются как
+    # кандидаты для поиска, но не как источник рыночной медианы: иначе редкие
+    # или переоценённые объявления создают фейковую скидку.
+    def _is_avito_ref(it: dict) -> bool:
+        return (it.get("source", "") or "").lower() == "avito"
+
+    if ref_items:
+        all_for_median = [i for i in ref_items if _is_avito_ref(i)]
     else:
-        all_for_median = list(items)
+        all_for_median = [i for i in items if _is_avito_ref(i)]
     # Чистим эталон: дилеры завышают цену (→ фейковые скидки), битые занижают.
     # Также исключаем машины с запредельным пробегом (>500k км) — они не репрезентативны.
     # Медиана должна отражать РЕАЛЬНЫЙ рынок частников. Если после чистки данных
@@ -1267,7 +1264,7 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
         убираем ОДНУ цену самого кандидата, чтобы дешёвая находка не занижала свой
         же «рынок». Возвращает (медиана, уровень, число_образцов)."""
         pr = list(prices)
-        if cand_p is not None and len(pr) > 2 and cand_p in pr:
+        if cand_p is not None and len(pr) > 1 and cand_p in pr:
             pr.remove(cand_p)
         return _trimmed_median(pr), lvl, len(pr)
 
@@ -1328,11 +1325,8 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
             # ПРИОРИТЕТ: собственная рыночная оценка Авито (если её удалось достать)
             # — она точнее нашей медианы. Иначе считаем по той же модели/году.
             _avm = it.get("_avito_market", 0) or 0
-            _drm = it.get("_drom_market", 0) or 0
             if _avm and 30_000 < _avm < 50_000_000:
                 med, _lvl, _n = float(_avm), "avito", 30
-            elif _drm and 30_000 < _drm < 50_000_000:
-                med, _lvl, _n = float(_drm), "drom", 30
             elif len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 4:
                 med, _lvl, _n = _market_for(parts[0], int(parts[1]), p)
                 if med <= 0:
@@ -4626,6 +4620,8 @@ def _apply_page_market(item: dict, market: int, lvl: str) -> None:
     if not price or not market or not (30_000 < market < 50_000_000):
         return
     item[f"_{lvl}_market"] = market
+    if lvl != "avito":
+        return
     item["_market_price"] = market
     item["_market_lvl"] = f"{lvl}_page"
     item["_market_n"] = 30
@@ -11969,16 +11965,12 @@ async def do_search_for_user(uid: int, reply_to):
         src_keys = list(scraper_map.keys())  # подстраховка: если выбор пуст — все
     futures = [loop.run_in_executor(None, scraper_map[src]) for src in src_keys]
 
-    # Рынок ВСЕГДА сравниваем с ценами Авито. Если Авито выбран — его результаты
-    # и так станут эталоном (ниже). Если НЕ выбран — отдельный скрейп Авито только
-    # для эталона рынка (конфликта IP нет, т.к. основной поиск Авито не трогает).
-    # Эталон рынка берём БЕЗ фильтра по бюджету (весь ценовой диапазон), иначе
-    # «рынок» занижен и скидки не видно. price_max большой → полный рынок модели.
-    _avito_ref_fut = None
-    if "avito" not in src_keys:
-        _avito_ref_fut = loop.run_in_executor(
-            None, lambda: scrape_avito(region, pages=5, price_min=0, price_max=99_000_000)
-        )
+    # Рынок ВСЕГДА сравниваем с ценами Авито. Отдельный эталон Авито запускаем
+    # всегда и без фильтра по бюджету: результаты основного поиска могут быть
+    # ограничены бюджетом пользователя и не отражать реальную рыночную цену.
+    _avito_ref_fut = loop.run_in_executor(
+        None, lambda: scrape_avito(region, pages=5, price_min=0, price_max=99_000_000)
+    )
     all_futs = futures + ([_avito_ref_fut] if _avito_ref_fut else [])
     done, pending = await asyncio.wait(all_futs, timeout=SEARCH_SOURCE_TIMEOUT_SEC)
     if pending:
@@ -12205,12 +12197,17 @@ async def do_search_for_user(uid: int, reply_to):
     # группирует по марке+модели+году → медиана корректна даже в пределах бюджета.
     import copy as _copy
     _avito_ref_items = [i for i in items if i.get("source") == "avito"]
-    if not _avito_ref_items and _avito_ref_fut is not None and _avito_ref_fut in done:
+    if _avito_ref_fut is not None and _avito_ref_fut in done:
         try:
-            _avito_ref_items = _avito_ref_fut.result() or []
+            _extra_ref = _avito_ref_fut.result() or []
+            if _extra_ref:
+                _seen_ref_u = {_norm_url(i.get("url", "")) for i in _avito_ref_items}
+                _avito_ref_items = list(_avito_ref_items) + [
+                    i for i in _extra_ref
+                    if _norm_url(i.get("url", "")) not in _seen_ref_u
+                ]
         except Exception as _e:
             print(f"  [рынок] Авито-эталон ошибка: {_e}")
-            _avito_ref_items = []
     # ВАЖНО для поиска ниже рынка: результаты Авито отфильтрованы БЮДЖЕТОМ, поэтому
     # «рынок» из них занижен (только дешёвые машины) и настоящая скидка теряется.
     # Добавляем полный кэш региона (без фильтра по цене) — он собирается фоновым
@@ -12238,16 +12235,7 @@ async def do_search_for_user(uid: int, reply_to):
         items = items + _ref_copies
         print(f"  [рынок] Авито-эталон: {len(_ref_copies)} записей для медианы цен")
     else:
-        # Авито недоступен — запасной эталон Дром+Auto.ru, чтобы рынок всё же был
-        _fallback = [i for i in items if i.get("source") in ("drom", "autoru")]
-        if _fallback:
-            _ref_copies = [_copy.copy(i) for i in _fallback]
-            for _rc in _ref_copies:
-                _rc["_market_ref_only"] = True
-            items = items + _ref_copies
-            print(f"  [рынок] запасной эталон Дром+Auto.ru: {len(_ref_copies)} (Авито недоступен)")
-        else:
-            print(f"  [рынок] нет эталона — рыночная цена не будет вычислена")
+        print(f"  [рынок] нет Авито-эталона — рыночная цена не будет вычислена")
 
     # seen хранит нормализованные URL — сравниваем тоже по нормализованным
     seen_norm = {_norm_url(u) for u in seen}
@@ -12327,12 +12315,13 @@ async def do_search_for_user(uid: int, reply_to):
         if it.get("url") and _norm_url(it["url"]) in seen_norm:
             it["_already_seen"] = True
 
-    _ref_items = [i for i in items if i.get("_market_ref_only")]
-    _avito_available = bool(_ref_items)  # True даже если эталон — Дром/Auto.ru
+    _ref_items = [
+        i for i in items
+        if i.get("_market_ref_only") and (i.get("source", "") or "").lower() == "avito"
+    ]
+    _avito_available = bool(_ref_items)
     if _avito_available:
-        _n_av_ref = sum(1 for i in _ref_items if i.get("source") == "avito")
-        _ref_src = "Авито" if _n_av_ref >= 5 else "Дром+Auto.ru"
-        print(f"  [рынок] {_ref_src}-референс: {len(_ref_items)} объявлений → считаем рыночную цену")
+        print(f"  [рынок] Авито-референс: {len(_ref_items)} объявлений → считаем рыночную цену")
         suitable = rank_by_market_price(suitable, ref_items=_ref_items, avito_only_median=True)
         # 📊 Ликвидность: сколько таких в продаже и средний срок продажи (по эталону)
         try:
@@ -12516,7 +12505,9 @@ async def do_search_for_user(uid: int, reply_to):
             await reply_to.answer("😔 Не нашёл авто ниже рынка с точной оценкой цены. Попробуй расширить бюджет или регион.")
             return
     else:
-        print(f"  [фильтр] Авито недоступен → показываем все {len(suitable)} в бюджете")
+        print("  [фильтр] нет Авито-эталона → не показываем выдачу без проверки рынка")
+        await reply_to.answer("😔 Сейчас не смог получить рынок Авито для сравнения. Попробуй повторить поиск чуть позже.")
+        return
 
     _search_cache[uid] = suitable
     _save_cache(uid, suitable)
@@ -14008,9 +13999,16 @@ async def _global_monitor_loop():
                         save_seen(uid, seen)
                         continue
 
-                    # Считаем рыночную цену по ВСЕМУ каталогу (raw + авито референс) — чем больше, тем точнее
                     cached = _search_cache.get(uid) or _load_cache(uid)
-                    pool = rank_by_market_price(raw + avito_ref + cached + new_items)
+                    avito_market_ref = [
+                        it for it in (avito_ref + raw + cached)
+                        if (it.get("source", "") or "").lower() == "avito"
+                    ]
+                    pool = rank_by_market_price(
+                        new_items,
+                        ref_items=avito_market_ref,
+                        avito_only_median=True,
+                    )
                     new_urls = {x["url"] for x in new_items}
 
                     new_below = sorted(
