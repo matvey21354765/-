@@ -1309,14 +1309,17 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
             # ПРИОРИТЕТ: собственная рыночная оценка Авито (если её удалось достать)
             # — она точнее нашей медианы. Иначе считаем по той же модели/году.
             _avm = it.get("_avito_market", 0) or 0
+            _drm = it.get("_drom_market", 0) or 0
             if _avm and 30_000 < _avm < 50_000_000:
                 med, _lvl, _n = float(_avm), "avito", 30
+            elif _drm and 30_000 < _drm < 50_000_000:
+                med, _lvl, _n = float(_drm), "drom", 30
             elif len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 4:
                 med, _lvl, _n = _market_for(parts[0], int(parts[1]), p)
                 if med <= 0:
                     med, _lvl, _n = _market_for_model(parts[0], p)
             if med > 0:
-                if _lvl != "avito":
+                if _lvl not in ("avito", "drom"):
                     _mileage_factor = _market_mileage_factor(it)
                     if _mileage_factor < 1.0:
                         med *= _mileage_factor
@@ -1329,7 +1332,7 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
                 # Для "medium" (±3 года) — 75%.
                 # Для "wide" (±5 лет, грубая оценка) — 70%.
                 # Для Авито собственной оценки — 85% (высокая точность).
-                if _lvl == "avito":
+                if _lvl in ("avito", "drom"):
                     _cap = 85
                 elif _lvl == "near":
                     _cap = 85
@@ -1353,7 +1356,7 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
                 it["_market_lvl"] = _lvl
 
                 # Скидка — главный фактор, но вес зависит от уровня точности
-                if _lvl == "avito":
+                if _lvl in ("avito", "drom"):
                     deal_score += savings_pct * 4.5  # ↑ было 3.0, Авито самая точная
                 elif _lvl == "near":
                     deal_score += savings_pct * 4.0  # ↑ было 3.0, ±1 год — точно
@@ -4575,6 +4578,39 @@ def _avito_ai_estimate_from_text(text: str) -> int:
         if value:
             return value
     return 0
+
+
+def _drom_estimate_from_text(text: str) -> int:
+    """Extracts Drom's own price estimate from an opened listing page."""
+    if not text:
+        return 0
+    flat = re.sub(r"\s+", " ", text)
+    patterns = (
+        r"Дром\s+оценил\s+(\d[\d\s]{1,12})\s*₽",
+        r"Оценк[аи]\s+Дрома.{0,160}?Дром\s+оценил\s+(\d[\d\s]{1,12})\s*₽",
+        r"drom[^0-9]{0,80}(?:estimate|estimated|valuation|market)[^0-9]{0,80}(\d{5,9})",
+    )
+    for pat in patterns:
+        m = re.search(pat, flat, re.IGNORECASE)
+        if not m:
+            continue
+        value = _parse_rub_amount(m.group(1))
+        if value:
+            return value
+    return 0
+
+
+def _apply_page_market(item: dict, market: int, lvl: str) -> None:
+    price = int(item.get("_price_int") or 0)
+    if not price or not market or not (30_000 < market < 50_000_000):
+        return
+    item[f"_{lvl}_market"] = market
+    item["_market_price"] = market
+    item["_market_lvl"] = f"{lvl}_page"
+    item["_market_n"] = 30
+    item.pop("_market_mileage_factor", None)
+    item["_savings_pct"] = round((1 - price / market) * 100, 1)
+    item["_below_market"] = _is_strong_below_market(item)
 
 
 def _avito_item_from_json(it: dict, today) -> dict | None:
@@ -10522,6 +10558,11 @@ def _fetch_and_check(url: str, source: str) -> dict | None:
             avito_ai_market = _avito_ai_estimate_from_text(
                 text + "\n" + soup.get_text("\n", strip=True)
             )
+        drom_market = 0
+        if source == "drom":
+            drom_market = _drom_estimate_from_text(
+                text + "\n" + soup.get_text("\n", strip=True)
+            )
 
         # Фото: og:image
         photo_url = ""
@@ -10630,6 +10671,8 @@ def _fetch_and_check(url: str, source: str) -> dict | None:
         details = {"_photo_url": photo_url, "description": description}
         if avito_ai_market:
             details["_avito_market"] = avito_ai_market
+        if drom_market:
+            details["_drom_market"] = drom_market
         return details
     except Exception:
         return {}  # Ошибка сети — считаем активным, без деталей
@@ -10657,6 +10700,10 @@ async def enrich_and_filter(items: list[dict], max_check: int = 25) -> list[dict
             item["_photo_url"] = details["_photo_url"]
         if details.get("description"):
             item["description"] = details["description"]
+        if details.get("_avito_market"):
+            _apply_page_market(item, int(details["_avito_market"]), "avito")
+        if details.get("_drom_market"):
+            _apply_page_market(item, int(details["_drom_market"]), "drom")
         active.append(item)
 
     return active + rest
@@ -11508,15 +11555,9 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                 if details.get("_photo_url") and not item.get("_photo_url"):
                     item["_photo_url"] = details["_photo_url"]
                 if details.get("_avito_market") and item.get("_price_int"):
-                    market = int(details["_avito_market"])
-                    price = int(item.get("_price_int") or 0)
-                    item["_avito_market"] = market
-                    item["_market_price"] = market
-                    item["_market_lvl"] = "avito_page"
-                    item["_market_n"] = 30
-                    item.pop("_market_mileage_factor", None)
-                    item["_savings_pct"] = round((1 - price / market) * 100, 1) if market > 0 else 0
-                    item["_below_market"] = _is_strong_below_market(item)
+                    _apply_page_market(item, int(details["_avito_market"]), "avito")
+                if details.get("_drom_market") and item.get("_price_int"):
+                    _apply_page_market(item, int(details["_drom_market"]), "drom")
             except Exception:
                 pass
         sid = url_to_id(url)
@@ -12337,15 +12378,9 @@ async def do_search_for_user(uid: int, reply_to):
                 if details.get("description") and not it.get("description"):
                     it["description"] = details["description"]
                 if details.get("_avito_market") and it.get("_price_int"):
-                    market = int(details["_avito_market"])
-                    price = int(it.get("_price_int") or 0)
-                    it["_avito_market"] = market
-                    it["_market_price"] = market
-                    it["_market_lvl"] = "avito_page"
-                    it["_market_n"] = 30
-                    it.pop("_market_mileage_factor", None)
-                    it["_savings_pct"] = round((1 - price / market) * 100, 1) if market > 0 else 0
-                    it["_below_market"] = _is_strong_below_market(it)
+                    _apply_page_market(it, int(details["_avito_market"]), "avito")
+                if details.get("_drom_market") and it.get("_price_int"):
+                    _apply_page_market(it, int(details["_drom_market"]), "drom")
                 return it
             except Exception:
                 return it  # при ошибке сети — оставляем объявление
