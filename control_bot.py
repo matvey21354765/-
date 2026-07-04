@@ -787,7 +787,7 @@ def _car_group_key(title: str) -> str:
     """
     t = title.lower()
     # Удаляем префиксы площадок
-    for _pfx in ("авито", "дром", "auto.ru", "autoru", "вконтакте", "tg", "telegram"):
+    for _pfx in ("авито", "дром", "auto.ru", "autoru", "вконтакте", "юла", "youla", "yula", "tg", "telegram"):
         t = re.sub(rf'^\s*{re.escape(_pfx)}\s*', '', t)
     # Убираем скобочные пометки: "ВАЗ (LADA) 2114" → "ВАЗ 2114" (иначе не матчится с ВК)
     t = re.sub(r'\([^)]*\)', ' ', t)
@@ -802,6 +802,11 @@ def _car_group_key(title: str) -> str:
     }
     for _ru, _en in _BRAND_SYN.items():
         t = re.sub(rf'\b{_ru}\b', _en, t)
+    # В соцсетях часто пишут просто "2101", "2106", "2114" без ВАЗ/Лада.
+    # Без этого ключ становится "2101 доками" и рынок не находится.
+    _vaz_m = re.search(r'\b(210[1-9]|211[0-5]|21099|217[0-2]|219[0-4]|111[7-9]|2121|2131)\b', t)
+    if _vaz_m and not re.search(r'\b(ваз|vaz)\b', t):
+        t = f"ваз {_vaz_m.group(1)} {t}"
     # Схлопываем составные марки в одно слово, ЧТОБЫ модель (класс) не терялась
     # при обрезке до 2 слов: "mercedes-benz e 200" → "mercedes e 200" (E-класс
     # больше не смешивается с C-классом), "land rover discovery" → "landrover discovery".
@@ -1227,6 +1232,19 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
         
         return float(median(s2)) if len(s2) >= 2 else float(m)
 
+    def _market_key_text(it: dict) -> str:
+        """Текст для извлечения модели: у VK/TG/Юлы модель часто в описании."""
+        title = it.get("title", "") or ""
+        desc = it.get("description", "") or ""
+        source = (it.get("source", "") or "").lower()
+        title_key = _car_group_key(title)
+        weak_title = len(title_key.split()) < 2 or title.strip().lower() in {
+            "продам", "продажа", "продам авто", "продам машину", "обмен",
+        }
+        if source in ("vk", "tg", "tg_channel", "youla", "yula") or weak_title:
+            return f"{title} {desc[:260]}"
+        return title
+
     # Цены строго по модели И году: model -> {year -> [prices]}. Рынок считаем
     # ТОЛЬКО по той же модели в близких годах — никаких «все годы»/«вся марка»,
     # иначе 2001 Corolla сравнивается с 2018 и даёт фейковую «скидку».
@@ -1236,7 +1254,7 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
         p = it.get("_price_int", 0)
         if p <= 0:
             continue
-        key = _car_group_key(it.get("title", ""))
+        key = _car_group_key(_market_key_text(it))
         parts = key.rsplit(" ", 1)
         if len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 4:
             model, yr = parts[0], int(parts[1])
@@ -1292,7 +1310,7 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
 
     def _market_for_model(model: str, cand_p=None):
         prices = model_all.get(model, [])
-        if len(prices) >= 3:
+        if len(prices) >= 2:
             return _est_price(prices, "model", cand_p)
         return 0.0, "", 0
 
@@ -1302,7 +1320,7 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
         savings_pct = 0.0
 
         if p > 0:
-            key = _car_group_key(it.get("title", ""))
+            key = _car_group_key(_market_key_text(it))
             parts = key.rsplit(" ", 1)
             med = 0.0
             _lvl = ""
@@ -8329,6 +8347,12 @@ _NON_CAR_GOODS_KEYWORDS = (
     "телефон", "смартфон", "iphone", "айфон", "samsung", "ноутбук",
     "холодильник", "стиральн", "диван", "кровать", "шкаф",
 )
+_NON_CAR_GOODS_RE = re.compile(
+    r"(?<!маш)(?:\bшин(?:ы|а|у|ами|ах)?\b|\bрезин(?:а|у|ы|ой)?\b|"
+    r"\bпокрышк\w*\b|\bкол[её]с(?:а|о|ный|ные)?\b|"
+    r"\bдиск(?:и|ов)?\s*r?\d{0,2}\b|\bкомплект\s+(?:шин|резин|кол[её]с|диск))",
+    re.IGNORECASE,
+)
 
 
 def _is_non_car_goods(it: dict) -> bool:
@@ -8336,6 +8360,8 @@ def _is_non_car_goods(it: dict) -> bool:
     if not blob.strip():
         return False
     if any(k in blob for k in _NON_CAR_GOODS_KEYWORDS):
+        return True
+    if _NON_CAR_GOODS_RE.search(blob):
         return True
     return False
 
@@ -12442,20 +12468,19 @@ async def do_search_for_user(uid: int, reply_to):
         await reply_to.answer("😔 Не нашёл объявлений в твоём бюджете. Попробуй расширить диапазон цен: /settings")
         return
 
-    # Фильтр витрины: показываем объявления НИЖЕ РЫНКА + те, для кого рынок
-    # неизвестен (часто ВК/ТГ — не нашли аналог на Авито). Выкидываем ТОЛЬКО те,
-    # что ТОЧНО дороже рынка (есть _market_price и savings_pct<=0). Так пользователь
-    # видит все объявления выбранных площадок, а выгодные — первыми (сортировка).
+    # Фильтр витрины: показываем только объявления, где удалось посчитать рынок
+    # и скидка действительно сильная. Иначе в выдачу попадают карточки
+    # "мало похожих авто для точной оценки", что выглядит как отсутствие анализа.
     _below_count = 0
     if _avito_available:
         _below_count = sum(1 for i in suitable if _is_strong_below_market(i))
-        shown = [
-            i for i in suitable
-            if _is_strong_below_market(i) or not i.get("_market_price")
-        ]
-        print(f"  [фильтр] ниже рынка: {_below_count}, показываем (вкл. без рынка): {len(shown)} из {len(suitable)}")
+        shown = [i for i in suitable if _is_strong_below_market(i)]
+        print(f"  [фильтр] ниже рынка с анализом: {_below_count}, показываем: {len(shown)} из {len(suitable)}")
         if shown:
             suitable = shown
+        else:
+            await reply_to.answer("😔 Не нашёл авто ниже рынка с точной оценкой цены. Попробуй расширить бюджет или регион.")
+            return
     else:
         print(f"  [фильтр] Авито недоступен → показываем все {len(suitable)} в бюджете")
 
