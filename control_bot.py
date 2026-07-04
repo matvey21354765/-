@@ -10452,7 +10452,10 @@ _DROM_PLACEHOLDER_URLS = ["drom.ru/img/app", "/placeholder", "mascot", "no-photo
 # Маркеры снятого объявления в HTML/JSON страницы
 _SOLD_MARKERS = [
     "снят с продажи", "снято с продажи", "объявление снято",
+    "автомобиль снят с продажи", "показать только актуальные объявления",
+    "мы показываем такие объявления, чтобы вам было проще ориентироваться",
     "объявление не найдено", "объявление недоступно", "объявление удалено",
+    "снят с публикации", "архивное объявление", "продано или снято",
     '"isSold":true', '"sold":true', '"status":"sold"', '"status":"inactive"',
     '"isArchived":true', 'bulletin-sold', 'data-bulletin-status="sold"',
     "listing not found", "offer not found",
@@ -10489,6 +10492,19 @@ def _fetch_and_check(url: str, source: str) -> dict | None:
                 r = _cffi.get(url, impersonate="chrome124", timeout=12, headers=_headers)
             except Exception:
                 pass
+        elif source == "drom":
+            try:
+                import cloudscraper as _cs
+                _scraper = _cs.create_scraper()
+                r = _scraper.get(url, timeout=12, headers=_headers)
+            except Exception:
+                r = None
+            if r is None:
+                try:
+                    from curl_cffi import requests as _cffi
+                    r = _cffi.get(url, impersonate="chrome124", timeout=12, headers=_headers)
+                except Exception:
+                    pass
         if r is None:
             r = _req.get(url, headers=_headers, timeout=12, allow_redirects=True)
         if r.status_code in (404, 410):
@@ -10636,6 +10652,7 @@ async def enrich_and_filter(items: list[dict], max_check: int = 25) -> list[dict
         if details is None:
             continue  # снято
         item["_enriched"] = True
+        item["_sale_status_checked"] = True
         if details.get("_photo_url"):
             item["_photo_url"] = details["_photo_url"]
         if details.get("description"):
@@ -11470,16 +11487,20 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         url = item.get("url", "")
         source = item.get("source", "")
         needs_avito_ai_check = source == "avito" and not item.get("_avito_page_checked")
+        needs_sale_status_check = source in ("avito", "drom", "autoru") and not item.get("_sale_status_checked")
         # Если нет описания или это Авито — догружаем страницу перед показом карточки.
-        if url and (not item.get("description") or needs_avito_ai_check):
+        if url and (needs_sale_status_check or not item.get("description") or needs_avito_ai_check):
             try:
                 loop_s = asyncio.get_running_loop()
+                check_timeout = 12 if source == "drom" else (8 if needs_avito_ai_check else 6)
                 details = await asyncio.wait_for(
                     loop_s.run_in_executor(None, _fetch_and_check, url, source),
-                    timeout=8 if needs_avito_ai_check else 6
+                    timeout=check_timeout
                 )
                 if details is None:
                     return  # продано — пропускаем
+                if needs_sale_status_check:
+                    item["_sale_status_checked"] = True
                 if needs_avito_ai_check:
                     item["_avito_page_checked"] = True
                 if details.get("description"):
@@ -12309,6 +12330,7 @@ async def do_search_for_user(uid: int, reply_to):
                 if details is None:
                     return None  # снято с продажи (Дром/Авито/Авто.ру)
                 it["_enriched"] = True
+                it["_sale_status_checked"] = True
                 # Фото обновляем только если у объявления его нет (не перезаписываем хорошее)
                 if details.get("_photo_url") and not it.get("_photo_url"):
                     it["_photo_url"] = details["_photo_url"]
