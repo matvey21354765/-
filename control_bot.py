@@ -10543,6 +10543,13 @@ _SOLD_MARKERS = [
     "listing not found", "offer not found",
 ]
 
+_DROM_SOLD_RE = re.compile(
+    r"(?:автомобиль|объявление)\s+снят[о]?\s+с\s+продажи|"
+    r"показать\s+только\s+актуальные\s+объявления|"
+    r"мы\s+показываем\s+такие\s+объявления.{0,120}ориентироваться",
+    re.IGNORECASE | re.S,
+)
+
 _FETCH_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Accept-Language": "ru-RU,ru;q=0.9",
@@ -10597,8 +10604,18 @@ def _fetch_and_check(url: str, source: str) -> dict | None:
         text_lower = text.lower()
         if any(m.lower() in text_lower for m in _SOLD_MARKERS):
             return None
+        page_text = re.sub(r"\s+", " ", text_lower)
+        if source == "drom" and _DROM_SOLD_RE.search(page_text):
+            return None
 
         soup = _BS(text, "lxml")
+        visible_text = soup.get_text("\n", strip=True)
+        visible_lower = re.sub(r"\s+", " ", visible_text.lower())
+        if any(m.lower() in visible_lower for m in _SOLD_MARKERS):
+            return None
+        if source == "drom" and _DROM_SOLD_RE.search(visible_lower):
+            return None
+
         avito_ai_market = 0
         if source == "avito":
             avito_ai_market = _avito_ai_estimate_from_text(
@@ -10721,7 +10738,13 @@ def _fetch_and_check(url: str, source: str) -> dict | None:
             details["_drom_market"] = drom_market
         return details
     except Exception:
-        return {}  # Ошибка сети — считаем активным, без деталей
+        # Для площадок, где мы явно проверяем актуальность перед отправкой,
+        # ошибка проверки не должна пропускать снятое объявление пользователю.
+        # Но это не то же самое, что "снято": статистика исчезнувших авто не
+        # должна срабатывать от сетевого сбоя.
+        if source in ("drom", "avito", "autoru"):
+            return {"_check_failed": True}
+        return {}
 
 
 async def enrich_and_filter(items: list[dict], max_check: int = 25) -> list[dict]:
@@ -10740,6 +10763,8 @@ async def enrich_and_filter(items: list[dict], max_check: int = 25) -> list[dict
     for item, details in zip(to_check, results):
         if details is None:
             continue  # снято
+        if details.get("_check_failed"):
+            continue  # не смогли подтвердить актуальность
         item["_enriched"] = True
         item["_sale_status_checked"] = True
         if details.get("_photo_url"):
@@ -11604,6 +11629,8 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                 )
                 if details is None:
                     return  # продано — пропускаем
+                if details.get("_check_failed"):
+                    return  # не смогли подтвердить актуальность
                 if needs_sale_status_check:
                     item["_sale_status_checked"] = True
                 if needs_avito_ai_check:
@@ -12428,6 +12455,8 @@ async def do_search_for_user(uid: int, reply_to):
                 )
                 if details is None:
                     return None  # снято с продажи (Дром/Авито/Авто.ру)
+                if details.get("_check_failed"):
+                    return None  # не смогли подтвердить актуальность
                 it["_enriched"] = True
                 it["_sale_status_checked"] = True
                 # Фото обновляем только если у объявления его нет (не перезаписываем хорошее)
@@ -12441,7 +12470,9 @@ async def do_search_for_user(uid: int, reply_to):
                     _apply_page_market(it, int(details["_drom_market"]), "drom")
                 return it
             except Exception:
-                return it  # при ошибке сети — оставляем объявление
+                if source in ("avito", "drom", "autoru"):
+                    return None
+                return it  # VK/TG не проверяем по странице
 
     try:
         checked = await asyncio.wait_for(
@@ -12449,7 +12480,10 @@ async def do_search_for_user(uid: int, reply_to):
             timeout=SEARCH_DETAIL_TOTAL_TIMEOUT_SEC
         ) if check_batch else []
     except asyncio.TimeoutError:
-        checked = check_batch  # при таймауте — не удаляем объявления
+        checked = [
+            it for it in check_batch
+            if it.get("source") not in ("avito", "drom", "autoru")
+        ]
 
     active = [it for it in checked if it is not None]
     sold_count = len(check_batch) - len(active)
