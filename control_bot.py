@@ -13192,13 +13192,182 @@ async def _discount_hunt_loop():
             if dt.hour >= DISCOUNT_HUNT_SEND_HOUR_MSK and last_sent != today:
                 top = await _discount_hunt_detect_removed(limit=100)
                 if top:
-                    await _discount_hunt_broadcast(top)
+                    # Отдельную ежедневную рассылку делает marketing scheduler,
+                    # здесь только отмечаем, что данные готовы.
                     _kv_set(_DISCOUNT_HUNT_LAST_SENT_KV, today)
                 elif dt.hour >= DISCOUNT_HUNT_SEND_HOUR_MSK + 2:
                     _kv_set(_DISCOUNT_HUNT_LAST_SENT_KV, today)
         except Exception as e:
             print(f"  [охота] loop error: {str(e)[:100]}")
         await asyncio.sleep(600)
+
+
+# ── Маркетинговые рассылки PerekupDrive: максимум 1 массовая в день ─────────
+MARKETING_BROADCAST_ENABLED = os.getenv("MARKETING_BROADCAST_ENABLED", "1").lower() not in ("0", "false", "no")
+MARKETING_MORNING_START_HOUR = _env_int("MARKETING_MORNING_START_HOUR", 8, 0)
+MARKETING_MORNING_END_HOUR = _env_int("MARKETING_MORNING_END_HOUR", 9, 0)
+_MARKETING_LAST_MASS_KV = "marketing_last_mass_date"
+
+
+def _marketing_stats() -> dict:
+    data = _discount_hunt_load()
+    now = time.time()
+    recent = [
+        rec for rec in data.values()
+        if now - float(rec.get("first_seen_ts", now)) <= 24 * 3600
+        and int(rec.get("market") or 0) > int(rec.get("price") or 0) > 0
+    ]
+    available = [rec for rec in recent if not rec.get("removed_ts")]
+    sold = [
+        rec for rec in data.values()
+        if rec.get("removed_ts")
+        and now - float(rec.get("removed_ts", now)) <= 24 * 3600
+    ]
+    savings = [int(rec.get("market") or 0) - int(rec.get("price") or 0) for rec in recent]
+    discounts = [float(rec.get("savings_pct") or 0) for rec in recent]
+    lifetimes = [
+        float(rec.get("removed_ts", 0)) - float(rec.get("first_seen_ts", 0))
+        for rec in sold
+        if rec.get("removed_ts") and rec.get("first_seen_ts")
+    ]
+    best = None
+    if available:
+        best = max(available, key=lambda rec: (float(rec.get("savings_pct") or 0), int(rec.get("market") or 0) - int(rec.get("price") or 0)))
+    return {
+        "cars_count": len(recent),
+        "available_count": len(available),
+        "sold_count": len(sold),
+        "total_saving": sum(max(0, x) for x in savings),
+        "max_saving": max([0] + savings),
+        "max_discount": round(max([0.0] + discounts), 1),
+        "avg_discount": round(sum(discounts) / len(discounts), 1) if discounts else 0,
+        "avg_lifetime": (sum(lifetimes) / len(lifetimes)) if lifetimes else 0,
+        "best": best,
+    }
+
+
+def _hours_label(seconds: float) -> str:
+    hours = max(1, round(seconds / 3600))
+    word = "час" if hours % 10 == 1 and hours % 100 != 11 else ("часа" if 2 <= hours % 10 <= 4 and not 12 <= hours % 100 <= 14 else "часов")
+    return f"{hours} {word}"
+
+
+def _marketing_keyboard(text: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=text, callback_data="start_search")
+    ]])
+
+
+def _marketing_mass_sent_today(today: str) -> bool:
+    return (_kv_get(_MARKETING_LAST_MASS_KV) or "") == today
+
+
+def _marketing_mark_mass_sent(today: str) -> None:
+    _kv_set(_MARKETING_LAST_MASS_KV, today)
+
+
+def _marketing_morning_message(stats: dict) -> tuple[str, str]:
+    cars = stats["cars_count"]
+    available = stats["available_count"]
+    max_saving = _fmt_n(stats["max_saving"])
+    max_discount = stats["max_discount"]
+    total_saving = _fmt_n(stats["total_saving"])
+    if cars >= 30:
+        return (
+            "🔥 Сегодня жирный день.\n\n"
+            f"За 24 часа найдено {cars} авто ниже рынка.\n\n"
+            f"💰 Общая потенциальная экономия: {total_saving} ₽\n"
+            f"🚗 Сейчас ещё доступны: {available}\n\n"
+            "Я бы посмотрел прямо сейчас 👇",
+            "⚡ Смотреть сейчас",
+        )
+    if cars < 5:
+        return (
+            f"Сегодня рынок тихий, но мы всё равно нашли {cars} интересных авто.\n\n"
+            f"💰 Лучшая экономия: {max_saving} ₽\n"
+            f"🚗 Доступно сейчас: {available}\n\n"
+            "Проверьте, вдруг среди них ваша сделка 👇",
+            "🔍 Смотреть находки",
+        )
+    return (
+        f"🔥 Пока вы спали, PerekupDrive нашёл {cars} авто ниже рынка.\n\n"
+        f"💰 Максимальная экономия: {max_saving} ₽\n"
+        f"📉 Самая большая скидка: {max_discount}%\n"
+        f"🚗 Сейчас доступны: {available} объявлений\n\n"
+        "Лучшие варианты долго не висят 👇",
+        "🚗 Открыть подборку",
+    )
+
+
+def _marketing_fomo_message(stats: dict) -> tuple[str, str] | None:
+    if stats["sold_count"] <= 0:
+        return None
+    avg = _hours_label(stats["avg_lifetime"] or 3 * 3600)
+    return (
+        f"⚠️ {stats['sold_count']} выгодных авто уже исчезли за последние сутки.\n\n"
+        f"Среднее время жизни хорошего объявления: {avg}\n\n"
+        f"Сейчас доступны ещё {stats['available_count']} вариантов ниже рынка.\n\n"
+        "Кто быстрее открыл — тот забрал 👇",
+        "🚨 Не упустить",
+    )
+
+
+def _marketing_weekly_message(stats: dict) -> tuple[str, str]:
+    return (
+        "📊 Итоги недели в PerekupDrive\n\n"
+        f"🚗 Найдено авто ниже рынка: {stats['cars_count']}\n"
+        f"💰 Общая потенциальная экономия: {_fmt_n(stats['total_saving'])} ₽\n"
+        f"📉 Средняя скидка: {stats['avg_discount']}%\n"
+        f"🔥 Самая большая экономия: {_fmt_n(stats['max_saving'])} ₽\n\n"
+        "На следующей неделе хорошие варианты тоже уйдут быстро.",
+        "🚗 Смотреть свежие авто",
+    )
+
+
+async def _marketing_send_all(text: str, button_text: str) -> None:
+    sent = failed = 0
+    kb = _marketing_keyboard(button_text)
+    for uid in _all_user_ids():
+        try:
+            await bot.send_message(uid, text, reply_markup=kb)
+            sent += 1
+        except Exception:
+            failed += 1
+        await asyncio.sleep(0.05)
+    print(f"  [marketing] broadcast sent={sent}, failed={failed}")
+
+
+async def _marketing_broadcast_loop():
+    if not MARKETING_BROADCAST_ENABLED:
+        print("  [marketing] выключен MARKETING_BROADCAST_ENABLED=0")
+        return
+    print("  [marketing] планировщик рассылок запущен")
+    await asyncio.sleep(240)
+    while True:
+        try:
+            dt = datetime.datetime.now(_MSK)
+            today = dt.date().isoformat()
+            in_morning = (
+                (dt.hour == MARKETING_MORNING_START_HOUR and dt.minute >= 30)
+                or (MARKETING_MORNING_START_HOUR < dt.hour <= MARKETING_MORNING_END_HOUR)
+            )
+            if in_morning and not _marketing_mass_sent_today(today):
+                stats = _marketing_stats()
+                if stats["cars_count"] <= 0:
+                    await asyncio.sleep(300)
+                    continue
+                if dt.weekday() == 6 and stats["cars_count"] > 0:
+                    text, button = _marketing_weekly_message(stats)
+                elif dt.weekday() in (1, 3, 5) and stats["sold_count"] > 0:
+                    fomo = _marketing_fomo_message(stats)
+                    text, button = fomo if fomo else _marketing_morning_message(stats)
+                else:
+                    text, button = _marketing_morning_message(stats)
+                await _marketing_send_all(text, button)
+                _marketing_mark_mass_sent(today)
+        except Exception as e:
+            print(f"  [marketing] loop error: {str(e)[:100]}")
+        await asyncio.sleep(300)
 
 
 # ── Push-уведомления — раз в 2-3 дня ─────────────────────────────
@@ -13944,11 +14113,10 @@ async def main():
     # Единый глобальный монитор — опрашивает всех активных пользователей каждые 2 минуты
     loop.create_task(_global_monitor_loop())
     print(f"  [монитор] глобальный цикл запущен (интервал {GLOBAL_POLL_SEC}с)")
-    # Push-уведомления — раз в 2-3 дня всем пользователям
-    loop.create_task(_push_notification_loop())
-    print("  [push] цикл уведомлений запущен (интервал ~2.5 дня)")
     loop.create_task(_discount_hunt_loop())
-    print("  [охота] ежедневная рассылка скидок запущена")
+    print("  [охота] сборщик скидок запущен")
+    loop.create_task(_marketing_broadcast_loop())
+    print("  [marketing] единый планировщик массовых рассылок запущен")
     loop.create_task(_admin_report_scheduler())
     print("  [admin] планировщик отчётов запущен (09:00 МСК)")
     loop.create_task(_analytics_persist_loop())
