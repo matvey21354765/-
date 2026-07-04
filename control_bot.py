@@ -862,6 +862,8 @@ MARKET_DEAL_MIN_PCT = 10.0
 def _is_strong_below_market(it: dict) -> bool:
     """True только для сильного сигнала ниже рынка, а не для погрешности медианы."""
     pct = it.get("_savings_pct", 0) or 0
+    if it.get("_market_lvl") == "model" and pct < 20:
+        return False
     if pct >= MARKET_DEAL_MIN_PCT:
         return True
     if it.get("_market_price") and pct <= 0:
@@ -1228,6 +1230,7 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
     # ТОЛЬКО по той же модели в близких годах — никаких «все годы»/«вся марка»,
     # иначе 2001 Corolla сравнивается с 2018 и даёт фейковую «скидку».
     model_year: dict[str, dict] = {}
+    model_all: dict[str, list] = {}
     for it in all_for_median:
         p = it.get("_price_int", 0)
         if p <= 0:
@@ -1238,6 +1241,7 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
             model, yr = parts[0], int(parts[1])
             if model:
                 model_year.setdefault(model, {}).setdefault(yr, []).append(p)
+                model_all.setdefault(model, []).append(p)
 
     def _est_price(prices: list, lvl: str, cand_p):
         """Медиана цен той же модели/года с отсечением выбросов. Leave-one-out:
@@ -1285,6 +1289,12 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
         
         return 0.0, "", 0
 
+    def _market_for_model(model: str, cand_p=None):
+        prices = model_all.get(model, [])
+        if len(prices) >= 3:
+            return _est_price(prices, "model", cand_p)
+        return 0.0, "", 0
+
     for it in items:
         p = it.get("_price_int", 0)
         deal_score = 0.0
@@ -1303,6 +1313,8 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
                 med, _lvl, _n = float(_avm), "avito", 30
             elif len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 4:
                 med, _lvl, _n = _market_for(parts[0], int(parts[1]), p)
+                if med <= 0:
+                    med, _lvl, _n = _market_for_model(parts[0], p)
             if med > 0:
                 if _lvl != "avito":
                     _mileage_factor = _market_mileage_factor(it)
@@ -1325,6 +1337,8 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
                     _cap = 80
                 elif _lvl == "medium":
                     _cap = 75
+                elif _lvl == "model":
+                    _cap = 55
                 else:  # "wide"
                     _cap = 70
                 
@@ -1347,6 +1361,8 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
                     deal_score += savings_pct * 3.5  # ±2 года
                 elif _lvl == "medium":
                     deal_score += savings_pct * 3.0  # ±3 года
+                elif _lvl == "model":
+                    deal_score += savings_pct * 1.5
                 else:  # "wide"
                     deal_score += savings_pct * 2.5  # ↓ ±5 лет — грубо, вес ниже
 
@@ -11516,6 +11532,8 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         if market and _pi:
             saving = market - _pi
             market_note = " с учётом пробега" if item.get("_market_mileage_factor") else ""
+            if item.get("_market_lvl") == "model":
+                market_note = " грубо" + market_note
             if pct > 0:
                 # Дешевле рынка
                 price_line += f"  🔻 рынок{market_note} ~{market:,} ₽ (-{pct}%)".replace(",", " ")
@@ -12163,7 +12181,7 @@ async def do_search_for_user(uid: int, reply_to):
             it["_already_seen"] = True
 
     _ref_items = [i for i in items if i.get("_market_ref_only")]
-    _avito_available = len(_ref_items) >= 5  # True даже если эталон — Дром/Auto.ru
+    _avito_available = bool(_ref_items)  # True даже если эталон — Дром/Auto.ru
     if _avito_available:
         _n_av_ref = sum(1 for i in _ref_items if i.get("source") == "avito")
         _ref_src = "Авито" if _n_av_ref >= 5 else "Дром+Auto.ru"
