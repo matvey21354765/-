@@ -449,9 +449,9 @@ SEARCH_SOURCE_TIMEOUT_SEC = _env_int("SEARCH_SOURCE_TIMEOUT_SEC", 35)
 SEARCH_AUTORU_DEADLINE_SEC = _env_int("SEARCH_AUTORU_DEADLINE_SEC", 24)
 SEARCH_PRICE_FILL_LIMIT = _env_int("SEARCH_PRICE_FILL_LIMIT", 3, 0)
 SEARCH_PRICE_FILL_TIMEOUT_SEC = _env_int("SEARCH_PRICE_FILL_TIMEOUT_SEC", 4)
-SEARCH_DETAIL_CHECK_LIMIT = _env_int("SEARCH_DETAIL_CHECK_LIMIT", 8, 0)
+SEARCH_DETAIL_CHECK_LIMIT = _env_int("SEARCH_DETAIL_CHECK_LIMIT", 20, 0)
 SEARCH_DETAIL_CHECK_TIMEOUT_SEC = _env_int("SEARCH_DETAIL_CHECK_TIMEOUT_SEC", 5)
-SEARCH_DETAIL_TOTAL_TIMEOUT_SEC = _env_int("SEARCH_DETAIL_TOTAL_TIMEOUT_SEC", 12)
+SEARCH_DETAIL_TOTAL_TIMEOUT_SEC = _env_int("SEARCH_DETAIL_TOTAL_TIMEOUT_SEC", 20)
 _last_search_at: dict[int, float] = {}
 
 # Мониторинг новых объявлений
@@ -1322,10 +1322,14 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
             med = 0.0
             _lvl = ""
             _n = 0
-            # ПРИОРИТЕТ: собственная рыночная оценка Авито (если её удалось достать)
-            # — она точнее нашей медианы. Иначе считаем по той же модели/году.
+            # Приоритет источника: для Дром-объявления берём оценку Дрома с
+            # самой страницы; для Авито — оценку Авито; дальше fallback к
+            # Авито-медиане по похожим объявлениям.
             _avm = it.get("_avito_market", 0) or 0
-            if _avm and 30_000 < _avm < 50_000_000:
+            _drm = it.get("_drom_market", 0) or 0
+            if it.get("source") == "drom" and _drm and 30_000 < _drm < 50_000_000:
+                med, _lvl, _n = float(_drm), "drom", 30
+            elif _avm and 30_000 < _avm < 50_000_000:
                 med, _lvl, _n = float(_avm), "avito", 30
             elif len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 4:
                 med, _lvl, _n = _market_for(parts[0], int(parts[1]), p)
@@ -1347,7 +1351,7 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
                 # Для "medium" (±3 года) — 75%.
                 # Для "wide" (±5 лет, грубая оценка) — 70%.
                 # Для Авито собственной оценки — 85% (высокая точность).
-                if _lvl in ("avito", "drom"):
+                if _lvl.startswith(("avito", "drom")):
                     _cap = 85
                 elif _lvl == "near":
                     _cap = 85
@@ -1371,7 +1375,7 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
                 it["_market_lvl"] = _lvl
 
                 # Скидка — главный фактор, но вес зависит от уровня точности
-                if _lvl in ("avito", "drom"):
+                if _lvl.startswith(("avito", "drom")):
                     deal_score += savings_pct * 4.5  # ↑ было 3.0, Авито самая точная
                 elif _lvl == "near":
                     deal_score += savings_pct * 4.0  # ↑ было 3.0, ±1 год — точно
@@ -4640,10 +4644,10 @@ def _apply_page_market(item: dict, market: int, lvl: str) -> None:
     if not price or not market or not (30_000 < market < 50_000_000):
         return
     item[f"_{lvl}_market"] = market
-    if lvl != "avito":
+    if lvl not in ("avito", "drom"):
         return
     item["_market_price"] = market
-    item["_market_lvl"] = f"{lvl}_page"
+    item["_market_lvl"] = lvl
     item["_market_n"] = 30
     item.pop("_market_mileage_factor", None)
     item["_savings_pct"] = round((1 - price / market) * 100, 1)
@@ -11695,7 +11699,11 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         if market and _pi:
             saving = market - _pi
             market_note = " с учётом пробега" if item.get("_market_mileage_factor") else ""
-            if item.get("_market_lvl") == "model":
+            if item.get("_market_lvl") == "drom":
+                market_note = " Дром" + market_note
+            elif item.get("_market_lvl") == "avito":
+                market_note = " Авито" + market_note
+            elif item.get("_market_lvl") == "model":
                 market_note = " грубо" + market_note
             if pct > 0:
                 # Дешевле рынка
@@ -12458,9 +12466,10 @@ async def do_search_for_user(uid: int, reply_to):
             return it
         async with sem_pre:
             try:
+                check_timeout = 12 if source == "drom" else SEARCH_DETAIL_CHECK_TIMEOUT_SEC
                 details = await asyncio.wait_for(
                     loop_pre.run_in_executor(None, _fetch_and_check, it["url"], source),
-                    timeout=SEARCH_DETAIL_CHECK_TIMEOUT_SEC
+                    timeout=check_timeout
                 )
                 if details is None:
                     return None  # снято с продажи (Дром/Авито/Авто.ру)
@@ -12499,6 +12508,7 @@ async def do_search_for_user(uid: int, reply_to):
     if sold_count:
         print(f"  [фильтр] убрано {sold_count} проданных объявлений из первых {len(check_batch)}")
     suitable = active + rest_batch
+    suitable = _sort_by_deal(suitable)
 
     # После загрузки цен — выкидываем только те, у кого цена ИЗВЕСТНА и вышла за бюджет.
     # Объявления без цены (_price_int=0) — оставляем: пользователь откроет ссылку и проверит.
@@ -12517,12 +12527,27 @@ async def do_search_for_user(uid: int, reply_to):
     _below_count = 0
     _showing_best_market = False
     _showing_without_market = False
-    if _avito_available:
+    _added_best_market_count = 0
+    _market_available = _avito_available or any(i.get("_market_price") for i in suitable)
+    if _market_available:
         _below_count = sum(1 for i in suitable if _is_strong_below_market(i))
         shown = [i for i in suitable if _is_strong_below_market(i)]
         print(f"  [фильтр] ниже рынка с анализом: {_below_count}, показываем: {len(shown)} из {len(suitable)}")
         if shown:
-            suitable = shown
+            shown_urls = {_norm_url(i.get("url", "")) for i in shown}
+            market_extra = [
+                i for i in suitable
+                if _norm_url(i.get("url", "")) not in shown_urls
+                and i.get("_market_price") and i.get("_price_int")
+            ]
+            budget_extra = [
+                i for i in suitable
+                if _norm_url(i.get("url", "")) not in shown_urls
+                and not (i.get("_market_price") and i.get("_price_int"))
+            ]
+            extra = (market_extra + budget_extra)[:max(0, 30 - len(shown))]
+            _added_best_market_count = len(extra)
+            suitable = shown + extra
         else:
             market_ranked = [i for i in suitable if i.get("_market_price") and i.get("_price_int")]
             if market_ranked:
@@ -12534,8 +12559,8 @@ async def do_search_for_user(uid: int, reply_to):
                 _showing_without_market = True
                 print(f"  [фильтр] точных оценок нет → показываем {len(suitable)} лучших в бюджете")
     else:
-        print("  [фильтр] нет Авито-эталона → не показываем выдачу без проверки рынка")
-        await reply_to.answer("😔 Сейчас не смог получить рынок Авито для сравнения. Попробуй повторить поиск чуть позже.")
+        print("  [фильтр] нет рыночной оценки → не показываем выдачу без анализа")
+        await reply_to.answer("😔 Сейчас не смог получить рыночную оценку для сравнения. Попробуй повторить поиск чуть позже.")
         return
 
     _search_cache[uid] = suitable
@@ -12553,7 +12578,7 @@ async def do_search_for_user(uid: int, reply_to):
     src_found = list(dict.fromkeys(i.get("source","") for i in suitable if i.get("source")))
     src_icons = {"avito":"🟠","drom":"🔵","autoru":"🔴","vk":"💙","tg":"✈️"}
     src_str = " ".join(src_icons.get(s,"") for s in src_found if s)
-    if _avito_available:
+    if _market_available:
         _extra = len(suitable) - _below_count
         if _showing_best_market:
             _msg = (
@@ -12567,7 +12592,9 @@ async def do_search_for_user(uid: int, reply_to):
             )
         else:
             _msg = f"✅ {src_str} Найдено {_below_count} объявлений реально ниже рынка (≥{MARKET_DEAL_MIN_PCT:.0f}%)!"
-        if _extra > 0 and not (_showing_best_market or _showing_without_market):
+            if _added_best_market_count:
+                _msg += f"\n➕ Добавил ещё {_added_best_market_count} лучших вариантов с анализом рынка."
+        if _extra > 0 and not (_showing_best_market or _showing_without_market or _added_best_market_count):
             _msg += f"\n➕ Ещё {_extra} в бюджете без сильной скидки или без точной оценки — ниже в списке."
     else:
         _msg = f"✅ {src_str} Найдено {len(suitable)} объявлений в бюджете!\n⚠️ Авито недоступен — сравнение с рынком отключено"
