@@ -1578,8 +1578,10 @@ def scrape_drom(region: str, pages: int = 15, price_min: int = 0, price_max: int
     results = []
     today = datetime.date.today()
 
-    # Используем субдомен города — Дром автоматически показывает всю область
+    # Пробуем несколько маршрутов Дрома: на Railway городской субдомен иногда
+    # отдаёт пустую/защитную страницу, а auto.drom.ru/<city>/ продолжает работать.
     base = f"https://{region}.drom.ru"
+    base_auto = "https://auto.drom.ru"
     # Марка: Дром использует путь /lada/all/ вместо /auto/all/
     _brand_l = (brand or "").strip().lower()
     _DROM_SLUG = {"mercedes": "mercedes-benz", "land rover": "land_rover", "alfa": "alfa_romeo"}
@@ -1594,17 +1596,35 @@ def scrape_drom(region: str, pages: int = 15, price_min: int = 0, price_max: int
 
     def _fetch_drom_html(p: int) -> str:
         """Скачивает HTML страницы Дрома (с прокси-фолбэком). Для параллельной загрузки."""
-        url = f"{base}/{_drom_seg}/all/" if p == 1 else f"{base}/{_drom_seg}/all/page{p}/"
+        city_url = f"{base}/{_drom_seg}/all/" if p == 1 else f"{base}/{_drom_seg}/all/page{p}/"
+        auto_city_url = f"{base_auto}/{region}/{_drom_seg}/all/" if p == 1 else f"{base_auto}/{region}/{_drom_seg}/all/page{p}/"
+        geo_url = f"{base_auto}/{_drom_seg}/all/" if p == 1 else f"{base_auto}/{_drom_seg}/all/page{p}/"
+        candidates = [(city_url, dict(_drom_params)), (auto_city_url, dict(_drom_params))]
+        if DROM_GEO.get(region):
+            _geo_params = dict(_drom_params)
+            _geo_params["geo"] = DROM_GEO[region]
+            candidates.append((geo_url, _geo_params))
+        best_html = ""
         try:
-            r = session.get(url, params=_drom_params, timeout=12)
-            html = r.text
-            if "bulls-list_bull" not in html and _drom_proxies:
+            for url, params in candidates:
+                r = session.get(url, params=params, timeout=7)
+                html = r.text
+                if len(html) > len(best_html):
+                    best_html = html
+                if "bulls-list_bull" in html or "data-ftid=\"bull_title\"" in html:
+                    return html
+            if _drom_proxies:
                 import requests as _rq_d
-                _r2 = _rq_d.get(url, params=_drom_params, timeout=12, proxies=_drom_proxies,
-                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                             "Accept-Language": "ru-RU,ru;q=0.9"})
-                html = _r2.text
-            return html
+                for url, params in candidates:
+                    _r2 = _rq_d.get(url, params=params, timeout=7, proxies=_drom_proxies,
+                        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                                 "Accept-Language": "ru-RU,ru;q=0.9"})
+                    html = _r2.text
+                    if len(html) > len(best_html):
+                        best_html = html
+                    if "bulls-list_bull" in html or "data-ftid=\"bull_title\"" in html:
+                        return html
+            return best_html
         except Exception as e:
             print(f"  [Дром {region}] стр.{p}: {str(e)[:50]}")
             return ""
@@ -10271,7 +10291,7 @@ async def cmd_global_search(msg: Message):
 
     # Запускаем все источники + TG-каналы параллельно
     scraper_map = {
-        "drom":   lambda: scrape_drom(region, pages=15, price_min=pmin, price_max=pmax, brand=_br),
+        "drom":   lambda: scrape_drom(region, pages=6, price_min=pmin, price_max=pmax, brand=_br),
         "autoru": lambda: scrape_autoru(region, pages=6, price_min=pmin, price_max=pmax, brand=_br),
         "avito":  lambda: scrape_avito(region, pages=12, price_min=pmin, price_max=pmax, sort_by_date=False),
         "youla":  lambda: scrape_youla(region, pages=8, price_min=pmin, price_max=pmax, brand=_br),
@@ -11952,7 +11972,7 @@ async def do_search_for_user(uid: int, reply_to):
     loop = asyncio.get_running_loop()
 
     scraper_map = {
-        "drom":   lambda: scrape_drom(region, pages=8, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
+        "drom":   lambda: scrape_drom(region, pages=4, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
         "autoru": lambda: scrape_autoru(region, pages=6, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
         "avito":  lambda: scrape_avito(region, pages=9, price_min=pmin, price_max=pmax, sort_by_date=False, brand=(brand if brand and brand != "any" else "")),
         "youla":  lambda: scrape_youla(region, pages=8, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
@@ -12069,7 +12089,7 @@ async def do_search_for_user(uid: int, reply_to):
             print(f"  [fallback] в бюджете {pmin}-{pmax}₽ на Авито пусто — добавляем Дром")
             try:
                 drom_fallback = await loop.run_in_executor(
-                    None, lambda: scrape_drom(region, pages=10, price_min=pmin, price_max=pmax)
+                    None, lambda: scrape_drom(region, pages=4, price_min=pmin, price_max=pmax)
                 )
                 if drom_fallback:
                     items.extend(drom_fallback)
