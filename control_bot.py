@@ -12,6 +12,7 @@ import time
 import datetime
 import subprocess
 import hashlib
+import html
 from pathlib import Path
 import os
 
@@ -12948,6 +12949,258 @@ async def _monitor_loop(uid: int):
         await asyncio.sleep(3600)
 
 
+# ── "Охота за скидками": ежедневный FOMO-топ исчезнувших авто ───────────────
+DISCOUNT_HUNT_ENABLED = os.getenv("DISCOUNT_HUNT_ENABLED", "1").lower() not in ("0", "false", "no")
+DISCOUNT_HUNT_REGIONS = [
+    r.strip() for r in os.getenv(
+        "DISCOUNT_HUNT_REGIONS",
+        "moscow,spb,ekaterinburg,krasnodar,krasnoyarsk,novosibirsk",
+    ).split(",") if r.strip()
+]
+DISCOUNT_HUNT_SOURCES = [
+    s.strip() for s in os.getenv("DISCOUNT_HUNT_SOURCES", "avito,drom,autoru").split(",") if s.strip()
+]
+DISCOUNT_HUNT_SCAN_SEC = _env_int("DISCOUNT_HUNT_SCAN_SEC", 3600, 600)
+DISCOUNT_HUNT_SEND_HOUR_MSK = _env_int("DISCOUNT_HUNT_SEND_HOUR_MSK", 11, 0)
+_DISCOUNT_HUNT_KV = "discount_hunt_items_v1"
+_DISCOUNT_HUNT_LAST_SENT_KV = "discount_hunt_last_sent_date"
+
+
+def _discount_hunt_load() -> dict:
+    raw = _kv_get(_DISCOUNT_HUNT_KV)
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _discount_hunt_save(data: dict) -> None:
+    try:
+        now = time.time()
+        pruned = {
+            k: v for k, v in data.items()
+            if now - float(v.get("first_seen_ts", now)) <= 4 * 24 * 3600
+            or (v.get("removed_ts") and not v.get("sent"))
+        }
+        if len(pruned) > 1200:
+            ordered = sorted(pruned.items(), key=lambda kv: kv[1].get("first_seen_ts", 0), reverse=True)
+            pruned = dict(ordered[:1200])
+        _kv_set(_DISCOUNT_HUNT_KV, json.dumps(pruned, ensure_ascii=False))
+    except Exception as e:
+        print(f"  [охота] save error: {str(e)[:80]}")
+
+
+def _discount_hunt_track(items: list[dict], region: str = "") -> None:
+    if not items:
+        return
+    data = _discount_hunt_load()
+    now = time.time()
+    added = 0
+    for it in items:
+        url = _norm_url(it.get("url", ""))
+        price = int(it.get("_price_int") or 0)
+        market = int(it.get("_market_price") or 0)
+        pct = float(it.get("_savings_pct") or 0)
+        if not url or price <= 0 or market <= 0 or pct < 10:
+            continue
+        if is_dealer(it) or is_not_running(it) or it.get("_is_junk"):
+            continue
+        rec = data.get(url)
+        if rec and rec.get("sent"):
+            continue
+        payload = {
+            "url": url,
+            "title": it.get("title", ""),
+            "price": price,
+            "market": market,
+            "savings_pct": pct,
+            "source": it.get("source", ""),
+            "region": region or it.get("_monitor_region", ""),
+            "photo": it.get("_photo_url") or it.get("photo_url") or "",
+            "last_seen_ts": now,
+        }
+        if not rec:
+            payload["first_seen_ts"] = now
+            payload["removed_ts"] = 0
+            payload["sent"] = False
+            added += 1
+        else:
+            payload["first_seen_ts"] = rec.get("first_seen_ts", now)
+            payload["removed_ts"] = rec.get("removed_ts", 0)
+            payload["sent"] = rec.get("sent", False)
+        data[url] = payload
+    if added or items:
+        _discount_hunt_save(data)
+    if added:
+        print(f"  [охота] добавлено кандидатов: {added}")
+
+
+def _discount_hunt_scrape_region(region: str) -> list[dict]:
+    raw: list[dict] = []
+    try:
+        if "avito" in DISCOUNT_HUNT_SOURCES:
+            raw.extend(scrape_avito(region, pages=2, sort_by_date=True) or [])
+    except Exception as e:
+        print(f"  [охота] avito {region}: {str(e)[:60]}")
+    try:
+        if "drom" in DISCOUNT_HUNT_SOURCES:
+            raw.extend(scrape_drom(region, pages=2, price_min=0, price_max=99_000_000) or [])
+    except Exception as e:
+        print(f"  [охота] drom {region}: {str(e)[:60]}")
+    try:
+        if "autoru" in DISCOUNT_HUNT_SOURCES:
+            raw.extend(scrape_autoru(region, pages=2, price_min=0, price_max=99_000_000) or [])
+    except Exception as e:
+        print(f"  [охота] autoru {region}: {str(e)[:60]}")
+    raw = [it for it in raw if it.get("url") and not is_dealer(it) and not is_not_running(it)]
+    if not raw:
+        return []
+    ranked = rank_by_market_price(raw)
+    return [
+        it for it in ranked
+        if _is_strong_below_market(it)
+        and (it.get("_savings_pct") or 0) >= 10
+        and int(it.get("_market_price") or 0) > 0
+    ][:40]
+
+
+async def _discount_hunt_collect_once() -> None:
+    if not DISCOUNT_HUNT_ENABLED:
+        return
+    loop = asyncio.get_running_loop()
+    tasks = {
+        region: loop.run_in_executor(None, _discount_hunt_scrape_region, region)
+        for region in DISCOUNT_HUNT_REGIONS
+    }
+    if not tasks:
+        return
+    done, _ = await asyncio.wait(list(tasks.values()), timeout=120)
+    total = 0
+    for region, fut in tasks.items():
+        if fut not in done:
+            continue
+        try:
+            items = fut.result()
+        except Exception:
+            items = []
+        total += len(items)
+        _discount_hunt_track(items, region)
+    print(f"  [охота] сбор завершён: {total} кандидатов")
+
+
+async def _discount_hunt_detect_removed(limit: int = 80) -> list[dict]:
+    data = _discount_hunt_load()
+    if not data:
+        return []
+    now = time.time()
+    candidates = [
+        (url, rec) for url, rec in data.items()
+        if not rec.get("sent")
+        and not rec.get("removed_ts")
+        and 20 * 60 <= now - float(rec.get("first_seen_ts", now)) <= 30 * 3600
+    ]
+    candidates.sort(key=lambda kv: -float(kv[1].get("savings_pct") or 0))
+    loop = asyncio.get_running_loop()
+    changed = False
+    for url, rec in candidates[:limit]:
+        try:
+            source = rec.get("source", "")
+            details = await asyncio.wait_for(
+                loop.run_in_executor(None, _fetch_and_check, rec.get("url", url), source),
+                timeout=12 if source == "drom" else 8,
+            )
+            if details is None:
+                rec["removed_ts"] = now
+                changed = True
+        except Exception:
+            pass
+        await asyncio.sleep(0.02)
+    if changed:
+        _discount_hunt_save(data)
+    removed = [
+        rec for rec in data.values()
+        if rec.get("removed_ts")
+        and not rec.get("sent")
+        and 0 < float(rec["removed_ts"]) - float(rec.get("first_seen_ts", rec["removed_ts"])) <= 24 * 3600
+        and now - float(rec["removed_ts"]) <= 36 * 3600
+    ]
+    removed.sort(key=lambda r: (-(float(r.get("savings_pct") or 0)), float(r.get("removed_ts") or 0)))
+    return removed[:10]
+
+
+def _discount_hunt_format(top: list[dict]) -> str:
+    lines = ["<b>Охота за скидками</b>", "", "ТОП-10 автомобилей, исчезнувших менее чем за 24 часа.", ""]
+    for i, rec in enumerate(top, 1):
+        title = html.escape(rec.get("title") or "Автомобиль")
+        price = _fmt_n(rec.get("price", 0))
+        market = _fmt_n(rec.get("market", 0))
+        hours = max(1, round((float(rec.get("removed_ts", time.time())) - float(rec.get("first_seen_ts", time.time()))) / 3600))
+        hour_word = "час" if hours % 10 == 1 and hours % 100 != 11 else ("часа" if 2 <= hours % 10 <= 4 and not 12 <= hours % 100 <= 14 else "часов")
+        lines.extend([
+            f"{i}. <b>{title}</b>",
+            f"Цена: {price} ₽",
+            f"Рынок: {market} ₽",
+            f"Ушла за {hours} {hour_word}.",
+            "",
+        ])
+    lines.append("Такие объявления бот присылает моментально.")
+    return "\n".join(lines)
+
+
+async def _discount_hunt_broadcast(top: list[dict]) -> None:
+    if not top:
+        return
+    text = _discount_hunt_format(top)
+    uids = _all_user_ids()
+    sent = failed = 0
+    for uid in uids:
+        try:
+            await bot.send_message(uid, text, parse_mode="HTML", disable_web_page_preview=True)
+            sent += 1
+        except Exception:
+            failed += 1
+        await asyncio.sleep(0.05)
+    data = _discount_hunt_load()
+    for rec in top:
+        url = rec.get("url")
+        if url in data:
+            data[url]["sent"] = True
+    _discount_hunt_save(data)
+    print(f"  [охота] рассылка: sent={sent}, failed={failed}, top={len(top)}")
+
+
+async def _discount_hunt_loop():
+    if not DISCOUNT_HUNT_ENABLED:
+        print("  [охота] выключена DISCOUNT_HUNT_ENABLED=0")
+        return
+    print(f"  [охота] цикл запущен: регионы={','.join(DISCOUNT_HUNT_REGIONS)}")
+    await asyncio.sleep(180)
+    last_collect = 0.0
+    while True:
+        try:
+            now = time.time()
+            if now - last_collect >= DISCOUNT_HUNT_SCAN_SEC:
+                last_collect = now
+                await _discount_hunt_collect_once()
+                await _discount_hunt_detect_removed(limit=50)
+            dt = datetime.datetime.now(_MSK)
+            today = dt.date().isoformat()
+            last_sent = _kv_get(_DISCOUNT_HUNT_LAST_SENT_KV) or ""
+            if dt.hour >= DISCOUNT_HUNT_SEND_HOUR_MSK and last_sent != today:
+                top = await _discount_hunt_detect_removed(limit=100)
+                if top:
+                    await _discount_hunt_broadcast(top)
+                    _kv_set(_DISCOUNT_HUNT_LAST_SENT_KV, today)
+                elif dt.hour >= DISCOUNT_HUNT_SEND_HOUR_MSK + 2:
+                    _kv_set(_DISCOUNT_HUNT_LAST_SENT_KV, today)
+        except Exception as e:
+            print(f"  [охота] loop error: {str(e)[:100]}")
+        await asyncio.sleep(600)
+
+
 # ── Push-уведомления — раз в 2-3 дня ─────────────────────────────
 _PUSH_MESSAGES = [
     "🚗 Привет! На рынке б/у авто появились новые выгодные предложения — первым найди машину ниже рынка: /search",
@@ -13694,6 +13947,8 @@ async def main():
     # Push-уведомления — раз в 2-3 дня всем пользователям
     loop.create_task(_push_notification_loop())
     print("  [push] цикл уведомлений запущен (интервал ~2.5 дня)")
+    loop.create_task(_discount_hunt_loop())
+    print("  [охота] ежедневная рассылка скидок запущена")
     loop.create_task(_admin_report_scheduler())
     print("  [admin] планировщик отчётов запущен (09:00 МСК)")
     loop.create_task(_analytics_persist_loop())
