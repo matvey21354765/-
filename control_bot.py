@@ -1319,6 +1319,8 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
                 med, _lvl, _n = _market_for(parts[0], int(parts[1]), p)
                 if med <= 0:
                     med, _lvl, _n = _market_for_model(parts[0], p)
+            elif key:
+                med, _lvl, _n = _market_for_model(key, p)
             if med > 0:
                 if _lvl not in ("avito", "drom"):
                     _mileage_factor = _market_mileage_factor(it)
@@ -8320,6 +8322,22 @@ _PROMO_PHRASES = (
     "платное размещение", "поднятие в поиске", "выделить объявление",
 )
 _PLACEHOLDER_TITLES = ("авто на auto.ru", "авто на авито", "авто на дром", "автомобиль")
+_NON_CAR_GOODS_KEYWORDS = (
+    "коляск", "carrello", "люльк", "автолюльк", "детск", "ребенк", "ребёнк",
+    "пк", "компьютер", "монитор", "клавиатур", "клава", "мышк", "наушник",
+    "видеокарт", "процессор", "материнск", "оперативн", "ssd", "hdd",
+    "телефон", "смартфон", "iphone", "айфон", "samsung", "ноутбук",
+    "холодильник", "стиральн", "диван", "кровать", "шкаф",
+)
+
+
+def _is_non_car_goods(it: dict) -> bool:
+    blob = f'{it.get("title", "")} {it.get("description", "")}'.lower()
+    if not blob.strip():
+        return False
+    if any(k in blob for k in _NON_CAR_GOODS_KEYWORDS):
+        return True
+    return False
 
 
 def _is_promo_listing(it: dict) -> bool:
@@ -8336,7 +8354,7 @@ def _filter_by_category(items: list[dict], category: str, brand: str) -> list[di
     # Убираем рекламу площадки / промо-блоки и мото/скутеры.
     # Для VK/TG обязательно смотрим не только title, но и описание: заголовок часто
     # короткий («Продам Вятку электрон.»), а признаки мото/деталей лежат в тексте.
-    items = [it for it in items if not _is_promo_listing(it)]
+    items = [it for it in items if not _is_promo_listing(it) and not _is_non_car_goods(it)]
     items = [
         it for it in items
         if not _is_moto(f'{it.get("title", "")} {it.get("description", "")}'[:700])
@@ -10399,6 +10417,7 @@ async def cmd_vk_tg_search(msg: Message):
         and i.get("url")
         and i["url"] not in skipped_norm_v
     ]
+    suitable = _filter_by_category(suitable, s.get("category", "all"), s.get("brand", ""))
     suitable = rank_by_market_price(suitable)
     suitable = _sort_by_deal(suitable)
 
@@ -11208,6 +11227,18 @@ def _get_db():
                             search_count INTEGER DEFAULT 0,
                             monitoring BOOLEAN DEFAULT FALSE
                         )
+                    """)
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS published_channel_posts (
+                            id SERIAL PRIMARY KEY,
+                            post_type TEXT,
+                            car_id TEXT,
+                            published_at TIMESTAMP DEFAULT NOW()
+                        )
+                    """)
+                    cur.execute("""
+                        CREATE INDEX IF NOT EXISTS idx_published_channel_posts_car
+                        ON published_channel_posts(car_id)
                     """)
         except Exception:
             return None
@@ -12982,7 +13013,7 @@ def _discount_hunt_save(data: dict) -> None:
         now = time.time()
         pruned = {
             k: v for k, v in data.items()
-            if now - float(v.get("first_seen_ts", now)) <= 4 * 24 * 3600
+            if now - float(v.get("first_seen_ts", now)) <= 8 * 24 * 3600
             or (v.get("removed_ts") and not v.get("sent"))
         }
         if len(pruned) > 1200:
@@ -13368,6 +13399,329 @@ async def _marketing_broadcast_loop():
         except Exception as e:
             print(f"  [marketing] loop error: {str(e)[:100]}")
         await asyncio.sleep(300)
+
+
+# ── Посты для Telegram-канала PerekupDrive ────────────────────────────────
+CHANNEL_POSTS_ENABLED = os.getenv("CHANNEL_POSTS_ENABLED", "1").lower() not in ("0", "false", "no")
+CHANNEL_ID = os.getenv("CHANNEL_ID", os.getenv("TELEGRAM_CHANNEL_ID", "@PerekupDrive")).strip()
+_CHANNEL_LAST_POST_KV_PREFIX = "channel_post_last_"
+
+
+def _bot_deep_link(utm: str) -> str:
+    username = BOT_USERNAME or "Perekupil_bot"
+    return f"https://t.me/{username}?start={utm}"
+
+
+def _channel_kb(text: str, utm: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=text, url=_bot_deep_link(utm))
+    ]])
+
+
+def _car_id(rec: dict) -> str:
+    return _norm_url(rec.get("url", "")) or hashlib.sha1(json.dumps(rec, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+
+def _published_car_ids() -> set[str]:
+    try:
+        db = _get_db()
+        if db:
+            with db.cursor() as cur:
+                cur.execute("SELECT car_id FROM published_channel_posts")
+                return {r[0] for r in cur.fetchall() if r and r[0]}
+    except Exception:
+        pass
+    return set()
+
+
+def _mark_channel_published(post_type: str, car_ids: list[str]) -> None:
+    try:
+        db = _get_db()
+        if db:
+            with db.cursor() as cur:
+                for cid in car_ids:
+                    cur.execute(
+                        "INSERT INTO published_channel_posts(post_type, car_id) VALUES(%s,%s)",
+                        (post_type, cid),
+                    )
+    except Exception as e:
+        print(f"  [channel] publish mark error: {str(e)[:80]}")
+
+
+def _channel_records(days: int = 1, include_removed: bool = True, unpublished_only: bool = True) -> list[dict]:
+    data = _discount_hunt_load()
+    now = time.time()
+    published = _published_car_ids() if unpublished_only else set()
+    out = []
+    for rec in data.values():
+        if unpublished_only and _car_id(rec) in published:
+            continue
+        first_seen = float(rec.get("first_seen_ts", now))
+        removed_ts = float(rec.get("removed_ts") or 0)
+        if now - first_seen > days * 24 * 3600 and (not removed_ts or now - removed_ts > days * 24 * 3600):
+            continue
+        if not include_removed and removed_ts:
+            continue
+        price = int(rec.get("price") or 0)
+        market = int(rec.get("market") or 0)
+        if not rec.get("title") or not (market > price > 0):
+            continue
+        out.append(rec)
+    return out
+
+
+def _car_title_parts(title: str) -> tuple[str, str, str]:
+    t = re.sub(r"\s+", " ", title or "").strip(" ,")
+    year_m = re.search(r"\b(19[5-9]\d|20[012]\d)\b", t)
+    year = year_m.group(1) if year_m else ""
+    clean = re.sub(r"\b(19[5-9]\d|20[012]\d)\b", "", t).strip(" ,-")
+    words = clean.split()
+    brand = words[0] if words else "Авто"
+    model = " ".join(words[1:3]) if len(words) > 1 else ""
+    return brand, model, year
+
+
+def _channel_car_line(rec: dict) -> str:
+    brand, model, year = _car_title_parts(rec.get("title", ""))
+    label = " ".join(x for x in (brand, model) if x).strip()
+    return f"{html.escape(label)}{', ' + year if year else ''}"
+
+
+def _saving(rec: dict) -> int:
+    return max(0, int(rec.get("market") or 0) - int(rec.get("price") or 0))
+
+
+def _discount(rec: dict) -> int:
+    return int(round(float(rec.get("savings_pct") or 0)))
+
+
+def _ts_label(ts: float) -> str:
+    if not ts:
+        return "неизвестно"
+    return datetime.datetime.fromtimestamp(ts, _MSK).strftime("%H:%M")
+
+
+def _lifetime_label(rec: dict) -> str:
+    start = float(rec.get("first_seen_ts") or time.time())
+    end = float(rec.get("removed_ts") or time.time())
+    return _hours_label(max(60, end - start))
+
+
+def generate_channel_post(post_type: str) -> dict | None:
+    post_type = (post_type or "").strip().lower()
+    day = _channel_records(days=1, include_removed=True, unpublished_only=True)
+    live = [r for r in day if not r.get("removed_ts")]
+    removed = [r for r in day if r.get("removed_ts")]
+
+    def car_payload(rec: dict, text: str, button: str, poll: bool = False) -> dict:
+        return {
+            "text": text + "\n\n<a href=\"https://t.me/Perekupil_bot\">@Perekupil_bot</a>",
+            "keyboard": _channel_kb(button, f"channel_{post_type}"),
+            "car_ids": [_car_id(rec)],
+            "poll": poll,
+        }
+
+    if post_type in ("deal_day", "deal", "сделка"):
+        if not live:
+            return None
+        rec = max(live, key=lambda r: (_saving(r), _discount(r)))
+        text = (
+            "🔥 <b>Сделка дня</b>\n\n"
+            f"🚗 {_channel_car_line(rec)}\n\n"
+            f"💵 Цена: {_fmt_n(rec['price'])} ₽\n"
+            f"📊 Рынок: {_fmt_n(rec['market'])} ₽\n"
+            f"💰 Экономия: {_fmt_n(_saving(rec))} ₽\n"
+            f"📉 Ниже рынка: {_discount(rec)}%\n"
+            f"⏱ Висит: {_hours_label(time.time() - float(rec.get('first_seen_ts', time.time())))}\n\n"
+            "Такие объявления PerekupDrive находит каждый день."
+        )
+        return car_payload(rec, text, "🚗 Открыть в боте")
+
+    if post_type in ("already_bought", "bought", "купили"):
+        if not removed:
+            return None
+        rec = max(removed, key=_saving)
+        text = (
+            "❌ <b>Уже купили</b>\n\n"
+            f"🚗 {_channel_car_line(rec)}\n\n"
+            f"💵 Цена была: {_fmt_n(rec['price'])} ₽\n"
+            f"📊 Рынок: {_fmt_n(rec['market'])} ₽\n"
+            f"💰 Экономия: {_fmt_n(_saving(rec))} ₽\n"
+            f"⏱ Объявление прожило: {_lifetime_label(rec)}\n\n"
+            "Кто получил уведомление — тот успел."
+        )
+        return car_payload(rec, text, "🔥 Смотреть свежие варианты")
+
+    if post_type in ("coffee", "fast_gone", "ушла"):
+        if not removed:
+            return None
+        rec = min(removed, key=lambda r: float(r.get("removed_ts") or time.time()) - float(r.get("first_seen_ts") or time.time()))
+        text = (
+            "⚡ <b>Ушла, пока ты пил кофе</b>\n\n"
+            f"🚗 {_channel_car_line(rec)}\n\n"
+            f"Опубликована: {_ts_label(float(rec.get('first_seen_ts') or 0))}\n"
+            f"Исчезла: {_ts_label(float(rec.get('removed_ts') or 0))}\n\n"
+            f"⏱ Всего: {_lifetime_label(rec)}\n"
+            f"💰 Экономия была: {_fmt_n(_saving(rec))} ₽\n\n"
+            "Хорошие варианты долго не ждут."
+        )
+        return car_payload(rec, text, "🚨 Включить уведомления")
+
+    if post_type in ("stats_day", "stats", "цифры"):
+        stats = _marketing_stats()
+        if stats["cars_count"] <= 0:
+            return None
+        regions: dict[str, int] = {}
+        for rec in day:
+            reg = rec.get("region") or "неизвестно"
+            regions[reg] = regions.get(reg, 0) + 1
+        top_region_key = max(regions, key=regions.get) if regions else ""
+        top_region = REGIONS.get(top_region_key, top_region_key) or "нет данных"
+        text = (
+            "📊 <b>Цифры дня в PerekupDrive</b>\n\n"
+            f"🚗 Найдено авто ниже рынка: {stats['cars_count']}\n"
+            f"💰 Общая потенциальная экономия: {_fmt_n(stats['total_saving'])} ₽\n"
+            f"📉 Средняя скидка: {int(round(stats['avg_discount']))}%\n"
+            f"🔥 Максимальная экономия: {_fmt_n(stats['max_saving'])} ₽\n"
+            f"📍 Самый активный регион: {html.escape(top_region)}"
+        )
+        return {"text": text + "\n\n<a href=\"https://t.me/Perekupil_bot\">@Perekupil_bot</a>", "keyboard": _channel_kb("🚗 Смотреть подборку", "channel_stats_day"), "car_ids": []}
+
+    if post_type in ("top5", "top_5", "топ5"):
+        top = sorted(live, key=lambda r: (_saving(r), _discount(r)), reverse=True)[:5]
+        if len(top) < 1:
+            return None
+        lines = ["🏆 <b>ТОП-5 авто ниже рынка сегодня</b>", ""]
+        for i, rec in enumerate(top, 1):
+            lines.extend([
+                f"{i}. {_channel_car_line(rec)}",
+                f"💰 Экономия: {_fmt_n(_saving(rec))} ₽",
+                f"📉 Ниже рынка: {_discount(rec)}%",
+                "",
+            ])
+        lines.append('<a href="https://t.me/Perekupil_bot">@Perekupil_bot</a>')
+        return {"text": "\n".join(lines), "keyboard": _channel_kb("🔍 Открыть все авто", "channel_top5"), "car_ids": [_car_id(r) for r in top]}
+
+    if post_type in ("worth", "poll", "стоило"):
+        if not live:
+            return None
+        rec = max(live, key=lambda r: (_discount(r), _saving(r)))
+        text = (
+            "🤔 <b>Стоило брать?</b>\n\n"
+            f"🚗 {_channel_car_line(rec)}\n\n"
+            f"💵 Цена: {_fmt_n(rec['price'])} ₽\n"
+            f"📊 Рынок: {_fmt_n(rec['market'])} ₽\n"
+            f"💰 Экономия: {_fmt_n(_saving(rec))} ₽\n"
+            f"📉 Ниже рынка: {_discount(rec)}%\n\n"
+            "Как думаете?"
+        )
+        return car_payload(rec, text, "🚗 Смотреть похожие", poll=True)
+
+    if post_type in ("week_biggest", "weekly_biggest", "неделя"):
+        week = _channel_records(days=7, include_removed=True, unpublished_only=True)
+        if not week:
+            return None
+        rec = max(week, key=_saving)
+        text = (
+            "💸 <b>Самая дорогая скидка недели</b>\n\n"
+            f"🚗 {_channel_car_line(rec)}\n\n"
+            f"💵 Цена: {_fmt_n(rec['price'])} ₽\n"
+            f"📊 Рынок: {_fmt_n(rec['market'])} ₽\n"
+            f"💰 Экономия: {_fmt_n(_saving(rec))} ₽\n"
+            f"📉 Ниже рынка: {_discount(rec)}%\n\n"
+            "Такую разницу вручную найти почти нереально."
+        )
+        return car_payload(rec, text, "🔥 Открыть PerekupDrive")
+
+    if post_type in ("region_day", "region", "регион"):
+        if not day:
+            return None
+        buckets: dict[str, list[dict]] = {}
+        for rec in day:
+            buckets.setdefault(rec.get("region") or "unknown", []).append(rec)
+        reg, rows = max(buckets.items(), key=lambda kv: len(kv[1]))
+        best = max(rows, key=_saving)
+        region_name = REGIONS.get(reg, reg)
+        total = sum(_saving(r) for r in rows)
+        text = (
+            f"📍 <b>Регион дня: {html.escape(region_name)}</b>\n\n"
+            "За 24 часа найдено:\n"
+            f"🚗 {len(rows)} авто ниже рынка\n\n"
+            f"💰 Общая экономия: {_fmt_n(total)} ₽\n"
+            f"🔥 Лучшая находка: {_channel_car_line(best)} — {_fmt_n(_saving(best))} ₽ экономии"
+        )
+        return {"text": text + "\n\n<a href=\"https://t.me/Perekupil_bot\">@Perekupil_bot</a>", "keyboard": _channel_kb("Смотреть авто в регионе", f"channel_region_{reg}"), "car_ids": [_car_id(best)]}
+
+    return None
+
+
+async def _send_channel_post(post_type: str) -> bool:
+    if not CHANNEL_ID:
+        return False
+    post = generate_channel_post(post_type)
+    if not post:
+        return False
+    await bot.send_message(
+        CHANNEL_ID,
+        post["text"],
+        parse_mode="HTML",
+        reply_markup=post.get("keyboard"),
+        disable_web_page_preview=True,
+    )
+    if post.get("poll"):
+        await bot.send_poll(
+            CHANNEL_ID,
+            "Стоило брать?",
+            ["✅ Да, забрал бы", "🤔 Сначала проверил бы", "❌ Нет, подозрительно"],
+            is_anonymous=False,
+        )
+    _mark_channel_published(post_type, post.get("car_ids", []))
+    return True
+
+
+@dp.message(Command("channel_post"))
+async def cmd_channel_post(msg: Message):
+    if msg.from_user.id not in ADMIN_IDS:
+        return
+    parts = (msg.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await msg.answer("Типы: deal_day, already_bought, coffee, stats_day, top5, worth, week_biggest, region_day")
+        return
+    ok = await _send_channel_post(parts[1].strip())
+    await msg.answer("✅ Пост отправлен" if ok else "⚠️ Нет данных для такого поста")
+
+
+async def _channel_posts_loop():
+    if not CHANNEL_POSTS_ENABLED:
+        print("  [channel] выключен CHANNEL_POSTS_ENABLED=0")
+        return
+    schedule = {
+        (9, 0): "deal_day",
+        (12, 0): "already_bought",
+        (16, 0): "worth",
+        (20, 0): "top5",
+        (21, 0): "stats_day",
+    }
+    print(f"  [channel] планировщик постов запущен: {CHANNEL_ID}")
+    await asyncio.sleep(300)
+    while True:
+        try:
+            dt = datetime.datetime.now(_MSK)
+            post_type = schedule.get((dt.hour, 0)) if dt.minute < 10 else None
+            if dt.weekday() == 6 and dt.hour == 19 and dt.minute < 10:
+                post_type = "week_biggest"
+            if dt.hour == 12 and dt.minute < 10:
+                # Чередуем два FOMO-формата в обед.
+                post_type = "coffee" if dt.day % 2 else "already_bought"
+            if post_type:
+                key = f"{_CHANNEL_LAST_POST_KV_PREFIX}{post_type}_{dt.date().isoformat()}"
+                if not _kv_get(key):
+                    ok = await _send_channel_post(post_type)
+                    if ok:
+                        _kv_set(key, "1")
+        except Exception as e:
+            print(f"  [channel] loop error: {str(e)[:100]}")
+        await asyncio.sleep(60)
 
 
 # ── Push-уведомления — раз в 2-3 дня ─────────────────────────────
@@ -14117,6 +14471,8 @@ async def main():
     print("  [охота] сборщик скидок запущен")
     loop.create_task(_marketing_broadcast_loop())
     print("  [marketing] единый планировщик массовых рассылок запущен")
+    loop.create_task(_channel_posts_loop())
+    print("  [channel] генератор постов канала запущен")
     loop.create_task(_admin_report_scheduler())
     print("  [admin] планировщик отчётов запущен (09:00 МСК)")
     loop.create_task(_analytics_persist_loop())
