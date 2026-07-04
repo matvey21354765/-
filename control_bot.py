@@ -864,6 +864,8 @@ def _is_strong_below_market(it: dict) -> bool:
     pct = it.get("_savings_pct", 0) or 0
     if pct >= MARKET_DEAL_MIN_PCT:
         return True
+    if it.get("_market_price") and pct <= 0:
+        return False
     # Если сам Авито пометил объявление как «отличная/очень хорошая цена»,
     # используем этот сигнал даже без нашей глубокой медианы. Обычная
     # «хорошая цена» без >=10% — не топ, чтобы −8% не считались находкой.
@@ -4527,6 +4529,36 @@ def _avito_price_rating(it: dict) -> tuple:
         if 30_000 < v < 50_000_000:
             market = v
     return text, score, market
+
+
+def _parse_rub_amount(text: str) -> int:
+    raw = re.sub(r"\D", "", text or "")
+    if not raw:
+        return 0
+    try:
+        value = int(raw)
+        return value if 10_000 <= value <= 50_000_000 else 0
+    except Exception:
+        return 0
+
+
+def _avito_ai_estimate_from_text(text: str) -> int:
+    """Extracts Avito neural-network estimate from an opened listing page."""
+    if not text:
+        return 0
+    flat = re.sub(r"\s+", " ", text)
+    low = flat.lower()
+    markers = ("оценка нейросети", "дешевле оценки", "дороже оценки")
+    starts = [low.find(m) for m in markers if low.find(m) >= 0]
+    if not starts:
+        return 0
+    window = flat[min(starts):min(starts) + 350]
+    amounts = re.findall(r"(\d[\d\s]{1,12})\s*₽", window)
+    for amount in amounts:
+        value = _parse_rub_amount(amount)
+        if value:
+            return value
+    return 0
 
 
 def _avito_item_from_json(it: dict, today) -> dict | None:
@@ -10453,6 +10485,11 @@ def _fetch_and_check(url: str, source: str) -> dict | None:
             return None
 
         soup = _BS(text, "lxml")
+        avito_ai_market = 0
+        if source == "avito":
+            avito_ai_market = _avito_ai_estimate_from_text(
+                text + "\n" + soup.get_text("\n", strip=True)
+            )
 
         # Фото: og:image
         photo_url = ""
@@ -10558,7 +10595,10 @@ def _fetch_and_check(url: str, source: str) -> dict | None:
                 )
                 description = desc_el.get_text(strip=True)[:500] if desc_el else ""
 
-        return {"_photo_url": photo_url, "description": description}
+        details = {"_photo_url": photo_url, "description": description}
+        if avito_ai_market:
+            details["_avito_market"] = avito_ai_market
+        return details
     except Exception:
         return {}  # Ошибка сети — считаем активным, без деталей
 
@@ -11412,20 +11452,34 @@ async def send_batch(chat_id: int, uid: int, offset: int):
 
     async def _send_item(item: dict):
         url = item.get("url", "")
-        # Если нет описания — быстро догружаем со страницы
-        if not item.get("description") and url:
+        source = item.get("source", "")
+        needs_avito_ai_check = source == "avito" and not item.get("_avito_page_checked")
+        # Если нет описания или это Авито — догружаем страницу перед показом карточки.
+        if url and (not item.get("description") or needs_avito_ai_check):
             try:
                 loop_s = asyncio.get_running_loop()
                 details = await asyncio.wait_for(
-                    loop_s.run_in_executor(None, _fetch_and_check, url, item.get("source", "")),
-                    timeout=6
+                    loop_s.run_in_executor(None, _fetch_and_check, url, source),
+                    timeout=8 if needs_avito_ai_check else 6
                 )
                 if details is None:
                     return  # продано — пропускаем
+                if needs_avito_ai_check:
+                    item["_avito_page_checked"] = True
                 if details.get("description"):
                     item["description"] = details["description"]
                 if details.get("_photo_url") and not item.get("_photo_url"):
                     item["_photo_url"] = details["_photo_url"]
+                if details.get("_avito_market") and item.get("_price_int"):
+                    market = int(details["_avito_market"])
+                    price = int(item.get("_price_int") or 0)
+                    item["_avito_market"] = market
+                    item["_market_price"] = market
+                    item["_market_lvl"] = "avito_page"
+                    item["_market_n"] = 30
+                    item.pop("_market_mileage_factor", None)
+                    item["_savings_pct"] = round((1 - price / market) * 100, 1) if market > 0 else 0
+                    item["_below_market"] = _is_strong_below_market(item)
             except Exception:
                 pass
         sid = url_to_id(url)
@@ -12242,6 +12296,16 @@ async def do_search_for_user(uid: int, reply_to):
                     it["_photo_url"] = details["_photo_url"]
                 if details.get("description") and not it.get("description"):
                     it["description"] = details["description"]
+                if details.get("_avito_market") and it.get("_price_int"):
+                    market = int(details["_avito_market"])
+                    price = int(it.get("_price_int") or 0)
+                    it["_avito_market"] = market
+                    it["_market_price"] = market
+                    it["_market_lvl"] = "avito_page"
+                    it["_market_n"] = 30
+                    it.pop("_market_mileage_factor", None)
+                    it["_savings_pct"] = round((1 - price / market) * 100, 1) if market > 0 else 0
+                    it["_below_market"] = _is_strong_below_market(it)
                 return it
             except Exception:
                 return it  # при ошибке сети — оставляем объявление
