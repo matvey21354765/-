@@ -12599,47 +12599,34 @@ async def do_search_for_user(uid: int, reply_to):
         await reply_to.answer("😔 Не нашёл объявлений в твоём бюджете. Попробуй расширить диапазон цен: /settings")
         return
 
-    # Фильтр витрины: показываем только объявления, где удалось посчитать рынок
-    # и скидка действительно сильная. Иначе в выдачу попадают карточки
-    # "мало похожих авто для точной оценки", что выглядит как отсутствие анализа.
-    _below_count = 0
-    _showing_best_market = False
-    _showing_without_market = False
-    _added_best_market_count = 0
-    _market_available = _avito_available or any(i.get("_market_price") for i in suitable)
+    # Пользовательский поиск должен быть широким: если точных сделок мало, не
+    # срезаем выдачу до 1-2 карточек. Реальные скидки идут первыми, остальные
+    # релевантные объявления в бюджете остаются ниже в списке.
+    _market_items_count = sum(1 for i in suitable if i.get("_market_price") and i.get("_price_int"))
+    _below_count = sum(1 for i in suitable if _is_strong_below_market(i))
+    _market_available = _market_items_count > 0
     if _market_available:
-        _below_count = sum(1 for i in suitable if _is_strong_below_market(i))
-        shown = [i for i in suitable if _is_strong_below_market(i)]
-        print(f"  [фильтр] ниже рынка с анализом: {_below_count}, показываем: {len(shown)} из {len(suitable)}")
-        if shown:
-            shown_urls = {_norm_url(i.get("url", "")) for i in shown}
-            market_extra = [
-                i for i in suitable
-                if _norm_url(i.get("url", "")) not in shown_urls
-                and i.get("_market_price") and i.get("_price_int")
-            ]
-            budget_extra = [
-                i for i in suitable
-                if _norm_url(i.get("url", "")) not in shown_urls
-                and not (i.get("_market_price") and i.get("_price_int"))
-            ]
-            extra = (market_extra + budget_extra)[:max(0, 30 - len(shown))]
-            _added_best_market_count = len(extra)
-            suitable = shown + extra
-        else:
-            market_ranked = [i for i in suitable if i.get("_market_price") and i.get("_price_int")]
-            if market_ranked:
-                suitable = market_ranked[:30]
-                _showing_best_market = True
-                print(f"  [фильтр] сильных скидок нет → показываем {len(suitable)} лучших с Авито-оценкой")
-            else:
-                suitable = suitable[:30]
-                _showing_without_market = True
-                print(f"  [фильтр] точных оценок нет → показываем {len(suitable)} лучших в бюджете")
+        below_items = [i for i in suitable if _is_strong_below_market(i)]
+        below_urls = {_norm_url(i.get("url", "")) for i in below_items}
+        market_items = [
+            i for i in suitable
+            if _norm_url(i.get("url", "")) not in below_urls
+            and i.get("_market_price") and i.get("_price_int")
+        ]
+        market_urls = {_norm_url(i.get("url", "")) for i in market_items}
+        rest_items = [
+            i for i in suitable
+            if _norm_url(i.get("url", "")) not in below_urls
+            and _norm_url(i.get("url", "")) not in market_urls
+        ]
+        suitable = (below_items + market_items + rest_items)[:80]
+        print(
+            f"  [фильтр] ниже рынка={_below_count}, с рынком={_market_items_count}, "
+            f"показываем={len(suitable)} из {len(below_items) + len(market_items) + len(rest_items)}"
+        )
     else:
-        print("  [фильтр] нет рыночной оценки → не показываем выдачу без анализа")
-        await reply_to.answer("😔 Сейчас не смог получить рыночную оценку для сравнения. Попробуй повторить поиск чуть позже.")
-        return
+        suitable = suitable[:80]
+        print(f"  [фильтр] точных оценок нет → показываем {len(suitable)} объявлений в бюджете")
 
     _search_cache[uid] = suitable
     _save_cache(uid, suitable)
@@ -12654,28 +12641,27 @@ async def do_search_for_user(uid: int, reply_to):
         pass
     _seen_cnt = sum(1 for i in suitable if i.get("_already_seen"))
     src_found = list(dict.fromkeys(i.get("source","") for i in suitable if i.get("source")))
-    src_icons = {"avito":"🟠","drom":"🔵","autoru":"🔴","vk":"💙","tg":"✈️"}
+    src_icons = {"avito":"🟠","drom":"🔵","autoru":"🔴","youla":"🟡","vk":"💙","tg":"✈️"}
     src_str = " ".join(src_icons.get(s,"") for s in src_found if s)
     if _market_available:
-        _extra = len(suitable) - _below_count
-        if _showing_best_market:
+        _extra = max(0, len(suitable) - _below_count)
+        if _below_count:
+            _msg = (
+                f"✅ {src_str} Найдено {_below_count} объявлений ниже рынка "
+                f"(≥{MARKET_DEAL_MIN_PCT:.0f}%)."
+            )
+            if _extra:
+                _msg += f"\n➕ Ещё {_extra} авто в бюджете — ниже в списке."
+        else:
             _msg = (
                 f"✅ {src_str} Сильных скидок ≥{MARKET_DEAL_MIN_PCT:.0f}% сейчас нет.\n"
-                f"Показываю {len(suitable)} лучших объявлений с Авито-оценкой рынка."
+                f"Показываю {len(suitable)} авто в бюджете, лучшие с анализом рынка сверху."
             )
-        elif _showing_without_market:
-            _msg = (
-                f"✅ {src_str} Ниже рынка с точной оценкой сейчас нет.\n"
-                f"Показываю {len(suitable)} лучших объявлений в бюджете."
-            )
-        else:
-            _msg = f"✅ {src_str} Найдено {_below_count} объявлений реально ниже рынка (≥{MARKET_DEAL_MIN_PCT:.0f}%)!"
-            if _added_best_market_count:
-                _msg += f"\n➕ Добавил ещё {_added_best_market_count} лучших вариантов с анализом рынка."
-        if _extra > 0 and not (_showing_best_market or _showing_without_market or _added_best_market_count):
-            _msg += f"\n➕ Ещё {_extra} в бюджете без сильной скидки или без точной оценки — ниже в списке."
     else:
-        _msg = f"✅ {src_str} Найдено {len(suitable)} объявлений в бюджете!\n⚠️ Авито недоступен — сравнение с рынком отключено"
+        _msg = (
+            f"✅ {src_str} Найдено {len(suitable)} авто в бюджете.\n"
+            f"⚠️ Точной рыночной оценки сейчас нет — показываю релевантные объявления, а не пустую выдачу."
+        )
     if _seen_cnt:
         _msg += f"\n♻️ {_seen_cnt} уже видел — они в конце."
 
