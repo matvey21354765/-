@@ -847,6 +847,10 @@ def _car_group_key(title: str) -> str:
             return False
         if w.isalpha():
             return True
+        if re.fullmatch(r'[a-zа-яё]{1,5}\d{1,4}[a-zа-яё]{0,3}', w):
+            return True
+        if re.fullmatch(r'\d{1,4}[a-zа-яё]{1,4}', w):
+            return True
         if w.isdigit():
             n = int(w)
             # Модели: 3, 5, 320, 2114, 2170 и т.п. Исключаем только правдоподобные
@@ -1269,8 +1273,8 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
         return _trimmed_median(pr), lvl, len(pr)
 
     def _market_for(model: str, yr: int, cand_p=None):
-        """Рыночная цена по той же модели: окно ±1 год (точно, ≥5), затем ±2 (≥6),
-        затем ±3 (≥7), затем ±5 (грубее, ≥8). ПОВЫШЕННЫЕ требования для точности.
+        """Рыночная цена по той же модели: окно ±1 год (точно, ≥3), затем ±2 (≥4),
+        затем ±3 (≥5), затем ±5 (грубее, ≥6).
         Возвращает (медиана, уровень, N)|(0,'',0)."""
         yrs = model_year.get(model)
         if not yrs:
@@ -1280,27 +1284,27 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
         near = []
         for y in (yr - 1, yr, yr + 1):
             near += yrs.get(y, [])
-        if len(near) >= 5:  # ↑ было ≥3, теперь точнее нужно больше
+        if len(near) >= 3:
             return _est_price(near, "near", cand_p)
         
         wide = list(near)
         for y in (yr - 2, yr + 2):
             wide += yrs.get(y, [])
-        if len(wide) >= 6:  # ↑ было ≥4
+        if len(wide) >= 4:
             return _est_price(wide, "bracket", cand_p)
         
         # Расширяем ещё шире: ±3 года — всё ещё та же модель
         wider = list(wide)
         for y in (yr - 3, yr + 3):
             wider += yrs.get(y, [])
-        if len(wider) >= 7:  # ↑ новый уровень точности
+        if len(wider) >= 5:
             return _est_price(wider, "medium", cand_p)
         
         # Последний шанс: окно ±5 лет (уже грубее, но лучше чем ничего)
         widest = list(wider)
         for y in (yr - 5, yr - 4, yr + 4, yr + 5):
             widest += yrs.get(y, [])
-        if len(widest) >= 8:  # ↑ было ≥6, теперь строже
+        if len(widest) >= 6:
             return _est_price(widest, "wide", cand_p)
         
         return 0.0, "", 0
@@ -12434,6 +12438,7 @@ async def do_search_for_user(uid: int, reply_to):
     suitable = [
         i for i in items
         if not i.get("_market_ref_only")
+        and (i.get("_price_int") or parse_price(i.get("price", "")))
         and in_price_range(i, pmin, pmax)
         and i.get("url")
         and i["url"] not in skipped_norm
