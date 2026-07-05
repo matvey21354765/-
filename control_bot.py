@@ -9405,6 +9405,38 @@ async def cmd_mailing_status(msg: Message):
         await msg.answer(f"❌ Ошибка проверки рассылок: {html.escape(str(e)[:200])}", parse_mode="HTML")
 
 
+@dp.message(Command("mailing_collect"))
+async def cmd_mailing_collect(msg: Message):
+    if msg.from_user.id not in ADMIN_IDS:
+        return
+    await msg.answer("🔄 Собираю кандидатов для рассылок сейчас…")
+    try:
+        before = len(_discount_hunt_load())
+        await _discount_hunt_collect_once()
+        await _discount_hunt_detect_removed(limit=80)
+        data = _discount_hunt_load()
+        now = time.time()
+        recent = [
+            rec for rec in data.values()
+            if now - float(rec.get("first_seen_ts", now)) <= 24 * 3600
+        ]
+        available = [rec for rec in recent if not rec.get("removed_ts")]
+        removed = [
+            rec for rec in data.values()
+            if rec.get("removed_ts") and now - float(rec.get("removed_ts", now)) <= 24 * 3600
+        ]
+        await msg.answer(
+            "✅ Сбор завершён.\n\n"
+            f"Было в базе: {_fmt_n(before)}\n"
+            f"Стало в базе: {_fmt_n(len(data))}\n"
+            f"За 24ч: {_fmt_n(len(recent))}\n"
+            f"Доступны сейчас: {_fmt_n(len(available))}\n"
+            f"Исчезли за 24ч: {_fmt_n(len(removed))}"
+        )
+    except Exception as e:
+        await msg.answer(f"❌ Ошибка сбора: {html.escape(str(e)[:200])}", parse_mode="HTML")
+
+
 @dp.message(Command("dashboard"))
 async def cmd_dashboard(msg: Message):
     if msg.from_user.id not in ADMIN_IDS:
@@ -13258,9 +13290,9 @@ def _discount_hunt_scrape_region(region: str) -> list[dict]:
     ranked = rank_by_market_price(raw, ref_items=avito_ref, avito_only_median=True)
     return [
         it for it in ranked
-        if _is_strong_below_market(it)
-        and (it.get("_savings_pct") or 0) >= 10
+        if (it.get("_savings_pct") or 0) >= 5
         and int(it.get("_market_price") or 0) > 0
+        and int(it.get("_market_price") or 0) > int(it.get("_price_int") or 0)
     ][:40]
 
 
@@ -13374,7 +13406,7 @@ async def _discount_hunt_loop():
         print("  [охота] выключена DISCOUNT_HUNT_ENABLED=0")
         return
     print(f"  [охота] цикл запущен: регионы={','.join(DISCOUNT_HUNT_REGIONS)}")
-    await asyncio.sleep(180)
+    await asyncio.sleep(20)
     last_collect = 0.0
     while True:
         try:
