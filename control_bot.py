@@ -2945,6 +2945,8 @@ _SOCIAL_REJECT_KEYWORDS = [
     "эксклюзив. номер", "эксклюзивный номер", "регистрационный номер",
     "номер на гелик", "номер на мерс", "номер на авто", "идеальный номер",
     "подчеркнет статус", "номер авт", "автономер",
+    "скутер", "мопед", "мотороллер", "мотоцикл", "питбайк", "квадроцикл",
+    "вятка электрон", "продам вятку", "вятка электрон", "vespa", "yamaha ybr",
     "запчаст", "автозапчаст", "разбор", "на разбор", "на запчаст",
     # Салонные/кузовные детали: «дверные карты ВАЗ 2106» не автомобиль.
     "дверные карты", "карты двер", "карта двери", "карты ваз", "карты 210",
@@ -3019,6 +3021,8 @@ def _is_car_sale_social(text: str) -> bool:
     tl = text.lower()
     if any(rk in tl for rk in _SOCIAL_REJECT_KEYWORDS):
         return False
+    if _is_moto(tl[:700]):
+        return False
     has_sale = any(sk in tl for sk in _SOCIAL_SALE_KEYWORDS)
     # Считаем сколько «сильных» авто-признаков (марка/пробег/двигатель/год и т.п.)
     car_hits = sum(1 for ck in _SOCIAL_CAR_STRONG if ck in tl)
@@ -3030,10 +3034,12 @@ def _is_car_sale_social(text: str) -> bool:
     has_year = bool(_SOCIAL_YEAR_RE.search(tl))
     has_price_hint = bool(re.search(r"\d{2,3}\s*(?:тыс|т\.?\s*р|к\b|₽|руб|млн)", tl)) or \
                      bool(re.search(r"\d[\d\s.,]{4,}\s*(?:₽|руб|р\b|р\.)", tl))
-    return has_brand or has_year or has_price_hint or car_hits >= 2
+    # Цена сама по себе не доказывает, что это авто: так проходили мопеды,
+    # коляски и запчасти. Нужна марка/модель, год или несколько авто-признаков.
+    return has_brand or has_year or car_hits >= 2
 
 _SOCIAL_TITLE_RE = re.compile(
-    r"(toyota|honda|kia|hyundai|nissan|mazda|bmw|audi|mercedes|lada|ваз|haval|geely|chery|skoda|volkswagen|vw|renault|peugeot|ford|opel|chevrolet|mitsubishi|subaru|lexus|infiniti|volvo|jeep|suzuki|datsun|changan|exeed|omoda|tank|jaecoo|byd|нива|приора|гранта|калина|vesta|largus|xray|москвич)",
+    r"(toyota|honda|kia|hyundai|nissan|mazda|bmw|audi|mercedes|lada|ваз|haval|geely|chery|skoda|volkswagen|vw|renault|peugeot|ford|opel|chevrolet|mitsubishi|subaru|lexus|infiniti|volvo|jeep|suzuki|datsun|changan|exeed|omoda|tank|jaecoo|byd|нива|приора|гранта|калина|vesta|largus|xray|москвич|\b210[1-9]\b|\b211[0-5]\b|\b21099\b|\b217[0-2]\b|\b219[0-4]\b|\b2121\b|\b2131\b)",
     re.IGNORECASE,
 )
 _SOCIAL_YEAR_RE = re.compile(r"\b(19[5-9]\d|20[012]\d)\b")
@@ -3558,6 +3564,70 @@ def scrape_youla(region: str, pages: int = 4, price_min: int = 0,
         if _added == 0:
             continue
         time.sleep(0.1)
+    if len(results) < 8:
+        try:
+            import urllib.parse as _upq_y
+            region_name = REGIONS.get(region, region)
+            queries = [
+                f"site:youla.ru {region_name} автомобиль продажа",
+                f"site:youla.ru {region_name} авто {brand}" if _brand_l and _brand_l != "any" else f"site:youla.ru {region_name} авто",
+            ]
+            seen_urls = {_norm_url(i.get("url", "")) for i in results}
+            for q in queries:
+                try:
+                    rr = _req.get(
+                        "https://html.duckduckgo.com/html/",
+                        params={"q": q, "kl": "ru-ru"},
+                        headers={"User-Agent": hdrs["User-Agent"], "Accept-Language": "ru-RU,ru;q=0.9"},
+                        timeout=8,
+                    )
+                    if rr.status_code != 200:
+                        continue
+                    html_text = _upq_y.unquote(rr.text)
+                    for m in re.finditer(r'https?://(?:www\.)?youla\.ru/[^\s"<>]+', html_text, re.I):
+                        u = m.group(0).split("&")[0].rstrip(".,)'\"")
+                        u_norm = _norm_url(u)
+                        if not u_norm or u_norm in seen_urls:
+                            continue
+                        pos = html_text.find(m.group(0))
+                        ctx = re.sub(r"<[^>]+>", " ", html_text[max(0, pos - 280):pos + 500])
+                        ctx = re.sub(r"\s+", " ", ctx).strip()
+                        if _is_moto(ctx[:700]):
+                            continue
+                        price = parse_price(ctx)
+                        if price and not (price_min <= price <= price_max):
+                            continue
+                        title = _social_make_title(ctx) if _SOCIAL_TITLE_RE.search(ctx) else ctx[:100]
+                        probe = {"title": title, "description": ctx, "url": u_norm}
+                        if _is_non_car_goods(probe):
+                            continue
+                        key = _car_group_key(title)
+                        if not key or len(key.split()) < 2:
+                            continue
+                        if _brand_l and _brand_l != "any" and not _match_brand_item(probe, _brand_l):
+                            continue
+                        seen_urls.add(u_norm)
+                        results.append({
+                            "source": "youla",
+                            "title": title,
+                            "price": f"{price:,} ₽".replace(",", " ") if price else "цена не указана",
+                            "_price_int": price,
+                            "url": u_norm,
+                            "date": str(today),
+                            "_days_on_site": 0,
+                            "_date_known": False,
+                            "_photo_url": "",
+                            "_photos": 0,
+                            "description": ctx[:400],
+                            "seller": region_name,
+                            "mileage": extract_mileage(ctx),
+                        })
+                except Exception:
+                    continue
+            if len(results) >= 8:
+                print(f"  [Юла fallback] всего {len(results)} объявлений")
+        except Exception as e:
+            print(f"  [Юла fallback] ошибка: {str(e)[:80]}")
     print(f"  [Юла] итого {len(results)} объявлений")
     return results
 
@@ -12058,10 +12128,10 @@ async def do_search_for_user(uid: int, reply_to):
     loop = asyncio.get_running_loop()
 
     scraper_map = {
-        "drom":   lambda: scrape_drom(region, pages=4, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
+        "drom":   lambda: scrape_drom(region, pages=6, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
         "autoru": lambda: scrape_autoru(region, pages=6, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
         "avito":  lambda: scrape_avito(region, pages=9, price_min=pmin, price_max=pmax, sort_by_date=False, brand=(brand if brand and brand != "any" else "")),
-        "youla":  lambda: scrape_youla(region, pages=8, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
+        "youla":  lambda: scrape_youla(region, pages=12, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
         "tg":     lambda: scrape_tg_channels(region, pmin, pmax),
     }
@@ -12075,14 +12145,20 @@ async def do_search_for_user(uid: int, reply_to):
     # всегда и без фильтра по бюджету: результаты основного поиска могут быть
     # ограничены бюджетом пользователя и не отражать реальную рыночную цену.
     _avito_ref_fut = loop.run_in_executor(
-        None, lambda: scrape_avito(region, pages=5, price_min=0, price_max=99_000_000)
+        None, lambda: scrape_avito(region, pages=8, price_min=0, price_max=99_000_000)
     )
-    all_futs = futures + ([_avito_ref_fut] if _avito_ref_fut else [])
-    done, pending = await asyncio.wait(all_futs, timeout=SEARCH_SOURCE_TIMEOUT_SEC)
+    done, pending = await asyncio.wait(futures, timeout=SEARCH_SOURCE_TIMEOUT_SEC)
     if pending:
         for f in pending:
             f.cancel()
         print(f"  [search] timeout: {len(pending)} source(s) still running, showing completed results")
+    _avito_ref_extra: list[dict] = []
+    if _avito_ref_fut is not None:
+        try:
+            _avito_ref_extra = await asyncio.wait_for(_avito_ref_fut, timeout=12)
+        except Exception as _e:
+            _avito_ref_extra = []
+            print(f"  [рынок] Авито-эталон не успел/ошибка: {str(_e)[:80]}")
     results = []
     for f in futures:
         if f in done:
@@ -12303,9 +12379,9 @@ async def do_search_for_user(uid: int, reply_to):
     # группирует по марке+модели+году → медиана корректна даже в пределах бюджета.
     import copy as _copy
     _avito_ref_items = [i for i in items if i.get("source") == "avito"]
-    if _avito_ref_fut is not None and _avito_ref_fut in done:
+    if _avito_ref_extra:
         try:
-            _extra_ref = _avito_ref_fut.result() or []
+            _extra_ref = _avito_ref_extra or []
             if _extra_ref:
                 _seen_ref_u = {_norm_url(i.get("url", "")) for i in _avito_ref_items}
                 _avito_ref_items = list(_avito_ref_items) + [
