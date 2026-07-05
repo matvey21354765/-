@@ -9359,6 +9359,52 @@ async def cmd_stats(msg: Message):
     await msg.answer(text, parse_mode="Markdown")
 
 
+@dp.message(Command("mailing_status"))
+async def cmd_mailing_status(msg: Message):
+    if msg.from_user.id not in ADMIN_IDS:
+        return
+    try:
+        users = _all_user_ids()
+        data = _discount_hunt_load()
+        now = time.time()
+        recent = [
+            rec for rec in data.values()
+            if now - float(rec.get("first_seen_ts", now)) <= 24 * 3600
+        ]
+        available = [rec for rec in recent if not rec.get("removed_ts")]
+        removed = [
+            rec for rec in data.values()
+            if rec.get("removed_ts") and now - float(rec.get("removed_ts", now)) <= 24 * 3600
+        ]
+        dt = datetime.datetime.now(_MSK)
+        today = dt.date().isoformat()
+        lines = [
+            "📣 <b>Статус рассылок</b>",
+            "",
+            f"👥 Пользователей для рассылки: <b>{_fmt_n(len(users))}</b>",
+            f"🧲 Охота включена: <b>{'да' if DISCOUNT_HUNT_ENABLED else 'нет'}</b>",
+            f"📨 Маркетинг включён: <b>{'да' if MARKETING_BROADCAST_ENABLED else 'нет'}</b>",
+            f"📢 Канал включён: <b>{'да' if CHANNEL_POSTS_ENABLED else 'нет'}</b>",
+            f"📍 Канал: <code>{html.escape(CHANNEL_ID or '-')}</code>",
+            "",
+            f"🚗 Кандидатов всего в базе: <b>{_fmt_n(len(data))}</b>",
+            f"🕓 За 24ч найдено: <b>{_fmt_n(len(recent))}</b>",
+            f"✅ Сейчас доступны: <b>{_fmt_n(len(available))}</b>",
+            f"❌ Исчезли за 24ч: <b>{_fmt_n(len(removed))}</b>",
+            "",
+            f"📅 Сегодня МСК: <code>{today}</code>",
+            f"🌅 Массовая сегодня: <b>{'да' if _marketing_mass_sent_today(today) else 'нет'}</b>",
+            f"🏁 Охота сегодня: <b>{'да' if (_kv_get(_DISCOUNT_HUNT_LAST_SENT_KV) or '') == today else 'нет'}</b>",
+            "",
+            "Ручные команды:",
+            "<code>/broadcast текст</code> — ручная рассылка всем",
+            "<code>/channel_post stats_day</code> — тест поста в канал",
+        ]
+        await msg.answer("\n".join(lines), parse_mode="HTML")
+    except Exception as e:
+        await msg.answer(f"❌ Ошибка проверки рассылок: {html.escape(str(e)[:200])}", parse_mode="HTML")
+
+
 @dp.message(Command("dashboard"))
 async def cmd_dashboard(msg: Message):
     if msg.from_user.id not in ADMIN_IDS:
@@ -13188,9 +13234,12 @@ def _discount_hunt_track(items: list[dict], region: str = "") -> None:
 
 def _discount_hunt_scrape_region(region: str) -> list[dict]:
     raw: list[dict] = []
+    avito_ref: list[dict] = []
     try:
         if "avito" in DISCOUNT_HUNT_SOURCES:
-            raw.extend(scrape_avito(region, pages=2, sort_by_date=True) or [])
+            avito_recent = scrape_avito(region, pages=2, sort_by_date=True) or []
+            raw.extend(avito_recent)
+            avito_ref = scrape_avito(region, pages=4, price_min=0, price_max=99_000_000) or avito_recent
     except Exception as e:
         print(f"  [охота] avito {region}: {str(e)[:60]}")
     try:
@@ -13206,7 +13255,7 @@ def _discount_hunt_scrape_region(region: str) -> list[dict]:
     raw = [it for it in raw if it.get("url") and not is_dealer(it) and not is_not_running(it)]
     if not raw:
         return []
-    ranked = rank_by_market_price(raw)
+    ranked = rank_by_market_price(raw, ref_items=avito_ref, avito_only_median=True)
     return [
         it for it in ranked
         if _is_strong_below_market(it)
@@ -13340,8 +13389,9 @@ async def _discount_hunt_loop():
             if dt.hour >= DISCOUNT_HUNT_SEND_HOUR_MSK and last_sent != today:
                 top = await _discount_hunt_detect_removed(limit=100)
                 if top:
-                    # Отдельную ежедневную рассылку делает marketing scheduler,
-                    # здесь только отмечаем, что данные готовы.
+                    if not _marketing_mass_sent_today(today):
+                        await _discount_hunt_broadcast(top)
+                        _marketing_mark_mass_sent(today)
                     _kv_set(_DISCOUNT_HUNT_LAST_SENT_KV, today)
                 elif dt.hour >= DISCOUNT_HUNT_SEND_HOUR_MSK + 2:
                     _kv_set(_DISCOUNT_HUNT_LAST_SENT_KV, today)
