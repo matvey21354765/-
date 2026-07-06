@@ -858,7 +858,11 @@ def _car_group_key(title: str) -> str:
             return n < 10000 and not (1980 <= n <= 2035)
         return False
     words = [w for w in re.sub(r'[^а-яёa-z0-9\s]', ' ', t).split() if w and _is_model_word(w)]
-    brand_model = " ".join(words[:2]) if len(words) >= 2 else " ".join(words)
+    if len(words) >= 3 and re.fullmatch(r'[a-zа-яё]{1,4}', words[1]) and words[2].isdigit():
+        # Mazda CX-5 / Audi Q 7 / BMW X 5 -> mazda cx5 / audi q7 / bmw x5
+        brand_model = f"{words[0]} {words[1]}{words[2]}"
+    else:
+        brand_model = " ".join(words[:2]) if len(words) >= 2 else " ".join(words)
     return f"{brand_model} {year}".strip()
 
 
@@ -1331,10 +1335,13 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
             # Авито-медиане по похожим объявлениям.
             _avm = it.get("_avito_market", 0) or 0
             _drm = it.get("_drom_market", 0) or 0
+            _aum = it.get("_autoru_market", 0) or 0
             if it.get("source") == "drom" and _drm and 30_000 < _drm < 50_000_000:
                 med, _lvl, _n = float(_drm), "drom", 30
             elif _avm and 30_000 < _avm < 50_000_000:
                 med, _lvl, _n = float(_avm), "avito", 30
+            elif it.get("source") == "autoru" and _aum and 30_000 < _aum < 50_000_000:
+                med, _lvl, _n = float(_aum), "autoru", 20
             elif len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 4:
                 med, _lvl, _n = _market_for(parts[0], int(parts[1]), p)
                 if med <= 0:
@@ -1355,7 +1362,7 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
                 # Для "medium" (±3 года) — 75%.
                 # Для "wide" (±5 лет, грубая оценка) — 70%.
                 # Для Авито собственной оценки — 85% (высокая точность).
-                if _lvl.startswith(("avito", "drom")):
+                if _lvl.startswith(("avito", "drom", "autoru")):
                     _cap = 85
                 elif _lvl == "near":
                     _cap = 85
@@ -1379,7 +1386,7 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
                 it["_market_lvl"] = _lvl
 
                 # Скидка — главный фактор, но вес зависит от уровня точности
-                if _lvl.startswith(("avito", "drom")):
+                if _lvl.startswith(("avito", "drom", "autoru")):
                     deal_score += savings_pct * 4.5  # ↑ было 3.0, Авито самая точная
                 elif _lvl == "near":
                     deal_score += savings_pct * 4.0  # ↑ было 3.0, ±1 год — точно
@@ -4660,6 +4667,8 @@ def _avito_price_rating(it: dict) -> tuple:
         v = int(m.group(1))
         if 30_000 < v < 50_000_000:
             market = v
+    if not market:
+        market = _extract_market_estimate_from_obj(it, "avito")
     return text, score, market
 
 
@@ -4674,23 +4683,100 @@ def _parse_rub_amount(text: str) -> int:
         return 0
 
 
-def _avito_ai_estimate_from_text(text: str) -> int:
-    """Extracts Avito neural-network estimate from an opened listing page."""
+def _extract_market_estimate_from_text(text: str, source: str = "") -> int:
+    """Best-effort extraction of marketplace market/AI estimate from HTML text."""
     if not text:
         return 0
     flat = re.sub(r"\s+", " ", text)
     low = flat.lower()
-    markers = ("оценка нейросети", "дешевле оценки", "дороже оценки")
-    starts = [low.find(m) for m in markers if low.find(m) >= 0]
+    source = (source or "").lower()
+    marker_groups = [
+        "оценка нейросети", "нейросеть", "дешевле оценки", "дороже оценки",
+        "дром оценил", "оценка дрома", "оценка дром",
+        "рыночная цена", "рыночная стоимость", "средняя цена", "средняя стоимость",
+        "market price", "marketprice", "average price", "avgprice",
+        "estimated price", "estimateprice", "price estimate", "valuation",
+    ]
+    starts = [low.find(m) for m in marker_groups if low.find(m) >= 0]
     if not starts:
         return 0
-    window = flat[min(starts):min(starts) + 350]
-    amounts = re.findall(r"(\d[\d\s]{1,12})\s*₽", window)
-    for amount in amounts:
-        value = _parse_rub_amount(amount)
-        if value:
-            return value
+    for start in sorted(starts)[:6]:
+        window = flat[max(0, start - 80):start + 520]
+        amounts = re.findall(r"(\d{1,3}(?:[\s.,]\d{3})+|\d{5,9})\s*(?:₽|руб|р\b)?", window, re.I)
+        values = []
+        for amount in amounts:
+            value = _parse_rub_amount(amount)
+            if value:
+                values.append(value)
+        if not values:
+            continue
+        # In Avito's AI block first amount is usually estimate, second is listing price.
+        if source == "avito":
+            return values[0]
+        # Drom blocks can contain listing price first; prefer value after "оценил".
+        for v in values:
+            return v
     return 0
+
+
+def _extract_market_estimate_from_obj(obj, source: str = "") -> int:
+    """Deep JSON/object scan for explicit marketplace market estimate fields."""
+    market_key_re = re.compile(
+        r"(market|average|avg|estimate|estimated|valuation|fair|recommended|"
+        r"рыноч|средн|оценк)",
+        re.I,
+    )
+    price_key_re = re.compile(r"(price|cost|value|amount|sum|стоим|цен)", re.I)
+
+    def _walk(x, depth=0, parent_key=""):
+        if depth > 9:
+            return 0
+        if isinstance(x, dict):
+            for k, v in x.items():
+                lk = str(k).lower()
+                key_is_market = bool(market_key_re.search(lk) or market_key_re.search(parent_key))
+                if key_is_market:
+                    if isinstance(v, (int, float)):
+                        iv = int(v)
+                        if 30_000 < iv < 50_000_000:
+                            return iv
+                    if isinstance(v, str):
+                        iv = _parse_rub_amount(v)
+                        if iv:
+                            return iv
+                    if isinstance(v, dict):
+                        for kk, vv in v.items():
+                            if price_key_re.search(str(kk)):
+                                iv = _walk(vv, depth + 1, str(kk))
+                                if iv:
+                                    return iv
+                        iv = _walk(v, depth + 1, lk)
+                        if iv:
+                            return iv
+                    if isinstance(v, list):
+                        iv = _walk(v, depth + 1, lk)
+                        if iv:
+                            return iv
+                elif isinstance(v, (dict, list)):
+                    iv = _walk(v, depth + 1, lk)
+                    if iv:
+                        return iv
+        elif isinstance(x, list):
+            for v in x:
+                iv = _walk(v, depth + 1, parent_key)
+                if iv:
+                    return iv
+        return 0
+
+    try:
+        return _walk(obj)
+    except Exception:
+        return 0
+
+
+def _avito_ai_estimate_from_text(text: str) -> int:
+    """Extracts Avito neural-network estimate from an opened listing page."""
+    return _extract_market_estimate_from_text(text, "avito")
 
 
 def _drom_estimate_from_text(text: str) -> int:
@@ -4710,7 +4796,7 @@ def _drom_estimate_from_text(text: str) -> int:
         value = _parse_rub_amount(m.group(1))
         if value:
             return value
-    return 0
+    return _extract_market_estimate_from_text(text, "drom")
 
 
 def _apply_page_market(item: dict, market: int, lvl: str) -> None:
@@ -4718,7 +4804,7 @@ def _apply_page_market(item: dict, market: int, lvl: str) -> None:
     if not price or not market or not (30_000 < market < 50_000_000):
         return
     item[f"_{lvl}_market"] = market
-    if lvl not in ("avito", "drom"):
+    if lvl not in ("avito", "drom", "autoru"):
         return
     item["_market_price"] = market
     item["_market_lvl"] = lvl
@@ -10447,10 +10533,10 @@ async def cmd_global_search(msg: Message):
 
     # Запускаем все источники + TG-каналы параллельно
     scraper_map = {
-        "drom":   lambda: scrape_drom(region, pages=6, price_min=pmin, price_max=pmax, brand=_br),
-        "autoru": lambda: scrape_autoru(region, pages=6, price_min=pmin, price_max=pmax, brand=_br),
-        "avito":  lambda: scrape_avito(region, pages=12, price_min=pmin, price_max=pmax, sort_by_date=False),
-        "youla":  lambda: scrape_youla(region, pages=8, price_min=pmin, price_max=pmax, brand=_br),
+        "drom":   lambda: scrape_drom(region, pages=8, price_min=pmin, price_max=pmax, brand=_br),
+        "autoru": lambda: scrape_autoru(region, pages=8, price_min=pmin, price_max=pmax, brand=_br),
+        "avito":  lambda: scrape_avito(region, pages=14, price_min=pmin, price_max=pmax, sort_by_date=False),
+        "youla":  lambda: scrape_youla(region, pages=14, price_min=pmin, price_max=pmax, brand=_br),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
     }
     task_pairs = [
@@ -10798,6 +10884,12 @@ def _fetch_and_check(url: str, source: str) -> dict | None:
             drom_market = _drom_estimate_from_text(
                 text + "\n" + soup.get_text("\n", strip=True)
             )
+        generic_market = 0
+        if source in ("autoru", "auto.ru"):
+            generic_market = _extract_market_estimate_from_text(
+                text + "\n" + soup.get_text("\n", strip=True),
+                "autoru",
+            )
 
         # Фото: og:image
         photo_url = ""
@@ -10908,6 +11000,8 @@ def _fetch_and_check(url: str, source: str) -> dict | None:
             details["_avito_market"] = avito_ai_market
         if drom_market:
             details["_drom_market"] = drom_market
+        if generic_market:
+            details["_autoru_market"] = generic_market
         return details
     except Exception:
         # Для площадок, где мы явно проверяем актуальность перед отправкой,
@@ -10947,6 +11041,8 @@ async def enrich_and_filter(items: list[dict], max_check: int = 25) -> list[dict
             _apply_page_market(item, int(details["_avito_market"]), "avito")
         if details.get("_drom_market"):
             _apply_page_market(item, int(details["_drom_market"]), "drom")
+        if details.get("_autoru_market"):
+            _apply_page_market(item, int(details["_autoru_market"]), "autoru")
         active.append(item)
 
     return active + rest
@@ -11815,6 +11911,8 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                     _apply_page_market(item, int(details["_avito_market"]), "avito")
                 if details.get("_drom_market") and item.get("_price_int"):
                     _apply_page_market(item, int(details["_drom_market"]), "drom")
+                if details.get("_autoru_market") and item.get("_price_int"):
+                    _apply_page_market(item, int(details["_autoru_market"]), "autoru")
             except Exception:
                 pass
         sid = url_to_id(url)
@@ -11855,6 +11953,8 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                 market_note = " Дром" + market_note
             elif item.get("_market_lvl") == "avito":
                 market_note = " Авито" + market_note
+            elif item.get("_market_lvl") == "autoru":
+                market_note = " Auto.ru" + market_note
             elif item.get("_market_lvl") == "model":
                 market_note = " грубо" + market_note
             if pct > 0:
@@ -12132,10 +12232,10 @@ async def do_search_for_user(uid: int, reply_to):
     loop = asyncio.get_running_loop()
 
     scraper_map = {
-        "drom":   lambda: scrape_drom(region, pages=6, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
-        "autoru": lambda: scrape_autoru(region, pages=6, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
-        "avito":  lambda: scrape_avito(region, pages=9, price_min=pmin, price_max=pmax, sort_by_date=False, brand=(brand if brand and brand != "any" else "")),
-        "youla":  lambda: scrape_youla(region, pages=12, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
+        "drom":   lambda: scrape_drom(region, pages=8, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
+        "autoru": lambda: scrape_autoru(region, pages=8, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
+        "avito":  lambda: scrape_avito(region, pages=12, price_min=pmin, price_max=pmax, sort_by_date=False, brand=(brand if brand and brand != "any" else "")),
+        "youla":  lambda: scrape_youla(region, pages=14, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
         "tg":     lambda: scrape_tg_channels(region, pmin, pmax),
     }
@@ -12149,7 +12249,7 @@ async def do_search_for_user(uid: int, reply_to):
     # всегда и без фильтра по бюджету: результаты основного поиска могут быть
     # ограничены бюджетом пользователя и не отражать реальную рыночную цену.
     _avito_ref_fut = loop.run_in_executor(
-        None, lambda: scrape_avito(region, pages=8, price_min=0, price_max=99_000_000)
+        None, lambda: scrape_avito(region, pages=12, price_min=0, price_max=99_000_000)
     )
     done, pending = await asyncio.wait(futures, timeout=SEARCH_SOURCE_TIMEOUT_SEC)
     if pending:
@@ -12159,7 +12259,7 @@ async def do_search_for_user(uid: int, reply_to):
     _avito_ref_extra: list[dict] = []
     if _avito_ref_fut is not None:
         try:
-            _avito_ref_extra = await asyncio.wait_for(_avito_ref_fut, timeout=12)
+            _avito_ref_extra = await asyncio.wait_for(_avito_ref_fut, timeout=18)
         except Exception as _e:
             _avito_ref_extra = []
             print(f"  [рынок] Авито-эталон не успел/ошибка: {str(_e)[:80]}")
@@ -12645,6 +12745,8 @@ async def do_search_for_user(uid: int, reply_to):
                     _apply_page_market(it, int(details["_avito_market"]), "avito")
                 if details.get("_drom_market") and it.get("_price_int"):
                     _apply_page_market(it, int(details["_drom_market"]), "drom")
+                if details.get("_autoru_market") and it.get("_price_int"):
+                    _apply_page_market(it, int(details["_autoru_market"]), "autoru")
                 return it
             except Exception:
                 if source in ("avito", "drom", "autoru"):
