@@ -4776,6 +4776,32 @@ def _extract_market_estimate_from_obj(obj, source: str = "") -> int:
 
 def _avito_ai_estimate_from_text(text: str) -> int:
     """Extracts Avito neural-network estimate from an opened listing page."""
+    if not text:
+        return 0
+    flat = re.sub(r"\s+", " ", text)
+    exact_patterns = (
+        r"Оценка\s+нейросети[^0-9]{0,120}(\d{1,3}(?:[\s.,]\d{3})+|\d{5,9})\s*₽",
+        r"Нейросеть[^0-9]{0,160}(?:определила|оценила|изучила)[^0-9]{0,160}(\d{1,3}(?:[\s.,]\d{3})+|\d{5,9})\s*₽",
+        r"Дешевле\s+оценки[^0-9]{0,160}Оценка\s+нейросети[^0-9]{0,120}(\d{1,3}(?:[\s.,]\d{3})+|\d{5,9})\s*₽",
+        r"Дороже\s+оценки[^0-9]{0,160}Оценка\s+нейросети[^0-9]{0,120}(\d{1,3}(?:[\s.,]\d{3})+|\d{5,9})\s*₽",
+    )
+    for pat in exact_patterns:
+        m = re.search(pat, flat, re.IGNORECASE)
+        if m:
+            value = _parse_rub_amount(m.group(1))
+            if value:
+                return value
+    # Cut the block before listing price so "Стоимость в объявлении" cannot win.
+    low = flat.lower()
+    start = low.find("оценка нейросети")
+    if start >= 0:
+        end = low.find("стоимость в объявлении", start)
+        block = flat[start:end if end > start else start + 320]
+        amounts = re.findall(r"(\d{1,3}(?:[\s.,]\d{3})+|\d{5,9})\s*₽", block)
+        for amount in amounts:
+            value = _parse_rub_amount(amount)
+            if value:
+                return value
     return _extract_market_estimate_from_text(text, "avito")
 
 
@@ -10879,6 +10905,23 @@ def _fetch_and_check(url: str, source: str) -> dict | None:
             avito_ai_market = _avito_ai_estimate_from_text(
                 text + "\n" + soup.get_text("\n", strip=True)
             )
+            if not avito_ai_market and "avito.ru" in url:
+                try:
+                    mobile_url = re.sub(r"https?://(?:www\.)?avito\.ru", "https://m.avito.ru", url)
+                    mr = _req.get(
+                        mobile_url,
+                        headers={
+                            **_headers,
+                            "Referer": "https://m.avito.ru/",
+                            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+                        },
+                        timeout=8,
+                        allow_redirects=True,
+                    )
+                    if mr.status_code == 200:
+                        avito_ai_market = _avito_ai_estimate_from_text(mr.text)
+                except Exception:
+                    pass
         drom_market = 0
         if source == "drom":
             drom_market = _drom_estimate_from_text(
