@@ -876,6 +876,10 @@ MARKET_DEAL_MIN_PCT = 10.0
 def _is_strong_below_market(it: dict) -> bool:
     """True только для сильного сигнала ниже рынка, а не для погрешности медианы."""
     pct = it.get("_savings_pct", 0) or 0
+    if (it.get("source", "") or "").lower() == "avito":
+        avito_score = it.get("_avito_rating_score")
+        if it.get("_market_lvl") != "avito" and avito_score is not None and avito_score <= 0:
+            return False
     if it.get("_market_lvl") == "model" and pct < 20:
         return False
     if pct >= MARKET_DEAL_MIN_PCT:
@@ -4639,8 +4643,10 @@ def _avito_desc_from_title(title: str, mileage: int = 0) -> str:
 _AVITO_RATING_MAP = [
     ("отличная цена", 2), ("очень хорошая цена", 2),
     ("ниже рыночной", 2), ("ниже рынка", 2),
-    ("хорошая цена", 1), ("рыночная цена", 0),
-    ("по рынку", 0), ("выше рыночной", -1), ("выше рынка", -1),
+    ("дешевле оценки", 2), ("дешевле рыночной оценки", 2),
+    ("хорошая цена", 1), ("рыночная цена", 0), ("соответствует оценке", 0),
+    ("по рынку", 0), ("дороже оценки", -1), ("дороже рыночной оценки", -1),
+    ("выше рыночной", -1), ("выше рынка", -1),
     ("завышенная цена", -1), ("завышена", -1), ("дорого", -1),
 ]
 
@@ -4670,6 +4676,14 @@ def _avito_price_rating(it: dict) -> tuple:
     if not market:
         market = _extract_market_estimate_from_obj(it, "avito")
     return text, score, market
+
+
+def _avito_rating_from_text(text: str) -> tuple[str, int | None]:
+    low = (text or "").lower()
+    for phrase, score in _AVITO_RATING_MAP:
+        if phrase in low:
+            return phrase, score
+    return "", None
 
 
 def _parse_rub_amount(text: str) -> int:
@@ -10901,10 +10915,12 @@ def _fetch_and_check(url: str, source: str) -> dict | None:
             return None
 
         avito_ai_market = 0
+        avito_rating_text = ""
+        avito_rating_score = None
         if source == "avito":
-            avito_ai_market = _avito_ai_estimate_from_text(
-                text + "\n" + soup.get_text("\n", strip=True)
-            )
+            avito_page_blob = text + "\n" + soup.get_text("\n", strip=True)
+            avito_ai_market = _avito_ai_estimate_from_text(avito_page_blob)
+            avito_rating_text, avito_rating_score = _avito_rating_from_text(avito_page_blob)
             if not avito_ai_market and "avito.ru" in url:
                 try:
                     mobile_url = re.sub(r"https?://(?:www\.)?avito\.ru", "https://m.avito.ru", url)
@@ -10920,6 +10936,8 @@ def _fetch_and_check(url: str, source: str) -> dict | None:
                     )
                     if mr.status_code == 200:
                         avito_ai_market = _avito_ai_estimate_from_text(mr.text)
+                        if not avito_rating_text:
+                            avito_rating_text, avito_rating_score = _avito_rating_from_text(mr.text)
                 except Exception:
                     pass
         drom_market = 0
@@ -11041,6 +11059,9 @@ def _fetch_and_check(url: str, source: str) -> dict | None:
         details = {"_photo_url": photo_url, "description": description}
         if avito_ai_market:
             details["_avito_market"] = avito_ai_market
+        if avito_rating_text:
+            details["_avito_rating"] = avito_rating_text
+            details["_avito_rating_score"] = avito_rating_score
         if drom_market:
             details["_drom_market"] = drom_market
         if generic_market:
@@ -11082,6 +11103,10 @@ async def enrich_and_filter(items: list[dict], max_check: int = 25) -> list[dict
             item["description"] = details["description"]
         if details.get("_avito_market"):
             _apply_page_market(item, int(details["_avito_market"]), "avito")
+        if details.get("_avito_rating"):
+            item["_avito_rating"] = details["_avito_rating"]
+            item["_avito_rating_score"] = details.get("_avito_rating_score")
+            item["_below_market"] = _is_strong_below_market(item)
         if details.get("_drom_market"):
             _apply_page_market(item, int(details["_drom_market"]), "drom")
         if details.get("_autoru_market"):
@@ -11952,6 +11977,10 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                     item["_photo_url"] = details["_photo_url"]
                 if details.get("_avito_market") and item.get("_price_int"):
                     _apply_page_market(item, int(details["_avito_market"]), "avito")
+                if details.get("_avito_rating"):
+                    item["_avito_rating"] = details["_avito_rating"]
+                    item["_avito_rating_score"] = details.get("_avito_rating_score")
+                    item["_below_market"] = _is_strong_below_market(item)
                 if details.get("_drom_market") and item.get("_price_int"):
                     _apply_page_market(item, int(details["_drom_market"]), "drom")
                 if details.get("_autoru_market") and item.get("_price_int"):
@@ -11989,6 +12018,10 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         deal_line = ""
         market = item.get("_market_price", 0)
         pct = item.get("_savings_pct", 0)
+        if source == "avito" and item.get("_market_lvl") != "avito" and (item.get("_avito_rating_score") is not None):
+            if (item.get("_avito_rating_score") or 0) <= 0:
+                market = 0
+                pct = 0
         if market and _pi:
             saving = market - _pi
             market_note = " с учётом пробега" if item.get("_market_mileage_factor") else ""
@@ -12786,6 +12819,10 @@ async def do_search_for_user(uid: int, reply_to):
                     it["description"] = details["description"]
                 if details.get("_avito_market") and it.get("_price_int"):
                     _apply_page_market(it, int(details["_avito_market"]), "avito")
+                if details.get("_avito_rating"):
+                    it["_avito_rating"] = details["_avito_rating"]
+                    it["_avito_rating_score"] = details.get("_avito_rating_score")
+                    it["_below_market"] = _is_strong_below_market(it)
                 if details.get("_drom_market") and it.get("_price_int"):
                     _apply_page_market(it, int(details["_drom_market"]), "drom")
                 if details.get("_autoru_market") and it.get("_price_int"):
