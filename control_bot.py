@@ -921,6 +921,22 @@ def _is_market_candidate(it: dict) -> bool:
 # СТОП только если машина НЕ НА ХОДУ / на запчасти / утиль. Битые, крашеные,
 # после ДТП, требующие ремонта — это НЕ стоп (пользователю такие нужны), лишь бы
 # ездили. Поэтому список узкий — только «нерабочие» состояния.
+def _best_below_market_items(items: list[dict]) -> list[dict]:
+    """Strict final selector: only proven below-market cars, best discount first."""
+    picked: list[dict] = []
+    for it in items:
+        price = int(it.get("_price_int") or 0)
+        market = int(it.get("_market_price") or 0)
+        if not price or not market or market <= price:
+            continue
+        if not _is_strong_below_market(it):
+            continue
+        if is_not_running(it):
+            continue
+        picked.append(it)
+    return _sort_by_deal(picked)
+
+
 _JUNK_KEYWORDS = [
     "не на ходу", "не ездит", "не заводится", "не заводилась", "не заводиться",
     "не едет", "не заведётся", "не заведется",
@@ -10553,10 +10569,7 @@ async def cmd_new_today(msg: Message):
         _ar["_market_ref_only"] = True
     suitable = rank_by_market_price(suitable, ref_items=_avito_ref_today, avito_only_median=True)
     # Только ниже рынка
-    below_today = [i for i in suitable if _is_strong_below_market(i)]
-    if below_today:
-        suitable = below_today
-    suitable = _sort_by_deal(suitable)
+    suitable = _best_below_market_items(suitable)
 
     if not suitable:
         await msg.answer(
@@ -10683,10 +10696,7 @@ async def cmd_global_search(msg: Message):
     ]
     suitable = rank_by_market_price(suitable)
     # Показываем только те что ниже рынка — остальные не интересны перекупу
-    below_market = [i for i in suitable if _is_strong_below_market(i)]
-    if below_market:
-        suitable = below_market
-    suitable = _sort_by_deal(suitable)
+    suitable = _best_below_market_items(suitable)
 
     if not suitable:
         await msg.answer(
@@ -10783,7 +10793,7 @@ async def cmd_vk_tg_search(msg: Message):
     ]
     suitable = _filter_by_category(suitable, s.get("category", "all"), s.get("brand", ""))
     suitable = rank_by_market_price(suitable)
-    suitable = _sort_by_deal(suitable)
+    suitable = _best_below_market_items(suitable)
 
     if not suitable:
         await msg.answer(
@@ -12909,7 +12919,7 @@ async def do_search_for_user(uid: int, reply_to):
     _below_count = sum(1 for i in suitable if _is_strong_below_market(i))
     _market_available = _market_items_count > 0
     if _market_available:
-        below_items = _sort_by_deal([i for i in suitable if _is_strong_below_market(i)])
+        below_items = _best_below_market_items(suitable)
         below_urls = {_norm_url(i.get("url", "")) for i in below_items}
         market_items = _sort_by_deal([
             i for i in suitable
@@ -12926,16 +12936,24 @@ async def do_search_for_user(uid: int, reply_to):
             and _is_market_candidate(i)
         ])
         if below_items or market_items:
-            suitable = (below_items + market_items)[:80]
+            suitable = below_items[:80]
         else:
-            suitable = rest_items[:40]
+            suitable = []
         print(
             f"  [фильтр] ниже рынка={_below_count}, с рынком={_market_items_count}, "
             f"показываем={len(suitable)} из {len(below_items) + len(market_items) + len(rest_items)}"
         )
     else:
-        suitable = suitable[:80]
+        suitable = []
         print(f"  [фильтр] точных оценок нет → показываем {len(suitable)} объявлений в бюджете")
+
+    if not suitable:
+        await reply_to.answer(
+            f"😔 Не нашёл подтверждённых авто ниже рынка (≥{MARKET_DEAL_MIN_PCT:.0f}%).\n"
+            f"Отфильтровал объявления по рынку, выше рынка и без точной оценки, чтобы не присылать мусор.\n"
+            f"Попробуй расширить бюджет, регион или включить больше площадок: /settings"
+        )
+        return
 
     _search_cache[uid] = suitable
     _save_cache(uid, suitable)
