@@ -12081,7 +12081,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         )
         return
 
-    async def _send_item(item: dict):
+    async def _send_item(item: dict) -> bool:
         url = item.get("url", "")
         source = item.get("source", "")
         needs_avito_ai_check = source == "avito" and not item.get("_avito_page_checked")
@@ -12096,9 +12096,9 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                     timeout=check_timeout
                 )
                 if details is None:
-                    return  # продано — пропускаем
+                    return False
                 if details.get("_check_failed"):
-                    return  # не смогли подтвердить актуальность
+                    return False
                 if needs_sale_status_check:
                     item["_sale_status_checked"] = True
                 if needs_avito_ai_check:
@@ -12119,13 +12119,13 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                     _apply_page_market(item, int(details["_autoru_market"]), "autoru")
             except Exception:
                 if source in ("avito", "drom", "autoru"):
-                    return
+                    return False
         if source in ("avito", "drom", "autoru") and not item.get("_sale_status_checked"):
-            return
+            return False
         if source == "drom" and item.get("_sale_status_checked") and not item.get("_drom_market"):
-            return
+            return False
         if not _ranked_search_items([item]):
-            return
+            return False
         sid = url_to_id(url)
         days = item.get("_days_on_site", 0)
         _date_known = item.get("_date_known", False) or item.get("date", "") == str(datetime.date.today())
@@ -12172,13 +12172,13 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                 market_note = " Auto.ru" + market_note
             elif item.get("_market_lvl") == "model":
                 market_note = " грубо" + market_note
-            if pct > 0:
+            if pct >= MARKET_DEAL_MIN_PCT:
                 # Дешевле рынка
                 price_line += f"  🔻 рынок{market_note} ~{market:,} ₽ (-{pct}%)".replace(",", " ")
                 if _is_junk:
                     # Не на ходу / на запчасти — это НЕ выгода, а причина низкой цены.
                     deal_line = "\n🔴 не на ходу / на запчасти — низкая цена не выгода"
-                elif pct >= MARKET_DEAL_MIN_PCT:
+                else:
                     tier = "🟢 ВЫГОДНО" if pct >= 25 else "🟡 ниже рынка"
                     deal_line = f"\n{tier}: дешевле рынка на ~{saving:,} ₽".replace(",", " ")
                     # Потенциальная прибыль перекупа: рынок − цена − примерные
@@ -12187,8 +12187,9 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                     _profit = saving - _costs
                     if _profit >= 15_000:
                         deal_line += f"\n💵 потенциальная прибыль ~{_profit:,} ₽ (после расходов)".replace(",", " ")
-                else:
-                    deal_line = "\n⚪ около рынка: скидка меньше 10%, не считаю сильной выгодой"
+            elif pct > 0:
+                price_line += f"  ≈ рынок{market_note} ~{market:,} ₽".replace(",", " ")
+                deal_line = f"\n⚪ около рынка: скидка {pct}%, не считаю выгодой ниже рынка"
             elif pct < 0:
                 # Дороже рынка
                 price_line += f"  🔺 рынок{market_note} ~{market:,} ₽ (+{abs(pct)}%)".replace(",", " ")
@@ -12322,16 +12323,17 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                 if content:
                     photo_bytes = BufferedInputFile(content, filename="photo.jpg")
                     await bot.send_photo(chat_id, photo=photo_bytes, caption=caption, reply_markup=kb)
-                    return
+                    return True
             except Exception:
                 pass
             # Fallback: передаём URL напрямую Telegram
             try:
                 await bot.send_photo(chat_id, photo=photo_url, caption=caption, reply_markup=kb)
-                return
+                return True
             except Exception:
                 pass
         await bot.send_message(chat_id, caption, reply_markup=kb)
+        return True
 
     # Отбираем кандидатов и дозагружаем фото/описание только для них (см. ниже).
     s = load_settings(uid)
@@ -12354,35 +12356,34 @@ async def send_batch(chat_id: int, uid: int, offset: int):
             except Exception:
                 pass
 
-    # Список уже отсортирован в do_search_for_user. Берём срез напрямую.
-    batch = items[offset:offset + 10]
-
-    # Дозагружаем фото ПАРАЛЛЕЛЬНО, но каждую карточку показываем сразу, как только
-    # готово ЕЁ фото — не ждём самую медленную из 10 (фото Дрома грузится до 14с).
-    # Все объявления показываются те же и в том же порядке — теряется только
-    # барьер-ожидание, первая выгодная карточка появляется в разы быстрее.
-    _pf_tasks = [asyncio.ensure_future(_prefetch(it)) for it in batch]
-    _deferred_junk = []
-    for i, item in enumerate(batch):
+    sent_items: list[dict] = []
+    scanned = offset
+    deferred_junk: list[dict] = []
+    while scanned < total and len(sent_items) < 10:
+        item = items[scanned]
+        scanned += 1
         try:
-            await _pf_tasks[i]   # ждём фото ТОЛЬКО этого объявления
+            await _prefetch(item)
         except Exception:
             pass
-        # Битость проверяем на подгруженном (полном) описании. Битые/не на ходу
-        # уводим в КОНЕЦ пачки — они не должны идти как выгодные сделки.
         if not item.get("_is_junk") and _text_is_junk(item.get("title", ""), item.get("description", "")):
             item["_is_junk"] = True
         if item.get("_is_junk"):
-            _deferred_junk.append(item)
+            deferred_junk.append(item)
             continue
-        await _send_item(item)
-        await asyncio.sleep(0.01)
-    for item in _deferred_junk:   # битые — в самом конце
-        await _send_item(item)
-        await asyncio.sleep(0.01)
+        if await _send_item(item):
+            sent_items.append(item)
+            await asyncio.sleep(0.01)
 
-    next_offset = offset + len(batch)
-    shown_str = f"{next_offset}/{total}"
+    for item in deferred_junk:
+        if len(sent_items) >= 10:
+            break
+        if await _send_item(item):
+            sent_items.append(item)
+            await asyncio.sleep(0.01)
+
+    next_offset = scanned
+    shown_str = f"{len(sent_items)} авто, просмотрено {next_offset}/{total}"
     if next_offset < total:
         nav_row = [InlineKeyboardButton(text="➡️ Ещё", callback_data=f"page|{uid}|{next_offset}")]
         if offset > 0:
@@ -12406,7 +12407,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
 
     # Сохраняем показанные в seen (нормализуем URL, кап 2000)
     seen = load_seen(uid)
-    for item in batch:
+    for item in sent_items:
         u = item.get("url", "")
         if u:
             seen.add(_norm_url(u))
@@ -12946,9 +12947,9 @@ async def do_search_for_user(uid: int, reply_to):
                     timeout=check_timeout
                 )
                 if details is None:
-                    return None  # снято с продажи (Дром/Авито/Авто.ру)
+                    return None
                 if details.get("_check_failed"):
-                    return None  # не смогли подтвердить актуальность
+                    return None
                 it["_enriched"] = True
                 it["_sale_status_checked"] = True
                 # Фото обновляем только если у объявления его нет (не перезаписываем хорошее)
