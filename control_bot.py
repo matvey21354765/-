@@ -451,7 +451,7 @@ SEARCH_PRICE_FILL_LIMIT = _env_int("SEARCH_PRICE_FILL_LIMIT", 3, 0)
 SEARCH_PRICE_FILL_TIMEOUT_SEC = _env_int("SEARCH_PRICE_FILL_TIMEOUT_SEC", 4)
 SEARCH_DETAIL_CHECK_LIMIT = _env_int("SEARCH_DETAIL_CHECK_LIMIT", 60, 0)
 SEARCH_DETAIL_CHECK_TIMEOUT_SEC = _env_int("SEARCH_DETAIL_CHECK_TIMEOUT_SEC", 5)
-SEARCH_DETAIL_TOTAL_TIMEOUT_SEC = _env_int("SEARCH_DETAIL_TOTAL_TIMEOUT_SEC", 20)
+SEARCH_DETAIL_TOTAL_TIMEOUT_SEC = _env_int("SEARCH_DETAIL_TOTAL_TIMEOUT_SEC", 45)
 _last_search_at: dict[int, float] = {}
 
 # Мониторинг новых объявлений
@@ -927,10 +927,21 @@ def _best_below_market_items(items: list[dict]) -> list[dict]:
     for it in items:
         price = int(it.get("_price_int") or 0)
         market = int(it.get("_market_price") or 0)
+        pct = float(it.get("_savings_pct") or 0)
+        lvl = str(it.get("_market_lvl") or "")
+        n = int(it.get("_market_n") or 0)
         if not price or not market or market <= price:
             continue
         if not _is_strong_below_market(it):
             continue
+        if lvl in ("avito", "drom", "autoru"):
+            pass
+        elif lvl in ("near", "bracket"):
+            if n < 5 or pct < 18:
+                continue
+        else:
+            if n < 8 or pct < 25:
+                continue
         if is_not_running(it):
             continue
         picked.append(it)
@@ -10652,10 +10663,10 @@ async def cmd_global_search(msg: Message):
 
     # Запускаем все источники + TG-каналы параллельно
     scraper_map = {
-        "drom":   lambda: scrape_drom(region, pages=8, price_min=pmin, price_max=pmax, brand=_br),
+        "drom":   lambda: scrape_drom(region, pages=10, price_min=pmin, price_max=pmax, brand=_br),
         "autoru": lambda: scrape_autoru(region, pages=12, price_min=pmin, price_max=pmax, brand=_br),
-        "avito":  lambda: scrape_avito(region, pages=14, price_min=pmin, price_max=pmax, sort_by_date=False),
-        "youla":  lambda: scrape_youla(region, pages=14, price_min=pmin, price_max=pmax, brand=_br),
+        "avito":  lambda: scrape_avito(region, pages=16, price_min=pmin, price_max=pmax, sort_by_date=False),
+        "youla":  lambda: scrape_youla(region, pages=16, price_min=pmin, price_max=pmax, brand=_br),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
     }
     task_pairs = [
@@ -12394,10 +12405,10 @@ async def do_search_for_user(uid: int, reply_to):
     loop = asyncio.get_running_loop()
 
     scraper_map = {
-        "drom":   lambda: scrape_drom(region, pages=8, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
+        "drom":   lambda: scrape_drom(region, pages=10, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
         "autoru": lambda: scrape_autoru(region, pages=12, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
-        "avito":  lambda: scrape_avito(region, pages=12, price_min=pmin, price_max=pmax, sort_by_date=False, brand=(brand if brand and brand != "any" else "")),
-        "youla":  lambda: scrape_youla(region, pages=14, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
+        "avito":  lambda: scrape_avito(region, pages=16, price_min=pmin, price_max=pmax, sort_by_date=False, brand=(brand if brand and brand != "any" else "")),
+        "youla":  lambda: scrape_youla(region, pages=16, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
         "tg":     lambda: scrape_tg_channels(region, pmin, pmax),
     }
@@ -12934,7 +12945,13 @@ async def do_search_for_user(uid: int, reply_to):
     sold_count = len(check_batch) - len(active)
     if sold_count:
         print(f"  [фильтр] убрано {sold_count} проданных объявлений из первых {len(check_batch)}")
-    suitable = active + rest_batch
+    verified_sources = {"avito", "drom", "autoru"}
+    rest_safe = [
+        it for it in rest_batch
+        if it.get("source") not in verified_sources
+        or it.get("_sale_status_checked")
+    ]
+    suitable = active + rest_safe
     suitable = _sort_by_deal(suitable)
 
     # После загрузки цен — выкидываем только те, у кого цена ИЗВЕСТНА и вышла за бюджет.
