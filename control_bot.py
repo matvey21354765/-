@@ -449,7 +449,7 @@ SEARCH_SOURCE_TIMEOUT_SEC = _env_int("SEARCH_SOURCE_TIMEOUT_SEC", 35)
 SEARCH_AUTORU_DEADLINE_SEC = _env_int("SEARCH_AUTORU_DEADLINE_SEC", 24)
 SEARCH_PRICE_FILL_LIMIT = _env_int("SEARCH_PRICE_FILL_LIMIT", 3, 0)
 SEARCH_PRICE_FILL_TIMEOUT_SEC = _env_int("SEARCH_PRICE_FILL_TIMEOUT_SEC", 4)
-SEARCH_DETAIL_CHECK_LIMIT = _env_int("SEARCH_DETAIL_CHECK_LIMIT", 20, 0)
+SEARCH_DETAIL_CHECK_LIMIT = _env_int("SEARCH_DETAIL_CHECK_LIMIT", 60, 0)
 SEARCH_DETAIL_CHECK_TIMEOUT_SEC = _env_int("SEARCH_DETAIL_CHECK_TIMEOUT_SEC", 5)
 SEARCH_DETAIL_TOTAL_TIMEOUT_SEC = _env_int("SEARCH_DETAIL_TOTAL_TIMEOUT_SEC", 20)
 _last_search_at: dict[int, float] = {}
@@ -935,6 +935,32 @@ def _best_below_market_items(items: list[dict]) -> list[dict]:
             continue
         picked.append(it)
     return _sort_by_deal(picked)
+
+
+def _dedupe_search_items(items: list[dict]) -> list[dict]:
+    """Remove duplicate listings by normalized URL and stable title/price signature."""
+    seen_urls: set[str] = set()
+    seen_sigs: set[str] = set()
+    out: list[dict] = []
+    for it in items or []:
+        url = _norm_url(it.get("url", ""))
+        if url:
+            if url in seen_urls:
+                continue
+            seen_urls.add(url)
+            it["url"] = url
+        title = re.sub(r"[^a-zа-яё0-9]+", " ", str(it.get("title", "")).lower()).strip()
+        desc = re.sub(r"[^a-zа-яё0-9]+", " ", str(it.get("description", "")).lower()).strip()
+        price = int(it.get("_price_int") or parse_price(it.get("price", "")) or 0)
+        year = it.get("year") or it.get("_year") or ""
+        sig_text = (title + " " + desc)[:140].strip()
+        sig = f"{it.get('source','')}|{price}|{year}|{sig_text}" if sig_text and price else ""
+        if sig:
+            if sig in seen_sigs:
+                continue
+            seen_sigs.add(sig)
+        out.append(it)
+    return out
 
 
 _JUNK_KEYWORDS = [
@@ -10627,7 +10653,7 @@ async def cmd_global_search(msg: Message):
     # Запускаем все источники + TG-каналы параллельно
     scraper_map = {
         "drom":   lambda: scrape_drom(region, pages=8, price_min=pmin, price_max=pmax, brand=_br),
-        "autoru": lambda: scrape_autoru(region, pages=8, price_min=pmin, price_max=pmax, brand=_br),
+        "autoru": lambda: scrape_autoru(region, pages=12, price_min=pmin, price_max=pmax, brand=_br),
         "avito":  lambda: scrape_avito(region, pages=14, price_min=pmin, price_max=pmax, sort_by_date=False),
         "youla":  lambda: scrape_youla(region, pages=14, price_min=pmin, price_max=pmax, brand=_br),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
@@ -11937,6 +11963,7 @@ _atexit.register(lambda: _db_conn and _db_conn.close())
 
 
 def _save_cache(uid: int, items: list[dict]):
+    items = _dedupe_search_items(_best_below_market_items(items))
     # Сохраняем в PostgreSQL (переживает рестарт)
     try:
         db = _get_db()
@@ -11987,7 +12014,9 @@ async def send_batch(chat_id: int, uid: int, offset: int):
     """
     items = _search_cache.get(uid) or _load_cache(uid)
     if items:
+        items = _dedupe_search_items(_best_below_market_items(items))
         _search_cache[uid] = items  # восстанавливаем в память после перезапуска
+        _save_cache(uid, items)
     if not items:
         await bot.send_message(chat_id, "✅ Объявления закончились. Нажми /search для нового поиска.")
         return
@@ -12037,6 +12066,8 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                     _apply_page_market(item, int(details["_autoru_market"]), "autoru")
             except Exception:
                 pass
+        if not _best_below_market_items([item]):
+            return
         sid = url_to_id(url)
         days = item.get("_days_on_site", 0)
         _date_known = item.get("_date_known", False) or item.get("date", "") == str(datetime.date.today())
@@ -12359,7 +12390,7 @@ async def do_search_for_user(uid: int, reply_to):
 
     scraper_map = {
         "drom":   lambda: scrape_drom(region, pages=8, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
-        "autoru": lambda: scrape_autoru(region, pages=8, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
+        "autoru": lambda: scrape_autoru(region, pages=12, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
         "avito":  lambda: scrape_avito(region, pages=12, price_min=pmin, price_max=pmax, sort_by_date=False, brand=(brand if brand and brand != "any" else "")),
         "youla":  lambda: scrape_youla(region, pages=14, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
