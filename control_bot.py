@@ -891,6 +891,19 @@ def _is_strong_below_market(it: dict) -> bool:
     # «хорошая цена» без >=10% — не топ, чтобы −8% не считались находкой.
     return (it.get("_avito_rating_score") or 0) >= 2
 
+
+def _is_market_candidate(it: dict) -> bool:
+    """True if listing is not known to be at/above market."""
+    price = int(it.get("_price_int") or 0)
+    market = int(it.get("_market_price") or 0)
+    if market and price:
+        return market > price and (it.get("_savings_pct") or 0) > 0
+    if (it.get("source", "") or "").lower() == "avito":
+        score = it.get("_avito_rating_score")
+        if score is not None and score <= 0:
+            return False
+    return True
+
 # СТОП только если машина НЕ НА ХОДУ / на запчасти / утиль. Битые, крашеные,
 # после ДТП, требующие ремонта — это НЕ стоп (пользователю такие нужны), лишь бы
 # ездили. Поэтому список узкий — только «нерабочие» состояния.
@@ -2893,7 +2906,7 @@ _TG_REGION_MAP = {
 }
 
 _TG_PRICE_RE = re.compile(
-    r"(\d[\d\s]{2,10})\s*(?:₽|тыс\.?\s*р(?:уб)?|руб|р\.)",
+    r"(\d[\d\s]{1,10})\s*(?:₽|тыс\.?\s*р(?:уб)?|тыс\.?|т\.?\s*р?\.?|тр\.?|k\b|к\b|руб|р\.)",
     re.IGNORECASE,
 )
 _TG_YEAR_RE = re.compile(r"\b(19[5-9]\d|20[012]\d)\b")
@@ -2909,7 +2922,7 @@ def _tg_parse_price(text: str) -> int:
         val = int(raw)
         # «тыс.» суффикс — умножаем
         suffix = m.group(0)[len(m.group(1)):].strip().lower()
-        if "тыс" in suffix:
+        if any(s in suffix for s in ("тыс", "тр", "т", "k", "к")):
             val = val * 1000
         if 50_000 <= val <= 50_000_000:
             return val
@@ -3700,12 +3713,12 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
     today = datetime.date.today()
 
     _vk_price_re = re.compile(
-        r"(\d[\d\s]{1,8})\s*(?:₽|тыс\.?\s*(?:р(?:уб(?:лей?|ля)?)?\.?)?|руб(?:лей?|ля)?\.?|р\b\.?|тр\.?|к\b)",
+        r"(\d[\d\s]{1,8})\s*(?:₽|тыс\.?\s*(?:р(?:уб(?:лей?|ля)?)?\.?)?|т\.?\s*р?\.?|тр\.?|k\b|к\b|руб(?:лей?|ля)?\.?|р\b\.?)",
         re.IGNORECASE,
     )
     # Число рядом с ценовым словом: "цена 150000", "прошу 95 000", "стоимость 80тыс"
     _vk_price_ctx_re = re.compile(
-        r"(?:цен[аеу]|стоимост[ьи]|прошу|продам за|отдам за)\s*[:\-]?\s*(\d[\d\s]{2,7})(?:\s*(?:тыс|т\.р|т\.\s*р))?",
+        r"(?:цен[аеу]|стоимост[ьи]|прошу|продам за|отдам за)\s*[:\-]?\s*(\d[\d\s]{1,7})(?:\s*(?:тыс|т\.?\s*р?|тр|k|к))?",
         re.IGNORECASE,
     )
     _vk_year_re = re.compile(r"\b(19[5-9]\d|20[012]\d)\b")
@@ -3759,7 +3772,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                 continue
             val = int(raw)
             suffix = m.group(0)[len(m.group(1)):].strip().lower()
-            _is_k = "тыс" in suffix or "тр" in suffix or (suffix.startswith("к") and "кузов" not in suffix)
+            _is_k = "тыс" in suffix or "тр" in suffix or re.search(r"\bт\.?\s*р?\.?\b", suffix) or re.search(r"\bk\b|\bк\b", suffix)
             if _is_k:
                 # "110к пробег" / "107 тыс км" — это ПРОБЕГ, а не цена. Суффикс ₽/руб —
                 # всегда цена, а к/тыс рядом с "пробег"/"км" — почти всегда пробег.
@@ -3780,7 +3793,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                 continue
             val = int(raw)
             full = m.group(0).lower()
-            if any(s in full for s in ("тыс", "т.р")):
+            if any(s in full for s in ("тыс", "т.р", "тр")) or re.search(r"\bт\b|\bk\b|\bк\b", full):
                 val *= 1000
             if val < 1000:  # вероятно тысячи без суффикса: "цена 95" → 95000
                 val *= 1000
@@ -12875,14 +12888,20 @@ async def do_search_for_user(uid: int, reply_to):
             i for i in suitable
             if _norm_url(i.get("url", "")) not in below_urls
             and i.get("_market_price") and i.get("_price_int")
+            and _is_market_candidate(i)
         ]
         market_urls = {_norm_url(i.get("url", "")) for i in market_items}
         rest_items = [
             i for i in suitable
             if _norm_url(i.get("url", "")) not in below_urls
             and _norm_url(i.get("url", "")) not in market_urls
+            and not (i.get("_market_price") and i.get("_price_int"))
+            and _is_market_candidate(i)
         ]
-        suitable = (below_items + market_items + rest_items)[:80]
+        if below_items or market_items:
+            suitable = (below_items + market_items)[:80]
+        else:
+            suitable = rest_items[:40]
         print(
             f"  [фильтр] ниже рынка={_below_count}, с рынком={_market_items_count}, "
             f"показываем={len(suitable)} из {len(below_items) + len(market_items) + len(rest_items)}"
