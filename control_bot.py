@@ -663,7 +663,21 @@ def save_skipped(uid: int, skipped: set):
 # ── Фильтры ─────────────────────────────────────────────────────
 
 def parse_price(s: str) -> int | None:
-    digits = re.sub(r"[^\d]", "", str(s or ""))
+    text = str(s or "").lower().replace(",", ".")
+    # Prices in VK/TG are often written as "20k", "155к", "155 т", "1.2 млн".
+    m = re.search(r"(?<!\d)(\d+(?:[.\s]\d+)?)\s*(млн|million|kk|кк|тыс|т\.?\s*р?\.?|тр|k|к)\b", text, re.I)
+    if m:
+        raw = re.sub(r"\s+", "", m.group(1))
+        try:
+            value = float(raw)
+        except Exception:
+            value = 0.0
+        suffix = m.group(2).lower().replace(" ", "")
+        mult = 1_000_000 if suffix in ("млн", "million", "kk", "кк") else 1_000
+        price = int(value * mult)
+        if price > 0:
+            return price
+    digits = re.sub(r"[^\d]", "", text)
     return int(digits) if digits else None
 
 
@@ -1493,12 +1507,18 @@ def _sort_by_deal(items: list[dict]) -> list[dict]:
     def _tier(x) -> int:
         if x.get("_already_seen"):
             return 10
-        pct = x.get("_savings_pct", 0) or 0
         if _is_strong_below_market(x):
             return 0
-        if x.get("_price_int", 0) > 0:
+        price = int(x.get("_price_int", 0) or 0)
+        market = int(x.get("_market_price", 0) or 0)
+        if market and price:
+            # Known at-market/above-market listings must never outrank unknown cheap finds.
+            return 4
+        if price > 0 and price <= 80_000 and not x.get("_is_junk"):
             return 1
-        return 2
+        if price > 0:
+            return 2
+        return 3
 
     def _primary_savings(x) -> float:
         """Главный ключ Tier 0: % скидки от рынка, взвешенный ДОВЕРИЕМ к рынку.
@@ -1527,7 +1547,8 @@ def _sort_by_deal(items: list[dict]) -> list[dict]:
         1) глубина скидки % (с учётом доверия к рынку) — основной сигнал;
         2) абсолютная выгода в рублях — −25% на дорогой машине ценнее −40% на дешёвой;
         3) свежесть — среди равных свежие объявления чуть выше (успеть первым)."""
-        base = _primary_savings(x)
+        pct = float(x.get("_savings_pct", 0) or 0)
+        base = pct * 10.0
         market = x.get("_market_price", 0) or 0
         price = x.get("_price_int", 0) or 0
         rub_bonus = 0.0
@@ -1535,9 +1556,12 @@ def _sort_by_deal(items: list[dict]) -> list[dict]:
             rub_bonus = min((market - price) / 25_000.0, 25.0)
         days = x.get("_days_on_site", 0) or 0
         fresh_bonus = 6.0 if days <= 1 else (3.0 if days <= 3 else 0.0)
+        cheap_bonus = 0.0
+        if price:
+            cheap_bonus = max(0.0, min((120_000 - price) / 20_000.0, 6.0))
         if x.get("_is_junk"):
-            rub_bonus = fresh_bonus = 0.0
-        return base + rub_bonus + fresh_bonus
+            rub_bonus = fresh_bonus = cheap_bonus = 0.0
+        return base + rub_bonus + fresh_bonus + cheap_bonus
 
     def _no_photo(x) -> int:
         """0 — есть фото (выше), 1 — без фото (в конец своего тира)."""
@@ -1563,7 +1587,10 @@ def _sort_by_deal(items: list[dict]) -> list[dict]:
         _no_photo(x),
         (-round(_deal_rank(x), 1), -_secondary(x))
         if _tier(x) == 0
-        else (x.get("_price_int", 999_999_999), 0),
+        else (
+            x.get("_price_int", 999_999_999),
+            x.get("_days_on_site", 999),
+        ),
     ))
     return items
 
@@ -12882,22 +12909,22 @@ async def do_search_for_user(uid: int, reply_to):
     _below_count = sum(1 for i in suitable if _is_strong_below_market(i))
     _market_available = _market_items_count > 0
     if _market_available:
-        below_items = [i for i in suitable if _is_strong_below_market(i)]
+        below_items = _sort_by_deal([i for i in suitable if _is_strong_below_market(i)])
         below_urls = {_norm_url(i.get("url", "")) for i in below_items}
-        market_items = [
+        market_items = _sort_by_deal([
             i for i in suitable
             if _norm_url(i.get("url", "")) not in below_urls
             and i.get("_market_price") and i.get("_price_int")
             and _is_market_candidate(i)
-        ]
+        ])
         market_urls = {_norm_url(i.get("url", "")) for i in market_items}
-        rest_items = [
+        rest_items = _sort_by_deal([
             i for i in suitable
             if _norm_url(i.get("url", "")) not in below_urls
             and _norm_url(i.get("url", "")) not in market_urls
             and not (i.get("_market_price") and i.get("_price_int"))
             and _is_market_candidate(i)
-        ]
+        ])
         if below_items or market_items:
             suitable = (below_items + market_items)[:80]
         else:
