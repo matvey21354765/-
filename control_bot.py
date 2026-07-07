@@ -4918,7 +4918,7 @@ def _drom_estimate_from_text(text: str) -> int:
         value = _parse_rub_amount(m.group(1))
         if value:
             return value
-    return _extract_market_estimate_from_text(text, "drom")
+    return 0
 
 
 def _apply_page_market(item: dict, market: int, lvl: str) -> None:
@@ -12065,7 +12065,12 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                 if details.get("_autoru_market") and item.get("_price_int"):
                     _apply_page_market(item, int(details["_autoru_market"]), "autoru")
             except Exception:
-                pass
+                if source in ("avito", "drom", "autoru"):
+                    return
+        if source in ("avito", "drom", "autoru") and not item.get("_sale_status_checked"):
+            return
+        if source == "drom" and item.get("_sale_status_checked") and not item.get("_drom_market"):
+            return
         if not _best_below_market_items([item]):
             return
         sid = url_to_id(url)
