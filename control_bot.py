@@ -971,16 +971,20 @@ def _ranked_search_items(items: list[dict]) -> list[dict]:
 
         if market and market > price and _is_strong_below_market(it):
             trusted = lvl in ("avito", "drom", "autoru") or n >= 5
-            if trusted and pct >= 25:
+            if trusted and days <= 1:
                 bucket = 0
-            elif trusted:
+            elif trusted and days <= 3:
                 bucket = 1
-            else:
+            elif trusted and pct >= 25:
                 bucket = 2
+            elif trusted:
+                bucket = 3
+            else:
+                bucket = 4
         elif not market:
-            bucket = 2 if (price <= 120_000 or days <= 2) else 3
+            bucket = 4 if (price <= 120_000 or days <= 2) else 5
         else:
-            bucket = 4
+            bucket = 6
         ranked.append((bucket, -pct, price, days, it))
     ranked.sort(key=lambda x: (x[0], x[1], x[2], x[3]))
     return [it for *_keys, it in ranked]
