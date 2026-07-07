@@ -948,6 +948,44 @@ def _best_below_market_items(items: list[dict]) -> list[dict]:
     return _sort_by_deal(picked)
 
 
+def _ranked_search_items(items: list[dict]) -> list[dict]:
+    """User search order: strong deals, regular deals, other cheap/fresh cars, then market."""
+    ranked: list[dict] = []
+    for it in items or []:
+        if is_not_running(it):
+            continue
+        price = int(it.get("_price_int") or parse_price(it.get("price", "")) or 0)
+        market = int(it.get("_market_price") or 0)
+        pct = float(it.get("_savings_pct") or 0)
+        lvl = str(it.get("_market_lvl") or "")
+        n = int(it.get("_market_n") or 0)
+        days = int(it.get("_days_on_site") or 999)
+        if not price:
+            continue
+        if market and market < price:
+            continue
+        if (it.get("source", "") or "").lower() == "avito":
+            score = it.get("_avito_rating_score")
+            if score is not None and score < 0:
+                continue
+
+        if market and market > price and _is_strong_below_market(it):
+            trusted = lvl in ("avito", "drom", "autoru") or n >= 5
+            if trusted and pct >= 25:
+                bucket = 0
+            elif trusted:
+                bucket = 1
+            else:
+                bucket = 2
+        elif not market:
+            bucket = 2 if (price <= 120_000 or days <= 2) else 3
+        else:
+            bucket = 4
+        ranked.append((bucket, -pct, price, days, it))
+    ranked.sort(key=lambda x: (x[0], x[1], x[2], x[3]))
+    return [it for *_keys, it in ranked]
+
+
 def _dedupe_search_items(items: list[dict]) -> list[dict]:
     """Remove duplicate listings by normalized URL and stable title/price signature."""
     seen_urls: set[str] = set()
@@ -11974,7 +12012,7 @@ _atexit.register(lambda: _db_conn and _db_conn.close())
 
 
 def _save_cache(uid: int, items: list[dict]):
-    items = _dedupe_search_items(_best_below_market_items(items))
+    items = _dedupe_search_items(_ranked_search_items(items))
     # Сохраняем в PostgreSQL (переживает рестарт)
     try:
         db = _get_db()
@@ -12025,7 +12063,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
     """
     items = _search_cache.get(uid) or _load_cache(uid)
     if items:
-        items = _dedupe_search_items(_best_below_market_items(items))
+        items = _dedupe_search_items(_ranked_search_items(items))
         _search_cache[uid] = items  # восстанавливаем в память после перезапуска
         _save_cache(uid, items)
     if not items:
@@ -12082,7 +12120,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
             return
         if source == "drom" and item.get("_sale_status_checked") and not item.get("_drom_market"):
             return
-        if not _best_below_market_items([item]):
+        if not _ranked_search_items([item]):
             return
         sid = url_to_id(url)
         days = item.get("_days_on_site", 0)
@@ -12988,16 +13026,18 @@ async def do_search_for_user(uid: int, reply_to):
             and not (i.get("_market_price") and i.get("_price_int"))
             and _is_market_candidate(i)
         ])
-        if below_items or market_items:
-            suitable = below_items[:80]
-        else:
-            suitable = []
+        suitable = _dedupe_search_items(_ranked_search_items(suitable))[:80]
+        _below_count = sum(1 for i in suitable if _is_strong_below_market(i))
+        _market_tail_count = sum(
+            1 for i in suitable
+            if i.get("_market_price") and i.get("_price_int") and not _is_strong_below_market(i)
+        )
         print(
             f"  [фильтр] ниже рынка={_below_count}, с рынком={_market_items_count}, "
-            f"показываем={len(suitable)} из {len(below_items) + len(market_items) + len(rest_items)}"
+            f"рынок внизу={_market_tail_count}, показываем={len(suitable)}"
         )
     else:
-        suitable = []
+        suitable = _dedupe_search_items(_ranked_search_items(suitable))[:40]
         print(f"  [фильтр] точных оценок нет → показываем {len(suitable)} объявлений в бюджете")
 
     if not suitable:
