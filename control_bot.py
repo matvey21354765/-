@@ -981,19 +981,21 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
         near = []
         for y in (yr - 1, yr, yr + 1):
             near += yrs.get(y, [])
-        if len(near) >= 3:
+        # Двух независимых аналогов достаточно для точной модели в окне ±1 год.
+        # Раньше порог 3 оставлял редкие объявления Юлы без анализа вообще.
+        if len(near) >= 2:
             return _est_price(near, "near", cand_p)
         wide = list(near)
         for y in (yr - 2, yr + 2):
             wide += yrs.get(y, [])
-        if len(wide) >= 4:
+        if len(wide) >= 3:
             return _est_price(wide, "bracket", cand_p)
         # Последний шанс покрытия: та же модель в окне ±4 года (шире, но всё ещё
         # одна модель — не смешиваем марки). Нужно достаточно образцов.
         widest = list(wide)
         for y in (yr - 4, yr - 3, yr + 3, yr + 4):
             widest += yrs.get(y, [])
-        if len(widest) >= 6:
+        if len(widest) >= 4:
             return _est_price(widest, "wide", cand_p)
         return 0.0, "", 0
 
@@ -1604,7 +1606,9 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
     today = datetime.date.today()
     # Жёсткий дедлайн: Auto.ru капча-защищён и часто виснет — не даём тормозить весь
     # поиск. Держим короткий бюджет: если IP чистый — успеваем, если капча — быстро выходим.
-    _ar_deadline = time.time() + 15
+    # Один проход трёх РФ-прокси занимает до 18 секунд. Старый лимит 15 секунд
+    # обрывал поиск ещё на первой странице и стабильно возвращал ноль.
+    _ar_deadline = time.time() + 55
     _ar_empty_streak = 0
     # Марка для Auto.ru: путь /cars/lada/used/ и catalog_filter mark=LADA
     _brand_l = (brand or "").strip().lower()
@@ -1988,7 +1992,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
             # прерываемся только после двух пустых подряд. IP общего мобильного
             # прокси НЕ трогаем (это ломает Авито) — для Auto.ru есть свой РФ-пул.
             _ar_empty_streak += 1
-            if _ar_empty_streak >= 2:
+            if _ar_empty_streak >= 3:
                 break
             time.sleep(0.05)
             continue
@@ -3112,6 +3116,44 @@ def scrape_youla(region: str, pages: int = 4, price_min: int = 0,
         "Accept-Language": "ru-RU,ru;q=0.9",
     }
     seen_ids: set[str] = set()
+
+    def _youla_specs(product: dict) -> tuple[str, str, int]:
+        """Достаёт марку, модель и год из меняющейся структуры API Юлы."""
+        found: dict[str, str] = {}
+
+        def walk(value, parent: str = ""):
+            if isinstance(value, dict):
+                label = str(value.get("name") or value.get("title") or value.get("slug") or parent).lower()
+                raw = value.get("value")
+                if raw is None:
+                    raw = value.get("value_name") or value.get("selected_value")
+                if raw is not None and not isinstance(raw, (dict, list)):
+                    if any(k in label for k in ("год", "year")):
+                        found.setdefault("year", str(raw))
+                    elif any(k in label for k in ("марка", "brand", "make")):
+                        found.setdefault("brand", str(raw))
+                    elif any(k in label for k in ("модель", "model")):
+                        found.setdefault("model", str(raw))
+                for key, child in value.items():
+                    key_l = str(key).lower()
+                    if not isinstance(child, (dict, list)):
+                        if key_l in ("year", "year_of_manufacture", "production_year"):
+                            found.setdefault("year", str(child))
+                        elif key_l in ("brand", "make", "mark"):
+                            found.setdefault("brand", str(child))
+                        elif key_l in ("model", "car_model"):
+                            found.setdefault("model", str(child))
+                    else:
+                        walk(child, key_l)
+            elif isinstance(value, list):
+                for child in value:
+                    walk(child, parent)
+
+        for field in ("attributes", "params", "properties", "characteristics", "filters"):
+            walk(product.get(field))
+        year_m = re.search(r"\b(19\d{2}|20\d{2})\b", found.get("year", ""))
+        return found.get("brand", "").strip(), found.get("model", "").strip(), int(year_m.group()) if year_m else 0
+
     for p in range(1, pages + 1):
         url = (f"https://youla.ru/api/v1/products?category=23"
                f"&latitude={lat}&longitude={lng}&radius=100&page={p}")
@@ -3138,6 +3180,15 @@ def scrape_youla(region: str, pages: int = 4, price_min: int = 0,
                 name = (it.get("name") or "").strip()
                 if not name:
                     continue
+                spec_brand, spec_model, spec_year = _youla_specs(it)
+                # Рыночный анализ группирует по «марка модель год». Юла часто
+                # хранит год только в attributes, поэтому дополняем заголовок.
+                if spec_brand and spec_brand.lower() not in name.lower():
+                    name = f"{spec_brand} {name}"
+                if spec_model and spec_model.lower() not in name.lower():
+                    name = f"{name} {spec_model}"
+                if spec_year and not re.search(r"\b(19\d{2}|20\d{2})\b", name):
+                    name = f"{name} {spec_year}"
                 if _brand_l and _brand_l != "any" and _brand_l not in name.lower():
                     continue
                 price_kop = it.get("price") or 0
@@ -3160,6 +3211,7 @@ def scrape_youla(region: str, pages: int = 4, price_min: int = 0,
                     "_photo_url": photo_url, "_photos": len(imgs),
                     "description": (it.get("description") or "")[:400],
                     "seller": loc.get("city_name", ""), "mileage": 0,
+                    "_year": spec_year,
                 }
                 item["_hot_score"] = hot_score(item)
                 results.append(item)
