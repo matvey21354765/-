@@ -3167,8 +3167,8 @@ def scrape_youla(region: str, pages: int = 4, price_min: int = 0,
             except Exception:
                 continue
         print(f"  [Юла] стр.{p}: +{_added} (всего {len(results)})")
-        if _added == 0:
-            break
+        # A page with zero matches after brand/price filtering is not the end.
+        # Later API pages can still contain matching cars; only empty data ends it.
         time.sleep(0.1)
     print(f"  [Юла] итого {len(results)} объявлений")
     return results
@@ -10978,7 +10978,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         )
         return
 
-    async def _send_item(item: dict):
+    async def _send_item(item: dict) -> bool:
         url = item.get("url", "")
         # Если нет описания — быстро догружаем со страницы
         if not item.get("description") and url:
@@ -10989,7 +10989,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                     timeout=6
                 )
                 if details is None:
-                    return  # продано — пропускаем
+                    return False  # продано — пропускаем и не считаем показанным
                 if details.get("description"):
                     item["description"] = details["description"]
                 if details.get("_photo_url") and not item.get("_photo_url"):
@@ -11175,16 +11175,17 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                 if content:
                     photo_bytes = BufferedInputFile(content, filename="photo.jpg")
                     await bot.send_photo(chat_id, photo=photo_bytes, caption=caption, reply_markup=kb)
-                    return
+                    return True
             except Exception:
                 pass
             # Fallback: передаём URL напрямую Telegram
             try:
                 await bot.send_photo(chat_id, photo=photo_url, caption=caption, reply_markup=kb)
-                return
+                return True
             except Exception:
                 pass
         await bot.send_message(chat_id, caption, reply_markup=kb)
+        return True
 
     # Отбираем кандидатов и дозагружаем фото/описание только для них (см. ниже).
     s = load_settings(uid)
@@ -11216,6 +11217,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
     # барьер-ожидание, первая выгодная карточка появляется в разы быстрее.
     _pf_tasks = [asyncio.ensure_future(_prefetch(it)) for it in batch]
     _deferred_junk = []
+    sent_count = 0
     for i, item in enumerate(batch):
         try:
             await _pf_tasks[i]   # ждём фото ТОЛЬКО этого объявления
@@ -11228,14 +11230,16 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         if item.get("_is_junk"):
             _deferred_junk.append(item)
             continue
-        await _send_item(item)
+        if await _send_item(item):
+            sent_count += 1
         await asyncio.sleep(0.01)
     for item in _deferred_junk:   # битые — в самом конце
-        await _send_item(item)
+        if await _send_item(item):
+            sent_count += 1
         await asyncio.sleep(0.01)
 
     next_offset = offset + len(batch)
-    shown_str = f"{next_offset}/{total}"
+    shown_str = f"{sent_count} на этой странице · обработано {next_offset}/{total}"
     if next_offset < total:
         nav_row = [InlineKeyboardButton(text="➡️ Ещё", callback_data=f"page|{uid}|{next_offset}")]
         if offset > 0:
@@ -11253,7 +11257,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
             nav_row.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"page|{uid}|{prev_offset}"))
         await bot.send_message(
             chat_id,
-            f"✅ Показаны все {total} объявлений.",
+            f"✅ Выдача закончилась. Показано {sent_count} на этой странице, обработано {total} объявлений.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[nav_row]) if nav_row else MAIN_KEYBOARD,
         )
 
@@ -11300,10 +11304,10 @@ async def do_search_for_user(uid: int, reply_to):
     loop = asyncio.get_running_loop()
 
     scraper_map = {
-        "drom":   lambda: scrape_drom(region, pages=8, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
-        "autoru": lambda: scrape_autoru(region, pages=4, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
-        "avito":  lambda: scrape_avito(region, pages=6, price_min=pmin, price_max=pmax, sort_by_date=False, brand=(brand if brand and brand != "any" else "")),
-        "youla":  lambda: scrape_youla(region, pages=5, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
+        "drom":   lambda: scrape_drom(region, pages=15, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
+        "autoru": lambda: scrape_autoru(region, pages=8, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
+        "avito":  lambda: scrape_avito(region, pages=10, price_min=pmin, price_max=pmax, sort_by_date=False, brand=(brand if brand and brand != "any" else "")),
+        "youla":  lambda: scrape_youla(region, pages=12, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
         "tg":     lambda: scrape_tg_channels(region, pmin, pmax),
     }
@@ -11324,7 +11328,7 @@ async def do_search_for_user(uid: int, reply_to):
             None, lambda: scrape_avito(region, pages=3, price_min=0, price_max=99_000_000)
         )
     all_futs = futures + ([_avito_ref_fut] if _avito_ref_fut else [])
-    done, pending = await asyncio.wait(all_futs, timeout=32)
+    done, pending = await asyncio.wait(all_futs, timeout=60)
     if pending:
         for f in pending:
             f.cancel()
