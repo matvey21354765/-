@@ -12,6 +12,8 @@ import time
 import datetime
 import subprocess
 import hashlib
+import hmac
+import urllib.parse
 from pathlib import Path
 import os
 
@@ -39,6 +41,14 @@ def _parse_admin_ids() -> set[int]:
     return ids
 
 ADMIN_IDS = _parse_admin_ids()
+
+YOOMONEY_WALLET = os.getenv("YOOMONEY_WALLET", "4100119558685452").strip()
+YOOMONEY_NOTIFICATION_SECRET = os.getenv("YOOMONEY_NOTIFICATION_SECRET", "").strip()
+PUBLIC_URL = os.getenv("PUBLIC_URL", "").strip().rstrip("/")
+SUBSCRIPTION_PLANS = {
+    "week": {"title": "Неделя", "amount": 349, "days": 7},
+    "month": {"title": "Месяц", "amount": 999, "days": 30},
+}
 
 # ── Токен ───────────────────────────────────────────────────────
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8923014188:AAHvNW2B5fin2XCmbVhlaLNjWhLwI3JhZ90")
@@ -583,8 +593,24 @@ def save_skipped(uid: int, skipped: set):
 # ── Фильтры ─────────────────────────────────────────────────────
 
 def parse_price(s: str) -> int | None:
-    digits = re.sub(r"[^\d]", "", str(s or ""))
-    return int(digits) if digits else None
+    """Parse one advertised price without gluing unrelated numbers together."""
+    text = str(s or "").replace("\xa0", " ").strip().lower()
+    if not text:
+        return None
+    # Prefer a number explicitly followed by a currency.  This avoids turning
+    # strings such as "2012 г., 180 000 км, 650 000 ₽" into one huge integer.
+    matches = re.findall(r"(?<!\d)(\d{1,3}(?:[\s.,]\d{3})+|\d{4,9})\s*(?:₽|руб(?:\.|лей|ля)?|р\b)", text)
+    candidates = matches or re.findall(r"(?<!\d)(\d{1,3}(?:[\s.,]\d{3})+|\d{4,9})(?!\d)", text)
+    values = []
+    for raw in candidates:
+        digits = re.sub(r"\D", "", raw)
+        if digits:
+            value = int(digits)
+            if 10_000 <= value <= 99_000_000:
+                values.append(value)
+    # In snippets the full vehicle price is normally the largest plausible
+    # currency value; monthly payments and mileage are smaller.
+    return max(values) if values else None
 
 
 def is_dealer(item: dict) -> bool:
@@ -915,10 +941,10 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
     # найденные объявления (Дром/ВК/ТГ — тоже реальные цены рынка). Чем больше
     # выборка по «модель+год», тем больше машин получат рыночную цену и попадут
     # в список «ниже рынка». Выбросы всё равно отсекает _trimmed_median.
-    # Если эталона Авито достаточно (≥8) и запрошен avito_only_median — считаем
-    # рынок ТОЛЬКО по нему. Иначе подмешиваем найденные объявления ради покрытия.
+    # При avito_only_median считаем рынок ТОЛЬКО по переданному эталону даже при
+    # небольшой выборке: цены Дрома/Юлы не должны менять эталон Авито.
     # Без этого дешёвые находки занижают собственный «рынок» и скидка теряется.
-    if ref_items and avito_only_median and len(ref_items) >= 8:
+    if ref_items and avito_only_median:
         all_for_median = list(ref_items)
     elif ref_items:
         all_for_median = list(ref_items) + list(items)
@@ -1010,10 +1036,11 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
             med = 0.0
             _lvl = ""
             _n = 0
-            # ПРИОРИТЕТ: собственная рыночная оценка Авито (если её удалось достать)
-            # — она точнее нашей медианы. Иначе считаем по той же модели/году.
+            # При едином эталоне не используем индивидуальную оценку конкретного
+            # объявления от Авито: она может отличаться у двух одинаковых машин.
+            # Одна модель и год должны получать одну медиану на всех площадках.
             _avm = it.get("_avito_market", 0) or 0
-            if _avm and 30_000 < _avm < 50_000_000:
+            if not avito_only_median and _avm and 30_000 < _avm < 50_000_000:
                 med, _lvl, _n = float(_avm), "avito", 30
             elif len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 4:
                 med, _lvl, _n = _market_for(parts[0], int(parts[1]), p)
@@ -1415,7 +1442,9 @@ def scrape_drom(region: str, pages: int = 15, price_min: int = 0, price_max: int
 
 # ── Auto.ru geo IDs для API ──────────────────────────────────────
 AUTORU_GEO_IDS = {
-    "ekaterinburg": [56],    # Свердловская обл.
+    # Яндекс Геобаза: 54 — Екатеринбург, 11162 — Свердловская область.
+    # Раньше здесь стоял 56 (Челябинск), поэтому поиск по Екатеринбургу пустовал.
+    "ekaterinburg": [54, 11162],
     "moscow":       [1],     # Москва
     "spb":          [10174], # Санкт-Петербург
     "novosibirsk":  [65],    # Новосибирская обл.
@@ -8768,6 +8797,154 @@ async def notify_admins_subscription(uid: int, username: str, plan: str, amount:
             pass
 
 
+# ── Подписка: ЮMoney, промокоды и поддержка ──────────────────────
+def _subscription_keyboard() -> InlineKeyboardMarkup:
+    rows = []
+    if YOOMONEY_WALLET:
+        for key, plan in SUBSCRIPTION_PLANS.items():
+            rows.append([InlineKeyboardButton(
+                text=f"💳 {plan['title']} — {plan['amount']} ₽",
+                callback_data=f"yoomoney|{key}",
+            )])
+    rows.extend([
+        [InlineKeyboardButton(text="🎁 Ввести промокод", callback_data="promo_help")],
+        [InlineKeyboardButton(text="☎️ Поддержка", url="https://t.me/durunegonim")],
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@dp.message(Command("subscribe"))
+@dp.message(F.text.in_({"💎 Подписка", "💎 Купить подписку", "💎 Выбрать тариф"}))
+async def cmd_subscribe(msg: Message):
+    await msg.answer(
+        "💎 <b>Тарифы и доступ</b>\n\n"
+        "📅 Неделя — 349 ₽\n🗓 Месяц — 999 ₽\n\n"
+        "После подтверждения ЮMoney доступ включится автоматически.\n"
+        "Промокод активируется командой <code>/promo КОД</code>.",
+        parse_mode="HTML", reply_markup=_subscription_keyboard(),
+    )
+
+
+@dp.callback_query(F.data.startswith("yoomoney|"))
+async def cb_yoomoney(cb: CallbackQuery):
+    plan_key = cb.data.split("|", 1)[1]
+    plan = SUBSCRIPTION_PLANS.get(plan_key)
+    if not plan or not YOOMONEY_WALLET:
+        await cb.answer("Оплата временно не настроена", show_alert=True); return
+    label = f"sub_{cb.from_user.id}_{plan_key}_{int(time.time())}"
+    params = {
+        "receiver": YOOMONEY_WALLET, "quickpay-form": "button",
+        "paymentType": "AC", "sum": str(plan["amount"]), "label": label,
+        "targets": f"Подписка на бот: {plan['title']}",
+    }
+    if PUBLIC_URL:
+        params["successURL"] = f"https://t.me/{BOT_USERNAME}"
+    pay_url = "https://yoomoney.ru/quickpay/confirm.xml?" + urllib.parse.urlencode(params)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"💳 Оплатить {plan['amount']} ₽", url=pay_url)],
+        [InlineKeyboardButton(text="☎️ Поддержка", url="https://t.me/durunegonim")],
+    ])
+    await cb.message.answer("Счёт сформирован. После оплаты дождись сообщения об активации.", reply_markup=kb)
+    await cb.answer()
+
+
+@dp.callback_query(F.data == "promo_help")
+async def cb_promo_help(cb: CallbackQuery):
+    await cb.message.answer("Отправь промокод командой:\n<code>/promo ТВОЙ-КОД</code>", parse_mode="HTML")
+    await cb.answer()
+
+
+def _promo_codes() -> list[str]:
+    secret = (BOT_TOKEN + "|monthly-promo-v1").encode()
+    return ["KK-" + hmac.new(secret, str(i).encode(), hashlib.sha256).hexdigest()[:10].upper() for i in range(1, 101)]
+
+
+def _claim_promo(uid: int, code: str) -> bool:
+    code = code.strip().upper()
+    if code not in _promo_codes():
+        return False
+    db = _get_db()
+    if db:
+        try:
+            with db.cursor() as cur:
+                cur.execute("CREATE TABLE IF NOT EXISTS promo_redemptions (code TEXT PRIMARY KEY, uid BIGINT NOT NULL, redeemed_at TIMESTAMPTZ DEFAULT NOW())")
+                cur.execute("INSERT INTO promo_redemptions(code, uid) VALUES (%s, %s) ON CONFLICT DO NOTHING RETURNING code", (code, uid))
+                claimed = cur.fetchone() is not None
+            db.commit(); db.close()
+            return claimed
+        except Exception:
+            try: db.close()
+            except Exception: pass
+    # Railway without PostgreSQL: safe per-process fallback (PG is recommended).
+    f = USERS_DIR / "promo_redemptions.json"
+    try: used = json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
+    except Exception: used = {}
+    if code in used: return False
+    used[code] = {"uid": uid, "ts": time.time()}
+    f.parent.mkdir(parents=True, exist_ok=True); f.write_text(json.dumps(used), encoding="utf-8")
+    return True
+
+
+async def _activate_subscription(uid: int, plan_key: str, operation_id: str, amount: int = 0):
+    plan = SUBSCRIPTION_PLANS[plan_key]
+    s = load_settings(uid)
+    now = time.time(); current = float(s.get("subscription_until", 0) or 0)
+    s.update({"subscription_type": plan_key, "subscription_start": now,
+              "subscription_until": max(now, current) + plan["days"] * 86400,
+              "payment_operation_id": operation_id})
+    save_settings(uid, s)
+    await bot.send_message(uid, f"✅ Оплата подтверждена! Доступ «{plan['title']}» активирован.")
+    await notify_admins_subscription(uid, "", plan["title"], amount)
+
+
+@dp.message(Command("promo"))
+async def cmd_promo(msg: Message):
+    parts = (msg.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await msg.answer("Формат: <code>/promo КОД</code>", parse_mode="HTML"); return
+    if not _claim_promo(msg.from_user.id, parts[1]):
+        await msg.answer("❌ Промокод неверный или уже использован."); return
+    await _activate_subscription(msg.from_user.id, "month", "promo:" + parts[1].strip().upper(), 0)
+
+
+@dp.message(Command("promo_codes"))
+async def cmd_promo_codes(msg: Message):
+    if msg.from_user.id not in ADMIN_IDS: return
+    from aiogram.types import BufferedInputFile
+    body = "\n".join(_promo_codes()).encode("utf-8")
+    await msg.answer_document(BufferedInputFile(body, "promo_codes_100.txt"), caption="100 одноразовых промокодов на месяц")
+
+
+@dp.message(Command("support"))
+@dp.message(F.text == "☎️ Поддержка")
+async def cmd_support(msg: Message):
+    await msg.answer("☎️ Личная поддержка: @durunegonim",
+                     reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Написать", url="https://t.me/durunegonim")]]))
+
+
+async def _yoomoney_webhook(request):
+    from aiohttp import web
+    form = {k: v for k, v in (await request.post()).items()}
+    supplied = form.pop("sign", "")
+    encoded = urllib.parse.urlencode(sorted(form.items()))
+    expected = hmac.new(YOOMONEY_NOTIFICATION_SECRET.encode(), encoded.encode(), hashlib.sha256).hexdigest()
+    if not YOOMONEY_NOTIFICATION_SECRET or not hmac.compare_digest(supplied.lower(), expected.lower()):
+        return web.Response(status=403, text="bad signature")
+    label = form.get("label", "")
+    m = re.fullmatch(r"sub_(\d+)_(week|month)_(\d+)", label)
+    if not m or form.get("unaccepted", "false").lower() == "true":
+        return web.Response(status=200, text="ignored")
+    uid, plan_key = int(m.group(1)), m.group(2)
+    received = int(float(form.get("withdraw_amount") or form.get("amount") or 0))
+    if received < SUBSCRIPTION_PLANS[plan_key]["amount"]:
+        return web.Response(status=400, text="amount mismatch")
+    operation_id = form.get("operation_id", "")
+    s = load_settings(uid)
+    if s.get("payment_operation_id") != operation_id:
+        await _activate_subscription(uid, plan_key, operation_id, received)
+    return web.Response(status=200, text="ok")
+
+
 # ── Рассылка всем пользователям (только админ) ──────────────────
 _pending_broadcast: dict[int, dict] = {}  # admin_uid -> {"text":..., "from_chat":..., "msg_id":...}
 
@@ -10093,9 +10270,15 @@ def _fetch_and_check(url: str, source: str) -> dict | None:
                 return False
             return True
 
+        def _normalise_photo(u: str) -> str:
+            u = (u or "").strip().replace("\\/", "/").replace("&amp;", "&")
+            if u.startswith("//"):
+                u = "https:" + u
+            return u if u.startswith(("http://", "https://")) else ""
+
         og = soup.select_one("meta[property='og:image']")
         if og:
-            _cand = og.get("content", "").strip()
+            _cand = _normalise_photo(og.get("content", ""))
             if _cand and _ok_photo(_cand, source):
                 photo_url = _cand
         # Отфильтровываем плейсхолдеры (логотип Дрома, хомяка и т.п.)
@@ -10127,12 +10310,31 @@ def _fetch_and_check(url: str, source: str) -> dict | None:
             }
             _cdn_kw = _cdn_kw_by_src.get(source, ["img.avito.st", "images.avito.st",
                                                     "avatars.mds.yandex", "dromcdn"])
-            for img in soup.select("img[src]"):
-                src_attr = img.get("src", "")
-                if src_attr.startswith("http") and any(x in src_attr for x in _cdn_kw):
-                    if _ok_photo(src_attr, source):
+            for img in soup.select("img"):
+                raw_candidates = [img.get(k, "") for k in ("src", "data-src", "data-original", "data-lazy-src")]
+                for srcset_key in ("srcset", "data-srcset"):
+                    raw_candidates.extend(x.strip().split()[0] for x in img.get(srcset_key, "").split(",") if x.strip())
+                for raw in reversed(raw_candidates):  # srcset usually grows from small to large
+                    src_attr = _normalise_photo(raw)
+                    if src_attr and any(x in src_attr.lower() for x in _cdn_kw) and _ok_photo(src_attr, source):
                         photo_url = src_attr
                         break
+                if photo_url:
+                    break
+        # Modern pages often keep the gallery only in JSON, not in <img> tags.
+        if not photo_url:
+            domains = {
+                "avito": r"(?:img|images)\.avito\.st",
+                "autoru": r"avatars\.mds\.yandex\.net",
+                "drom": r"(?:dromcdn|drom\.ru/photos)",
+            }
+            domain = domains.get(source)
+            if domain:
+                m = re.search(rf'((?:https?:)?(?:\\?/){2}[^"\'\s]*{domain}[^"\'\s]+)', text, re.I)
+                if m:
+                    candidate = _normalise_photo(m.group(1))
+                    if candidate and _ok_photo(candidate, source):
+                        photo_url = candidate
         if photo_url and not photo_url.startswith("http"):
             photo_url = "https:" + photo_url if photo_url.startswith("//") else ""
 
@@ -11369,9 +11571,8 @@ async def do_search_for_user(uid: int, reply_to):
         src_keys = list(scraper_map.keys())  # подстраховка: если выбор пуст — все
     futures = [loop.run_in_executor(None, scraper_map[src]) for src in src_keys]
 
-    # Рынок ВСЕГДА сравниваем с ценами Авито. Если Авито выбран — его результаты
-    # и так станут эталоном (ниже). Если НЕ выбран — отдельный скрейп Авито только
-    # для эталона рынка (конфликта IP нет, т.к. основной поиск Авито не трогает).
+    # Рынок сравниваем с ценами Авито и Юлы. Если площадка не выбрана, её скрейп
+    # используется только как эталон и не попадает в пользовательскую выдачу.
     # Эталон рынка берём БЕЗ фильтра по бюджету (весь ценовой диапазон), иначе
     # «рынок» занижен и скидки не видно. price_max большой → полный рынок модели.
     _avito_ref_fut = None
@@ -11379,7 +11580,14 @@ async def do_search_for_user(uid: int, reply_to):
         _avito_ref_fut = loop.run_in_executor(
             None, lambda: scrape_avito(region, pages=3, price_min=0, price_max=99_000_000)
         )
-    all_futs = futures + ([_avito_ref_fut] if _avito_ref_fut else [])
+    # Запрашиваем полный ценовой диапазон отдельно даже когда Юла выбрана:
+    # основная выдача ограничена бюджетом и сама по себе занизила бы медиану.
+    _youla_ref_fut = loop.run_in_executor(
+        None, lambda: scrape_youla(region, pages=8, price_min=0,
+                                   price_max=99_000_000,
+                                   brand=(brand if brand and brand != "any" else ""))
+    )
+    all_futs = futures + ([_avito_ref_fut] if _avito_ref_fut else []) + ([_youla_ref_fut] if _youla_ref_fut else [])
     done, pending = await asyncio.wait(all_futs, timeout=60)
     if pending:
         for f in pending:
@@ -11402,6 +11610,15 @@ async def do_search_for_user(uid: int, reply_to):
         items.extend(batch)
         tag = SOURCE_TAGS.get(src, src)
         stat_parts.append(f"{tag}: {len(batch)}")
+
+    # Полный набор Юлы нужен для анализа цены даже при узком бюджете 0–100 тыс.
+    # Объявления-аналоги не показываются: ниже они помечаются market_ref_only.
+    _youla_ref_items = [i for i in items if i.get("source") == "youla"]
+    if _youla_ref_fut is not None and _youla_ref_fut in done:
+        try:
+            _youla_ref_items.extend(_youla_ref_fut.result() or [])
+        except Exception as _e:
+            print(f"  [рынок] Юла-эталон ошибка: {_e}")
 
     if stat_parts:
         await reply_to.answer("📊 " + " | ".join(stat_parts))
@@ -11628,12 +11845,19 @@ async def do_search_for_user(uid: int, reply_to):
                 print(f"  [рынок] +{len(_extra)} записей из полного кэша региона (истинный рынок)")
     except Exception as _e:
         print(f"  [рынок] кэш-эталон ошибка: {_e}")
-    if _avito_ref_items:
-        _ref_copies = [_copy.copy(i) for i in _avito_ref_items]
+    # Авито — единый эталон для всех площадок. Юлу используем только как резерв,
+    # когда Авито полностью недоступно; смешивать две базы в одной медиане нельзя.
+    _market_ref_items = list(_avito_ref_items)
+    _market_ref_source = "Авито"
+    if not _market_ref_items:
+        _market_ref_items = [i for i in _youla_ref_items if i.get("_price_int", 0)]
+        _market_ref_source = "Юла (резерв)"
+    if _market_ref_items:
+        _ref_copies = [_copy.copy(i) for i in _market_ref_items]
         for _rc in _ref_copies:
             _rc["_market_ref_only"] = True
         items = items + _ref_copies
-        print(f"  [рынок] Авито-эталон: {len(_ref_copies)} записей для медианы цен")
+        print(f"  [рынок] единый эталон {_market_ref_source}: {len(_ref_copies)} записей для медианы цен")
     else:
         # Авито недоступен — запасной эталон Дром+Auto.ru, чтобы рынок всё же был
         _fallback = [i for i in items if i.get("source") in ("drom", "autoru")]
@@ -11728,7 +11952,7 @@ async def do_search_for_user(uid: int, reply_to):
     _avito_available = len(_ref_items) >= 5  # True даже если эталон — Дром/Auto.ru
     if _avito_available:
         _n_av_ref = sum(1 for i in _ref_items if i.get("source") == "avito")
-        _ref_src = "Авито" if _n_av_ref >= 5 else "Дром+Auto.ru"
+        _ref_src = "Авито" if _n_av_ref >= 5 else "резервный источник"
         print(f"  [рынок] {_ref_src}-референс: {len(_ref_items)} объявлений → считаем рыночную цену")
         suitable = rank_by_market_price(suitable, ref_items=_ref_items, avito_only_median=True)
         # 📊 Ликвидность: сколько таких в продаже и средний срок продажи (по эталону)
@@ -12427,15 +12651,14 @@ async def _monitor_loop(uid: int):
 
 # ── Push-уведомления — раз в 2-3 дня ─────────────────────────────
 _PUSH_MESSAGES = [
-    "🚗 Привет! На рынке б/у авто появились новые выгодные предложения — первым найди машину ниже рынка: /search",
-    "💰 Пока ты отдыхал, рынок изменился. Новые объявления ниже рыночной цены уже ждут тебя: /search",
-    "🔍 Свежие авто с пробегом — нашёл 10+ объявлений ниже рынка в твоём городе. Смотри: /search",
-    "🎯 Выгодная сделка не ждёт! Каждый день продавцы занижают цену. Поищи прямо сейчас: /search",
-    "⚡️ Новые авто ниже рынка появляются каждый день. Не пропусти выгодное предложение: /search",
-    "🚘 Рынок авто живёт своей жизнью — сегодня могут появиться отличные варианты в твоём бюджете: /search",
+    "💡 ЛАЙФХАК\n\nИщешь конкретную машину? Укажи марку, город и бюджет — бот отсортирует подходящие варианты: /search",
+    "💡 ЛАЙФХАК\n\nНе переводи задаток до проверки VIN и документов. Слишком низкая цена — повод проверить машину внимательнее.",
+    "💡 ЛАЙФХАК\n\nДобавляй интересные машины в ⭐ Избранное: так проще сравнить цену, год и пробег перед звонком продавцу.",
+    "🔔 Напоминание\n\nВключи 🎯 отслеживание марки — бот сам сообщит о новом подходящем объявлении.",
+    "💡 ЛАЙФХАК\n\nПеред осмотром спроси продавца о владельцах, ДТП и ограничениях. Ответы потом можно сверить с документами.",
 ]
 
-_PUSH_INTERVAL_SEC = 2.5 * 24 * 3600  # ~2.5 дня между уведомлениями
+_PUSH_INTERVAL_SEC = 4 * 24 * 3600  # не чаще одного полезного сообщения в 4 дня
 
 async def _push_notification_loop():
     """Раз в 2-3 дня отправляет всем пользователям мотивирующее сообщение для возврата в бот."""
@@ -12449,6 +12672,8 @@ async def _push_notification_loop():
                 if not user_path.is_dir() or not user_path.name.isdigit():
                     continue
                 uid = int(user_path.name)
+                if not load_settings(uid).get("tips_enabled", True):
+                    continue
                 notif_file = user_path / "last_push_notif.txt"
                 try:
                     if notif_file.exists():
@@ -12463,6 +12688,18 @@ async def _push_notification_loop():
                     pass
         # Следующий обход — через сутки (каждый день проверяем кому пора слать)
         await asyncio.sleep(24 * 3600)
+
+
+@dp.message(Command("tips_off"))
+async def cmd_tips_off(msg: Message):
+    s = load_settings(msg.from_user.id); s["tips_enabled"] = False; save_settings(msg.from_user.id, s)
+    await msg.answer("🔕 Полезные напоминания отключены. Включить снова: /tips_on")
+
+
+@dp.message(Command("tips_on"))
+async def cmd_tips_on(msg: Message):
+    s = load_settings(msg.from_user.id); s["tips_enabled"] = True; save_settings(msg.from_user.id, s)
+    await msg.answer("🔔 Полезные напоминания включены — не чаще одного раза в 4 дня.")
 
 
 # ── Глобальный монитор — один цикл на всех пользователей ─────────
@@ -13181,7 +13418,7 @@ async def main():
     print("  [прокси-прогрев] запущен фоновый прогрев кеша прокси")
 
     # Веб-дашборд аналитики — работает параллельно, не блокирует polling
-    await analytics.start_dashboard(REGIONS)
+    await analytics.start_dashboard(REGIONS, extra_routes=[("POST", "/yoomoney/webhook", _yoomoney_webhook)])
 
     # Непрерывный фоновый прогрев кэша Авито: данные берутся через поисковики
     # (не прямой запрос к avito.ru), поэтому риска IP-блокировки нет. Благодаря

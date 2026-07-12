@@ -363,7 +363,8 @@ load();
 </body></html>"""
 
 
-def create_app(region_names: dict | None = None, dashboard_key: str | None = None):
+def create_app(region_names: dict | None = None, dashboard_key: str | None = None,
+               extra_routes: list | None = None):
     """
     Создать aiohttp-приложение дашборда. Импорт aiohttp внутри, чтобы
     модуль можно было импортировать без aiohttp (для /stats и трекинга).
@@ -392,10 +393,12 @@ def create_app(region_names: dict | None = None, dashboard_key: str | None = Non
     app = web.Application()
     app.router.add_get("/", index)
     app.router.add_get("/api/stats", api_stats)
+    for method, path, handler in (extra_routes or []):
+        app.router.add_route(method, path, handler)
     return app
 
 
-async def start_dashboard(region_names: dict | None = None):
+async def start_dashboard(region_names: dict | None = None, extra_routes: list | None = None):
     """
     Запустить веб-сервер параллельно с ботом (не блокирует polling).
     Порт из env PORT (Railway), fallback 8080.
@@ -406,7 +409,7 @@ async def start_dashboard(region_names: dict | None = None):
         key = os.getenv("DASHBOARD_KEY", "")
         if not key:
             print("  [dashboard] ⚠️ DASHBOARD_KEY не задан — дашборд открыт без пароля!")
-        app = create_app(region_names, key)
+        app = create_app(region_names, key, extra_routes=extra_routes)
         runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(runner, "0.0.0.0", port)
