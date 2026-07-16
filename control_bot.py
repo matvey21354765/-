@@ -944,6 +944,8 @@ MARKET_DEAL_MIN_PCT = 10.0
 
 def _is_strong_below_market(it: dict) -> bool:
     """True только для сильного сигнала ниже рынка, а не для погрешности медианы."""
+    if it.get("_is_junk") or is_not_running(it):
+        return False
     pct = it.get("_savings_pct", 0) or 0
     if (it.get("source", "") or "").lower() == "avito":
         avito_score = it.get("_avito_rating_score")
@@ -963,6 +965,8 @@ def _is_strong_below_market(it: dict) -> bool:
 
 def _is_market_candidate(it: dict) -> bool:
     """True if listing is not known to be at/above market."""
+    if it.get("_is_junk") or is_not_running(it):
+        return False
     price = int(it.get("_price_int") or 0)
     market = int(it.get("_market_price") or 0)
     if market and price:
@@ -13190,8 +13194,6 @@ async def do_search_for_user(uid: int, reply_to):
                 if details is None:
                     return None
                 if details.get("_check_failed"):
-                    if source == "drom":
-                        return None
                     it["_sale_status_check_failed"] = True
                     return it
                 it["_enriched"] = True
@@ -13213,8 +13215,6 @@ async def do_search_for_user(uid: int, reply_to):
                     _apply_page_market(it, int(details["_autoru_market"]), "autoru")
                 return it
             except Exception:
-                if source == "drom":
-                    return None
                 it["_sale_status_check_failed"] = True
                 return it  # VK/TG не проверяем по странице
 
@@ -13231,6 +13231,9 @@ async def do_search_for_user(uid: int, reply_to):
     if sold_count:
         print(f"  [фильтр] убрано {sold_count} проданных объявлений из первых {len(check_batch)}")
     suitable = active + rest_batch
+    for it in suitable:
+        if _text_is_junk(it.get("title", ""), it.get("description", "")):
+            it["_is_junk"] = True
     if _ref_items:
         suitable = rank_by_market_price(suitable, ref_items=_ref_items, avito_only_median=True)
     suitable = _sort_by_deal(suitable)
