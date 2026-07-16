@@ -10813,7 +10813,7 @@ async def cmd_global_search(msg: Message):
     scraper_map = {
         "drom":   lambda: scrape_drom(region, pages=10, price_min=pmin, price_max=pmax, brand=_br),
         "autoru": lambda: scrape_autoru(region, pages=4, price_min=pmin, price_max=pmax, brand=_br),
-        "avito":  lambda: scrape_avito(region, pages=6, price_min=pmin, price_max=pmax, sort_by_date=True),
+        "avito":  lambda: scrape_avito(region, pages=3, price_min=pmin, price_max=pmax, sort_by_date=True),
         "youla":  lambda: scrape_youla(region, pages=16, price_min=pmin, price_max=pmax, brand=_br),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
     }
@@ -12580,7 +12580,7 @@ async def do_search_for_user(uid: int, reply_to):
     scraper_map = {
         "drom":   lambda: scrape_drom(region, pages=10, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
         "autoru": lambda: scrape_autoru(region, pages=4, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
-        "avito":  lambda: scrape_avito(region, pages=6, price_min=pmin, price_max=pmax, sort_by_date=True, brand=(brand if brand and brand != "any" else "")),
+        "avito":  lambda: scrape_avito(region, pages=3, price_min=pmin, price_max=pmax, sort_by_date=True, brand=(brand if brand and brand != "any" else "")),
         "youla":  lambda: scrape_youla(region, pages=16, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
         "tg":     lambda: scrape_tg_channels(region, pmin, pmax),
@@ -12591,12 +12591,14 @@ async def do_search_for_user(uid: int, reply_to):
         src_keys = list(scraper_map.keys())  # подстраховка: если выбор пуст — все
     futures = [loop.run_in_executor(None, scraper_map[src]) for src in src_keys]
 
-    # Рынок ВСЕГДА сравниваем с ценами Авито. Отдельный эталон Авито запускаем
-    # всегда и без фильтра по бюджету: результаты основного поиска могут быть
-    # ограничены бюджетом пользователя и не отражать реальную рыночную цену.
-    _avito_ref_fut = loop.run_in_executor(
-        None, lambda: scrape_avito(region, pages=4, price_min=0, price_max=99_000_000)
-    )
+    # Avito is both a search source and the market reference. When Avito is
+    # already selected, reuse that result/cache instead of launching a duplicate
+    # Avito scrape that often makes the source miss the user-facing timeout.
+    _avito_ref_fut = None
+    if "avito" not in src_keys:
+        _avito_ref_fut = loop.run_in_executor(
+            None, lambda: scrape_avito(region, pages=3, price_min=0, price_max=99_000_000)
+        )
     done, pending = await asyncio.wait(futures, timeout=SEARCH_SOURCE_TIMEOUT_SEC)
     if pending:
         for f in pending:
@@ -12623,6 +12625,12 @@ async def do_search_for_user(uid: int, reply_to):
         else:
             results.append([])
             source_status[src] = "timeout"
+
+    if "avito" in src_keys:
+        try:
+            _avito_ref_extra = list(results[src_keys.index("avito")] or [])
+        except Exception:
+            _avito_ref_extra = []
 
     avito_enabled = "avito" in enabled_sources and "avito" in scraper_map
     if avito_enabled and "avito" in src_keys:
