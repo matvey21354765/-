@@ -1450,6 +1450,8 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
 
     mixed_model_year: dict[str, dict] = {}
     mixed_model_all: dict[str, list] = {}
+    mixed_brand_year: dict[str, dict] = {}
+    mixed_brand_all: dict[str, list] = {}
     mixed_seen_urls: set[str] = set()
     mixed_refs = list(ref_items or []) + list(items or [])
     for it in mixed_refs:
@@ -1473,6 +1475,10 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
             if model:
                 mixed_model_year.setdefault(model, {}).setdefault(yr, []).append(p)
                 mixed_model_all.setdefault(model, []).append(p)
+                brand = model.split()[0] if model.split() else ""
+                if brand:
+                    mixed_brand_year.setdefault(brand, {}).setdefault(yr, []).append(p)
+                    mixed_brand_all.setdefault(brand, []).append(p)
 
     def _est_price(prices: list, lvl: str, cand_p):
         """Медиана цен той же модели/года с отсечением выбросов. Leave-one-out:
@@ -1561,6 +1567,35 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
                 return med, _lvl, _n
         return 0.0, "", 0
 
+    def _mixed_brand_market_for_old(model: str, yr: int, cand_p=None):
+        """Fallback for rare old/budget cars: same brand + close years from trusted sources."""
+        if not model or not yr:
+            return 0.0, "", 0
+        parts = model.split()
+        brand = parts[0] if parts else ""
+        yrs = mixed_brand_year.get(brand)
+        if not brand or not yrs:
+            return 0.0, "", 0
+
+        window = 8 if yr < 2000 else 5
+        prices = []
+        for y in range(yr - window, yr + window + 1):
+            prices += yrs.get(y, [])
+        min_samples = 3 if yr < 2000 else 5
+        if len(prices) >= min_samples:
+            med, _lvl, _n = _est_price(prices, "mixed_brand_old", cand_p)
+            if _n >= max(2, min_samples - 1):
+                return med, _lvl, _n
+
+        # For very old cars model-level data is often sparse; brand-level data is still
+        # better than showing no market at all when the search returned hundreds of cars.
+        all_prices = mixed_brand_all.get(brand, [])
+        if yr < 2000 and len(all_prices) >= 4:
+            med, _lvl, _n = _est_price(all_prices, "mixed_brand_old", cand_p)
+            if _n >= 3:
+                return med, _lvl, _n
+        return 0.0, "", 0
+
     for it in items:
         p = it.get("_price_int", 0)
         deal_score = 0.0
@@ -1592,6 +1627,10 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
                     med, _lvl, _n = _mixed_market_for(parts[0], int(parts[1]), p)
                 if med <= 0:
                     med, _lvl, _n = _mixed_market_for_model(parts[0], p, int(parts[1]))
+                if med <= 0:
+                    yr_int = int(parts[1])
+                    if yr_int < 2005 or p <= 120_000:
+                        med, _lvl, _n = _mixed_brand_market_for_old(parts[0], yr_int, p)
             elif key:
                 med, _lvl, _n = _market_for_model(key, p)
                 if med <= 0:
@@ -1620,6 +1659,8 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
                     _cap = 75
                 elif _lvl == "model":
                     _cap = 55
+                elif _lvl == "mixed_brand_old":
+                    _cap = 60
                 else:  # "wide"
                     _cap = 70
                 
