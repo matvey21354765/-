@@ -446,7 +446,8 @@ def _env_int(name: str, default: int, min_value: int = 1) -> int:
 
 SEARCH_COOLDOWN_SEC = 45
 SEARCH_SOURCE_TIMEOUT_SEC = _env_int("SEARCH_SOURCE_TIMEOUT_SEC", 30)
-SEARCH_AUTORU_DEADLINE_SEC = _env_int("SEARCH_AUTORU_DEADLINE_SEC", 10)
+SEARCH_CRITICAL_SOURCE_GRACE_SEC = _env_int("SEARCH_CRITICAL_SOURCE_GRACE_SEC", 25)
+SEARCH_AUTORU_DEADLINE_SEC = _env_int("SEARCH_AUTORU_DEADLINE_SEC", 26)
 SEARCH_PRICE_FILL_LIMIT = _env_int("SEARCH_PRICE_FILL_LIMIT", 3, 0)
 SEARCH_PRICE_FILL_TIMEOUT_SEC = _env_int("SEARCH_PRICE_FILL_TIMEOUT_SEC", 4)
 SEARCH_DETAIL_CHECK_LIMIT = _env_int("SEARCH_DETAIL_CHECK_LIMIT", 0, 0)
@@ -12905,6 +12906,26 @@ async def do_search_for_user(uid: int, reply_to):
             None, lambda: scrape_avito(region, pages=3, price_min=0, price_max=99_000_000)
         )
     done, pending = await asyncio.wait(futures, timeout=SEARCH_SOURCE_TIMEOUT_SEC)
+    # Авито и Auto.ru проходят более тяжёлую антибот-защиту и часто завершаются
+    # чуть позже быстрых площадок. Даём им отдельный резерв времени, иначе готовый
+    # результат выбрасывался ровно на общем таймауте и в статистике появлялось
+    # «не успел», хотя поток продолжал работу и наполнял кэш уже после ответа.
+    critical_pending = {
+        f for src, f in zip(src_keys, futures)
+        if src in ("avito", "autoru") and f in pending
+    }
+    if critical_pending:
+        critical_done, _ = await asyncio.wait(
+            critical_pending,
+            timeout=SEARCH_CRITICAL_SOURCE_GRACE_SEC,
+        )
+        done = set(done) | set(critical_done)
+        pending = set(pending) - set(critical_done)
+        if critical_done:
+            print(
+                f"  [search] critical grace: завершено "
+                f"{len(critical_done)}/{len(critical_pending)} медленных источников"
+            )
     if pending:
         for f in pending:
             f.cancel()
