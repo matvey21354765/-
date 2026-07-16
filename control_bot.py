@@ -9880,13 +9880,24 @@ def _access_notice_text(days_left: int, plan: str) -> str:
         return (
             "🚨 Сегодня последний день доступа к PerekupDrive.\n\n"
             "Дальше ты можешь пропустить свежие объявления ниже рынка: хорошие варианты часто уходят за часы.\n\n"
-            "Напиши администратору, чтобы продлить доступ и не выключать уведомления."
+            "Продли пользование и купи подписку, чтобы поиск и уведомления не остановились."
         )
     return (
         f"⏳ Осталось {days_left} дня доступа к PerekupDrive.\n\n"
         "Бот продолжает искать свежие объявления и скидки ниже рынка. "
-        "Продли доступ заранее, чтобы уведомления не остановились в самый неподходящий момент."
+        "Продли доступ заранее: купи подписку, чтобы уведомления не остановились в самый неподходящий момент."
     )
+
+
+def _subscription_offer_keyboard() -> InlineKeyboardMarkup:
+    pay_url = os.getenv("SUBSCRIPTION_URL", "").strip()
+    if not pay_url and ADMIN_IDS:
+        pay_url = f"tg://user?id={next(iter(ADMIN_IDS))}"
+    rows = []
+    if pay_url:
+        rows.append([InlineKeyboardButton(text="💳 Купить / продлить подписку", url=pay_url)])
+    rows.append([InlineKeyboardButton(text="🚗 Смотреть свежие авто", callback_data="start_search")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def _access_expiry_notice_loop():
@@ -9913,7 +9924,11 @@ async def _access_expiry_notice_loop():
                 if int(last_days or -1) == days_left and str(last_date or "") == today:
                     continue
                 try:
-                    await bot.send_message(int(uid), _access_notice_text(days_left, plan or "trial"))
+                    await bot.send_message(
+                        int(uid),
+                        _access_notice_text(days_left, plan or "trial"),
+                        reply_markup=_subscription_offer_keyboard(),
+                    )
                     sent += 1
                     if db:
                         with db.cursor() as cur:
@@ -12720,8 +12735,22 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                 return True
             except Exception:
                 pass
-        await bot.send_message(chat_id, caption, reply_markup=kb)
-        return True
+        try:
+            await bot.send_message(chat_id, caption, reply_markup=kb)
+            return True
+        except Exception as e:
+            print(f"  [send] full card failed: {str(e)[:100]}")
+            try:
+                short_caption = (
+                    f"{source_tag} {item.get('title', 'Объявление')}\n"
+                    f"💰 {price_line}\n"
+                    f"🔗 {url}"
+                )
+                await bot.send_message(chat_id, short_caption, reply_markup=kb)
+                return True
+            except Exception as e2:
+                print(f"  [send] short card failed: {str(e2)[:100]}")
+                return False
 
     # Отбираем кандидатов и дозагружаем фото/описание только для них (см. ниже).
     s = load_settings(uid)
@@ -12769,6 +12798,24 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         if await _send_item(item):
             sent_items.append(item)
             await asyncio.sleep(0.01)
+
+    if not sent_items and total:
+        for item in items[offset:min(total, offset + 20)]:
+            if not item.get("url"):
+                continue
+            if await _send_item(item):
+                sent_items.append(item)
+                await asyncio.sleep(0.01)
+                if len(sent_items) >= 10:
+                    break
+
+    if not sent_items:
+        await bot.send_message(
+            chat_id,
+            f"⚠️ Нашёл {total} объявлений, но Telegram не принял карточки для отправки. "
+            "Попробуй нажать «Искать» ещё раз или расширить бюджет в /settings.",
+        )
+        return
 
     next_offset = scanned
     shown_str = f"{len(sent_items)} авто, просмотрено {next_offset}/{total}"
@@ -13207,6 +13254,24 @@ async def do_search_for_user(uid: int, reply_to):
     # seen хранит нормализованные URL — сравниваем тоже по нормализованным
     seen_norm = {_norm_url(u) for u in seen}
     skipped_norm = {_norm_url(u) for u in skipped}
+    def _display_fallback_candidates() -> list[dict]:
+        preferred: list[dict] = []
+        broader: list[dict] = []
+        for it in items:
+            if it.get("_market_ref_only") or not it.get("url"):
+                continue
+            if _norm_url(it.get("url", "")) in skipped_norm:
+                continue
+            price = int(it.get("_price_int") or parse_price(it.get("price", "")) or 0)
+            if price:
+                it["_price_int"] = price
+            if price and pmin <= price <= pmax:
+                preferred.append(it)
+            else:
+                broader.append(it)
+        return _safe_rank_search_items(preferred or broader)[:120]
+
+    _display_fallback = _display_fallback_candidates()
     already_seen_count = sum(
         1 for i in items
         if not is_dealer(i) and in_price_range(i, pmin, pmax)
@@ -13322,6 +13387,11 @@ async def do_search_for_user(uid: int, reply_to):
             it["_is_dealer"] = True
             it["_deal_score"] = it.get("_deal_score", 0) - 30
     suitable = _sort_by_deal(suitable)
+    if not suitable and _display_fallback:
+        suitable = _display_fallback
+        await reply_to.answer(
+            f"⚠️ Строгие фильтры убрали все карточки. Показываю {len(suitable)} найденных объявлений, чтобы выдача не была пустой."
+        )
 
     if not suitable:
         items_in_seen_count = sum(
@@ -13501,6 +13571,10 @@ async def do_search_for_user(uid: int, reply_to):
     else:
         suitable = _safe_rank_search_items(suitable)[:80]
         print(f"  [фильтр] точных оценок нет → показываем {len(suitable)} объявлений в бюджете")
+
+    if not suitable and _display_fallback:
+        suitable = _display_fallback[:80]
+        print(f"  [fallback] final ranking empty -> showing {len(suitable)} basic listings")
 
     if not suitable:
         await reply_to.answer(
