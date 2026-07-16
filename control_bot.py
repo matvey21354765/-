@@ -12735,6 +12735,40 @@ async def do_search_for_user(uid: int, reply_to):
         else:
             results.append([])
 
+    avito_enabled = "avito" in enabled_sources and "avito" in scraper_map
+    if avito_enabled and "avito" in src_keys:
+        avito_idx = src_keys.index("avito")
+        if len(results[avito_idx] or []) == 0:
+            def _avito_budget_candidates(pool: list[dict]) -> list[dict]:
+                picked: list[dict] = []
+                seen_urls: set[str] = set()
+                for it in pool or []:
+                    if (it.get("source", "") or "").lower() != "avito":
+                        continue
+                    price = int(it.get("_price_int") or parse_price(it.get("price", "")) or 0)
+                    if not price or price < pmin or price > pmax:
+                        continue
+                    if is_dealer(it) or not it.get("url"):
+                        continue
+                    url = _norm_url(it.get("url", ""))
+                    if not url or url in seen_urls:
+                        continue
+                    seen_urls.add(url)
+                    picked.append(dict(it))
+                return picked
+
+            avito_fallback_pool = list(_avito_ref_extra or [])
+            for cache_key, (_ts, cached_items) in list(_AVITO_REGION_CACHE.items()):
+                if cache_key == region or cache_key.startswith(region + "_"):
+                    avito_fallback_pool.extend(cached_items or [])
+            avito_fallback = _avito_budget_candidates(avito_fallback_pool)[:60]
+            if avito_fallback:
+                results[avito_idx] = avito_fallback
+                print(
+                    f"  [fallback] Авито основной поиск 0 → восстановлено "
+                    f"{len(avito_fallback)} объявлений из эталона/кэша"
+                )
+
     items = []
     stat_parts = []
     for src, batch in zip(src_keys, results):
@@ -12747,7 +12781,6 @@ async def do_search_for_user(uid: int, reply_to):
 
     # Если Авито — единственный включённый источник и вернул 0 результатов,
     # автоматически добавляем Дром как запасной источник.
-    avito_enabled = "avito" in enabled_sources and "avito" in scraper_map
     avito_count = 0
     if avito_enabled:
         for src, batch in zip([s for s in enabled_sources if s in scraper_map], results):
