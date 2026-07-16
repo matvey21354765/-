@@ -10115,7 +10115,9 @@ async def cmd_analyze_competitors(msg: Message):
 
 # Все возможные площадки для мониторинга
 _MONITOR_SOURCES = [
+    ("avito",  "Авито"),
     ("drom",   "Дром"),
+    ("autoru", "Auto.ru"),
     ("youla",  "Юла"),
     ("vk",     "ВКонтакте"),
     ("tg",     "Telegram"),
@@ -10744,7 +10746,7 @@ async def cmd_settings(msg: Message, state: FSMContext):
 
 
 ALL_SOURCES = ["drom", "autoru", "avito", "youla", "vk", "tg"]
-USER_SEARCH_SOURCES = ["drom", "youla", "vk", "tg"]
+USER_SEARCH_SOURCES = list(ALL_SOURCES)
 SOURCE_NAMES = {
     "drom":   "🔵 Дром",
     "autoru": "🟠 Auto.ru",
@@ -10779,9 +10781,9 @@ def _get_enabled_sources(s: dict) -> list[str]:
     """Возвращает список включённых площадок, по умолчанию — все."""
     enabled = s.get("sources", [])
     if not enabled:
-        return list(USER_SEARCH_SOURCES)
-    filtered = [src for src in enabled if src in USER_SEARCH_SOURCES]
-    return filtered or list(USER_SEARCH_SOURCES)
+        return list(ALL_SOURCES)
+    filtered = [src for src in enabled if src in ALL_SOURCES]
+    return filtered or list(ALL_SOURCES)
 
 
 @dp.message(Command("search"))
@@ -10925,6 +10927,8 @@ async def cmd_global_search(msg: Message):
     # Запускаем все источники + TG-каналы параллельно
     scraper_map = {
         "drom":   lambda: scrape_drom(region, pages=10, price_min=pmin, price_max=pmax, brand=_br),
+        "autoru": lambda: scrape_autoru(region, pages=12, price_min=pmin, price_max=pmax, brand=_br),
+        "avito":  lambda: scrape_avito(region, pages=16, price_min=pmin, price_max=pmax, sort_by_date=True),
         "youla":  lambda: scrape_youla(region, pages=16, price_min=pmin, price_max=pmax, brand=_br),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
     }
@@ -10942,21 +10946,28 @@ async def cmd_global_search(msg: Message):
     items: list[dict] = []
     stat_parts: list[str] = []
     for src, task in task_pairs:
+        tag = "✈️ Telegram" if src == "tg" else SOURCE_TAGS.get(src, src)
         if task not in done:
             batch = []
+            stat_parts.append(f"{tag}: таймаут")
+            continue
         else:
             try:
                 batch = task.result()
             except Exception as e:
                 print(f"  [global scraper] {src} error: {e}")
                 batch = []
+                stat_parts.append(f"{tag}: ошибка")
+                continue
         if isinstance(batch, list):
             items.extend(batch)
             cnt = len(batch)
         else:
             cnt = 0
-        tag = "✈️ Telegram" if src == "tg" else SOURCE_TAGS.get(src, src)
-        stat_parts.append(f"{tag}: {cnt}")
+        if cnt == 0 and src in ("avito", "autoru"):
+            stat_parts.append(f"{tag}: нет данных")
+        else:
+            stat_parts.append(f"{tag}: {cnt}")
 
     if stat_parts:
         await msg.answer("📊 " + " | ".join(stat_parts))
@@ -11131,10 +11142,10 @@ async def cb_toggle_src(cb: CallbackQuery):
 async def cb_src_all(cb: CallbackQuery):
     uid = cb.from_user.id
     s = load_settings(uid)
-    s["sources"] = list(USER_SEARCH_SOURCES)
+    s["sources"] = list(ALL_SOURCES)
     save_settings(uid, s)
     await cb.answer("Все площадки включены")
-    await cb.message.edit_reply_markup(reply_markup=sources_keyboard(USER_SEARCH_SOURCES))
+    await cb.message.edit_reply_markup(reply_markup=sources_keyboard(ALL_SOURCES))
 
 
 @dp.callback_query(F.data == "open_settings")
@@ -12687,7 +12698,7 @@ async def do_search_for_user(uid: int, reply_to):
     scraper_map = {
         "drom":   lambda: scrape_drom(region, pages=10, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
         "autoru": lambda: scrape_autoru(region, pages=12, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
-        "avito":  lambda: scrape_avito(region, pages=16, price_min=pmin, price_max=pmax, sort_by_date=False, brand=(brand if brand and brand != "any" else "")),
+        "avito":  lambda: scrape_avito(region, pages=16, price_min=pmin, price_max=pmax, sort_by_date=True, brand=(brand if brand and brand != "any" else "")),
         "youla":  lambda: scrape_youla(region, pages=16, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
         "tg":     lambda: scrape_tg_channels(region, pmin, pmax),
@@ -12717,15 +12728,19 @@ async def do_search_for_user(uid: int, reply_to):
             _avito_ref_extra = []
             print(f"  [рынок] Авито-эталон не успел/ошибка: {str(_e)[:80]}")
     results = []
-    for f in futures:
+    source_status: dict[str, str] = {}
+    for src, f in zip(src_keys, futures):
         if f in done:
             try:
                 results.append(f.result())
+                source_status[src] = "ok"
             except Exception as e:
                 print(f"  [скрапер] ошибка: {e}")
                 results.append([])
+                source_status[src] = "error"
         else:
             results.append([])
+            source_status[src] = "timeout"
 
     avito_enabled = "avito" in enabled_sources and "avito" in scraper_map
     if avito_enabled and "avito" in src_keys:
@@ -12756,6 +12771,7 @@ async def do_search_for_user(uid: int, reply_to):
             avito_fallback = _avito_budget_candidates(avito_fallback_pool)[:60]
             if avito_fallback:
                 results[avito_idx] = avito_fallback
+                source_status["avito"] = "ok"
                 print(
                     f"  [fallback] Авито основной поиск 0 → восстановлено "
                     f"{len(avito_fallback)} объявлений из эталона/кэша"
@@ -12766,7 +12782,15 @@ async def do_search_for_user(uid: int, reply_to):
     for src, batch in zip(src_keys, results):
         items.extend(batch)
         tag = SOURCE_TAGS.get(src, src)
-        stat_parts.append(f"{tag}: {len(batch)}")
+        status = source_status.get(src, "ok")
+        if status == "timeout":
+            stat_parts.append(f"{tag}: таймаут")
+        elif status == "error":
+            stat_parts.append(f"{tag}: ошибка")
+        elif len(batch) == 0 and src in ("avito", "autoru"):
+            stat_parts.append(f"{tag}: нет данных")
+        else:
+            stat_parts.append(f"{tag}: {len(batch)}")
 
     if stat_parts:
         await reply_to.answer("📊 " + " | ".join(stat_parts))
