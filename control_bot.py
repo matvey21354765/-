@@ -1044,8 +1044,9 @@ def _ranked_search_items(items: list[dict]) -> list[dict]:
             bucket = 7
         else:
             bucket = 6
-        ranked.append((bucket, days, -pct, price, it))
-    ranked.sort(key=lambda x: (x[0], x[1], x[2], x[3]))
+        seen_rank = 1 if it.get("_already_seen") else 0
+        ranked.append((seen_rank, days, bucket, -pct, price, it))
+    ranked.sort(key=lambda x: (x[0], x[1], x[2], x[3], x[4]))
     return [it for *_keys, it in ranked]
 
 
@@ -1836,6 +1837,8 @@ def _sort_by_deal(items: list[dict]) -> list[dict]:
     #      при почти равной скидке — кто дольше висит/срочная продажа.
     #   Никакого округления в «полки»: −30% всегда выше −5%.
     items.sort(key=lambda x: (
+        1 if x.get("_already_seen") else 0,
+        x.get("_days_on_site", 999),
         _tier(x),
         _no_photo(x),
         (x.get("_days_on_site", 999), -round(_deal_rank(x), 1), -_secondary(x))
@@ -10112,9 +10115,7 @@ async def cmd_analyze_competitors(msg: Message):
 
 # Все возможные площадки для мониторинга
 _MONITOR_SOURCES = [
-    ("avito",  "Авито"),
     ("drom",   "Дром"),
-    ("autoru", "Auto.ru"),
     ("youla",  "Юла"),
     ("vk",     "ВКонтакте"),
     ("tg",     "Telegram"),
@@ -10125,7 +10126,8 @@ def _monitor_sources(s: dict) -> list[str]:
     src = s.get("monitor_sources")
     if not src or not isinstance(src, list):
         return [k for k, _ in _MONITOR_SOURCES]
-    return src
+    allowed = {k for k, _ in _MONITOR_SOURCES}
+    return [x for x in src if x in allowed] or [k for k, _ in _MONITOR_SOURCES]
 
 
 _SELLER_TYPE_LABELS = {"private": "Частник", "pro": "Профи/перекуп", "dealer": "Автодилер"}
@@ -10742,6 +10744,7 @@ async def cmd_settings(msg: Message, state: FSMContext):
 
 
 ALL_SOURCES = ["drom", "autoru", "avito", "youla", "vk", "tg"]
+USER_SEARCH_SOURCES = ["drom", "youla", "vk", "tg"]
 SOURCE_NAMES = {
     "drom":   "🔵 Дром",
     "autoru": "🟠 Auto.ru",
@@ -10756,7 +10759,7 @@ SOURCE_NAMES = {
 def sources_keyboard(enabled: list[str], show_back: bool = True) -> InlineKeyboardMarkup:
     rows = []
     enabled_set = set(enabled or [])
-    for src in ALL_SOURCES:
+    for src in USER_SEARCH_SOURCES:
         check = "✅" if src in enabled_set else "☐"
         source_name = SOURCE_NAMES.get(src, src)
         rows.append([InlineKeyboardButton(
@@ -10776,9 +10779,9 @@ def _get_enabled_sources(s: dict) -> list[str]:
     """Возвращает список включённых площадок, по умолчанию — все."""
     enabled = s.get("sources", [])
     if not enabled:
-        return list(ALL_SOURCES)
-    filtered = [src for src in enabled if src in ALL_SOURCES]
-    return filtered or list(ALL_SOURCES)
+        return list(USER_SEARCH_SOURCES)
+    filtered = [src for src in enabled if src in USER_SEARCH_SOURCES]
+    return filtered or list(USER_SEARCH_SOURCES)
 
 
 @dp.message(Command("search"))
@@ -10922,8 +10925,6 @@ async def cmd_global_search(msg: Message):
     # Запускаем все источники + TG-каналы параллельно
     scraper_map = {
         "drom":   lambda: scrape_drom(region, pages=10, price_min=pmin, price_max=pmax, brand=_br),
-        "autoru": lambda: scrape_autoru(region, pages=12, price_min=pmin, price_max=pmax, brand=_br),
-        "avito":  lambda: scrape_avito(region, pages=16, price_min=pmin, price_max=pmax, sort_by_date=False),
         "youla":  lambda: scrape_youla(region, pages=16, price_min=pmin, price_max=pmax, brand=_br),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
     }
@@ -11130,10 +11131,10 @@ async def cb_toggle_src(cb: CallbackQuery):
 async def cb_src_all(cb: CallbackQuery):
     uid = cb.from_user.id
     s = load_settings(uid)
-    s["sources"] = list(ALL_SOURCES)
+    s["sources"] = list(USER_SEARCH_SOURCES)
     save_settings(uid, s)
     await cb.answer("Все площадки включены")
-    await cb.message.edit_reply_markup(reply_markup=sources_keyboard(ALL_SOURCES))
+    await cb.message.edit_reply_markup(reply_markup=sources_keyboard(USER_SEARCH_SOURCES))
 
 
 @dp.callback_query(F.data == "open_settings")
