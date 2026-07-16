@@ -1438,6 +1438,32 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
                 model_year.setdefault(model, {}).setdefault(yr, []).append(p)
                 model_all.setdefault(model, []).append(p)
 
+    mixed_model_year: dict[str, dict] = {}
+    mixed_model_all: dict[str, list] = {}
+    mixed_seen_urls: set[str] = set()
+    mixed_refs = list(ref_items or []) + list(items or [])
+    for it in mixed_refs:
+        source = (it.get("source", "") or "").lower()
+        if source not in ("avito", "drom", "autoru", "auto.ru"):
+            continue
+        if is_dealer(it) or is_not_running(it) or has_extreme_mileage(it):
+            continue
+        p = int(it.get("_price_int") or 0)
+        if p <= 0:
+            continue
+        url = _norm_url(it.get("url", ""))
+        if url:
+            if url in mixed_seen_urls:
+                continue
+            mixed_seen_urls.add(url)
+        key = _car_group_key(_market_key_text(it))
+        parts = key.rsplit(" ", 1)
+        if len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 4:
+            model, yr = parts[0], int(parts[1])
+            if model:
+                mixed_model_year.setdefault(model, {}).setdefault(yr, []).append(p)
+                mixed_model_all.setdefault(model, []).append(p)
+
     def _est_price(prices: list, lvl: str, cand_p):
         """Медиана цен той же модели/года с отсечением выбросов. Leave-one-out:
         убираем ОДНУ цену самого кандидата, чтобы дешёвая находка не занижала свой
@@ -1490,6 +1516,41 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
             return _est_price(prices, "model", cand_p)
         return 0.0, "", 0
 
+    def _mixed_market_for(model: str, yr: int, cand_p=None):
+        yrs = mixed_model_year.get(model)
+        if not yrs:
+            return 0.0, "", 0
+        near = []
+        for y in (yr - 1, yr, yr + 1):
+            near += yrs.get(y, [])
+        if len(near) >= 2:
+            med, _lvl, _n = _est_price(near, "mixed_near", cand_p)
+            if _n >= 2:
+                return med, _lvl, _n
+        wide = list(near)
+        for y in (yr - 2, yr + 2):
+            wide += yrs.get(y, [])
+        if len(wide) >= 3:
+            med, _lvl, _n = _est_price(wide, "mixed_bracket", cand_p)
+            if _n >= 2:
+                return med, _lvl, _n
+        wider = list(wide)
+        for y in (yr - 3, yr - 4, yr - 5, yr + 3, yr + 4, yr + 5):
+            wider += yrs.get(y, [])
+        if len(wider) >= 4:
+            med, _lvl, _n = _est_price(wider, "mixed_wide", cand_p)
+            if _n >= 3:
+                return med, _lvl, _n
+        return 0.0, "", 0
+
+    def _mixed_market_for_model(model: str, cand_p=None):
+        prices = mixed_model_all.get(model, [])
+        if len(prices) >= 3:
+            med, _lvl, _n = _est_price(prices, "mixed_model", cand_p)
+            if _n >= 2:
+                return med, _lvl, _n
+        return 0.0, "", 0
+
     for it in items:
         p = it.get("_price_int", 0)
         deal_score = 0.0
@@ -1517,8 +1578,14 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
                 med, _lvl, _n = _market_for(parts[0], int(parts[1]), p)
                 if med <= 0:
                     med, _lvl, _n = _market_for_model(parts[0], p)
+                if med <= 0:
+                    med, _lvl, _n = _mixed_market_for(parts[0], int(parts[1]), p)
+                if med <= 0:
+                    med, _lvl, _n = _mixed_market_for_model(parts[0], p)
             elif key:
                 med, _lvl, _n = _market_for_model(key, p)
+                if med <= 0:
+                    med, _lvl, _n = _mixed_market_for_model(key, p)
             if med > 0:
                 if _lvl not in ("avito", "drom"):
                     _mileage_factor = _market_mileage_factor(it)
@@ -12234,6 +12301,8 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                 market_note = " Авито" + market_note
             elif item.get("_market_lvl") == "autoru":
                 market_note = " Auto.ru" + market_note
+            elif str(item.get("_market_lvl", "")).startswith("mixed"):
+                market_note = " смешанный грубо" + market_note
             elif item.get("_market_lvl") == "model":
                 market_note = " грубо" + market_note
             if pct >= MARKET_DEAL_MIN_PCT:
