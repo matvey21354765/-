@@ -3159,6 +3159,23 @@ _TG_MILEAGE_RE = re.compile(r"(\d[\d\s]{2,6})\s*(?:тыс\.?\s*км|км)", re.I
 
 def _tg_parse_price(text: str) -> int:
     """Извлекает цену из текста Telegram-объявления."""
+    low = str(text or "").lower()
+    ctx_re = re.compile(
+        r"(?:цен[аеу]|стоимост[ьи]|прошу|продам за|отдам за)\s*[:\-]?\s*(\d[\d\s]{1,9})(?:\s*(?:тыс|т\.?\s*р?|тр|k|к))?",
+        re.IGNORECASE,
+    )
+    for m in ctx_re.finditer(text):
+        raw = re.sub(r"\D", "", m.group(1))
+        if not raw:
+            continue
+        val = int(raw)
+        full = m.group(0).lower()
+        if any(s in full for s in ("тыс", "т.р", "тр")) or re.search(r"\bт\b|\bk\b|\bк\b", full):
+            val *= 1000
+        if val < 1000:
+            val *= 1000
+        if 50_000 <= val <= 50_000_000:
+            return val
     for m in _TG_PRICE_RE.finditer(text):
         raw = re.sub(r"\D", "", m.group(1))
         if not raw:
@@ -3167,6 +3184,9 @@ def _tg_parse_price(text: str) -> int:
         # «тыс.» суффикс — умножаем
         suffix = m.group(0)[len(m.group(1)):].strip().lower()
         if any(s in suffix for s in ("тыс", "тр", "т", "k", "к")):
+            nearby = low[max(0, m.start() - 45):m.end() + 12]
+            if any(x in nearby for x in ("влож", "ходов", "сцеп", "ремонт", "поменян", "замен", "капиталк", "грм")):
+                continue
             val = val * 1000
         if 50_000 <= val <= 50_000_000:
             return val
@@ -4018,6 +4038,19 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
             val = int(re.sub(r'\D', '', m.group(1)))
             if 5_000 <= val <= 50_000_000:
                 return val
+        # Явное ценовое поле должно быть приоритетнее последующих сумм ремонта/вложений.
+        for m in _vk_price_ctx_re.finditer(text):
+            raw = re.sub(r"\D", "", m.group(1))
+            if not raw:
+                continue
+            val = int(raw)
+            full = m.group(0).lower()
+            if any(s in full for s in ("тыс", "т.р", "тр")) or re.search(r"\bт\b|\bk\b|\bк\b", full):
+                val *= 1000
+            if val < 1000:
+                val *= 1000
+            if 5_000 <= val <= 50_000_000:
+                return val
         # Сначала ищем с явным символом валюты
         for m in _vk_price_re.finditer(text):
             _g = m.group(1).strip()
@@ -4035,10 +4068,14 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
                 # "110к пробег" / "107 тыс км" — это ПРОБЕГ, а не цена. Суффикс ₽/руб —
                 # всегда цена, а к/тыс рядом с "пробег"/"км" — почти всегда пробег.
                 _after = _tl[m.end():m.end() + 12]
-                _before = _tl[max(0, m.start() - 12):m.start()]
+                _before = _tl[max(0, m.start() - 45):m.start()]
                 if ("пробег" in _after or "пробег" in _before
                         or _after.lstrip(" .,:") .startswith("км")
                         or "тыс.км" in _after or "тыс км" in _after):
+                    continue
+                if any(x in (_before + _after) for x in (
+                    "влож", "ходов", "сцеп", "ремонт", "поменян", "замен", "капиталк", "грм"
+                )):
                     continue
                 if val < 1000:
                     val *= 1000
@@ -12319,7 +12356,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         market = item.get("_market_price", 0)
         pct = item.get("_savings_pct", 0)
         if source == "avito" and item.get("_market_lvl") != "avito" and (item.get("_avito_rating_score") is not None):
-            if (item.get("_avito_rating_score") or 0) <= 0:
+            if (item.get("_avito_rating_score") or 0) < 0:
                 market = 0
                 pct = 0
         if market and _pi:
