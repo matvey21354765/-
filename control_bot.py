@@ -11366,6 +11366,8 @@ async def enrich_and_filter(items: list[dict], max_check: int = 25) -> list[dict
         if details is None:
             continue  # снято
         if details.get("_check_failed"):
+            if (item.get("source", "") or "").lower() == "drom":
+                continue
             item["_sale_status_check_failed"] = True
             active.append(item)
             continue
@@ -12233,7 +12235,10 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         source = item.get("source", "")
         _sanitize_social_price(item)
         needs_avito_ai_check = source == "avito" and not item.get("_avito_page_checked")
-        needs_sale_status_check = source in ("avito", "drom", "autoru") and not item.get("_sale_status_checked")
+        needs_sale_status_check = (
+            source == "drom"
+            or (source in ("avito", "autoru") and not item.get("_sale_status_checked"))
+        )
         # Если нет описания или это Авито — догружаем страницу перед показом карточки.
         if url and (needs_sale_status_check or not item.get("description") or needs_avito_ai_check):
             try:
@@ -12246,6 +12251,8 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                 if details is None:
                     return False
                 if details.get("_check_failed"):
+                    if source == "drom":
+                        return False
                     item["_sale_status_check_failed"] = True
                     needs_sale_status_check = False
                     needs_avito_ai_check = False
@@ -12269,8 +12276,12 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                 if details.get("_autoru_market") and item.get("_price_int"):
                     _apply_page_market(item, int(details["_autoru_market"]), "autoru")
             except Exception:
+                if source == "drom":
+                    return False
                 item["_sale_status_check_failed"] = True
-        if source in ("avito", "drom", "autoru") and not item.get("_sale_status_checked") and not item.get("_sale_status_check_failed"):
+        if source == "drom" and not item.get("_sale_status_checked"):
+            return False
+        if source in ("avito", "autoru") and not item.get("_sale_status_checked") and not item.get("_sale_status_check_failed"):
             return False
         if source == "drom" and item.get("_sale_status_checked") and not item.get("_drom_market"):
             return False
@@ -13101,6 +13112,8 @@ async def do_search_for_user(uid: int, reply_to):
                 if details is None:
                     return None
                 if details.get("_check_failed"):
+                    if source == "drom":
+                        return None
                     it["_sale_status_check_failed"] = True
                     return it
                 it["_enriched"] = True
@@ -13122,6 +13135,8 @@ async def do_search_for_user(uid: int, reply_to):
                     _apply_page_market(it, int(details["_autoru_market"]), "autoru")
                 return it
             except Exception:
+                if source == "drom":
+                    return None
                 it["_sale_status_check_failed"] = True
                 return it  # VK/TG не проверяем по странице
 
