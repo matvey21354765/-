@@ -13117,8 +13117,8 @@ async def do_search_for_user(uid: int, reply_to):
         except Exception as _le:
             print(f"  [ликвидность] ошибка: {_le}")
     else:
-        print(f"  [рынок] нет эталона — рыночная цена не считается, сортируем по дате/цене")
-        pass
+        print(f"  [рынок] нет Авито-эталона — считаем грубый рынок по Дром/Auto.ru из текущей выдачи")
+        suitable = rank_by_market_price(suitable, ref_items=[], avito_only_median=True)
     # Дилерские объявления — добавляем штраф к deal_score
     for it in suitable:
         if is_dealer(it):
@@ -13258,8 +13258,7 @@ async def do_search_for_user(uid: int, reply_to):
     for it in suitable:
         if _text_is_junk(it.get("title", ""), it.get("description", "")):
             it["_is_junk"] = True
-    if _ref_items:
-        suitable = rank_by_market_price(suitable, ref_items=_ref_items, avito_only_median=True)
+    suitable = rank_by_market_price(suitable, ref_items=_ref_items if _ref_items else [], avito_only_median=True)
     suitable = _sort_by_deal(suitable)
 
     # После загрузки цен — выкидываем только те, у кого цена ИЗВЕСТНА и вышла за бюджет.
