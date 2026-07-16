@@ -767,6 +767,15 @@ def _social_price_is_plausible(price: int, year: int = 0) -> bool:
     return True
 
 
+def _social_price_is_credit_payment(price: int, text: str) -> bool:
+    if not price:
+        return False
+    low = str(text or "").lower()
+    if not any(x in low for x in ("кредит", "месяц", "мес.", "платеж", "платёж", "взнос", "рассроч")):
+        return False
+    return price <= 120_000
+
+
 def _sanitize_social_price(item: dict) -> None:
     source = (item.get("source", "") or "").lower()
     if source not in ("vk", "tg", "tg_channel"):
@@ -779,7 +788,8 @@ def _sanitize_social_price(item: dict) -> None:
         year = int(str(year)[:4])
     except Exception:
         year = 0
-    if _social_price_is_plausible(price, year):
+    text = f"{item.get('title', '')} {item.get('description', '')}"
+    if _social_price_is_plausible(price, year) and not _social_price_is_credit_payment(price, text):
         return
     item["_bad_price_int"] = price
     item["_price_int"] = 0
@@ -1525,29 +1535,29 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
             near += yrs.get(y, [])
         if len(near) >= 2:
             med, _lvl, _n = _est_price(near, "mixed_near", cand_p)
-            if _n >= 2:
+            if _n >= 2 or (yr < 2000 and _n >= 1):
                 return med, _lvl, _n
         wide = list(near)
         for y in (yr - 2, yr + 2):
             wide += yrs.get(y, [])
         if len(wide) >= 3:
             med, _lvl, _n = _est_price(wide, "mixed_bracket", cand_p)
-            if _n >= 2:
+            if _n >= 2 or (yr < 2000 and _n >= 1):
                 return med, _lvl, _n
         wider = list(wide)
         for y in (yr - 3, yr - 4, yr - 5, yr + 3, yr + 4, yr + 5):
             wider += yrs.get(y, [])
         if len(wider) >= 4:
             med, _lvl, _n = _est_price(wider, "mixed_wide", cand_p)
-            if _n >= 3:
+            if _n >= 3 or (yr < 2000 and _n >= 1):
                 return med, _lvl, _n
         return 0.0, "", 0
 
-    def _mixed_market_for_model(model: str, cand_p=None):
+    def _mixed_market_for_model(model: str, cand_p=None, yr: int = 0):
         prices = mixed_model_all.get(model, [])
-        if len(prices) >= 3:
+        if len(prices) >= 3 or (yr and yr < 2000 and len(prices) >= 2):
             med, _lvl, _n = _est_price(prices, "mixed_model", cand_p)
-            if _n >= 2:
+            if _n >= 2 or (yr and yr < 2000 and _n >= 1):
                 return med, _lvl, _n
         return 0.0, "", 0
 
@@ -1581,11 +1591,11 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
                 if med <= 0:
                     med, _lvl, _n = _mixed_market_for(parts[0], int(parts[1]), p)
                 if med <= 0:
-                    med, _lvl, _n = _mixed_market_for_model(parts[0], p)
+                    med, _lvl, _n = _mixed_market_for_model(parts[0], p, int(parts[1]))
             elif key:
                 med, _lvl, _n = _market_for_model(key, p)
                 if med <= 0:
-                    med, _lvl, _n = _mixed_market_for_model(key, p)
+                    med, _lvl, _n = _mixed_market_for_model(key, p, 0)
             if med > 0:
                 if _lvl not in ("avito", "drom"):
                     _mileage_factor = _market_mileage_factor(it)
@@ -3581,7 +3591,10 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
                         year_m = _TG_YEAR_RE.search(text)
                         year_num = int(year_m.group(1)) if year_m else 0
                         price = _tg_parse_price(text)
-                        if price and not _social_price_is_plausible(price, year_num):
+                        if price and (
+                            not _social_price_is_plausible(price, year_num)
+                            or _social_price_is_credit_payment(price, text)
+                        ):
                             print(f"  [TG] ignore suspicious price {price} for year {year_num}: {text[:80]!r}")
                             price = 0
                         if price > 0 and not (price_min <= price <= price_max):
@@ -3669,7 +3682,10 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
                     year_m = _TG_YEAR_RE.search(ctx)
                     year_num = int(year_m.group(1)) if year_m else 0
                     price = _tg_parse_price(ctx)
-                    if price and not _social_price_is_plausible(price, year_num):
+                    if price and (
+                        not _social_price_is_plausible(price, year_num)
+                        or _social_price_is_credit_payment(price, ctx)
+                    ):
                         print(f"  [TG] ignore suspicious price {price} for year {year_num}: {ctx[:80]!r}")
                         price = 0
                     if price > 0 and not (price_min <= price <= price_max):
@@ -4139,7 +4155,10 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
         year_m = _vk_year_re.search(text)
         year_num = int(year_m.group(1)) if year_m else 0
         price = _parse_price(text)
-        if price and not _social_price_is_plausible(price, year_num):
+        if price and (
+            not _social_price_is_plausible(price, year_num)
+            or _social_price_is_credit_payment(price, text)
+        ):
             print(f"  [VK] ignore suspicious price {price} for year {year_num}: {text[:80]!r}")
             price = 0
         if price > 0 and not (price_min <= price <= price_max):
