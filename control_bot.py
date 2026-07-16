@@ -445,13 +445,13 @@ def _env_int(name: str, default: int, min_value: int = 1) -> int:
 
 
 SEARCH_COOLDOWN_SEC = 45
-SEARCH_SOURCE_TIMEOUT_SEC = _env_int("SEARCH_SOURCE_TIMEOUT_SEC", 35)
-SEARCH_AUTORU_DEADLINE_SEC = _env_int("SEARCH_AUTORU_DEADLINE_SEC", 24)
+SEARCH_SOURCE_TIMEOUT_SEC = _env_int("SEARCH_SOURCE_TIMEOUT_SEC", 20)
+SEARCH_AUTORU_DEADLINE_SEC = _env_int("SEARCH_AUTORU_DEADLINE_SEC", 10)
 SEARCH_PRICE_FILL_LIMIT = _env_int("SEARCH_PRICE_FILL_LIMIT", 3, 0)
 SEARCH_PRICE_FILL_TIMEOUT_SEC = _env_int("SEARCH_PRICE_FILL_TIMEOUT_SEC", 4)
-SEARCH_DETAIL_CHECK_LIMIT = _env_int("SEARCH_DETAIL_CHECK_LIMIT", 60, 0)
+SEARCH_DETAIL_CHECK_LIMIT = _env_int("SEARCH_DETAIL_CHECK_LIMIT", 25, 0)
 SEARCH_DETAIL_CHECK_TIMEOUT_SEC = _env_int("SEARCH_DETAIL_CHECK_TIMEOUT_SEC", 5)
-SEARCH_DETAIL_TOTAL_TIMEOUT_SEC = _env_int("SEARCH_DETAIL_TOTAL_TIMEOUT_SEC", 45)
+SEARCH_DETAIL_TOTAL_TIMEOUT_SEC = _env_int("SEARCH_DETAIL_TOTAL_TIMEOUT_SEC", 25)
 _last_search_at: dict[int, float] = {}
 
 # Мониторинг новых объявлений
@@ -10812,8 +10812,8 @@ async def cmd_global_search(msg: Message):
     # Запускаем все источники + TG-каналы параллельно
     scraper_map = {
         "drom":   lambda: scrape_drom(region, pages=10, price_min=pmin, price_max=pmax, brand=_br),
-        "autoru": lambda: scrape_autoru(region, pages=12, price_min=pmin, price_max=pmax, brand=_br),
-        "avito":  lambda: scrape_avito(region, pages=16, price_min=pmin, price_max=pmax, sort_by_date=True),
+        "autoru": lambda: scrape_autoru(region, pages=4, price_min=pmin, price_max=pmax, brand=_br),
+        "avito":  lambda: scrape_avito(region, pages=6, price_min=pmin, price_max=pmax, sort_by_date=True),
         "youla":  lambda: scrape_youla(region, pages=16, price_min=pmin, price_max=pmax, brand=_br),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
     }
@@ -10835,6 +10835,8 @@ async def cmd_global_search(msg: Message):
         if task not in done:
             batch = []
             print(f"  [global scraper] {src}: timeout")
+            if src in ("avito", "autoru"):
+                stat_parts.append(f"{tag}: не успел")
             continue
         else:
             try:
@@ -10842,6 +10844,8 @@ async def cmd_global_search(msg: Message):
             except Exception as e:
                 print(f"  [global scraper] {src} error: {e}")
                 batch = []
+                if src in ("avito", "autoru"):
+                    stat_parts.append(f"{tag}: ошибка")
                 continue
         if isinstance(batch, list):
             items.extend(batch)
@@ -10850,6 +10854,8 @@ async def cmd_global_search(msg: Message):
             cnt = 0
         if cnt > 0 or src not in ("avito", "autoru"):
             stat_parts.append(f"{tag}: {cnt}")
+        else:
+            stat_parts.append(f"{tag}: пусто")
 
     if stat_parts:
         await msg.answer("📊 " + " | ".join(stat_parts))
@@ -12573,8 +12579,8 @@ async def do_search_for_user(uid: int, reply_to):
 
     scraper_map = {
         "drom":   lambda: scrape_drom(region, pages=10, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
-        "autoru": lambda: scrape_autoru(region, pages=12, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
-        "avito":  lambda: scrape_avito(region, pages=16, price_min=pmin, price_max=pmax, sort_by_date=True, brand=(brand if brand and brand != "any" else "")),
+        "autoru": lambda: scrape_autoru(region, pages=4, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
+        "avito":  lambda: scrape_avito(region, pages=6, price_min=pmin, price_max=pmax, sort_by_date=True, brand=(brand if brand and brand != "any" else "")),
         "youla":  lambda: scrape_youla(region, pages=16, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
         "tg":     lambda: scrape_tg_channels(region, pmin, pmax),
@@ -12589,7 +12595,7 @@ async def do_search_for_user(uid: int, reply_to):
     # всегда и без фильтра по бюджету: результаты основного поиска могут быть
     # ограничены бюджетом пользователя и не отражать реальную рыночную цену.
     _avito_ref_fut = loop.run_in_executor(
-        None, lambda: scrape_avito(region, pages=12, price_min=0, price_max=99_000_000)
+        None, lambda: scrape_avito(region, pages=4, price_min=0, price_max=99_000_000)
     )
     done, pending = await asyncio.wait(futures, timeout=SEARCH_SOURCE_TIMEOUT_SEC)
     if pending:
@@ -12599,7 +12605,7 @@ async def do_search_for_user(uid: int, reply_to):
     _avito_ref_extra: list[dict] = []
     if _avito_ref_fut is not None:
         try:
-            _avito_ref_extra = await asyncio.wait_for(_avito_ref_fut, timeout=18)
+            _avito_ref_extra = await asyncio.wait_for(_avito_ref_fut, timeout=5)
         except Exception as _e:
             _avito_ref_extra = []
             print(f"  [рынок] Авито-эталон не успел/ошибка: {str(_e)[:80]}")
@@ -12653,6 +12659,24 @@ async def do_search_for_user(uid: int, reply_to):
                     f"{len(avito_fallback)} объявлений из эталона/кэша"
                 )
 
+    if "autoru" in src_keys:
+        autoru_idx = src_keys.index("autoru")
+        if len(results[autoru_idx] or []) == 0:
+            autoru_cached: list[dict] = []
+            for it in (_search_cache.get(uid) or _load_cache(uid) or []):
+                if (it.get("source", "") or "").lower() != "autoru":
+                    continue
+                price = int(it.get("_price_int") or parse_price(it.get("price", "")) or 0)
+                if price and not (pmin <= price <= pmax):
+                    continue
+                if is_dealer(it) or not it.get("url"):
+                    continue
+                autoru_cached.append(dict(it))
+            if autoru_cached:
+                results[autoru_idx] = autoru_cached[:30]
+                source_status["autoru"] = "ok"
+                print(f"  [fallback] Auto.ru восстановлено {len(results[autoru_idx])} объявлений из кэша пользователя")
+
     items = []
     stat_parts = []
     for src, batch in zip(src_keys, results):
@@ -12661,10 +12685,15 @@ async def do_search_for_user(uid: int, reply_to):
         status = source_status.get(src, "ok")
         if status == "timeout":
             print(f"  [scraper] {src}: timeout")
+            if src in ("avito", "autoru"):
+                stat_parts.append(f"{tag}: не успел")
         elif status == "error":
             print(f"  [scraper] {src}: error")
+            if src in ("avito", "autoru"):
+                stat_parts.append(f"{tag}: ошибка")
         elif len(batch) == 0 and src in ("avito", "autoru"):
             print(f"  [scraper] {src}: no data")
+            stat_parts.append(f"{tag}: пусто")
         else:
             stat_parts.append(f"{tag}: {len(batch)}")
 
