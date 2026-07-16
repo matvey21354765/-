@@ -1008,7 +1008,7 @@ def _best_below_market_items(items: list[dict]) -> list[dict]:
 
 
 def _ranked_search_items(items: list[dict]) -> list[dict]:
-    """User search order: strong deals, regular deals, other cheap/fresh cars, then market."""
+    """User search order: fresh strong deals first, then the rest of budget listings."""
     ranked: list[dict] = []
     for it in items or []:
         if is_not_running(it):
@@ -1021,8 +1021,6 @@ def _ranked_search_items(items: list[dict]) -> list[dict]:
         days = int(it.get("_days_on_site") or 999)
         if not price:
             continue
-        if market and market < price:
-            continue
         if (it.get("source", "") or "").lower() == "avito":
             score = it.get("_avito_rating_score")
             if score is not None and score < 0:
@@ -1030,9 +1028,9 @@ def _ranked_search_items(items: list[dict]) -> list[dict]:
 
         if market and market > price and _is_strong_below_market(it):
             trusted = lvl in ("avito", "drom", "autoru") or n >= 5
-            if trusted and days <= 1:
+            if days <= 1:
                 bucket = 0
-            elif trusted and days <= 3:
+            elif days <= 3:
                 bucket = 1
             elif trusted and pct >= 25:
                 bucket = 2
@@ -1042,9 +1040,11 @@ def _ranked_search_items(items: list[dict]) -> list[dict]:
                 bucket = 4
         elif not market:
             bucket = 4 if (price <= 120_000 or days <= 2) else 5
+        elif market and market < price:
+            bucket = 7
         else:
             bucket = 6
-        ranked.append((bucket, -pct, price, days, it))
+        ranked.append((bucket, days, -pct, price, it))
     ranked.sort(key=lambda x: (x[0], x[1], x[2], x[3]))
     return [it for *_keys, it in ranked]
 
@@ -1829,15 +1829,6 @@ def _sort_by_deal(items: list[dict]) -> list[dict]:
         """0 — есть фото (выше), 1 — без фото (в конец своего тира)."""
         return 0 if (x.get("_photo_url") or x.get("photo_url") or x.get("_photos", 0) > 0) else 1
 
-    # Убираем объявления без фото (обычно неинформативные/подозрительные), но
-    # только если объявлений с фото достаточно — иначе показываем что есть.
-    _with_photo = [x for x in items if _no_photo(x) == 0]
-    if len(_with_photo) >= 5:
-        _dropped = len(items) - len(_with_photo)
-        if _dropped:
-            print(f"  [сортировка] убрано без фото: {_dropped}, осталось {len(_with_photo)}")
-        items = _with_photo
-
     # Порядок ключей:
     #   1) тир (ниже рынка → по рынку → без цены → просмотренные),
     #   2) наличие фото (объявления без фото падают вниз своего тира),
@@ -1847,11 +1838,11 @@ def _sort_by_deal(items: list[dict]) -> list[dict]:
     items.sort(key=lambda x: (
         _tier(x),
         _no_photo(x),
-        (-round(_deal_rank(x), 1), -_secondary(x))
+        (x.get("_days_on_site", 999), -round(_deal_rank(x), 1), -_secondary(x))
         if _tier(x) == 0
         else (
-            x.get("_price_int", 999_999_999),
             x.get("_days_on_site", 999),
+            x.get("_price_int", 999_999_999),
         ),
     ))
     return items
@@ -13305,7 +13296,7 @@ async def do_search_for_user(uid: int, reply_to):
             and not (i.get("_market_price") and i.get("_price_int"))
             and _is_market_candidate(i)
         ])
-        suitable = _dedupe_search_items(_ranked_search_items(suitable))[:80]
+        suitable = _dedupe_search_items(_ranked_search_items(suitable))[:120]
         _below_count = sum(1 for i in suitable if _is_strong_below_market(i))
         _market_tail_count = sum(
             1 for i in suitable
@@ -13316,7 +13307,7 @@ async def do_search_for_user(uid: int, reply_to):
             f"рынок внизу={_market_tail_count}, показываем={len(suitable)}"
         )
     else:
-        suitable = _dedupe_search_items(_ranked_search_items(suitable))[:40]
+        suitable = _dedupe_search_items(_ranked_search_items(suitable))[:80]
         print(f"  [фильтр] точных оценок нет → показываем {len(suitable)} объявлений в бюджете")
 
     if not suitable:
