@@ -1453,38 +1453,6 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
                 model_year.setdefault(model, {}).setdefault(yr, []).append(p)
                 model_all.setdefault(model, []).append(p)
 
-    mixed_model_year: dict[str, dict] = {}
-    mixed_model_all: dict[str, list] = {}
-    mixed_brand_year: dict[str, dict] = {}
-    mixed_brand_all: dict[str, list] = {}
-    mixed_seen_urls: set[str] = set()
-    mixed_refs = list(ref_items or []) + list(items or [])
-    for it in mixed_refs:
-        source = (it.get("source", "") or "").lower()
-        if source not in ("avito", "drom", "autoru", "auto.ru"):
-            continue
-        if is_dealer(it) or is_not_running(it) or has_extreme_mileage(it):
-            continue
-        p = int(it.get("_price_int") or 0)
-        if p <= 0:
-            continue
-        url = _norm_url(it.get("url", ""))
-        if url:
-            if url in mixed_seen_urls:
-                continue
-            mixed_seen_urls.add(url)
-        key = _car_group_key(_market_key_text(it))
-        parts = key.rsplit(" ", 1)
-        if len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 4:
-            model, yr = parts[0], int(parts[1])
-            if model:
-                mixed_model_year.setdefault(model, {}).setdefault(yr, []).append(p)
-                mixed_model_all.setdefault(model, []).append(p)
-                brand = model.split()[0] if model.split() else ""
-                if brand:
-                    mixed_brand_year.setdefault(brand, {}).setdefault(yr, []).append(p)
-                    mixed_brand_all.setdefault(brand, []).append(p)
-
     def _est_price(prices: list, lvl: str, cand_p):
         """Медиана цен той же модели/года с отсечением выбросов. Leave-one-out:
         убираем ОДНУ цену самого кандидата, чтобы дешёвая находка не занижала свой
@@ -1537,70 +1505,6 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
             return _est_price(prices, "model", cand_p)
         return 0.0, "", 0
 
-    def _mixed_market_for(model: str, yr: int, cand_p=None):
-        yrs = mixed_model_year.get(model)
-        if not yrs:
-            return 0.0, "", 0
-        near = []
-        for y in (yr - 1, yr, yr + 1):
-            near += yrs.get(y, [])
-        if len(near) >= 2:
-            med, _lvl, _n = _est_price(near, "mixed_near", cand_p)
-            if _n >= 2 or (yr < 2000 and _n >= 1):
-                return med, _lvl, _n
-        wide = list(near)
-        for y in (yr - 2, yr + 2):
-            wide += yrs.get(y, [])
-        if len(wide) >= 3:
-            med, _lvl, _n = _est_price(wide, "mixed_bracket", cand_p)
-            if _n >= 2 or (yr < 2000 and _n >= 1):
-                return med, _lvl, _n
-        wider = list(wide)
-        for y in (yr - 3, yr - 4, yr - 5, yr + 3, yr + 4, yr + 5):
-            wider += yrs.get(y, [])
-        if len(wider) >= 4:
-            med, _lvl, _n = _est_price(wider, "mixed_wide", cand_p)
-            if _n >= 3 or (yr < 2000 and _n >= 1):
-                return med, _lvl, _n
-        return 0.0, "", 0
-
-    def _mixed_market_for_model(model: str, cand_p=None, yr: int = 0):
-        prices = mixed_model_all.get(model, [])
-        if len(prices) >= 3 or (yr and yr < 2000 and len(prices) >= 2):
-            med, _lvl, _n = _est_price(prices, "mixed_model", cand_p)
-            if _n >= 2 or (yr and yr < 2000 and _n >= 1):
-                return med, _lvl, _n
-        return 0.0, "", 0
-
-    def _mixed_brand_market_for_old(model: str, yr: int, cand_p=None):
-        """Fallback for rare old/budget cars: same brand + close years from trusted sources."""
-        if not model or not yr:
-            return 0.0, "", 0
-        parts = model.split()
-        brand = parts[0] if parts else ""
-        yrs = mixed_brand_year.get(brand)
-        if not brand or not yrs:
-            return 0.0, "", 0
-
-        window = 8 if yr < 2000 else 5
-        prices = []
-        for y in range(yr - window, yr + window + 1):
-            prices += yrs.get(y, [])
-        min_samples = 3 if yr < 2000 else 5
-        if len(prices) >= min_samples:
-            med, _lvl, _n = _est_price(prices, "mixed_brand_old", cand_p)
-            if _n >= max(2, min_samples - 1):
-                return med, _lvl, _n
-
-        # For very old cars model-level data is often sparse; brand-level data is still
-        # better than showing no market at all when the search returned hundreds of cars.
-        all_prices = mixed_brand_all.get(brand, [])
-        if yr < 2000 and len(all_prices) >= 4:
-            med, _lvl, _n = _est_price(all_prices, "mixed_brand_old", cand_p)
-            if _n >= 3:
-                return med, _lvl, _n
-        return 0.0, "", 0
-
     for it in items:
         p = it.get("_price_int", 0)
         deal_score = 0.0
@@ -1612,34 +1516,17 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
             med = 0.0
             _lvl = ""
             _n = 0
-            # Приоритет источника: для Дром-объявления берём оценку Дрома с
-            # самой страницы; для Авито — оценку Авито; дальше fallback к
-            # Авито-медиане по похожим объявлениям.
+            # Market price source is Avito only: Avito page estimate first,
+            # then Avito median by similar listings.
             _avm = it.get("_avito_market", 0) or 0
-            _drm = it.get("_drom_market", 0) or 0
-            _aum = it.get("_autoru_market", 0) or 0
-            if it.get("source") == "drom" and _drm and 30_000 < _drm < 50_000_000:
-                med, _lvl, _n = float(_drm), "drom", 30
-            elif _avm and 30_000 < _avm < 50_000_000:
+            if _avm and 30_000 < _avm < 50_000_000:
                 med, _lvl, _n = float(_avm), "avito", 30
-            elif it.get("source") == "autoru" and _aum and 30_000 < _aum < 50_000_000:
-                med, _lvl, _n = float(_aum), "autoru", 20
             elif len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 4:
                 med, _lvl, _n = _market_for(parts[0], int(parts[1]), p)
                 if med <= 0:
                     med, _lvl, _n = _market_for_model(parts[0], p)
-                if med <= 0:
-                    med, _lvl, _n = _mixed_market_for(parts[0], int(parts[1]), p)
-                if med <= 0:
-                    med, _lvl, _n = _mixed_market_for_model(parts[0], p, int(parts[1]))
-                if med <= 0:
-                    yr_int = int(parts[1])
-                    if yr_int < 2005 or p <= 120_000:
-                        med, _lvl, _n = _mixed_brand_market_for_old(parts[0], yr_int, p)
             elif key:
                 med, _lvl, _n = _market_for_model(key, p)
-                if med <= 0:
-                    med, _lvl, _n = _mixed_market_for_model(key, p, 0)
             if med > 0:
                 if _lvl not in ("avito", "drom"):
                     _mileage_factor = _market_mileage_factor(it)
@@ -1664,8 +1551,6 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
                     _cap = 75
                 elif _lvl == "model":
                     _cap = 55
-                elif _lvl == "mixed_brand_old":
-                    _cap = 60
                 else:  # "wide"
                     _cap = 70
                 
@@ -10949,7 +10834,7 @@ async def cmd_global_search(msg: Message):
         tag = "✈️ Telegram" if src == "tg" else SOURCE_TAGS.get(src, src)
         if task not in done:
             batch = []
-            stat_parts.append(f"{tag}: таймаут")
+            print(f"  [global scraper] {src}: timeout")
             continue
         else:
             try:
@@ -10957,16 +10842,13 @@ async def cmd_global_search(msg: Message):
             except Exception as e:
                 print(f"  [global scraper] {src} error: {e}")
                 batch = []
-                stat_parts.append(f"{tag}: ошибка")
                 continue
         if isinstance(batch, list):
             items.extend(batch)
             cnt = len(batch)
         else:
             cnt = 0
-        if cnt == 0 and src in ("avito", "autoru"):
-            stat_parts.append(f"{tag}: нет данных")
-        else:
+        if cnt > 0 or src not in ("avito", "autoru"):
             stat_parts.append(f"{tag}: {cnt}")
 
     if stat_parts:
@@ -11468,10 +11350,6 @@ async def enrich_and_filter(items: list[dict], max_check: int = 25) -> list[dict
             item["_avito_rating"] = details["_avito_rating"]
             item["_avito_rating_score"] = details.get("_avito_rating_score")
             item["_below_market"] = _is_strong_below_market(item)
-        if details.get("_drom_market"):
-            _apply_page_market(item, int(details["_drom_market"]), "drom")
-        if details.get("_autoru_market"):
-            _apply_page_market(item, int(details["_autoru_market"]), "autoru")
         active.append(item)
 
     return active + rest
@@ -12356,10 +12234,6 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                     item["_avito_rating"] = details["_avito_rating"]
                     item["_avito_rating_score"] = details.get("_avito_rating_score")
                     item["_below_market"] = _is_strong_below_market(item)
-                if details.get("_drom_market") and item.get("_price_int"):
-                    _apply_page_market(item, int(details["_drom_market"]), "drom")
-                if details.get("_autoru_market") and item.get("_price_int"):
-                    _apply_page_market(item, int(details["_autoru_market"]), "autoru")
             except Exception:
                 if source == "drom":
                     return False
@@ -12401,6 +12275,10 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         _is_junk = bool(item.get("_is_junk"))
         # Рыночную цену показываем на КАЖДОЙ машине, где она известна.
         deal_line = ""
+        _lvl_now = str(item.get("_market_lvl") or "")
+        _avito_market_levels = {"avito", "near", "bracket", "medium", "wide", "model"}
+        if _lvl_now and _lvl_now not in _avito_market_levels:
+            _clear_market_fields(item)
         market = item.get("_market_price", 0)
         pct = item.get("_savings_pct", 0)
         if source == "avito" and item.get("_market_lvl") != "avito" and (item.get("_avito_rating_score") is not None):
@@ -12416,8 +12294,6 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                 market_note = " Авито" + market_note
             elif item.get("_market_lvl") == "autoru":
                 market_note = " Auto.ru" + market_note
-            elif str(item.get("_market_lvl", "")).startswith("mixed"):
-                market_note = " смешанный грубо" + market_note
             elif item.get("_market_lvl") == "model":
                 market_note = " грубо" + market_note
             if pct >= MARKET_DEAL_MIN_PCT:
@@ -12784,11 +12660,11 @@ async def do_search_for_user(uid: int, reply_to):
         tag = SOURCE_TAGS.get(src, src)
         status = source_status.get(src, "ok")
         if status == "timeout":
-            stat_parts.append(f"{tag}: таймаут")
+            print(f"  [scraper] {src}: timeout")
         elif status == "error":
-            stat_parts.append(f"{tag}: ошибка")
+            print(f"  [scraper] {src}: error")
         elif len(batch) == 0 and src in ("avito", "autoru"):
-            stat_parts.append(f"{tag}: нет данных")
+            print(f"  [scraper] {src}: no data")
         else:
             stat_parts.append(f"{tag}: {len(batch)}")
 
@@ -13142,8 +13018,9 @@ async def do_search_for_user(uid: int, reply_to):
         except Exception as _le:
             print(f"  [ликвидность] ошибка: {_le}")
     else:
-        print(f"  [рынок] нет Авито-эталона — считаем грубый рынок по Дром/Auto.ru из текущей выдачи")
-        suitable = rank_by_market_price(suitable, ref_items=[], avito_only_median=True)
+        print(f"  [рынок] нет Авито-эталона — рыночная цена не вычисляется")
+        for it in suitable:
+            _clear_market_fields(it)
     # Дилерские объявления — добавляем штраф к deal_score
     for it in suitable:
         if is_dealer(it):
@@ -13258,10 +13135,6 @@ async def do_search_for_user(uid: int, reply_to):
                     it["_avito_rating"] = details["_avito_rating"]
                     it["_avito_rating_score"] = details.get("_avito_rating_score")
                     it["_below_market"] = _is_strong_below_market(it)
-                if details.get("_drom_market") and it.get("_price_int"):
-                    _apply_page_market(it, int(details["_drom_market"]), "drom")
-                if details.get("_autoru_market") and it.get("_price_int"):
-                    _apply_page_market(it, int(details["_autoru_market"]), "autoru")
                 return it
             except Exception:
                 it["_sale_status_check_failed"] = True
