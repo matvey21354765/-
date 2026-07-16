@@ -11223,7 +11223,9 @@ async def enrich_and_filter(items: list[dict], max_check: int = 25) -> list[dict
         if details is None:
             continue  # снято
         if details.get("_check_failed"):
-            continue  # не смогли подтвердить актуальность
+            item["_sale_status_check_failed"] = True
+            active.append(item)
+            continue
         item["_enriched"] = True
         item["_sale_status_checked"] = True
         if details.get("_photo_url"):
@@ -12098,7 +12100,10 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                 if details is None:
                     return False
                 if details.get("_check_failed"):
-                    return False
+                    item["_sale_status_check_failed"] = True
+                    needs_sale_status_check = False
+                    needs_avito_ai_check = False
+                    details = {}
                 if needs_sale_status_check:
                     item["_sale_status_checked"] = True
                 if needs_avito_ai_check:
@@ -12118,9 +12123,8 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                 if details.get("_autoru_market") and item.get("_price_int"):
                     _apply_page_market(item, int(details["_autoru_market"]), "autoru")
             except Exception:
-                if source in ("avito", "drom", "autoru"):
-                    return False
-        if source in ("avito", "drom", "autoru") and not item.get("_sale_status_checked"):
+                item["_sale_status_check_failed"] = True
+        if source in ("avito", "drom", "autoru") and not item.get("_sale_status_checked") and not item.get("_sale_status_check_failed"):
             return False
         if source == "drom" and item.get("_sale_status_checked") and not item.get("_drom_market"):
             return False
@@ -12949,7 +12953,8 @@ async def do_search_for_user(uid: int, reply_to):
                 if details is None:
                     return None
                 if details.get("_check_failed"):
-                    return None
+                    it["_sale_status_check_failed"] = True
+                    return it
                 it["_enriched"] = True
                 it["_sale_status_checked"] = True
                 # Фото обновляем только если у объявления его нет (не перезаписываем хорошее)
@@ -12969,8 +12974,7 @@ async def do_search_for_user(uid: int, reply_to):
                     _apply_page_market(it, int(details["_autoru_market"]), "autoru")
                 return it
             except Exception:
-                if source in ("avito", "drom", "autoru"):
-                    return None
+                it["_sale_status_check_failed"] = True
                 return it  # VK/TG не проверяем по странице
 
     try:
@@ -12979,22 +12983,15 @@ async def do_search_for_user(uid: int, reply_to):
             timeout=SEARCH_DETAIL_TOTAL_TIMEOUT_SEC
         ) if check_batch else []
     except asyncio.TimeoutError:
-        checked = [
-            it for it in check_batch
-            if it.get("source") not in ("avito", "drom", "autoru")
-        ]
+        checked = check_batch
 
     active = [it for it in checked if it is not None]
     sold_count = len(check_batch) - len(active)
     if sold_count:
         print(f"  [фильтр] убрано {sold_count} проданных объявлений из первых {len(check_batch)}")
-    verified_sources = {"avito", "drom", "autoru"}
-    rest_safe = [
-        it for it in rest_batch
-        if it.get("source") not in verified_sources
-        or it.get("_sale_status_checked")
-    ]
-    suitable = active + rest_safe
+    suitable = active + rest_batch
+    if _ref_items:
+        suitable = rank_by_market_price(suitable, ref_items=_ref_items, avito_only_median=True)
     suitable = _sort_by_deal(suitable)
 
     # После загрузки цен — выкидываем только те, у кого цена ИЗВЕСТНА и вышла за бюджет.
