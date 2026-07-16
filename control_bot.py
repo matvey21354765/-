@@ -452,6 +452,7 @@ SEARCH_PRICE_FILL_TIMEOUT_SEC = _env_int("SEARCH_PRICE_FILL_TIMEOUT_SEC", 4)
 SEARCH_DETAIL_CHECK_LIMIT = _env_int("SEARCH_DETAIL_CHECK_LIMIT", 0, 0)
 SEARCH_DETAIL_CHECK_TIMEOUT_SEC = _env_int("SEARCH_DETAIL_CHECK_TIMEOUT_SEC", 5)
 SEARCH_DETAIL_TOTAL_TIMEOUT_SEC = _env_int("SEARCH_DETAIL_TOTAL_TIMEOUT_SEC", 25)
+DEFAULT_TRIAL_DAYS = _env_int("DEFAULT_TRIAL_DAYS", 7, 1)
 _last_search_at: dict[int, float] = {}
 
 # Мониторинг новых объявлений
@@ -9674,6 +9675,7 @@ async def notify_admins_subscription(uid: int, username: str, plan: str, amount:
 
 # ── Рассылка всем пользователям (только админ) ──────────────────
 _pending_broadcast: dict[int, dict] = {}  # admin_uid -> {"text":..., "from_chat":..., "msg_id":...}
+_pending_fomo_broadcast: dict[int, dict] = {}
 
 
 def _all_user_ids() -> list[int]:
@@ -9770,6 +9772,163 @@ async def cb_broadcast(cb: CallbackQuery):
         f"⚠️ Ошибок: {_fmt_n(failed)}\n"
         f"👥 Всего: {_fmt_n(len(uids))}"
     )
+
+
+@dp.message(Command("access_status"))
+async def cmd_access_status(msg: Message):
+    if msg.from_user.id not in ADMIN_IDS:
+        return
+    rows = _access_rows(120)
+    active = [r for r in rows if r.get("days_left") and r["days_left"] > 0]
+    expiring = [r for r in active if r["days_left"] <= 3]
+    expired = [r for r in rows if r.get("days_left") == 0]
+    lines = [
+        "⏳ <b>Сроки доступа</b>",
+        "",
+        f"Активных: <b>{_fmt_n(len(active))}</b>",
+        f"Осталось 1-3 дня: <b>{_fmt_n(len(expiring))}</b>",
+        f"Истекли: <b>{_fmt_n(len(expired))}</b>",
+        "",
+        "<b>Ближайшие окончания:</b>",
+    ]
+    for r in rows[:30]:
+        uid = r["uid"]
+        who = f"@{html.escape(r['username'])}" if r.get("username") else f"id{uid}"
+        days = r.get("days_left")
+        if days is None:
+            left = "нет даты"
+        elif days == 0:
+            left = "истек"
+        elif days == 1:
+            left = "1 день"
+        else:
+            left = f"{days} дн."
+        lines.append(f"{who} — <b>{left}</b> ({html.escape(str(r.get('plan') or 'trial'))})")
+    lines.append("")
+    lines.append("<code>/set_access UID DAYS [plan]</code> — поставить срок доступа")
+    await msg.answer("\n".join(lines)[:4000], parse_mode="HTML")
+
+
+@dp.message(Command("set_access"))
+async def cmd_set_access(msg: Message):
+    if msg.from_user.id not in ADMIN_IDS:
+        return
+    parts = (msg.text or "").split(maxsplit=3)
+    if len(parts) < 3 or not parts[1].isdigit():
+        await msg.answer("Формат: <code>/set_access UID DAYS [plan]</code>", parse_mode="HTML")
+        return
+    try:
+        uid = int(parts[1])
+        days = int(parts[2])
+        plan = parts[3].strip() if len(parts) > 3 else "paid"
+    except Exception:
+        await msg.answer("DAYS должен быть числом.")
+        return
+    if _set_user_access(uid, days, plan):
+        await msg.answer(f"✅ Доступ id{uid}: {days} дн., план {html.escape(plan)}", parse_mode="HTML")
+        try:
+            await bot.send_message(
+                uid,
+                f"✅ Доступ продлён.\n\nОсталось дней: {days}\nПлан: {plan}\n\nИщи свежие авто и включай уведомления, чтобы не пропустить хорошие варианты.",
+            )
+        except Exception:
+            pass
+    else:
+        await msg.answer("❌ Не удалось обновить доступ.")
+
+
+@dp.message(Command("fomo_broadcast"))
+async def cmd_fomo_broadcast(msg: Message):
+    if msg.from_user.id not in ADMIN_IDS:
+        return
+    stats = _marketing_stats()
+    fomo = _marketing_fomo_message(stats)
+    if fomo:
+        text, button = fomo
+    else:
+        text, button = _marketing_morning_message(stats)
+        text = "⚠️ FOMO-данных по исчезнувшим авто сейчас мало.\n\n" + text
+    _pending_fomo_broadcast[msg.from_user.id] = {"text": text, "button": button}
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=f"🚨 Разослать FOMO всем ({len(_all_user_ids())})", callback_data="fomo|go"),
+        InlineKeyboardButton(text="❌ Отмена", callback_data="fomo|cancel"),
+    ]])
+    await msg.answer("🚨 <b>Предпросмотр FOMO-рассылки:</b>", parse_mode="HTML")
+    await msg.answer(text, reply_markup=_marketing_keyboard(button))
+    await msg.answer("Отправить всем пользователям?", reply_markup=kb)
+
+
+@dp.callback_query(F.data.startswith("fomo|"))
+async def cb_fomo_broadcast(cb: CallbackQuery):
+    if cb.from_user.id not in ADMIN_IDS:
+        await cb.answer("Только для администраторов", show_alert=True)
+        return
+    action = cb.data.split("|", 1)[1]
+    pend = _pending_fomo_broadcast.pop(cb.from_user.id, None)
+    if action == "cancel" or not pend:
+        await cb.message.edit_text("❌ FOMO-рассылка отменена.")
+        await cb.answer()
+        return
+    await cb.message.edit_text("🚨 Рассылаю FOMO…")
+    await cb.answer()
+    await _marketing_send_all(pend["text"], pend["button"])
+    await bot.send_message(cb.from_user.id, "✅ FOMO-рассылка завершена.")
+
+
+def _access_notice_text(days_left: int, plan: str) -> str:
+    if days_left <= 1:
+        return (
+            "🚨 Сегодня последний день доступа к PerekupDrive.\n\n"
+            "Дальше ты можешь пропустить свежие объявления ниже рынка: хорошие варианты часто уходят за часы.\n\n"
+            "Напиши администратору, чтобы продлить доступ и не выключать уведомления."
+        )
+    return (
+        f"⏳ Осталось {days_left} дня доступа к PerekupDrive.\n\n"
+        "Бот продолжает искать свежие объявления и скидки ниже рынка. "
+        "Продли доступ заранее, чтобы уведомления не остановились в самый неподходящий момент."
+    )
+
+
+async def _access_expiry_notice_loop():
+    await asyncio.sleep(90)
+    print("  [access] планировщик уведомлений о сроке доступа запущен")
+    while True:
+        try:
+            today = datetime.datetime.now(_MSK).date().isoformat()
+            rows = []
+            db = _get_db()
+            if db:
+                with db.cursor() as cur:
+                    cur.execute(
+                        "SELECT uid, subscription_plan, EXTRACT(EPOCH FROM subscription_expires_at), "
+                        "last_expiry_notice_days, last_expiry_notice_date FROM bot_users "
+                        "WHERE subscription_expires_at IS NOT NULL"
+                    )
+                    rows = cur.fetchall()
+            sent = 0
+            for uid, plan, exp, last_days, last_date in rows:
+                days_left = _days_left_from_ts(int(exp or 0))
+                if days_left not in (3, 1):
+                    continue
+                if int(last_days or -1) == days_left and str(last_date or "") == today:
+                    continue
+                try:
+                    await bot.send_message(int(uid), _access_notice_text(days_left, plan or "trial"))
+                    sent += 1
+                    if db:
+                        with db.cursor() as cur:
+                            cur.execute(
+                                "UPDATE bot_users SET last_expiry_notice_days=%s, last_expiry_notice_date=%s WHERE uid=%s",
+                                (days_left, today, int(uid)),
+                            )
+                    await asyncio.sleep(0.05)
+                except Exception as e:
+                    print(f"  [access] notice failed uid={uid}: {str(e)[:80]}")
+            if sent:
+                print(f"  [access] expiry notices sent={sent}")
+        except Exception as e:
+            print(f"  [access] loop error: {str(e)[:100]}")
+        await asyncio.sleep(3600)
 
 
 async def _admin_report_scheduler():
@@ -11875,9 +12034,22 @@ def _get_db():
                             first_seen TIMESTAMP DEFAULT NOW(),
                             last_seen TIMESTAMP DEFAULT NOW(),
                             search_count INTEGER DEFAULT 0,
-                            monitoring BOOLEAN DEFAULT FALSE
+                            monitoring BOOLEAN DEFAULT FALSE,
+                            subscription_plan TEXT DEFAULT 'trial',
+                            subscription_expires_at TIMESTAMP,
+                            last_expiry_notice_days INTEGER,
+                            last_expiry_notice_date TEXT
                         )
                     """)
+                    cur.execute("ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS subscription_plan TEXT DEFAULT 'trial'")
+                    cur.execute("ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS subscription_expires_at TIMESTAMP")
+                    cur.execute("ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS last_expiry_notice_days INTEGER")
+                    cur.execute("ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS last_expiry_notice_date TEXT")
+                    cur.execute(
+                        "UPDATE bot_users SET subscription_expires_at = first_seen + (%s * INTERVAL '1 day') "
+                        "WHERE subscription_expires_at IS NULL",
+                        (DEFAULT_TRIAL_DAYS,),
+                    )
                     cur.execute("""
                         CREATE TABLE IF NOT EXISTS published_channel_posts (
                             id SERIAL PRIMARY KEY,
@@ -11955,12 +12127,14 @@ def _register_user(uid: int, username: "str | None" = None, is_search: bool = Fa
         if db:
             with db.cursor() as cur:
                 cur.execute(
-                    "INSERT INTO bot_users(uid, username, first_seen, last_seen, search_count) "
-                    "VALUES(%s,%s,NOW(),NOW(),%s) "
+                    "INSERT INTO bot_users(uid, username, first_seen, last_seen, search_count, subscription_plan, subscription_expires_at) "
+                    "VALUES(%s,%s,NOW(),NOW(),%s,'trial',NOW() + (%s * INTERVAL '1 day')) "
                     "ON CONFLICT(uid) DO UPDATE SET last_seen=NOW(), "
                     "  username=COALESCE(EXCLUDED.username, bot_users.username), "
-                    "  search_count=bot_users.search_count + %s",
-                    (uid, username, 1 if is_search else 0, 1 if is_search else 0),
+                    "  search_count=bot_users.search_count + %s, "
+                    "  subscription_plan=COALESCE(bot_users.subscription_plan, 'trial'), "
+                    "  subscription_expires_at=COALESCE(bot_users.subscription_expires_at, bot_users.first_seen + (%s * INTERVAL '1 day'))",
+                    (uid, username, 1 if is_search else 0, DEFAULT_TRIAL_DAYS, 1 if is_search else 0, DEFAULT_TRIAL_DAYS),
                 )
     except Exception:
         pass
@@ -11994,16 +12168,92 @@ def _db_users() -> dict:
             return out
         with db.cursor() as cur:
             cur.execute("SELECT uid, username, EXTRACT(EPOCH FROM first_seen), "
-                        "EXTRACT(EPOCH FROM last_seen), search_count, monitoring FROM bot_users")
-            for uid, un, fs, ls, sc, mon in cur.fetchall():
+                        "EXTRACT(EPOCH FROM last_seen), search_count, monitoring, subscription_plan, "
+                        "EXTRACT(EPOCH FROM subscription_expires_at) FROM bot_users")
+            for uid, un, fs, ls, sc, mon, plan, exp in cur.fetchall():
+                exp_i = int(exp or 0)
+                if not exp_i and fs:
+                    exp_i = int(fs) + DEFAULT_TRIAL_DAYS * 86400
                 out[str(uid)] = {
                     "username": un, "first_seen": int(fs or 0),
                     "last_seen": int(ls or 0), "searches": int(sc or 0),
-                    "monitoring": bool(mon),
+                    "monitoring": bool(mon), "subscription_plan": plan or "trial",
+                    "subscription_expires_at": exp_i,
                 }
     except Exception:
         pass
     return out
+
+
+def _days_left_from_ts(expires_ts: int | float | None) -> int | None:
+    if not expires_ts:
+        return None
+    seconds = int(expires_ts - time.time())
+    if seconds <= 0:
+        return 0
+    return max(1, (seconds + 86399) // 86400)
+
+
+def _set_user_access(uid: int, days: int, plan: str = "paid") -> bool:
+    days = max(0, int(days))
+    plan = (plan or "paid").strip()[:40]
+    try:
+        db = _get_db()
+        if db:
+            with db.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO bot_users(uid, first_seen, last_seen, subscription_plan, subscription_expires_at) "
+                    "VALUES(%s,NOW(),NOW(),%s,NOW() + (%s * INTERVAL '1 day')) "
+                    "ON CONFLICT(uid) DO UPDATE SET "
+                    "subscription_plan=EXCLUDED.subscription_plan, "
+                    "subscription_expires_at=EXCLUDED.subscription_expires_at, "
+                    "last_expiry_notice_days=NULL, last_expiry_notice_date=NULL",
+                    (uid, plan, days),
+                )
+        k = str(uid)
+        u = _USER_REGISTRY.get(k) or {"first_seen": int(time.time()), "searches": 0}
+        u["subscription_plan"] = plan
+        u["subscription_expires_at"] = int(time.time()) + days * 86400
+        _USER_REGISTRY[k] = u
+        return True
+    except Exception as e:
+        print(f"  [access] set failed uid={uid}: {str(e)[:100]}")
+        return False
+
+
+def _access_rows(limit: int = 200) -> list[dict]:
+    rows: list[dict] = []
+    try:
+        db = _get_db()
+        if db:
+            with db.cursor() as cur:
+                cur.execute(
+                    "SELECT uid, username, subscription_plan, EXTRACT(EPOCH FROM subscription_expires_at), "
+                    "EXTRACT(EPOCH FROM last_seen) FROM bot_users "
+                    "ORDER BY subscription_expires_at NULLS LAST, last_seen DESC LIMIT %s",
+                    (limit,),
+                )
+                for uid, username, plan, exp, last_seen in cur.fetchall():
+                    exp_i = int(exp or 0)
+                    rows.append({
+                        "uid": int(uid), "username": username, "plan": plan or "trial",
+                        "expires_ts": exp_i, "days_left": _days_left_from_ts(exp_i),
+                        "last_seen": int(last_seen or 0),
+                    })
+            return rows
+    except Exception as e:
+        print(f"  [access] rows failed: {str(e)[:100]}")
+    for uid_s, u in (_db_users() or {}).items():
+        if not str(uid_s).isdigit():
+            continue
+        exp_i = int(u.get("subscription_expires_at") or 0)
+        rows.append({
+            "uid": int(uid_s), "username": u.get("username"), "plan": u.get("subscription_plan") or "trial",
+            "expires_ts": exp_i, "days_left": _days_left_from_ts(exp_i),
+            "last_seen": int(u.get("last_seen") or 0),
+        })
+    rows.sort(key=lambda r: (999999 if r["days_left"] is None else r["days_left"], -r["last_seen"]))
+    return rows[:limit]
 
 
 # ── Бэкап реестра в Telegram (закреплённый документ) — работает без БД ──
@@ -15295,6 +15545,8 @@ async def main():
     print("  [охота] сборщик скидок запущен")
     loop.create_task(_marketing_broadcast_loop())
     print("  [marketing] единый планировщик массовых рассылок запущен")
+    loop.create_task(_access_expiry_notice_loop())
+    print("  [access] expiry notice scheduler started")
     loop.create_task(_channel_posts_loop())
     print("  [channel] генератор постов канала запущен")
     loop.create_task(_admin_report_scheduler())
@@ -15329,6 +15581,9 @@ async def main():
     admin_commands = public_commands + [
         BotCommand(command="stats",     description="📊 Статистика"),
         BotCommand(command="dashboard", description="📈 Дашборд аналитики"),
+        BotCommand(command="access_status", description="⏳ Сроки доступа"),
+        BotCommand(command="set_access", description="✅ Выдать дни доступа"),
+        BotCommand(command="fomo_broadcast", description="🚨 FOMO-рассылка"),
         BotCommand(command="deploy",    description="🚂 Версия Railway"),
     ]
     # Обычным пользователям — только публичные команды
