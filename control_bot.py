@@ -722,6 +722,8 @@ def in_price_range(item: dict, price_min: int, price_max: int) -> bool:
     p = item.get("_price_int") or parse_price(item.get("price", ""))
     if p:
         return price_min <= p <= price_max
+    if (item.get("source", "") or "").lower() in ("vk", "tg", "tg_channel"):
+        return False
     # Цена неизвестна. Пытаемся исключить заведомо дорогие машины по году.
     # Новые авто (2022+) стоят от ~1 млн ₽. Если бюджет до 800k — не показываем.
     year = item.get("year") or item.get("_year") or 0
@@ -742,6 +744,49 @@ def in_price_range(item: dict, price_min: int, price_max: int) -> bool:
     # Пропускаем как кандидата: реальная цена нужна, но лучше показать
     # объявление с "—", чем потерять реальную выгодную машину.
     return True
+
+
+def _social_price_is_plausible(price: int, year: int = 0) -> bool:
+    """Reject prices that were probably parsed from year/mileage/power in VK/TG text."""
+    if not price:
+        return True
+    if price < 10_000:
+        return False
+    if year >= 2022:
+        return price >= 800_000
+    if year >= 2020:
+        return price >= 400_000
+    if year >= 2018:
+        return price >= 250_000
+    if year >= 2015:
+        return price >= 130_000
+    if year >= 2012:
+        return price >= 80_000
+    if year >= 2008:
+        return price >= 50_000
+    return True
+
+
+def _sanitize_social_price(item: dict) -> None:
+    source = (item.get("source", "") or "").lower()
+    if source not in ("vk", "tg", "tg_channel"):
+        return
+    price = int(item.get("_price_int") or 0)
+    if not price:
+        return
+    year = item.get("_year") or item.get("year") or 0
+    try:
+        year = int(str(year)[:4])
+    except Exception:
+        year = 0
+    if _social_price_is_plausible(price, year):
+        return
+    item["_bad_price_int"] = price
+    item["_price_int"] = 0
+    item["price"] = "цена не указана"
+    item["_no_price"] = True
+    for key in ("_market_price", "_savings_pct", "_market_lvl", "_market_n", "_below_market"):
+        item.pop(key, None)
 
 
 def hot_score(item: dict) -> float:
@@ -3466,7 +3511,12 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
                         if not _is_car_sale_social(text):
                             print(f"  [TG] @{channel} отфильтрован пост: {text[:80]!r}")
                             continue
+                        year_m = _TG_YEAR_RE.search(text)
+                        year_num = int(year_m.group(1)) if year_m else 0
                         price = _tg_parse_price(text)
+                        if price and not _social_price_is_plausible(price, year_num):
+                            print(f"  [TG] ignore suspicious price {price} for year {year_num}: {text[:80]!r}")
+                            price = 0
                         if price > 0 and not (price_min <= price <= price_max):
                             continue
                         link_el = msg_el.select_one("a.tgme_widget_message_date") or msg_el.select_one("a[href*='t.me']")
@@ -3495,7 +3545,6 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
                         # Телефон
                         phone_m = _tg_phone_re2.search(text)
                         phone = phone_m.group(0).strip() if phone_m else ""
-                        year_m = _TG_YEAR_RE.search(text)
                         batch.append({
                             "title": _social_make_title(text) or f"Авто {region_name_ru}",
                             "price": f"{price:,} ₽".replace(",", " ") if price else "цена не указана",
@@ -3506,7 +3555,7 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
                             "source": "tg",
                             "seller": f"@{channel}" + (f" · {phone}" if phone else ""),
                             "_seller_url": f"https://t.me/{channel}",
-                            "_year": int(year_m.group(1)) if year_m else 0,
+                            "_year": year_num,
                             "_days_on_site": days,
                             "_no_price": price == 0,
                         })
@@ -3550,12 +3599,16 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
                     ctx = re.sub(r"\s+", " ", ctx).strip()
                     if not _is_car_sale_social(ctx):
                         continue
+                    year_m = _TG_YEAR_RE.search(ctx)
+                    year_num = int(year_m.group(1)) if year_m else 0
                     price = _tg_parse_price(ctx)
+                    if price and not _social_price_is_plausible(price, year_num):
+                        print(f"  [TG] ignore suspicious price {price} for year {year_num}: {ctx[:80]!r}")
+                        price = 0
                     if price > 0 and not (price_min <= price <= price_max):
                         continue
                     ch_m = re.match(r'https?://t\.me/([a-zA-Z0-9_]+)/', href)
                     ch_name = ch_m.group(1) if ch_m else "tg"
-                    year_m = _TG_YEAR_RE.search(ctx)
                     batch.append({
                         "title": _social_make_title(ctx) or f"Авто {region_name_ru}",
                         "price": f"{price:,} ₽".replace(",", " ") if price else "цена не указана",
@@ -3566,7 +3619,7 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
                         "source": "tg",
                         "seller": f"@{ch_name}",
                         "_seller_url": f"https://t.me/{ch_name}",
-                        "_year": int(year_m.group(1)) if year_m else 0,
+                        "_year": year_num,
                         "_days_on_site": 0,
                         "_no_price": price == 0,
                     })
@@ -3978,9 +4031,6 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
             return None
         if _is_moto(text[:200]):
             return None
-        price = _parse_price(text)
-        if price > 0 and not (price_min <= price <= price_max):
-            return None
         owner_id = post.get("owner_id") or post.get("from_id", 0)
         post_id = post.get("id", "")
         url = f"https://vk.com/wall{owner_id}_{post_id}"
@@ -4020,6 +4070,13 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
         _ph_m = re.search(r'(?:\+7|8)[\s\-(]*\d{3}[\s\-)]*\d{3}[\s\-]*\d{2}[\s\-]*\d{2}', text)
         _phone = _ph_m.group(0).strip() if _ph_m else ""
         year_m = _vk_year_re.search(text)
+        year_num = int(year_m.group(1)) if year_m else 0
+        price = _parse_price(text)
+        if price and not _social_price_is_plausible(price, year_num):
+            print(f"  [VK] ignore suspicious price {price} for year {year_num}: {text[:80]!r}")
+            price = 0
+        if price > 0 and not (price_min <= price <= price_max):
+            return None
         photo_url = ""
         for att in post.get("attachments", []):
             if att.get("type") == "photo":
@@ -4057,7 +4114,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
             "_seller_url": _author_page if _is_personal else "",
             "_seller_is_personal": _is_personal,
             "_phone": _phone,
-            "_year": int(year_m.group(1)) if year_m else 0,
+            "_year": year_num,
             "_days_on_site": days,
             "_no_price": price == 0,
         }
@@ -12069,6 +12126,8 @@ async def send_batch(chat_id: int, uid: int, offset: int):
     """
     items = _search_cache.get(uid) or _load_cache(uid)
     if items:
+        for _it in items:
+            _sanitize_social_price(_it)
         items = _dedupe_search_items(_ranked_search_items(items))
         _search_cache[uid] = items  # восстанавливаем в память после перезапуска
         _save_cache(uid, items)
@@ -12086,6 +12145,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
     async def _send_item(item: dict) -> bool:
         url = item.get("url", "")
         source = item.get("source", "")
+        _sanitize_social_price(item)
         needs_avito_ai_check = source == "avito" and not item.get("_avito_page_checked")
         needs_sale_status_check = source in ("avito", "drom", "autoru") and not item.get("_sale_status_checked")
         # Если нет описания или это Авито — догружаем страницу перед показом карточки.
