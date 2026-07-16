@@ -1050,6 +1050,24 @@ def _ranked_search_items(items: list[dict]) -> list[dict]:
     return [it for *_keys, it in ranked]
 
 
+def _safe_rank_search_items(items: list[dict]) -> list[dict]:
+    ranked = _dedupe_search_items(_ranked_search_items(items))
+    if ranked:
+        return ranked
+    fallback: list[dict] = []
+    for it in items or []:
+        if it.get("_market_ref_only"):
+            continue
+        if is_not_running(it):
+            continue
+        if not it.get("url"):
+            continue
+        fallback.append(it)
+    if fallback:
+        print(f"  [search-fallback] strict ranking removed all cards; showing {len(fallback)} basic results")
+    return _dedupe_search_items(fallback)
+
+
 def _dedupe_search_items(items: list[dict]) -> list[dict]:
     """Remove duplicate listings by normalized URL and stable title/price signature."""
     seen_urls: set[str] = set()
@@ -12132,7 +12150,7 @@ _atexit.register(lambda: _db_conn and _db_conn.close())
 
 
 def _save_cache(uid: int, items: list[dict]):
-    items = _dedupe_search_items(_ranked_search_items(items))
+    items = _safe_rank_search_items(items)
     # Сохраняем в PostgreSQL (переживает рестарт)
     try:
         db = _get_db()
@@ -12185,7 +12203,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
     if items:
         for _it in items:
             _sanitize_social_price(_it)
-        items = _dedupe_search_items(_ranked_search_items(items))
+        items = _safe_rank_search_items(items)
         _search_cache[uid] = items  # восстанавливаем в память после перезапуска
         _save_cache(uid, items)
     if not items:
@@ -12240,7 +12258,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                     item["_below_market"] = _is_strong_below_market(item)
             except Exception:
                 item["_sale_status_check_failed"] = True
-        if not _ranked_search_items([item]):
+        if is_not_running(item) or not item.get("url"):
             return False
         sid = url_to_id(url)
         days = item.get("_days_on_site", 0)
@@ -13220,7 +13238,7 @@ async def do_search_for_user(uid: int, reply_to):
             and not (i.get("_market_price") and i.get("_price_int"))
             and _is_market_candidate(i)
         ])
-        suitable = _dedupe_search_items(_ranked_search_items(suitable))[:120]
+        suitable = _safe_rank_search_items(suitable)[:120]
         _below_count = sum(1 for i in suitable if _is_strong_below_market(i))
         _market_tail_count = sum(
             1 for i in suitable
@@ -13231,7 +13249,7 @@ async def do_search_for_user(uid: int, reply_to):
             f"рынок внизу={_market_tail_count}, показываем={len(suitable)}"
         )
     else:
-        suitable = _dedupe_search_items(_ranked_search_items(suitable))[:80]
+        suitable = _safe_rank_search_items(suitable)[:80]
         print(f"  [фильтр] точных оценок нет → показываем {len(suitable)} объявлений в бюджете")
 
     if not suitable:
