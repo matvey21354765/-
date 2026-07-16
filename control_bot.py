@@ -445,11 +445,11 @@ def _env_int(name: str, default: int, min_value: int = 1) -> int:
 
 
 SEARCH_COOLDOWN_SEC = 45
-SEARCH_SOURCE_TIMEOUT_SEC = _env_int("SEARCH_SOURCE_TIMEOUT_SEC", 20)
+SEARCH_SOURCE_TIMEOUT_SEC = _env_int("SEARCH_SOURCE_TIMEOUT_SEC", 30)
 SEARCH_AUTORU_DEADLINE_SEC = _env_int("SEARCH_AUTORU_DEADLINE_SEC", 10)
 SEARCH_PRICE_FILL_LIMIT = _env_int("SEARCH_PRICE_FILL_LIMIT", 3, 0)
 SEARCH_PRICE_FILL_TIMEOUT_SEC = _env_int("SEARCH_PRICE_FILL_TIMEOUT_SEC", 4)
-SEARCH_DETAIL_CHECK_LIMIT = _env_int("SEARCH_DETAIL_CHECK_LIMIT", 25, 0)
+SEARCH_DETAIL_CHECK_LIMIT = _env_int("SEARCH_DETAIL_CHECK_LIMIT", 0, 0)
 SEARCH_DETAIL_CHECK_TIMEOUT_SEC = _env_int("SEARCH_DETAIL_CHECK_TIMEOUT_SEC", 5)
 SEARCH_DETAIL_TOTAL_TIMEOUT_SEC = _env_int("SEARCH_DETAIL_TOTAL_TIMEOUT_SEC", 25)
 _last_search_at: dict[int, float] = {}
@@ -10813,7 +10813,7 @@ async def cmd_global_search(msg: Message):
     scraper_map = {
         "drom":   lambda: scrape_drom(region, pages=10, price_min=pmin, price_max=pmax, brand=_br),
         "autoru": lambda: scrape_autoru(region, pages=4, price_min=pmin, price_max=pmax, brand=_br),
-        "avito":  lambda: scrape_avito(region, pages=3, price_min=pmin, price_max=pmax, sort_by_date=True),
+        "avito":  lambda: scrape_avito(region, pages=5, price_min=pmin, price_max=pmax, sort_by_date=True),
         "youla":  lambda: scrape_youla(region, pages=16, price_min=pmin, price_max=pmax, brand=_br),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
     }
@@ -12203,10 +12203,9 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         url = item.get("url", "")
         source = item.get("source", "")
         _sanitize_social_price(item)
-        needs_avito_ai_check = source == "avito" and not item.get("_avito_page_checked")
+        needs_avito_ai_check = False
         needs_sale_status_check = (
             source == "drom"
-            or (source in ("avito", "autoru") and not item.get("_sale_status_checked"))
         )
         # Если нет описания или это Авито — догружаем страницу перед показом карточки.
         if url and (needs_sale_status_check or not item.get("description") or needs_avito_ai_check):
@@ -12218,10 +12217,9 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                     timeout=check_timeout
                 )
                 if details is None:
-                    return False
+                    item["_sale_status_check_failed"] = True
+                    details = {}
                 if details.get("_check_failed"):
-                    if source == "drom":
-                        return False
                     item["_sale_status_check_failed"] = True
                     needs_sale_status_check = False
                     needs_avito_ai_check = False
@@ -12241,15 +12239,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                     item["_avito_rating_score"] = details.get("_avito_rating_score")
                     item["_below_market"] = _is_strong_below_market(item)
             except Exception:
-                if source == "drom":
-                    return False
                 item["_sale_status_check_failed"] = True
-        if source == "drom" and not item.get("_sale_status_checked"):
-            return False
-        if source in ("avito", "autoru") and not item.get("_sale_status_checked") and not item.get("_sale_status_check_failed"):
-            return False
-        if source == "drom" and item.get("_sale_status_checked") and not item.get("_drom_market"):
-            return False
         if not _ranked_search_items([item]):
             return False
         sid = url_to_id(url)
@@ -12580,7 +12570,7 @@ async def do_search_for_user(uid: int, reply_to):
     scraper_map = {
         "drom":   lambda: scrape_drom(region, pages=10, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
         "autoru": lambda: scrape_autoru(region, pages=4, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
-        "avito":  lambda: scrape_avito(region, pages=3, price_min=pmin, price_max=pmax, sort_by_date=True, brand=(brand if brand and brand != "any" else "")),
+        "avito":  lambda: scrape_avito(region, pages=5, price_min=pmin, price_max=pmax, sort_by_date=True, brand=(brand if brand and brand != "any" else "")),
         "youla":  lambda: scrape_youla(region, pages=16, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
         "tg":     lambda: scrape_tg_channels(region, pmin, pmax),
