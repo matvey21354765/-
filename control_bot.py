@@ -2759,37 +2759,100 @@ def _autoru_search_fallback(
         return []
 
     region_name = REGIONS.get(region, region)
-    brand_hint = f" {brand}" if brand and brand != "any" else ""
     price_hint = f" до {price_max} руб" if price_max < 99_000_000 else ""
-    query = f"site:auto.ru/cars/used/sale/ {region_name}{brand_hint}{price_hint}"
-    try:
-        response = _req.get(
-            "https://html.duckduckgo.com/html/",
-            params={"q": query, "kl": "ru-ru"},
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/124.0.0.0 Safari/537.36"
-                ),
-                "Accept-Language": "ru-RU,ru;q=0.9",
-            },
-            timeout=7,
+    if brand and brand != "any":
+        search_terms = [brand]
+    elif price_max <= 300_000:
+        # Для дешёвого бюджета широкий запрос «Lada» поднимает новые Granta и
+        # Largus. Узкие старые модели дают релевантные объявления до 300 тыс.
+        search_terms = [
+            "ВАЗ 2106", "ВАЗ 2107", "ВАЗ 2114", "Daewoo Nexia", "Lada (ВАЗ)",
+        ]
+    else:
+        search_terms = ["Lada (ВАЗ)", "ВАЗ", "Kia", "Hyundai", "Renault"]
+    search_headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "ru-RU,ru;q=0.9",
+    }
+    search_deadline = time.time() + 12
+    search_pages: list[str] = []
+    for idx, term in enumerate(search_terms):
+        if time.time() >= search_deadline:
+            break
+        query = (
+            f'site:auto.ru/cars/used/sale/ "{region_name}" '
+            f'"{term}" "рублей на Авто.ру"{price_hint}'
         )
-        if response.status_code != 200 or len(response.text) < 1_000:
-            return []
-        text = response.text
-        for _ in range(2):
-            decoded = _up.unquote(text)
-            if decoded == text:
+        endpoint = (
+            "https://lite.duckduckgo.com/lite/"
+            if idx % 2 else "https://html.duckduckgo.com/html/"
+        )
+        try:
+            response = _req.get(
+                endpoint,
+                params={"q": query, "kl": "ru-ru"},
+                headers=search_headers,
+                timeout=4,
+            )
+            if (
+                response.status_code == 200
+                and len(response.text) >= 1_000
+                and response.text.lower().count("auto.ru/cars/used/sale/") > 1
+            ):
+                search_pages.append(response.text)
+        except Exception as exc:
+            print(f"  [Auto.ru fallback] {term}: {str(exc)[:55]}")
+        if len(search_pages) >= 3:
+            break
+
+    # У Mojeek и Brave отдельные лимиты. Brave на Railway обычно отдаёт
+    # полноценные результаты, когда оба DDG-интерфейса вернули 202/429.
+    if not search_pages and time.time() < search_deadline:
+        query = (
+            f'site:auto.ru/cars/used/sale/ "{region_name}" '
+            f'"{search_terms[0]}" "рублей на Авто.ру"{price_hint}'
+        )
+        alt_engines = [
+            ("https://www.mojeek.com/search", {"q": query}),
+            ("https://search.brave.com/search", {"q": query, "source": "web"}),
+        ]
+        for endpoint, params in alt_engines:
+            if time.time() >= search_deadline:
                 break
-            text = decoded
-    except Exception as exc:
-        print(f"  [Auto.ru fallback] поиск: {str(exc)[:60]}")
+            try:
+                response = _req.get(
+                    endpoint,
+                    params=params,
+                    headers=search_headers,
+                    timeout=5,
+                )
+                if (
+                    response.status_code == 200
+                    and len(response.text) >= 1_000
+                    and response.text.lower().count(
+                        "auto.ru/cars/used/sale/"
+                    ) > 1
+                ):
+                    search_pages.append(response.text)
+                    break
+            except Exception:
+                continue
+
+    if not search_pages:
         return []
+    text = "\n".join(search_pages)
+    for _ in range(2):
+        decoded = _up.unquote(text)
+        if decoded == text:
+            break
+        text = decoded
 
     url_re = re.compile(
-        r"https?://(?:www\.)?auto\.ru/cars/used/sale/"
+        r"(?:https?://)?(?:www\.)?auto\.ru/cars/used/sale/"
         r"[a-z0-9_.%-]+/[a-z0-9_.%-]+/[a-z0-9_.%-]+/?",
         re.I,
     )
@@ -2803,7 +2866,10 @@ def _autoru_search_fallback(
     seen_urls: set[str] = set()
 
     for match in url_re.finditer(text):
-        url = match.group(0).split("?")[0].rstrip("/") + "/"
+        url = match.group(0)
+        if not url.startswith("http"):
+            url = "https://" + url
+        url = url.split("?")[0].rstrip("/") + "/"
         if url in seen_urls:
             continue
         seen_urls.add(url)
@@ -2812,8 +2878,13 @@ def _autoru_search_fallback(
         context = html.unescape(re.sub(
             r"\s+",
             " ",
-            re.sub(r"<[^>]+>", " ", text[match.start():match.end() + 1_200]),
+            # Brave размещает цену после favicon/thumbnail-разметки; 1200
+            # сырых символов заканчивались раньше сниппета и давали ложный 0.
+            re.sub(r"<[^>]+>", " ", text[match.start():match.end() + 5_000]),
         )).strip()
+        region_token = re.sub(r"[^а-яa-z]", "", region_name.lower())[:5]
+        if region_token and region_token not in context.lower():
+            continue
         price = 0
         for price_match in price_re.finditer(context):
             value = int(re.sub(r"\D", "", price_match.group(1)) or 0)
@@ -2839,10 +2910,11 @@ def _autoru_search_fallback(
             "description": context[:400],
             "seller": "Auto.ru",
             "_year": year,
-            "_days_on_site": 0,
+            "_days_on_site": 2,
+            "_date_known": False,
             "_photos": 0,
             "mileage": 0,
-            "date": str(today),
+            "date": "",
         }
         item["_hot_score"] = hot_score(item)
         out.append(item)
