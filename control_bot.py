@@ -454,8 +454,8 @@ def _env_int(name: str, default: int, min_value: int = 1) -> int:
 
 SEARCH_COOLDOWN_SEC = 45
 SEARCH_SOURCE_TIMEOUT_SEC = _env_int("SEARCH_SOURCE_TIMEOUT_SEC", 30)
-SEARCH_CRITICAL_SOURCE_GRACE_SEC = _env_int("SEARCH_CRITICAL_SOURCE_GRACE_SEC", 40)
-SEARCH_AUTORU_DEADLINE_SEC = _env_int("SEARCH_AUTORU_DEADLINE_SEC", 45)
+SEARCH_CRITICAL_SOURCE_GRACE_SEC = _env_int("SEARCH_CRITICAL_SOURCE_GRACE_SEC", 25)
+SEARCH_AUTORU_DEADLINE_SEC = _env_int("SEARCH_AUTORU_DEADLINE_SEC", 26)
 SEARCH_PRICE_FILL_LIMIT = _env_int("SEARCH_PRICE_FILL_LIMIT", 3, 0)
 SEARCH_PRICE_FILL_TIMEOUT_SEC = _env_int("SEARCH_PRICE_FILL_TIMEOUT_SEC", 4)
 SEARCH_DETAIL_CHECK_LIMIT = _env_int("SEARCH_DETAIL_CHECK_LIMIT", 0, 0)
@@ -13769,15 +13769,7 @@ async def do_search_for_user(uid: int, reply_to):
             and not (i.get("_market_price") and i.get("_price_int"))
             and _is_market_candidate(i)
         ])
-        suitable = _safe_rank_search_items(suitable)
-        # Пользовательский поиск предназначен только для реальных сделок ниже
-        # рынка. Раньше после подтверждённых вариантов добавлялся хвост «ещё в
-        # бюджете», куда попадали и машины дороже рынка. Больше их не показываем.
-        suitable = [
-            i for i in suitable
-            if _is_strong_below_market(i)
-            and int(i.get("_market_price") or 0) > int(i.get("_price_int") or 0)
-        ][:120]
+        suitable = _safe_rank_search_items(suitable)[:120]
         _below_count = sum(1 for i in suitable if _is_strong_below_market(i))
         _market_tail_count = sum(
             1 for i in suitable
@@ -13791,7 +13783,7 @@ async def do_search_for_user(uid: int, reply_to):
         suitable = _safe_rank_search_items(suitable)[:80]
         print(f"  [фильтр] точных оценок нет → показываем {len(suitable)} объявлений в бюджете")
 
-    if not suitable and _display_fallback and not _market_available:
+    if not suitable and _display_fallback:
         suitable = _display_fallback[:80]
         print(f"  [fallback] final ranking empty -> showing {len(suitable)} basic listings")
 
