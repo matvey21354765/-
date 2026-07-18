@@ -553,7 +553,7 @@ SEARCH_SOURCE_TIMEOUT_SEC = _env_int("SEARCH_SOURCE_TIMEOUT_SEC", 30)
 # обычных 30 секунд им нужен реальный резерв, иначе второй источник обрывается
 # уже после успешного ответа сайта, но до возврата результата в Telegram.
 SEARCH_CRITICAL_SOURCE_GRACE_SEC = max(
-    35, _env_int("SEARCH_CRITICAL_SOURCE_GRACE_SEC", 35)
+    45, _env_int("SEARCH_CRITICAL_SOURCE_GRACE_SEC", 45)
 )
 SEARCH_AUTORU_DEADLINE_SEC = max(
     30, _env_int("SEARCH_AUTORU_DEADLINE_SEC", 45)
@@ -3179,6 +3179,45 @@ def scrape_autoru(
 
         # Метод 0а: Прямой AJAX API с общим мобильным прокси. Пропускаем, если
         # есть выделенный РФ-пул (он уже отработал выше и не ловит капчу).
+        # Когда платный маршрут не прошёл стартовую проверку, сначала используем
+        # адреса, которые уже подтвердили HTTPS CONNECT на каталоге Авито. Это
+        # оставляет больше дедлайна, чем попытки через известный мёртвый маршрут.
+        if (
+            not batch
+            and _paid_proxy_healthy is False
+            and _working_free_proxies
+            and time.time() < _ar_deadline
+        ):
+            for _fp in list(_working_free_proxies)[:2]:
+                if time.time() > _ar_deadline:
+                    break
+                try:
+                    _fp_prx = {"http": f"http://{_fp}", "https": f"http://{_fp}"}
+                    _rf = _req.post(
+                        "https://auto.ru/-/ajax/desktop/listing/",
+                        json=body,
+                        headers={**headers_ajax, "x-requested-with": "fetch"},
+                        proxies=_fp_prx,
+                        timeout=4,
+                    )
+                    print(
+                        f"  [Auto.ru] резервный прокси {_fp} стр.{p}: "
+                        f"HTTP {_rf.status_code}, {len(_rf.text):,}б"
+                    )
+                    if _rf.status_code == 200 and not _autoru_is_captcha(_rf.text):
+                        try:
+                            batch = _autoru_parse_offers(_rf.json(), today)
+                        except Exception:
+                            batch = _autoru_parse_html(_rf.text, today)
+                        if batch:
+                            print(
+                                f"  [Auto.ru] резервный прокси {_fp}: "
+                                f"{len(batch)} объявлений"
+                            )
+                            break
+                except Exception as e:
+                    print(f"  [Auto.ru] резервный прокси {_fp}: {str(e)[:60]}")
+
         if not batch and AVITO_PROXIES and not AUTORU_PROXIES:
             for _ar_proxy in _ar_mobile_proxy_variants:
                 if batch or time.time() > _ar_deadline:
@@ -3263,7 +3302,12 @@ def scrape_autoru(
         # Метод 0d: бесплатные РФ-прокси — не требует настроек. Часть РФ ISP-IP
         # Яндекс НЕ режет капчей (в отличие от дата-центра). Пробуем AJAX (JSON)
         # через несколько таких прокси. Работает даже без мобильного прокси.
-        if not batch and _working_free_proxies and time.time() < _ar_deadline:
+        if (
+            not batch
+            and _paid_proxy_healthy is not False
+            and _working_free_proxies
+            and time.time() < _ar_deadline
+        ):
             for _fp in list(_working_free_proxies)[:2]:
                 if time.time() > _ar_deadline:
                     break
@@ -14034,14 +14078,14 @@ async def do_search_for_user(uid: int, reply_to):
                     price_min=pmin,
                     price_max=pmax,
                     brand=(brand if brand and brand != "any" else ""),
-                    deadline_sec=30,
+                    deadline_sec=35,
                 )
         finally:
             _protected_autoru_done.set()
 
     def _run_user_avito() -> list[dict]:
         if "autoru" in enabled_sources:
-            _protected_autoru_done.wait(35)
+            _protected_autoru_done.wait(40)
         with _AUTORU_BACKGROUND_LOCK:
             return scrape_avito(
                 region,
