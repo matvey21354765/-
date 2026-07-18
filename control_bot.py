@@ -13,6 +13,7 @@ import datetime
 import subprocess
 import hashlib
 import html
+import urllib.parse
 from pathlib import Path
 import os
 
@@ -40,6 +41,13 @@ def _parse_admin_ids() -> set[int]:
     return ids
 
 ADMIN_IDS = _parse_admin_ids()
+
+YOOMONEY_WALLET = os.getenv("YOOMONEY_WALLET", "4100119558685452").strip()
+SUBSCRIPTION_PLANS = {
+    "week": {"title": "Неделя", "amount": 349, "days": 7},
+    "month": {"title": "Месяц", "amount": 999, "days": 30},
+}
+SUPPORT_URL = os.getenv("SUPPORT_URL", "https://t.me/durunegonim").strip()
 
 
 def _deploy_revision() -> str:
@@ -9964,14 +9972,81 @@ def _access_notice_text(days_left: int, plan: str) -> str:
 
 
 def _subscription_offer_keyboard() -> InlineKeyboardMarkup:
-    pay_url = os.getenv("SUBSCRIPTION_URL", "").strip()
-    if not pay_url and ADMIN_IDS:
-        pay_url = f"tg://user?id={next(iter(ADMIN_IDS))}"
-    rows = []
-    if pay_url:
-        rows.append([InlineKeyboardButton(text="💳 Купить / продлить подписку", url=pay_url)])
+    rows = [[
+        InlineKeyboardButton(
+            text="💳 Купить / продлить подписку",
+            callback_data="subscription_plans",
+        )
+    ]]
     rows.append([InlineKeyboardButton(text="🚗 Смотреть свежие авто", callback_data="start_search")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _subscription_plans_keyboard() -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(
+            text=f"💳 {plan['title']} — {plan['amount']} ₽",
+            callback_data=f"subscription_pay|{key}",
+        )]
+        for key, plan in SUBSCRIPTION_PLANS.items()
+    ]
+    if SUPPORT_URL:
+        rows.append([InlineKeyboardButton(text="☎️ Поддержка", url=SUPPORT_URL)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@dp.message(Command("subscribe"))
+@dp.callback_query(F.data == "subscription_plans")
+async def show_subscription_plans(event):
+    text = (
+        "💎 <b>Тарифы подписки</b>\n\n"
+        "📅 Неделя — 349 ₽\n"
+        "🗓 Месяц — 999 ₽\n\n"
+        "Выбери тариф. После оплаты отправь чек в поддержку для активации."
+    )
+    if isinstance(event, CallbackQuery):
+        await event.answer()
+        await event.message.answer(
+            text,
+            parse_mode="HTML",
+            reply_markup=_subscription_plans_keyboard(),
+        )
+    else:
+        await event.answer(
+            text,
+            parse_mode="HTML",
+            reply_markup=_subscription_plans_keyboard(),
+        )
+
+
+@dp.callback_query(F.data.startswith("subscription_pay|"))
+async def create_subscription_payment(cb: CallbackQuery):
+    plan_key = cb.data.split("|", 1)[1]
+    plan = SUBSCRIPTION_PLANS.get(plan_key)
+    if not plan or not YOOMONEY_WALLET:
+        await cb.answer("Оплата временно не настроена", show_alert=True)
+        return
+    label = f"sub_{cb.from_user.id}_{plan_key}_{int(time.time())}"
+    pay_url = "https://yoomoney.ru/quickpay/confirm.xml?" + urllib.parse.urlencode({
+        "receiver": YOOMONEY_WALLET,
+        "quickpay-form": "button",
+        "paymentType": "AC",
+        "sum": str(plan["amount"]),
+        "label": label,
+        "targets": f"Подписка PerekupDrive: {plan['title']}",
+    })
+    rows = [[InlineKeyboardButton(
+        text=f"💳 Оплатить {plan['amount']} ₽",
+        url=pay_url,
+    )]]
+    if SUPPORT_URL:
+        rows.append([InlineKeyboardButton(text="📨 Отправить чек", url=SUPPORT_URL)])
+    await cb.message.answer(
+        f"Счёт на {plan['amount']} ₽ сформирован.\n"
+        "После оплаты нажми «Отправить чек», чтобы активировать доступ.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+    await cb.answer()
 
 
 async def _access_expiry_notice_loop():
