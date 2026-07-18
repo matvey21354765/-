@@ -8251,7 +8251,9 @@ _AVITO_REGION_CACHE: dict[str, tuple[float, list[dict]]] = {}
 _AVITO_REGION_CACHE_TTL = 24 * 60 * 60  # 24 часа — дольше кэш = меньше блокировок
 _AVITO_CACHE_FILE = Path("avito_region_cache.json")
 _AVITO_NETWORK_LOCK = _threading.Lock()
-_AVITO_BACKGROUND_LOCK = _threading.Lock()
+# Один мобильный прокси обслуживает обе защищённые площадки. Фоновые Авито и
+# Auto.ru не должны конкурировать ни внутри источника, ни друг с другом.
+_AVITO_BACKGROUND_LOCK = _AUTORU_BACKGROUND_LOCK
 
 
 def _load_avito_cache():
