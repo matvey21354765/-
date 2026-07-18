@@ -1318,6 +1318,30 @@ def _liquidity_note(item: dict) -> str:
     return " · ".join(parts)
 
 
+def _market_confidence_text(item: dict) -> str:
+    """Понятное пользователю качество рыночной оценки."""
+    lvl = str(item.get("_market_lvl") or "")
+    sample_count = int(item.get("_market_n") or 0)
+    if lvl in {"avito", "drom", "autoru"}:
+        platform = {"avito": "Авито", "drom": "Дром", "autoru": "Auto.ru"}[lvl]
+        return f"высокая (оценка {platform})"
+    if lvl == "near":
+        return "высокая (точный год)"
+    if lvl == "bracket":
+        return "средняя (±2 года)"
+    if lvl == "medium":
+        return "средняя (±3 года)"
+    if lvl == "wide":
+        return "ограниченная (±5 лет)"
+    if lvl == "model":
+        return "низкая (мало данных по году)"
+    if sample_count >= 7:
+        return "высокая"
+    if sample_count >= 4:
+        return "средняя"
+    return "ограниченная"
+
+
 # ── Haraba.ru анализ конкурентов ───────────────────────────────────────────
 def scrape_haraba(region: str, price_min: int = 0, price_max: int = 99_000_000) -> list[dict]:
     """Парсит объявления с Haraba.ru для анализа конкурентов."""
@@ -2155,25 +2179,82 @@ def _autoru_parse_offers(data: dict, today) -> list[dict]:
         or (data.get("result", {}) or {}).get("offers", [])
         or (data.get("listing", {}) or {}).get("offers", [])
     )
+    if isinstance(listing, dict):
+        listing = (
+            listing.get("offers", [])
+            or listing.get("items", [])
+            or listing.get("results", [])
+        )
+    # Auto.ru регулярно переносит offers глубже в JSON, не меняя сами объекты
+    # объявлений. Не привязываемся только к семи известным путям: если они
+    # пусты, находим offer-объекты по их устойчивым полям.
+    if not listing:
+        listing = []
+        stack = [data]
+        visited: set[int] = set()
+        while stack and len(visited) < 100_000:
+            node = stack.pop()
+            if not isinstance(node, (dict, list)):
+                continue
+            node_id = id(node)
+            if node_id in visited:
+                continue
+            visited.add(node_id)
+            if isinstance(node, list):
+                stack.extend(node)
+                continue
+            has_vehicle = "vehicle_info" in node or "vehicleInfo" in node
+            has_price = "price_info" in node or "priceInfo" in node
+            has_identity = bool(node.get("url") or node.get("sale_url") or node.get("id"))
+            if has_vehicle and has_price and has_identity:
+                listing.append(node)
+                continue
+            stack.extend(node.values())
+
+    seen_urls: set[str] = set()
     for offer in listing:
         try:
-            vehicle = offer.get("vehicle_info", {})
-            mark = vehicle.get("mark_info", {}).get("name", "")
-            model = vehicle.get("model_info", {}).get("name", "")
-            year = offer.get("documents", {}).get("year", "")
-            title = f"{mark} {model} {year}".strip()
-            price_val = offer.get("price_info", {}).get("price", "")
-            price_str = f"{int(price_val):,} ₽".replace(",", " ") if price_val else ""
-            item_url = offer.get("url", "") or f"https://auto.ru/cars/used/sale/{offer.get('id', '')}"
-            if offer.get("seller_type") == "COMMERCIAL":
+            if not isinstance(offer, dict):
                 continue
-            photos_list = offer.get("photos", [])
+            vehicle = offer.get("vehicle_info", {}) or offer.get("vehicleInfo", {}) or {}
+            mark_info = vehicle.get("mark_info", {}) or vehicle.get("markInfo", {}) or {}
+            model_info = vehicle.get("model_info", {}) or vehicle.get("modelInfo", {}) or {}
+            mark = mark_info.get("name", "") or mark_info.get("code", "")
+            model = model_info.get("name", "") or model_info.get("code", "")
+            documents = offer.get("documents", {}) or {}
+            year = documents.get("year", "") or vehicle.get("year", "") or offer.get("year", "")
+            title = f"{mark} {model} {year}".strip()
+            price_info = offer.get("price_info", {}) or offer.get("priceInfo", {}) or {}
+            price_val = (
+                price_info.get("price", "")
+                or price_info.get("value", "")
+                or offer.get("price", "")
+            )
+            if isinstance(price_val, dict):
+                price_val = price_val.get("value", "") or price_val.get("amount", "")
+            price_str = f"{int(price_val):,} ₽".replace(",", " ") if price_val else ""
+            item_url = offer.get("url", "") or offer.get("sale_url", "")
+            if item_url and item_url.startswith("/"):
+                item_url = "https://auto.ru" + item_url
+            if not item_url and offer.get("id"):
+                item_url = f"https://auto.ru/cars/used/sale/{offer.get('id', '')}"
+            if item_url in seen_urls:
+                continue
+            seller_type = offer.get("seller_type", "") or offer.get("sellerType", "")
+            if str(seller_type).upper() == "COMMERCIAL":
+                continue
+            photos_list = offer.get("photos", []) or offer.get("images", []) or []
             photo_url = ""
             if photos_list:
-                sizes = photos_list[0].get("sizes", {})
-                photo_url = sizes.get("1200x900") or sizes.get("832x624") or sizes.get("456x342") or ""
+                first_photo = photos_list[0] if isinstance(photos_list[0], dict) else {}
+                sizes = first_photo.get("sizes", {}) or {}
+                photo_url = (
+                    sizes.get("1200x900") or sizes.get("832x624")
+                    or sizes.get("456x342") or first_photo.get("url", "") or ""
+                )
             days = 0
-            date_str = offer.get("additional_info", {}).get("creation_date", "")
+            additional = offer.get("additional_info", {}) or offer.get("additionalInfo", {}) or {}
+            date_str = additional.get("creation_date", "") or additional.get("creationDate", "")
             if date_str:
                 try:
                     dt = datetime.datetime.fromisoformat(date_str[:10]).date()
@@ -2185,7 +2266,7 @@ def _autoru_parse_offers(data: dict, today) -> list[dict]:
             if tech and not desc:
                 parts = [x for x in [tech.get("engine_type",""), f"{tech.get('power','')} л.с." if tech.get("power") else "", tech.get("transmission","")] if x]
                 desc = ", ".join(parts)
-            if title and item_url:
+            if title and item_url and price_val:
                 price_int = int(price_val) if price_val else 0
                 item = {
                     "source": "autoru", "title": title, "price": price_str,
@@ -2196,6 +2277,7 @@ def _autoru_parse_offers(data: dict, today) -> list[dict]:
                 }
                 item["_hot_score"] = hot_score(item)
                 results.append(item)
+                seen_urls.add(item_url)
         except Exception:
             pass
     return results
@@ -2248,54 +2330,247 @@ def _autoru_parse_html(text: str, today) -> list[dict]:
         except Exception as e:
             print(f"  [Auto.ru] {marker} json error: {e}")
 
-    # Метод 2: regex по паттернам Auto.ru в сыром HTML/JSON
-    # Auto.ru URLs: https://auto.ru/cars/used/sale/brand/model/id/
-    seen_urls: set[str] = set()
-    for m in re.finditer(
-        r'"url"\s*:\s*"(https://auto\.ru/cars/[^"]{10,120})"'
-        r'.*?"price"\s*:\s*(\d{4,9})',
-        text, re.DOTALL
-    ):
-        item_url = m.group(1)
-        price_val = int(m.group(2))
-        if item_url in seen_urls or price_val < 10_000:
+    # Метод 2: карточки уже отрисованной HTML-страницы. Auto.ru может убрать
+    # JSON-state, но оставляет ссылки /cars/used/sale/ и видимые цену/название.
+    try:
+        from bs4 import BeautifulSoup as _AutoSoup
+
+        soup = _AutoSoup(text, "lxml")
+        dom_seen: set[str] = set()
+        price_visible_re = re.compile(
+            r"(\d{1,3}(?:[ \u00a0]\d{3})+|\d{4,9})\s*₽"
+        )
+        year_visible_re = re.compile(r"\b(19[5-9]\d|20[012]\d)\b")
+        for link in soup.select(
+            'a[href*="/cars/used/sale/"], a[href*="/cars/new/sale/"]'
+        ):
+            href = (link.get("href") or "").replace("\\/", "/")
+            if href.startswith("/"):
+                href = "https://auto.ru" + href
+            if not href.startswith("http"):
+                continue
+            item_url = href.split("?")[0].rstrip("/") + "/"
+            if item_url in dom_seen:
+                continue
+
+            # Поднимаемся от ссылки до самой маленькой оболочки, содержащей
+            # видимую цену. Это переживает смену CSS-классов ListingItem.
+            card = link
+            card_text = ""
+            price_match = None
+            for _ in range(9):
+                card = getattr(card, "parent", None)
+                if card is None:
+                    break
+                candidate_text = card.get_text(" ", strip=True)
+                if len(candidate_text) > 10_000:
+                    break
+                candidate_price = price_visible_re.search(candidate_text)
+                if candidate_price:
+                    card_text = candidate_text
+                    price_match = candidate_price
+                    break
+            if not card or not price_match:
+                continue
+            price_val = int(re.sub(r"\D", "", price_match.group(1)) or 0)
+            if not (10_000 <= price_val <= 99_000_000):
+                continue
+
+            title = ""
+            title_el = card.select_one(
+                '[class*="ListingItemTitle"], [data-ftid*="bull_title"], h3, h2'
+            )
+            if title_el:
+                title = title_el.get_text(" ", strip=True)
+            if not title:
+                title = (link.get("aria-label") or link.get("title") or "").strip()
+            image = card.select_one("img")
+            if not title and image:
+                title = (image.get("alt") or image.get("title") or "").strip()
+
+            path = item_url.split("/sale/", 1)[-1].strip("/").split("/")
+            if not title:
+                path_mark = path[0].replace("_", " ").title() if path else "Авто"
+                path_model = path[1].replace("_", " ").title() if len(path) > 1 else ""
+                title = f"{path_mark} {path_model}".strip()
+            year_m = year_visible_re.search(title) or year_visible_re.search(card_text)
+            year = int(year_m.group(1)) if year_m else 0
+            if year and str(year) not in title:
+                title = f"{title}, {year}"
+
+            photo_url = ""
+            if image:
+                photo_url = (
+                    image.get("src") or image.get("data-src")
+                    or image.get("data-lazy-src") or ""
+                )
+                if not photo_url and image.get("srcset"):
+                    photo_url = image.get("srcset", "").split(",")[0].strip().split(" ")[0]
+            if photo_url.startswith("//"):
+                photo_url = "https:" + photo_url
+
+            days = 0
+            text_lower = card_text.lower()
+            date_known = False
+            if "сегодня" in text_lower:
+                date_known = True
+            elif "вчера" in text_lower:
+                days, date_known = 1, True
+            else:
+                days_m = re.search(r"\b(\d{1,3})\s+(?:дн|день|дня|дней)\b", text_lower)
+                if days_m:
+                    days, date_known = int(days_m.group(1)), True
+
+            item = {
+                "source": "autoru", "title": title[:160],
+                "price": f"{price_val:,} ₽".replace(",", " "),
+                "url": item_url,
+                "date": str(today - datetime.timedelta(days=days)),
+                "_photos": 1 if photo_url else 0, "_days_on_site": days,
+                "description": card_text[:400], "seller": "",
+                "_photo_url": photo_url, "_price_int": price_val,
+                "_year": year, "_date_known": date_known,
+            }
+            item["_hot_score"] = hot_score(item)
+            results.append(item)
+            dom_seen.add(item_url)
+        if results:
+            print(f"  [Auto.ru] DOM HTML: {len(results)} объявлений")
+    except Exception as exc:
+        print(f"  [Auto.ru] DOM parse: {str(exc)[:80]}")
+
+    # Метод 3: устойчивый разбор URL-карточек в сыром HTML/JSON. В новом HTML
+    # Auto.ru цена часто находится ПЕРЕД url, а ссылки бывают относительными и
+    # с JSON-экранированием. Старый шаблон искал только url → price и поэтому
+    # объединял всю страницу в один матч, возвращая ровно одно объявление.
+    normalized = (
+        text.replace("\\/", "/")
+        .replace("\\u002F", "/")
+        .replace("\\u002f", "/")
+    )
+    seen_urls: set[str] = {item.get("url", "") for item in results if item.get("url")}
+    url_re = re.compile(
+        r'(?:(?:https?:)?//(?:www\.)?auto\.ru)?'
+        r'/cars/(?:used|new)/sale/[a-z0-9_./%+-]{8,180}',
+        re.I,
+    )
+
+    def _nearest_match(pattern: str, context: str, anchor: int):
+        matches = list(re.finditer(pattern, context, re.I | re.S))
+        return min(matches, key=lambda match: abs(match.start() - anchor)) if matches else None
+
+    def _json_text(raw: str) -> str:
+        try:
+            return str(json.loads(f'"{raw}"'))
+        except Exception:
+            return raw.replace("\\n", " ").replace('\\"', '"').strip()
+
+    brand_names = {
+        "vaz": "ВАЗ (Lada)", "lada": "Lada", "gaz": "ГАЗ",
+        "uaz": "УАЗ", "moskvich": "Москвич",
+    }
+
+    for m in url_re.finditer(normalized):
+        raw_url = m.group(0)
+        path_start = raw_url.find("/cars/")
+        if path_start < 0:
             continue
-        seen_urls.add(item_url)
-        # Ищем марку/модель/год в блоке вокруг этого матча
-        ctx_start = max(0, m.start() - 800)
-        ctx = text[ctx_start:m.end() + 3000]
-        mark_m = re.search(r'"mark_info"\s*:\s*\{[^}]*"name"\s*:\s*"([^"]+)"', ctx)
-        model_m = re.search(r'"model_info"\s*:\s*\{[^}]*"name"\s*:\s*"([^"]+)"', ctx)
-        year_m = re.search(r'"year"\s*:\s*(\d{4})', ctx)
-        mark = mark_m.group(1) if mark_m else ""
-        model = model_m.group(1) if model_m else ""
+        item_url = "https://auto.ru" + raw_url[path_start:]
+        item_url = item_url.split("?")[0].rstrip("/.,") + "/"
+        if item_url in seen_urls:
+            continue
+
+        ctx_start = max(0, m.start() - 7_000)
+        ctx_end = min(len(normalized), m.end() + 7_000)
+        ctx = normalized[ctx_start:ctx_end]
+        anchor = m.start() - ctx_start
+
+        _price_pattern = (
+            r'"price"\s*:\s*(?:\{\s*"(?:value|amount)"\s*:\s*)?"?(\d{4,9})'
+        )
+        # В карточках Auto.ru price_info расположен перед url. Предпочитаем
+        # последний price перед ссылкой: иначе цена следующей карточки, стоящая
+        # сразу после текущего URL, ошибочно приклеивается к текущей машине.
+        _price_matches = list(re.finditer(_price_pattern, ctx, re.I | re.S))
+        _price_before = [match for match in _price_matches if match.start() < anchor]
+        price_m = (
+            max(_price_before, key=lambda match: match.start())
+            if _price_before
+            else (_nearest_match(_price_pattern, ctx, anchor) if _price_matches else None)
+        )
+        if not price_m:
+            price_m = _nearest_match(
+                r'"priceInfo"\s*:\s*\{.{0,500}?"(?:value|price)"\s*:\s*"?(\d{4,9})',
+                ctx,
+                anchor,
+            )
+        price_val = int(price_m.group(1)) if price_m else 0
+        if not (10_000 <= price_val <= 99_000_000):
+            continue
+
+        mark_m = _nearest_match(
+            r'"(?:mark_info|markInfo)"\s*:\s*\{.{0,600}?"(?:name|code)"\s*:\s*"([^"]+)"',
+            ctx,
+            anchor,
+        )
+        model_m = _nearest_match(
+            r'"(?:model_info|modelInfo)"\s*:\s*\{.{0,600}?"(?:name|code)"\s*:\s*"([^"]+)"',
+            ctx,
+            anchor,
+        )
+        year_m = _nearest_match(r'"year"\s*:\s*"?(\d{4})', ctx, anchor)
+        path = item_url.split("/sale/", 1)[-1].strip("/").split("/")
+        path_mark = path[0].replace("_", " ") if path else ""
+        path_model = path[1].replace("_", " ") if len(path) > 1 else ""
+        mark = _json_text(mark_m.group(1)) if mark_m else brand_names.get(path_mark, path_mark.title())
+        model = _json_text(model_m.group(1)) if model_m else path_model.title()
         year = year_m.group(1) if year_m else ""
-        # Нет ни марки, ни модели, ни года → это не объявление о машине
-        # (реклама Auto.ru, промо-блок и т.п.) — пропускаем, не показываем заглушку.
         if not (mark or model or year):
             continue
         title = f"{mark} {model} {year}".strip()
         price_str = f"{price_val:,} ₽".replace(",", " ")
-        # Фото: ищем сначала 1200x900, потом любой размер из CDN Яндекса
-        photo_m = re.search(r'"1200x900"\s*:\s*"([^"]+)"', ctx)
+        # Фото и описание тоже берём ближайшие к URL, а не первые на странице.
+        photo_m = _nearest_match(r'"1200x900"\s*:\s*"([^"]+)"', ctx, anchor)
         if not photo_m:
-            photo_m = re.search(r'"(?:832x624|456x342|320x240)"\s*:\s*"([^"]+)"', ctx)
+            photo_m = _nearest_match(
+                r'"(?:832x624|456x342|320x240)"\s*:\s*"([^"]+)"',
+                ctx,
+                anchor,
+            )
         if not photo_m:
-            photo_m = re.search(r'"((?:https?:)?//avatars\.mds\.yandex\.net/[^"]{10,})"', ctx)
+            photo_m = _nearest_match(
+                r'"((?:https?:)?//avatars\.mds\.yandex\.net/[^"]{10,})"',
+                ctx,
+                anchor,
+            )
         photo_url = photo_m.group(1).replace("\\/", "/") if photo_m else ""
         if photo_url.startswith("//"):
             photo_url = "https:" + photo_url
-        desc_m = re.search(r'"description"\s*:\s*"([^"]{10,400})"', text[max(0,m.start()-2000):m.end()+3000])
-        desc = desc_m.group(1).replace("\\n", " ").strip() if desc_m else ""
+        desc_m = _nearest_match(r'"description"\s*:\s*"([^"]{10,800})"', ctx, anchor)
+        desc = _json_text(desc_m.group(1))[:400] if desc_m else ""
+        date_m = _nearest_match(
+            r'"(?:creation_date|creationDate)"\s*:\s*"(\d{4}-\d{2}-\d{2})',
+            ctx,
+            anchor,
+        )
+        days = 0
+        if date_m:
+            try:
+                created = datetime.datetime.fromisoformat(date_m.group(1)).date()
+                days = max(0, (today - created).days)
+            except Exception:
+                pass
         item = {
             "source": "autoru", "title": title, "price": price_str,
-            "url": item_url, "date": str(today),
-            "_photos": 1 if photo_url else 0, "_days_on_site": 0,
+            "url": item_url, "date": str(today - datetime.timedelta(days=days)),
+            "_photos": 1 if photo_url else 0, "_days_on_site": days,
             "description": desc, "seller": "", "_photo_url": photo_url,
-            "_price_int": price_val,
+            "_price_int": price_val, "_year": int(year) if year else 0,
+            "_date_known": bool(date_m),
         }
         item["_hot_score"] = hot_score(item)
         results.append(item)
+        seen_urls.add(item_url)
 
     if results:
         print(f"  [Auto.ru] regex HTML: {len(results)} объявлений")
@@ -7842,10 +8117,11 @@ def _avito_api_fetch(
                     continue
             return ""
 
-        def _parse_serp(html: str) -> list[dict]:
+        def _parse_serp(serp_html: str) -> list[dict]:
+            import html as _html_module
             import urllib.parse as _upq
             out: list[dict] = []
-            ctx_html = html
+            ctx_html = serp_html
             for _ in range(2):
                 try:
                     ctx_html = _upq.unquote(ctx_html)
@@ -7858,7 +8134,7 @@ def _avito_api_fetch(
                 # Сниппет результата находится после ссылки. Текст до неё может
                 # содержать цену предыдущей машины или верхнюю границу запроса.
                 context = ctx_html[pos:pos+1_200] if pos >= 0 else ""
-                context_clean = html.unescape(re.sub(r"<[^>]+>", " ", context))
+                context_clean = _html_module.unescape(re.sub(r"<[^>]+>", " ", context))
                 context_clean = re.sub(r"&[a-z]+;", " ", context_clean)
                 context_clean = re.sub(r"\s+", " ", context_clean).strip()
 
@@ -13051,6 +13327,8 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         _is_junk = bool(item.get("_is_junk"))
         # Рыночную цену показываем на КАЖДОЙ машине, где она известна.
         deal_line = ""
+        analysis_line = ""
+        reserve_line = ""
         _lvl_now = str(item.get("_market_lvl") or "")
         _trusted_market_levels = {"avito", "drom", "autoru", "near", "bracket", "medium", "wide", "model"}
         if _lvl_now and _lvl_now not in _trusted_market_levels:
@@ -13063,12 +13341,8 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                 pct = 0
         if market and _pi:
             saving = market - _pi
-            _market_n = int(item.get("_market_n") or 0)
-            _confidence = (
-                "высокое" if _lvl_now in {"avito", "drom", "autoru"} or _market_n >= 7
-                else "среднее" if _market_n >= 4
-                else "ограниченное"
-            )
+            _confidence = _market_confidence_text(item)
+            _pct_text = f"{abs(float(pct)):.1f}"
             market_note = " с учётом пробега" if item.get("_market_mileage_factor") else ""
             if item.get("_market_lvl") == "drom":
                 market_note = " Дром" + market_note
@@ -13078,9 +13352,9 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                 market_note = " Auto.ru" + market_note
             elif item.get("_market_lvl") == "model":
                 market_note = " грубо" + market_note
-            if pct >= MARKET_DEAL_MIN_PCT:
+            if pct >= 5:
                 # Дешевле рынка
-                price_line += f"  🔻 рынок{market_note} ~{market:,} ₽ (-{pct}%)".replace(",", " ")
+                price_line += f"  🔻 рынок{market_note} ~{market:,} ₽ (-{_pct_text}%)".replace(",", " ")
                 if _is_junk:
                     # Не на ходу / на запчасти — это НЕ выгода, а причина низкой цены.
                     deal_line = "\n🔴 не на ходу / на запчасти — низкая цена не выгода"
@@ -13092,23 +13366,27 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                     _costs = int(_pi * 0.04) + 10_000
                     _profit = saving - _costs
                     if _profit >= 15_000:
-                        deal_line += f"\n💵 потенциальная прибыль ~{_profit:,} ₽ (после расходов)".replace(",", " ")
+                        reserve_line = f"💵 Потенциальная прибыль ~{_profit:,} ₽ (после расходов)".replace(",", " ")
+                    else:
+                        reserve_line = "💵 Запас маленький: торг/вложения могут съесть выгоду"
             elif pct > 0:
                 price_line += f"  ≈ рынок{market_note} ~{market:,} ₽".replace(",", " ")
                 deal_line = f"\n⚪ около рынка: скидка {pct}%, не считаю выгодой ниже рынка"
             elif pct < 0:
                 # Дороже рынка
-                price_line += f"  🔺 рынок{market_note} ~{market:,} ₽ (+{abs(pct)}%)".replace(",", " ")
+                price_line += f"  🔺 рынок{market_note} ~{market:,} ₽ (+{_pct_text}%)".replace(",", " ")
             else:
                 # По рынку
                 price_line += f"  ≈ рынок{market_note} ~{market:,} ₽".replace(",", " ")
-            deal_line += (
-                f"\n📊 Анализ рынка: {abs(pct):g}% "
-                f"{'ниже' if pct > 0 else ('выше' if pct < 0 else 'на уровне')} рынка"
-                f" · доверие: {_confidence}"
-            )
+            if pct > 0:
+                _analysis = f"ниже рынка на ~{max(0, saving):,} ₽ ({_pct_text}%)".replace(",", " ")
+            elif pct < 0:
+                _analysis = f"выше рынка на ~{abs(saving):,} ₽ ({_pct_text}%)".replace(",", " ")
+            else:
+                _analysis = "на уровне рынка (0.0%)"
+            analysis_line = f"📊 Анализ цены: {_analysis} · доверие: {_confidence}"
         elif _pi:
-            deal_line = "\n📊 рынок: мало похожих авто для точной оценки"
+            analysis_line = "📊 рынок: мало похожих авто для точной оценки"
 
         mileage = item.get("mileage", 0)
         mileage_str = ""
@@ -13122,6 +13400,10 @@ async def send_batch(chat_id: int, uid: int, offset: int):
             f"💰 {price_line}{deal_line}\n"
             f"📅 {days_str}{mileage_str}"
         )
+        if analysis_line:
+            caption += f"\n{analysis_line}"
+        if reserve_line:
+            caption += f"\n{reserve_line}"
         _liq = _liquidity_note(item)  # 📊 ликвидность модели
         if _liq:
             caption += f"\n📊 {_liq}"
@@ -13898,27 +14180,6 @@ async def do_search_for_user(uid: int, reply_to):
     if _avito_available:
         print(f"  [рынок] Авито-референс: {len(_ref_items)} объявлений → считаем рыночную цену")
         suitable = rank_by_market_price(suitable, ref_items=_ref_items, avito_only_median=True)
-        # 📊 Ликвидность: сколько таких в продаже и средний срок продажи (по эталону)
-        try:
-            from statistics import median as _median
-            _liq_cnt: dict[str, int] = {}
-            _liq_days: dict[str, list] = {}
-            for _r in _ref_items:
-                _k = _car_group_key(_r.get("title", ""))
-                if not _k:
-                    continue
-                _liq_cnt[_k] = _liq_cnt.get(_k, 0) + 1
-                _d = _r.get("_days_on_site", 0)
-                if _d and _d > 0:
-                    _liq_days.setdefault(_k, []).append(_d)
-            for it in suitable:
-                _k = _car_group_key(it.get("title", ""))
-                if _k and _k in _liq_cnt:
-                    it["_liq_count"] = _liq_cnt[_k]
-                    if _liq_days.get(_k):
-                        it["_liq_days"] = int(_median(_liq_days[_k]))
-        except Exception as _le:
-            print(f"  [ликвидность] ошибка: {_le}")
     else:
         _market_ref_items = [
             i for i in suitable
@@ -13934,6 +14195,29 @@ async def do_search_for_user(uid: int, reply_to):
             ref_items=_market_ref_items,
             avito_only_median=False,
         )
+    # 📊 Ликвидность считаем по тому же эталону, что и рыночную цену. Раньше
+    # строка «в продаже / срок продажи» появлялась только при живом Авито и
+    # исчезала при резервном эталоне Дром/Auto.ru/Юла.
+    try:
+        from statistics import median as _median
+        _liq_cnt: dict[str, int] = {}
+        _liq_days: dict[str, list] = {}
+        for _r in _market_ref_items:
+            _k = _car_group_key(_r.get("title", ""))
+            if not _k:
+                continue
+            _liq_cnt[_k] = _liq_cnt.get(_k, 0) + 1
+            _d = int(_r.get("_days_on_site") or 0)
+            if _d > 0:
+                _liq_days.setdefault(_k, []).append(_d)
+        for it in suitable:
+            _k = _car_group_key(it.get("title", ""))
+            if _k and _k in _liq_cnt:
+                it["_liq_count"] = _liq_cnt[_k]
+                if _liq_days.get(_k):
+                    it["_liq_days"] = int(_median(_liq_days[_k]))
+    except Exception as _le:
+        print(f"  [ликвидность] ошибка: {_le}")
     # Дилерские объявления — добавляем штраф к deal_score
     for it in suitable:
         if is_dealer(it):
