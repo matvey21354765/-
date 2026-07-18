@@ -2881,12 +2881,16 @@ def scrape_autoru(
     # деплое Auto.ru отвечал по HTTP, но при кратком обрыве HTTP CONNECT бот
     # сразу возвращал 0. Теперь каждый сетевой этап сначала повторяет тот же
     # рабочий HTTP-маршрут, затем автоматически пробует SOCKS5.
-    _ar_mobile_proxy_variants = (
+    _configured_ar_proxy_variants = (
         _avito_proxy_variants(prefer_socks=False) if AVITO_PROXIES else []
     )
-    # Последняя попытка — прямой Railway-канал. Обычно Яндекс показывает
-    # капчу, но после смены egress-IP он периодически отдаёт каталог.
-    _ar_mobile_proxy_variants.append({})
+    # Если самопроверка платного прокси упала, не расходуем весь дедлайн на два
+    # заведомо мёртвых маршрута. После следующего рестарта самопроверка снова
+    # включит HTTP/SOCKS, как только провайдер оживёт.
+    if _paid_proxy_healthy is False:
+        _ar_mobile_proxy_variants = [{}]
+    else:
+        _ar_mobile_proxy_variants = _configured_ar_proxy_variants + [{}]
 
     def _ar_proxy_tag(proxy: dict[str, str]) -> str:
         value = proxy.get("https") or proxy.get("http") or ""
