@@ -524,7 +524,7 @@ SEARCH_CRITICAL_SOURCE_GRACE_SEC = _env_int("SEARCH_CRITICAL_SOURCE_GRACE_SEC", 
 SEARCH_AUTORU_DEADLINE_SEC = _env_int("SEARCH_AUTORU_DEADLINE_SEC", 45)
 SEARCH_PRICE_FILL_LIMIT = _env_int("SEARCH_PRICE_FILL_LIMIT", 3, 0)
 SEARCH_PRICE_FILL_TIMEOUT_SEC = _env_int("SEARCH_PRICE_FILL_TIMEOUT_SEC", 4)
-SEARCH_DETAIL_CHECK_LIMIT = _env_int("SEARCH_DETAIL_CHECK_LIMIT", 0, 0)
+SEARCH_DETAIL_CHECK_LIMIT = max(10, _env_int("SEARCH_DETAIL_CHECK_LIMIT", 10, 0))
 SEARCH_DETAIL_CHECK_TIMEOUT_SEC = _env_int("SEARCH_DETAIL_CHECK_TIMEOUT_SEC", 5)
 SEARCH_DETAIL_TOTAL_TIMEOUT_SEC = _env_int("SEARCH_DETAIL_TOTAL_TIMEOUT_SEC", 25)
 DEFAULT_TRIAL_DAYS = _env_int("DEFAULT_TRIAL_DAYS", 7, 1)
@@ -576,6 +576,29 @@ def _cached_source_results(
         if len(out) >= limit:
             break
     return out
+
+
+def _cached_market_reference_items(max_age_sec: int = 6 * 60 * 60) -> list[dict]:
+    """Fresh automotive listings from all regions for rare-model valuation."""
+    now = time.time()
+    out: list[dict] = []
+    seen_urls: set[str] = set()
+    for (source, _region), (ts, cached_items) in list(_source_result_cache.items()):
+        if source not in {"drom", "autoru", "youla", "yula"}:
+            continue
+        if now - ts > max_age_sec:
+            continue
+        for item in cached_items or []:
+            price = int(item.get("_price_int") or parse_price(item.get("price", "")) or 0)
+            url = _norm_url(item.get("url", ""))
+            if not price or not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            out.append(dict(item))
+            if len(out) >= 1_500:
+                return out
+    return out
+
 
 # Мониторинг новых объявлений
 MONITOR_INTERVAL = 15 * 60   # проверять каждые 15 минут
@@ -1009,7 +1032,10 @@ def _car_group_key(title: str) -> str:
         t = re.sub(rf'\b{_ru}\b', _en, t)
     # В соцсетях часто пишут просто "2101", "2106", "2114" без ВАЗ/Лада.
     # Без этого ключ становится "2101 доками" и рынок не находится.
-    _vaz_m = re.search(r'\b(210[1-9]|211[0-5]|21099|217[0-2]|219[0-4]|111[7-9]|2121|2131)\b', t)
+    _vaz_m = re.search(
+        r'\b(210[1-9]|211[0-5]|21099|217[0-2]|219[0-4]|1111(?:3)?|111[7-9]|2121|2131)\b',
+        t,
+    )
     if _vaz_m and not re.search(r'\b(ваз|vaz)\b', t):
         t = f"ваз {_vaz_m.group(1)} {t}"
     # Схлопываем составные марки в одно слово, ЧТОБЫ модель (класс) не терялась
@@ -1030,6 +1056,18 @@ def _car_group_key(title: str) -> str:
     year = year_m.group(1) if year_m else ""
     if year_m:
         t = t[:year_m.start()] + t[year_m.end():]  # убираем год из строки
+    # Одинаковые отечественные модели площадки называют по-разному:
+    # «Лада 1111 Ока», «ВАЗ 11113», «Oka». Без канонического ключа Дром
+    # не находит аналоги и карточка остаётся без числового анализа.
+    _vaz_aliases = (
+        (r'\b(?:1111|11113|ока|oka)\b', "ваз oka"),
+        (r'\b(?:2170|2171|2172|приора|priora)\b', "ваз priora"),
+        (r'\b(?:1117|1118|1119|калина|kalina)\b', "ваз kalina"),
+        (r'\b(?:2190|2191|гранта|granta)\b', "ваз granta"),
+    )
+    for _pattern, _canonical in _vaz_aliases:
+        if re.search(_pattern, t):
+            return f"{_canonical} {year}".strip()
     # Берём первые 2 смысловых слова — марка + модель
     # Оставляем числа-части модели: Mazda 3, BMW 5, ВАЗ 2114 и т.п.
     # Исключаем числа > 2100 (могут быть годами, уже обработаны выше)
@@ -1088,6 +1126,9 @@ def _is_strong_below_market(it: dict) -> bool:
         if it.get("_market_lvl") != "avito" and avito_score is not None and avito_score <= 0:
             return False
     if it.get("_market_lvl") == "model" and pct < 20:
+        return False
+    if it.get("_market_lvl") in {"brandyear", "brand"}:
+        # Это числовой ориентир для редкой модели, а не доказанная топ-сделка.
         return False
     if pct >= MARKET_DEAL_MIN_PCT:
         return True
@@ -1154,7 +1195,17 @@ def _ranked_search_items(items: list[dict]) -> list[dict]:
         pct = float(it.get("_savings_pct") or 0)
         lvl = str(it.get("_market_lvl") or "")
         n = int(it.get("_market_n") or 0)
-        days = int(it.get("_days_on_site") or 999)
+        raw_days = it.get("_days_on_site")
+        try:
+            days = int(raw_days) if raw_days is not None else 999
+        except Exception:
+            days = 999
+        # Parsеры иногда ставят 0, когда дата просто не найдена. Такое объявление
+        # не выдаём за «сегодня» и не ставим выше карточек с подтверждённой датой.
+        if days == 0:
+            date_is_today = it.get("date", "") == str(datetime.date.today())
+            if not (it.get("_date_known") or date_is_today):
+                days = 2
         if not price:
             continue
         if (it.get("source", "") or "").lower() == "avito":
@@ -1181,7 +1232,7 @@ def _ranked_search_items(items: list[dict]) -> list[dict]:
         else:
             bucket = 6
         seen_rank = 1 if it.get("_already_seen") else 0
-        ranked.append((seen_rank, days, bucket, -pct, price, it))
+        ranked.append((seen_rank, bucket, days, -pct, price, it))
     ranked.sort(key=lambda x: (x[0], x[1], x[2], x[3], x[4]))
     return [it for *_keys, it in ranked]
 
@@ -1333,7 +1384,7 @@ def _traffic_light(item: dict) -> str:
     if has_market and pct <= -10:
         return "🔴"
     # Зелёный: ощутимо дешевле рынка и без явных рисков
-    if has_market and pct >= 15 and not is_dealer:
+    if has_market and _is_strong_below_market(item) and not is_dealer:
         return "🟢"
     # Жёлтый: всё остальное (около рынка, небольшая скидка, дилер, нет рынка)
     return "🟡"
@@ -1373,6 +1424,10 @@ def _market_confidence_text(item: dict) -> str:
         return "ограниченная (±5 лет)"
     if lvl == "model":
         return "низкая (мало данных по году)"
+    if lvl == "brandyear":
+        return "низкая (марка и близкий год)"
+    if lvl == "brand":
+        return "очень низкая (только марка)"
     if sample_count >= 7:
         return "высокая"
     if sample_count >= 4:
@@ -1627,6 +1682,8 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
     # иначе 2001 Corolla сравнивается с 2018 и даёт фейковую «скидку».
     model_year: dict[str, dict] = {}
     model_all: dict[str, list] = {}
+    brand_year: dict[str, dict] = {}
+    brand_all: dict[str, list] = {}
     for it in all_for_median:
         p = it.get("_price_int", 0)
         if p <= 0:
@@ -1638,6 +1695,9 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
             if model:
                 model_year.setdefault(model, {}).setdefault(yr, []).append(p)
                 model_all.setdefault(model, []).append(p)
+                brand_name = model.split()[0]
+                brand_year.setdefault(brand_name, {}).setdefault(yr, []).append(p)
+                brand_all.setdefault(brand_name, []).append(p)
 
     def _est_price(prices: list, lvl: str, cand_p):
         """Медиана цен той же модели/года с отсечением выбросов. Leave-one-out:
@@ -1691,6 +1751,24 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
             return _est_price(prices, "model", cand_p)
         return 0.0, "", 0
 
+    def _market_for_brand(brand_name: str, yr: int = 0, cand_p=None):
+        """Low-confidence fallback for a rare model.
+
+        It provides a numeric orientation for the card, but brandyear/brand is
+        explicitly forbidden from becoming a top below-market deal.
+        """
+        if yr:
+            years = brand_year.get(brand_name, {})
+            nearby: list[int] = []
+            for year_value in range(yr - 2, yr + 3):
+                nearby += years.get(year_value, [])
+            if len(nearby) >= 5:
+                return _est_price(nearby, "brandyear", cand_p)
+        prices = brand_all.get(brand_name, [])
+        if len(prices) >= 12:
+            return _est_price(prices, "brand", cand_p)
+        return 0.0, "", 0
+
     for it in items:
         p = it.get("_price_int", 0)
         deal_score = 0.0
@@ -1717,8 +1795,16 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
                 med, _lvl, _n = _market_for(parts[0], int(parts[1]), p)
                 if med <= 0:
                     med, _lvl, _n = _market_for_model(parts[0], p)
+                if med <= 0:
+                    med, _lvl, _n = _market_for_brand(
+                        parts[0].split()[0],
+                        int(parts[1]),
+                        p,
+                    )
             elif key:
                 med, _lvl, _n = _market_for_model(key, p)
+                if med <= 0:
+                    med, _lvl, _n = _market_for_brand(key.split()[0], 0, p)
             if med > 0:
                 if _lvl not in ("avito", "drom"):
                     _mileage_factor = _market_mileage_factor(it)
@@ -1743,6 +1829,10 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
                     _cap = 75
                 elif _lvl == "model":
                     _cap = 55
+                elif _lvl == "brandyear":
+                    _cap = 40
+                elif _lvl == "brand":
+                    _cap = 35
                 else:  # "wide"
                     _cap = 70
                 
@@ -1767,6 +1857,8 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
                     deal_score += savings_pct * 3.0  # ±3 года
                 elif _lvl == "model":
                     deal_score += savings_pct * 1.5
+                elif _lvl in {"brandyear", "brand"}:
+                    deal_score += min(savings_pct, 0) * 1.0
                 else:  # "wide"
                     deal_score += savings_pct * 2.5  # ↓ ±5 лет — грубо, вес ниже
 
@@ -1826,16 +1918,11 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
 
 def _sort_by_deal(items: list[dict]) -> list[dict]:
     """
-    Идеальная сортировка: сначала самые выгодные + висящие дольше.
+    Идеальная сортировка: сначала свежие подтверждённые сделки ниже рынка.
 
     Логика:
       Tier 0 — реально ниже рынка (savings_pct >= MARKET_DEAL_MIN_PCT):
-        Ключ: -(savings_pct * 2 + age_bonus)
-        age_bonus = min(days, 90) * 0.5   → макс 45 очков за 90 дней
-        savings   = pct * 2               → -30% даёт 60 очков
-        Смысл: среди одинакового % скидки тот, кто висит дольше, идёт первым.
-        Пример: -25% 0 дней = 50 очков, -25% 30 дней = 65 очков → 30-дневный первый.
-                -40% 0 дней = 80 очков → всё равно выше -25%, правильно.
+        Сначала сегодня/вчера, затем более старые; внутри одной даты — скидка.
 
       Tier 1 — по рынку или выше, но цена известна:
         Сортировка: дешевле → выше (покупатель ищет минимум)
@@ -1915,8 +2002,8 @@ def _sort_by_deal(items: list[dict]) -> list[dict]:
     #   Никакого округления в «полки»: −30% всегда выше −5%.
     items.sort(key=lambda x: (
         1 if x.get("_already_seen") else 0,
-        x.get("_days_on_site", 999),
         _tier(x),
+        x.get("_days_on_site", 999),
         _no_photo(x),
         (x.get("_days_on_site", 999), -round(_deal_rank(x), 1), -_secondary(x))
         if _tier(x) == 0
@@ -2180,6 +2267,7 @@ def scrape_drom(region: str, pages: int = 15, price_min: int = 0, price_max: int
             print(f"  [Дром {region}] парс стр.{p}: {e}")
             continue
 
+    _remember_source_results("drom", region, results)
     return results
 
 
@@ -6844,7 +6932,7 @@ def _avito_api_fetch(
     # ── Метод 0: Официальный мобильный JSON API (m.avito.ru/api/13/items) ──────
     # С российским мобильным IP (Megafone/MTS) работает без авторизации и OAuth.
     # Возвращает структурированный JSON — не нужно парсить HTML.
-    if AVITO_PROXIES:
+    if AVITO_PROXIES and not fast:
         _key = "af0deccbgcgidddjgnvljitntccdduijhdinfgjgfjir"
         _mob_params: dict = {
             "key": _key,
@@ -7794,8 +7882,9 @@ def _avito_api_fetch(
         _proxy_order = []
         if AVITO_PROXIES and not _proxy_auth_failed:
             _proxy_order.append(("прокси", _avito_proxies()))
-            _proxy_order.append(("прокси-rot1", "ROTATE"))  # сменить IP и повторить
-            _proxy_order.append(("прокси-rot2", "ROTATE"))
+            if not fast:
+                _proxy_order.append(("прокси-rot1", "ROTATE"))  # сменить IP и повторить
+                _proxy_order.append(("прокси-rot2", "ROTATE"))
         _proxy_order.append(("напрямую", None))  # напрямую (датацентр-IP)
         for _tag, _px in _proxy_order:
             # Маркер ROTATE — сменить IP прокси и использовать его же
@@ -7806,7 +7895,7 @@ def _avito_api_fetch(
             try:
                 r = _req.get(
                     "https://www.avito.ru/web/1/js/items",
-                    params=_params, headers=_hdrs, timeout=20,
+                    params=_params, headers=_hdrs, timeout=6 if fast else 20,
                     proxies=_px or {},
                 )
                 if r.status_code != 200 and r.status_code not in (403, 429):
@@ -8335,6 +8424,17 @@ def _avito_api_fetch(
     # После двух быстрых запросов берём реальные проиндексированные ссылки и
     # возвращаем управление; полный медленный режим остаётся для мониторинга.
     if fast:
+        # Главный JSON-каталог раньше был ошибочно доступен только медленному
+        # фоновому режиму. После смены IP пользовательский поиск проверял старый
+        # mobile API (404/429), но даже не пробовал рабочий webJSON.
+        try:
+            web_json_items = _try_avito_web_json(1)
+        except Exception as exc:
+            web_json_items = []
+            print(f"  [Авито fast webJSON] {str(exc)[:60]}")
+        if web_json_items:
+            print(f"  [Авито fast webJSON] {len(web_json_items)} объявлений")
+            return web_json_items
         try:
             indexed = _try_yandex_snippets(1, max_seconds=6, max_results=12)
         except Exception as exc:
@@ -13368,7 +13468,10 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         analysis_line = ""
         reserve_line = ""
         _lvl_now = str(item.get("_market_lvl") or "")
-        _trusted_market_levels = {"avito", "drom", "autoru", "near", "bracket", "medium", "wide", "model"}
+        _trusted_market_levels = {
+            "avito", "drom", "autoru", "near", "bracket", "medium",
+            "wide", "model", "brandyear", "brand",
+        }
         if _lvl_now and _lvl_now not in _trusted_market_levels:
             _clear_market_fields(item)
         market = item.get("_market_price", 0)
@@ -13390,7 +13493,10 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                 market_note = " Auto.ru" + market_note
             elif item.get("_market_lvl") == "model":
                 market_note = " грубо" + market_note
-            if pct >= 5:
+            elif item.get("_market_lvl") in {"brandyear", "brand"}:
+                market_note = " ориентир" + market_note
+            _rough_market = item.get("_market_lvl") in {"brandyear", "brand"}
+            if pct >= 5 and not _rough_market:
                 # Дешевле рынка
                 price_line += f"  🔻 рынок{market_note} ~{market:,} ₽ (-{_pct_text}%)".replace(",", " ")
                 if _is_junk:
@@ -14219,11 +14325,21 @@ async def do_search_for_user(uid: int, reply_to):
         print(f"  [рынок] Авито-референс: {len(_ref_items)} объявлений → считаем рыночную цену")
         suitable = rank_by_market_price(suitable, ref_items=_ref_items, avito_only_median=True)
     else:
-        _market_ref_items = [
+        _current_market_refs = [
             i for i in suitable
             if (i.get("source", "") or "").lower() in {"drom", "autoru", "youla", "yula"}
             and int(i.get("_price_int") or 0) > 0
         ]
+        # Для редких моделей добавляем только сравнительные цены из свежих
+        # региональных кэшей. Эти записи не попадают в выдачу пользователю.
+        _market_ref_items = []
+        _market_seen_urls: set[str] = set()
+        for _ref in _current_market_refs + _cached_market_reference_items():
+            _url = _norm_url(_ref.get("url", ""))
+            if not _url or _url in _market_seen_urls:
+                continue
+            _market_seen_urls.add(_url)
+            _market_ref_items.append(_ref)
         print(
             f"  [рынок] резервный эталон: {len(_market_ref_items)} объявлений "
             f"Дром/Auto.ru/Юла"
