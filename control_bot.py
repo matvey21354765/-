@@ -1804,6 +1804,18 @@ def scrape_drom(region: str, pages: int = 15, price_min: int = 0, price_max: int
 
     results = []
     today = datetime.date.today()
+    # Для страниц выдачи Дрома обычный requests сейчас стабильнее
+    # cloudscraper и мобильного прокси: городской URL отдаёт полный SSR HTML.
+    # Держим отдельную прямую сессию, чтобы капча Авито/Auto.ru не ломала Дром.
+    direct_session = _req.Session()
+    direct_session.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "ru-RU,ru;q=0.9",
+    })
 
     # Пробуем несколько маршрутов Дрома: на Railway городской субдомен иногда
     # отдаёт пустую/защитную страницу, а auto.drom.ru/<city>/ продолжает работать.
@@ -1814,7 +1826,6 @@ def scrape_drom(region: str, pages: int = 15, price_min: int = 0, price_max: int
     _DROM_SLUG = {"mercedes": "mercedes-benz", "land rover": "land_rover", "alfa": "alfa_romeo"}
     _drom_seg = _DROM_SLUG.get(_brand_l, _brand_l) if _brand_l and _brand_l != "any" else "auto"
 
-    _drom_proxies = _avito_proxies() if AVITO_PROXIES else None
     _drom_params = {}
     if price_min > 0:
         _drom_params["minprice"] = price_min
@@ -1834,23 +1845,12 @@ def scrape_drom(region: str, pages: int = 15, price_min: int = 0, price_max: int
         best_html = ""
         try:
             for url, params in candidates:
-                r = session.get(url, params=params, timeout=7)
+                r = direct_session.get(url, params=params, timeout=7)
                 html = r.text
                 if len(html) > len(best_html):
                     best_html = html
                 if "bulls-list_bull" in html or "data-ftid=\"bull_title\"" in html:
                     return html
-            if _drom_proxies:
-                import requests as _rq_d
-                for url, params in candidates:
-                    _r2 = _rq_d.get(url, params=params, timeout=7, proxies=_drom_proxies,
-                        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                                 "Accept-Language": "ru-RU,ru;q=0.9"})
-                    html = _r2.text
-                    if len(html) > len(best_html):
-                        best_html = html
-                    if "bulls-list_bull" in html or "data-ftid=\"bull_title\"" in html:
-                        return html
             return best_html
         except Exception as e:
             print(f"  [Дром {region}] стр.{p}: {str(e)[:50]}")
