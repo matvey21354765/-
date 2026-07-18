@@ -195,11 +195,11 @@ _last_ip_rotate_ts = 0.0
 # IP, но чистые РФ SOCKS5/резидентные IP обычно пропускает. Формат каждого:
 #   socks5://user:pass@host:port  (или http://...). Список через запятую в
 #   переменной AUTORU_PROXIES; ниже — дефолтные РФ-прокси пользователя.
-# Не подставляем старый встроенный пул: когда AUTORU_PROXIES не задан,
-# Auto.ru должен использовать тот же актуальный мобильный mproxy.site, что и
-# Avito. Раньше эти устаревшие адреса имели приоритет и рабочий прокси
-# пользователя вообще не использовался.
-_AUTORU_PROXIES_DEFAULT: list[str] = []
+_AUTORU_PROXIES_DEFAULT = [
+    "socks5://hZoswb:f3dQZ6@193.187.144.4:8000",
+    "socks5://GPL5xs:mM4GHB@193.31.101.131:9928",
+    "socks5://xZ6MTF:9XEWJd@217.29.53.106:10248",
+]
 AUTORU_PROXIES = [
     p.strip() for p in os.getenv("AUTORU_PROXIES", ",".join(_AUTORU_PROXIES_DEFAULT)).split(",")
     if p.strip()
