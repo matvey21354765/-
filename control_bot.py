@@ -171,6 +171,18 @@ if not AVITO_PROXIES and not _proxy_auth_failed:
     AVITO_PROXY_PASS = "EDNyWFYHyH2Y"
     print("[прокси] ⚡ Используем встроенный прокси mproxy.site")
 
+
+def _active_proxy_url() -> str:
+    """Единый актуальный URL прокси из AVITO_PROXY_*.
+
+    PROXY_URL может остаться со старым логином после замены учётных данных.
+    Все источники должны использовать уже разобранную конфигурацию, иначе часть
+    запросов идёт через новый логин, а часть — через устаревший.
+    """
+    proxy = _avito_proxies() or {}
+    return proxy.get("https") or proxy.get("http") or ""
+
+
 _proxy_display = f"{AVITO_PROXY_PROTOCOL}://{AVITO_PROXY_HOST}:{AVITO_PROXY_PORT}" if AVITO_PROXIES else None
 print(f"[прокси] {'✅ ' + _proxy_display if _proxy_display else '❌ не настроен — Авито/Auto.ru могут не работать'}")
 
@@ -2192,6 +2204,121 @@ def _autoru_parse_html(text: str, today) -> list[dict]:
     return results
 
 
+def _autoru_search_fallback(
+    region: str,
+    price_min: int,
+    price_max: int,
+    brand: str = "",
+    limit: int = 12,
+) -> list[dict]:
+    """Быстрый резерв Auto.ru через уже проиндексированные страницы поиска.
+
+    Используется только когда Auto.ru закрыл каталог капчей. Возвращает реальные
+    ссылки auto.ru с ценой из сниппета, чтобы источник не становился полностью
+    пустым из-за одного заблокированного IP.
+    """
+    try:
+        import requests as _req
+        import urllib.parse as _up
+    except ImportError:
+        return []
+
+    region_name = REGIONS.get(region, region)
+    brand_hint = f" {brand}" if brand and brand != "any" else ""
+    price_hint = f" до {price_max} руб" if price_max < 99_000_000 else ""
+    query = f"site:auto.ru/cars/used/sale/ {region_name}{brand_hint}{price_hint}"
+    try:
+        response = _req.get(
+            "https://html.duckduckgo.com/html/",
+            params={"q": query, "kl": "ru-ru"},
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                ),
+                "Accept-Language": "ru-RU,ru;q=0.9",
+            },
+            timeout=7,
+        )
+        if response.status_code != 200 or len(response.text) < 1_000:
+            return []
+        text = response.text
+        for _ in range(2):
+            decoded = _up.unquote(text)
+            if decoded == text:
+                break
+            text = decoded
+    except Exception as exc:
+        print(f"  [Auto.ru fallback] поиск: {str(exc)[:60]}")
+        return []
+
+    url_re = re.compile(
+        r"https?://(?:www\.)?auto\.ru/cars/used/sale/"
+        r"[a-z0-9_.%-]+/[a-z0-9_.%-]+/[a-z0-9_.%-]+/?",
+        re.I,
+    )
+    price_re = re.compile(
+        r"(\d{1,3}(?:[ \u00a0]\d{3})+|\d{4,9})\s*(?:₽|руб\.?)",
+        re.I,
+    )
+    year_re = re.compile(r"\b(19[5-9]\d|20[012]\d)\b")
+    today = datetime.date.today()
+    out: list[dict] = []
+    seen_urls: set[str] = set()
+
+    for match in url_re.finditer(text):
+        url = match.group(0).split("?")[0].rstrip("/") + "/"
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+        # У DDG цена и описание идут после целевой ссылки. Не захватываем текст
+        # предыдущего результата или сам поисковый запрос с верхней ценой.
+        context = html.unescape(re.sub(
+            r"\s+",
+            " ",
+            re.sub(r"<[^>]+>", " ", text[match.start():match.end() + 1_200]),
+        )).strip()
+        price = 0
+        for price_match in price_re.finditer(context):
+            value = int(re.sub(r"\D", "", price_match.group(1)) or 0)
+            if 10_000 <= value <= 99_000_000:
+                price = value
+                break
+        if not price or not (price_min <= price <= price_max):
+            continue
+
+        path = url.split("/sale/", 1)[-1].strip("/").split("/")
+        brand_name = path[0].replace("_", " ").title() if path else "Авто"
+        model_name = path[1].replace("_", " ").title() if len(path) > 1 else ""
+        year_match = year_re.search(context)
+        year = int(year_match.group(1)) if year_match else 0
+        title = " ".join(x for x in (brand_name, model_name, str(year or "")) if x).strip()
+        item = {
+            "source": "autoru",
+            "title": title or "Автомобиль с Auto.ru",
+            "price": f"{price:,} ₽".replace(",", " "),
+            "_price_int": price,
+            "url": url,
+            "_photo_url": "",
+            "description": context[:400],
+            "seller": "Auto.ru",
+            "_year": year,
+            "_days_on_site": 0,
+            "_photos": 0,
+            "mileage": 0,
+            "date": str(today),
+        }
+        item["_hot_score"] = hot_score(item)
+        out.append(item)
+        if len(out) >= limit:
+            break
+
+    if out:
+        print(f"  [Auto.ru fallback] {len(out)} объявлений из поискового индекса")
+    return out
+
+
 def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: int = 99_000_000, brand: str = "") -> list[dict]:
     slug = AUTORU_SLUGS.get(region, region)
     geo_ids = AUTORU_GEO_IDS.get(region, [])
@@ -2596,6 +2723,8 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
         results.extend(batch)
         time.sleep(0.05)
 
+    if not results:
+        results = _autoru_search_fallback(region, price_min, price_max, brand=brand)
     print(f"  [Auto.ru] итого {len(results)} объявлений")
     return results
 
@@ -3343,16 +3472,7 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Accept-Language": "ru-RU,ru;q=0.9",
     })
-    _TG_FALLBACK_PROXY = "http://ilkin:EDNyWFYHyH2Y@mproxy.site:16358"
-    _tg_proxy_url = (
-        os.getenv("PROXY_URL") or
-        os.getenv("AVITO_PROXY_URL") or
-        (
-            f"http://{AVITO_PROXY_USER}:{AVITO_PROXY_PASS}@{AVITO_PROXY_HOST}:{AVITO_PROXY_PORT}"
-            if AVITO_PROXY_HOST and AVITO_PROXY_USER and not _proxy_auth_failed
-            else ""
-        ) or _TG_FALLBACK_PROXY
-    )
+    _tg_proxy_url = _active_proxy_url()
     if _tg_proxy_url and "__agentproxy" not in _tg_proxy_url:
         session.proxies.update({"http": _tg_proxy_url, "https": _tg_proxy_url})
 
@@ -4071,18 +4191,8 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Accept-Language": "ru-RU,ru;q=0.9",
     })
-    # Русский резидентный прокси — обходит блокировки VK API / Yandex / DDG
-    # Хардкодим как абсолютный fallback чтобы работало даже без Railway env vars
-    _VK_FALLBACK_PROXY = "http://ilkin:EDNyWFYHyH2Y@mproxy.site:16358"
-    _vk_proxy_url = (
-        os.getenv("PROXY_URL") or
-        os.getenv("AVITO_PROXY_URL") or
-        (
-            f"http://{AVITO_PROXY_USER}:{AVITO_PROXY_PASS}@{AVITO_PROXY_HOST}:{AVITO_PROXY_PORT}"
-            if AVITO_PROXY_HOST and AVITO_PROXY_USER and not _proxy_auth_failed
-            else ""
-        ) or _VK_FALLBACK_PROXY
-    )
+    # Русский резидентный прокси — тот же единый актуальный конфиг, что у Авито.
+    _vk_proxy_url = _active_proxy_url()
     if _vk_proxy_url and "__agentproxy" not in _vk_proxy_url:
         session.proxies.update({"http": _vk_proxy_url, "https": _vk_proxy_url})
 
@@ -7441,7 +7551,11 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                 pass
         return []
 
-    def _try_yandex_snippets(p: int) -> list[dict]:
+    def _try_yandex_snippets(
+        p: int,
+        max_seconds: int = 45,
+        max_results: int = 40,
+    ) -> list[dict]:
         """
         Ищет объявления Авито через DuckDuckGo (html + lite).
         Стратегия основана на живых тестах с Railway IP:
@@ -7469,7 +7583,11 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             r'(?:https?://)?(?:www\.|m\.)?avito\.ru/[a-z0-9_.-]+/avtomobili/[a-z0-9_.%-]*\d{6,}',
             re.I,
         )
-        _price_re = re.compile(r"(\d[\d\s]{2,8})\s*(?:₽|тыс\.?\s*р(?:уб)?\.?|руб\.?)", re.I)
+        _price_re = re.compile(
+            r"(\d{1,3}(?:[ \u00a0]\d{3})+|\d{3,9})"
+            r"\s*(?:₽|тыс\.?\s*р(?:уб)?\.?|руб\.?)",
+            re.I,
+        )
         _price_json_re = re.compile(r'["\']?price["\']?\s*[=:]\s*["\']?(\d{4,9})(?:\.0+)?["\']?', re.I)
         _year_re = re.compile(r"\b(19[5-9]\d|20[012]\d)\b")
 
@@ -7564,8 +7682,10 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             for url in found_urls:
                 clean_url = url.split("?")[0]
                 pos = ctx_html.find(url)
-                context = ctx_html[max(0, pos-400):pos+800] if pos >= 0 else ""
-                context_clean = re.sub(r"<[^>]+>", " ", context)
+                # Сниппет результата находится после ссылки. Текст до неё может
+                # содержать цену предыдущей машины или верхнюю границу запроса.
+                context = ctx_html[pos:pos+1_200] if pos >= 0 else ""
+                context_clean = html.unescape(re.sub(r"<[^>]+>", " ", context))
                 context_clean = re.sub(r"&[a-z]+;", " ", context_clean)
                 context_clean = re.sub(r"\s+", " ", context_clean).strip()
 
@@ -7673,14 +7793,15 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         elif price_max <= 600_000:
             _year_hint = " 2012 2016 2018"
 
-        # Тайм-лимит для всего DDG-цикла: максимум 45 секунд
-        _ddg_deadline = time.time() + 45
+        # Полный режим собирает широкий рынок, быстрый fallback ограничивается
+        # несколькими секундами, чтобы не задерживать ответ пользователю.
+        _ddg_deadline = time.time() + max_seconds
 
         for brand in _all_brands:
-            if len(results_out) >= 40:
+            if len(results_out) >= max_results:
                 break
             if time.time() > _ddg_deadline:
-                print(f"  [ddg] тайм-лимит 45с, остановка на {brand}")
+                print(f"  [ddg] тайм-лимит {max_seconds}с, остановка на {brand}")
                 break
             q = f"site:avito.ru/{slug}/avtomobili {brand}{_price_hint}{_year_hint}"
             # Пауза 2-3.5с между запросами — достаточно для обхода DDG rate-limit,
@@ -7844,6 +7965,25 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             _ex.shutdown(wait=False)
 
     results = list(merged.values())
+
+    # Мобильный прокси может быть корректно авторизован, но его текущий IP уже
+    # заблокирован Авито кодами 403/429. В этом случае не возвращаем пустоту:
+    # берём короткий срез реальных ссылок Авито из поискового индекса.
+    if not results and _use_proxy and not _proxy_auth_failed:
+        try:
+            indexed = _try_yandex_snippets(1, max_seconds=10, max_results=12)
+        except Exception as exc:
+            indexed = []
+            print(f"  [Авито fallback] поиск: {str(exc)[:60]}")
+        for item in indexed:
+            url = item.get("url", "")
+            key = _listing_key(url)
+            if url and key and key not in _seen_keys:
+                _seen_keys.add(key)
+                merged[url] = item
+        results = list(merged.values())
+        if results:
+            print(f"  [Авито fallback] {len(results)} объявлений из поискового индекса")
 
     # Если прокси сломан (407) и ничего не нашли — перезапускаем без прокси
     if not results and _proxy_auth_failed and _use_proxy:
