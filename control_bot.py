@@ -8079,12 +8079,20 @@ def _avito_api_fetch(
                         _tag_pw = "прокси" if _proxy_cfg else "напрямую"
                         try:
                             # Прогрев через главную Авито (НЕ через город — ред. по IP-гео ломает регион)
-                            page.goto("https://www.avito.ru/", timeout=15000, wait_until="domcontentloaded")
-                            page.wait_for_timeout(1500)
+                            page.goto(
+                                "https://www.avito.ru/",
+                                timeout=8000 if fast else 15000,
+                                wait_until="domcontentloaded",
+                            )
+                            page.wait_for_timeout(1000 if fast else 1500)
                         except Exception:
                             pass
-                        page.goto(full_url, timeout=30000, wait_until="networkidle")
-                        page.wait_for_timeout(2000)
+                        page.goto(
+                            full_url,
+                            timeout=22000 if fast else 30000,
+                            wait_until="domcontentloaded" if fast else "networkidle",
+                        )
+                        page.wait_for_timeout(3000 if fast else 2000)
                         html = page.content()
                         ctx.close()
                         _has_data = '__NEXT_DATA__' in html or '"urlPath"' in html or '"canonicalUrl"' in html
@@ -8166,7 +8174,24 @@ def _avito_api_fetch(
         for _tag, _px in _proxy_order:
             # Маркер ROTATE — сменить IP прокси и использовать его же
             if _px == "ROTATE":
-                if not _rotate_proxy_ip(min_interval=0):
+                _rotated = _rotate_proxy_ip(min_interval=20)
+                if not _rotated and fast and AVITO_PROXY_ROTATE_URL:
+                    # Другой поиск мог только что сменить общий мобильный IP.
+                    # Не выбрасываем retry: ждём остаток обязательного окна
+                    # провайдера и выполняем ротацию один раз.
+                    _rotation_wait = max(
+                        0.0,
+                        20.5 - (time.time() - _last_ip_rotate_ts),
+                    )
+                    if 0 < _rotation_wait <= 20.5:
+                        print(
+                            f"  [Авито] ждём ротацию нового IP "
+                            f"{_rotation_wait:.1f}с"
+                        )
+                        time.sleep(_rotation_wait)
+                        _rotated = _rotate_proxy_ip(min_interval=20)
+                if not _rotated:
+                    print(f"  [Авито webJSON {_tag}] ротация недоступна")
                     continue  # ротация недоступна — пропускаем
                 _px = (_avito_proxy_variants(prefer_socks=False) or [None])[0]
             try:
@@ -8444,6 +8469,7 @@ def _avito_api_fetch(
         _year_re = re.compile(r"\b(19[5-9]\d|20[012]\d)\b")
 
         def _extract_avito_urls(html: str) -> list[str]:
+            import base64
             import urllib.parse
             found = []
             seen = set()
@@ -8460,6 +8486,24 @@ def _avito_api_fetch(
             for _ in range(2):
                 for m in _avito_url_re.finditer(decoded):
                     _add(m.group(0))
+                # Bing прячет целевой URL в параметре u=a1<base64url>.
+                # Декодируем его до общего regex, иначе в HTML виден только
+                # bing.com/ck/a и рабочее объявление теряется.
+                for encoded in re.findall(
+                    r"[?&](?:amp;)?u=(a1[A-Za-z0-9_-]{16,})",
+                    decoded,
+                ):
+                    try:
+                        payload = encoded[2:]
+                        payload += "=" * (-len(payload) % 4)
+                        target = base64.urlsafe_b64decode(payload).decode(
+                            "utf-8",
+                            errors="ignore",
+                        )
+                        for match in _avito_url_re.finditer(target):
+                            _add(match.group(0))
+                    except Exception:
+                        continue
                 try:
                     nxt = urllib.parse.unquote(decoded)
                 except Exception:
@@ -8491,13 +8535,18 @@ def _avito_api_fetch(
         def _is_blocked(text: str, status: int) -> bool:
             return status == 202 or status == 429 or (status != 200) or len(text) < 2000
 
+        _ddg_globally_blocked = False
+
         def _fetch_ddg(q: str, use_lite: bool, proxy=None) -> str:
             """Один запрос к DDG html или lite. Возвращает HTML или ''."""
+            nonlocal _ddg_globally_blocked
             url = "https://lite.duckduckgo.com/lite/" if use_lite else "https://html.duckduckgo.com/html/"
             params = {"q": q, "kl": "ru-ru"}
             try:
                 r = _rq.get(url, params=params, headers=headers, timeout=10, proxies=proxy)
                 if _is_blocked(r.text, r.status_code):
+                    if r.status_code in (202, 429):
+                        _ddg_globally_blocked = True
                     return ""
                 return r.text
             except Exception:
@@ -8505,23 +8554,34 @@ def _avito_api_fetch(
 
         def _fetch_alt_engines(q: str, proxy=None) -> str:
             """Резервные поисковики, когда DDG отдаёт 202/429.
-            Mojeek, Brave, Startpage — все индексируют avito.ru и имеют
+            Bing, Mojeek и Brave индексируют avito.ru и имеют
             отдельные счётчики лимитов, поэтому повышают надёжность."""
             engines = [
+                (
+                    "https://www.bing.com/search",
+                    {"q": q, "cc": "RU", "setlang": "ru"},
+                ),
                 ("https://www.mojeek.com/search", {"q": q}),
                 ("https://search.brave.com/search", {"q": q, "source": "web"}),
-                ("https://lite.duckduckgo.com/lite/", {"q": q, "kl": "ru-ru"}),
             ]
             for eurl, eparams in engines:
                 try:
                     r = _rq.get(eurl, params=eparams, headers=headers, timeout=10, proxies=proxy)
-                    if r.status_code == 200 and "avito.ru" in r.text and len(r.text) > 2000:
+                    # Строка avito.ru почти всегда отражается из самого запроса.
+                    # Это не результат поиска. Принимаем страницу только если
+                    # из неё извлечена хотя бы одна реальная ссылка объявления.
+                    if (
+                        r.status_code == 200
+                        and len(r.text) > 2000
+                        and _extract_avito_urls(r.text)
+                    ):
                         return r.text
                 except Exception:
                     continue
             return ""
 
         def _parse_serp(serp_html: str) -> list[dict]:
+            import base64 as _base64_module
             import html as _html_module
             import urllib.parse as _upq
             out: list[dict] = []
@@ -8535,9 +8595,21 @@ def _avito_api_fetch(
             for url in found_urls:
                 clean_url = url.split("?")[0]
                 pos = ctx_html.find(url)
+                if pos < 0:
+                    listing_id = re.search(r"(\d{6,})$", clean_url)
+                    if listing_id:
+                        pos = ctx_html.find(listing_id.group(1))
+                if pos < 0:
+                    encoded_url = (
+                        "a1"
+                        + _base64_module.urlsafe_b64encode(
+                            clean_url.encode("utf-8")
+                        ).decode("ascii").rstrip("=")
+                    )
+                    pos = ctx_html.find(encoded_url[:40])
                 # Сниппет результата находится после ссылки. Текст до неё может
                 # содержать цену предыдущей машины или верхнюю границу запроса.
-                context = ctx_html[pos:pos+1_200] if pos >= 0 else ""
+                context = ctx_html[pos:pos+1_600] if pos >= 0 else ""
                 context_clean = _html_module.unescape(re.sub(r"<[^>]+>", " ", context))
                 context_clean = re.sub(r"&[a-z]+;", " ", context_clean)
                 context_clean = re.sub(r"\s+", " ", context_clean).strip()
@@ -8593,13 +8665,22 @@ def _avito_api_fetch(
                     if photo_url.startswith("//"):
                         photo_url = "https:" + photo_url
 
+                context_lower = context_clean.lower()
+                days_on_site = (
+                    0 if "сегодня" in context_lower
+                    else 1 if "вчера" in context_lower
+                    else 2
+                )
                 out.append({
                     "source": "avito", "title": title,
                     "price": f"{price_int:,} ₽".replace(",", " ") if price_int else "цена не указана",
                     "_price_int": price_int, "url": clean_url, "_photo_url": photo_url,
                     "description": context_clean[:400], "seller": "Авито (частник)",
-                    "_year": year, "_days_on_site": 0, "_photos": 1 if photo_url else 0,
+                    "_year": year, "_days_on_site": days_on_site,
+                    "_date_known": days_on_site < 2,
+                    "_photos": 1 if photo_url else 0,
                     "mileage": 0, "_avito_price_filtered": False,
+                    "_indexed_fallback": True,
                 })
             return out
 
@@ -8657,12 +8738,14 @@ def _avito_api_fetch(
                 print(f"  [ddg] тайм-лимит {max_seconds}с, остановка на {brand}")
                 break
             q = f"site:avito.ru/{slug}/avtomobili {brand}{_price_hint}{_year_hint}"
-            # Пауза 2-3.5с между запросами — достаточно для обхода DDG rate-limit,
-            # но не так долго, чтобы вылезти за тайм-лимит scrape_avito.
-            time.sleep(random.uniform(2.0, 3.5))
             proxy = proxy_pool[proxy_idx % len(proxy_pool)]
-            html = _fetch_ddg(q, use_lite=lite_flag, proxy=proxy)
-            if not html:
+            html = ""
+            if not _ddg_globally_blocked:
+                # Пауза нужна только DDG. После первого 202/429 сразу переходим
+                # к независимым индексам и не теряем по 4-5 секунд на каждую марку.
+                time.sleep(random.uniform(2.0, 3.5))
+                html = _fetch_ddg(q, use_lite=lite_flag, proxy=proxy)
+            if not html and not _ddg_globally_blocked:
                 # 202/блок — сразу пробуем через прокси и другой endpoint
                 proxy_idx += 1
                 proxy = proxy_pool[proxy_idx % len(proxy_pool)]
@@ -8735,6 +8818,29 @@ def _avito_api_fetch(
         if browser_html_items:
             print(f"  [Авито fast cffi] {len(browser_html_items)} объявлений")
             return browser_html_items
+        # RSS использует отдельный формат ответа и иногда остаётся доступным,
+        # когда webJSON/HTML уже получили 403/439.
+        try:
+            rss_items = _try_avito_rss(1)
+        except Exception as exc:
+            rss_items = []
+            print(f"  [Авито fast RSS] {str(exc)[:60]}")
+        if rss_items:
+            print(f"  [Авито fast RSS] {len(rss_items)} объявлений")
+            return rss_items
+        # Последний прямой маршрут — настоящий Chromium через уже обновлённый
+        # мобильный IP. Он выполняет JS-антибот, чего requests/curl_cffi не умеют.
+        try:
+            playwright_items = _try_playwright(1)
+        except Exception as exc:
+            playwright_items = []
+            print(f"  [Авито fast Playwright] {str(exc)[:60]}")
+        if playwright_items:
+            print(
+                f"  [Авито fast Playwright] "
+                f"{len(playwright_items)} объявлений"
+            )
+            return playwright_items
         try:
             indexed = _try_yandex_snippets(
                 1,
@@ -9112,12 +9218,21 @@ def scrape_avito(
                 print(f"  [Авито] пусто → устаревший кэш: {len(items)} шт")
 
     # Фильтр по бюджету в памяти.
-    # С рабочим прокси Авито отдаёт реальные цены, поэтому объявления БЕЗ цены —
-    # это мусор (DDG/устаревший кэш). Требуем цену и строгое попадание в бюджет.
+    # Каталог через прокси отдаёт реальные цены — для него требуем строгое
+    # попадание в бюджет. Реальную индексную ссылку без цены сохраняем: общий
+    # поиск ниже попробует загрузить её страницу и заполнить цену. Если антибот
+    # снова закроет страницу, карточка честно уйдёт вниз с «цена не указана».
     if AVITO_PROXIES:
         out = [
             it for it in items
-            if it.get("_price_int") and (price_min <= it["_price_int"] <= price_max)
+            if (
+                it.get("_price_int")
+                and (price_min <= it["_price_int"] <= price_max)
+            )
+            or (
+                it.get("_indexed_fallback")
+                and not it.get("_price_int")
+            )
         ]
     else:
         # Без прокси цену часто не достать — пропускаем безценовые как кандидатов.
@@ -9211,7 +9326,12 @@ def _scrape_avito_raw(
     # Перед сетевым скрейпом (кэш-промах) меняем IP прокси на свежий, чтобы
     # обойти rate-limit Авито (429). min_interval=8с — каждый поиск стартует
     # со свежим IP, но защита от слишком частой ротации (лимиты провайдера).
-    if AVITO_PROXIES and not _proxy_auth_failed:
+    # В быстром пользовательском поиске сначала проверяем текущий IP. Если он
+    # уже в лимите Авито, webJSON сам дождётся разрешённого окна ротации,
+    # сменит IP и повторит запрос. Прежняя ротация прямо здесь запускалась за
+    # несколько секунд до повторной и из-за 20-секундного лимита провайдера
+    # делала обязательный retry недоступным.
+    if AVITO_PROXIES and not _proxy_auth_failed and not fast:
         _rotate_proxy_ip(min_interval=8)
 
     try:
@@ -14644,7 +14764,14 @@ async def do_search_for_user(uid: int, reply_to):
     suitable = [
         i for i in items
         if not i.get("_market_ref_only")
-        and (i.get("_price_int") or parse_price(i.get("price", "")))
+        and (
+            i.get("_price_int")
+            or parse_price(i.get("price", ""))
+            or (
+                i.get("source") == "avito"
+                and i.get("_indexed_fallback")
+            )
+        )
         and in_price_range(i, pmin, pmax)
         and i.get("url")
         and i["url"] not in skipped_norm
