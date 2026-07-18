@@ -156,6 +156,34 @@ def _avito_proxies() -> "dict[str, str] | None":
     return AVITO_PROXIES
 
 
+def _avito_proxy_variants(prefer_socks: bool = False) -> "list[dict[str, str]]":
+    """HTTP и SOCKS5 одного мобильного прокси.
+
+    mobileproxy.space публикует оба протокола на одном адресе/порту. Иногда
+    HTTP CONNECT обрывается, хотя SOCKS5 на том же IP продолжает работать.
+    Auto.ru по-прежнему использует основной HTTP, а Avito может переключиться.
+    """
+    primary = _avito_proxies()
+    if not primary:
+        return []
+    url = primary.get("https") or primary.get("http") or ""
+    if not url or "://" not in url:
+        return [primary]
+    scheme, rest = url.split("://", 1)
+    alternate_scheme = "http" if scheme.lower().startswith("socks") else "socks5h"
+    alternate_url = f"{alternate_scheme}://{rest}"
+    alternate = {"http": alternate_url, "https": alternate_url}
+    variants = [alternate, primary] if prefer_socks else [primary, alternate]
+    out: list[dict[str, str]] = []
+    seen_urls: set[str] = set()
+    for candidate in variants:
+        candidate_url = candidate.get("https") or candidate.get("http") or ""
+        if candidate_url and candidate_url not in seen_urls:
+            seen_urls.add(candidate_url)
+            out.append(candidate)
+    return out
+
+
 def _mark_proxy_failed(err: str) -> None:
     """Помечаем прокси как сломанный при ошибке 407."""
     global _proxy_auth_failed
@@ -265,7 +293,7 @@ def _rotate_proxy_ip(min_interval: float = 50.0, force: bool = False) -> bool:
             try:
                 response = _rq.get(
                     "https://api.ipify.org",
-                    proxies=_avito_proxies() or {},
+                    proxies=(_avito_proxy_variants(prefer_socks=True) or [{}])[0],
                     timeout=6,
                 )
                 value = (response.text or "").strip()
@@ -7133,7 +7161,8 @@ def _avito_api_fetch(
         # Если прокси работает — идём через прокси первым (прямой IP даёт 339KB скелет-страницу)
         _attempts = []
         if AVITO_PROXIES and not _proxy_auth_failed:
-            _attempts.append(_avito_proxies())
+            _variants = _avito_proxy_variants(prefer_socks=True)
+            _attempts.extend(_variants[:1] if fast else _variants)
         # В пользовательском поиске Railway-IP заведомо заблокирован. Один
         # браузерный запрос через мобильный прокси полезнее, чем несколько
         # долгих попыток по обоим каналам.
@@ -7895,7 +7924,11 @@ def _avito_api_fetch(
         # При firewall/429 на прокси — меняем IP и пробуем прокси ещё раз (до 2 ротаций).
         _proxy_order = []
         if AVITO_PROXIES and not _proxy_auth_failed:
-            _proxy_order.append(("прокси", _avito_proxies()))
+            _preferred_variants = _avito_proxy_variants(prefer_socks=True)
+            for _variant in (_preferred_variants[:1] if fast else _preferred_variants):
+                _variant_url = _variant.get("https") or _variant.get("http") or ""
+                _variant_tag = "прокси-socks" if _variant_url.startswith("socks") else "прокси-http"
+                _proxy_order.append((_variant_tag, _variant))
             if not fast:
                 _proxy_order.append(("прокси-rot1", "ROTATE"))  # сменить IP и повторить
                 _proxy_order.append(("прокси-rot2", "ROTATE"))
@@ -7905,7 +7938,7 @@ def _avito_api_fetch(
             if _px == "ROTATE":
                 if not _rotate_proxy_ip(min_interval=0):
                     continue  # ротация недоступна — пропускаем
-                _px = _avito_proxies()
+                _px = (_avito_proxy_variants(prefer_socks=True) or [None])[0]
             try:
                 r = _req.get(
                     "https://www.avito.ru/web/1/js/items",
