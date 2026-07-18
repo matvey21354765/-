@@ -89,6 +89,7 @@ _free_proxy_cache_time: float = 0.0
 # Прокси, проверенные и реально дающие доступ к Авито (обновляются при старте и каждые 15 мин)
 _working_free_proxies: list[str] = []
 _working_free_proxies_time: float = 0.0
+_paid_proxy_healthy: bool | None = None
 
 # ── Резидентный прокси для запросов к Авито (опционально) ────────
 # Поддерживает HTTP и SOCKS5. AVITO_PROXY_AUTH=ip — авторизация по IP (без логина).
@@ -2883,11 +2884,14 @@ def scrape_autoru(
     _ar_mobile_proxy_variants = (
         _avito_proxy_variants(prefer_socks=False) if AVITO_PROXIES else []
     )
-    if not _ar_mobile_proxy_variants:
-        _ar_mobile_proxy_variants = [{}]
+    # Последняя попытка — прямой Railway-канал. Обычно Яндекс показывает
+    # капчу, но после смены egress-IP он периодически отдаёт каталог.
+    _ar_mobile_proxy_variants.append({})
 
     def _ar_proxy_tag(proxy: dict[str, str]) -> str:
         value = proxy.get("https") or proxy.get("http") or ""
+        if not value:
+            return "direct"
         return "socks" if value.startswith("socks") else "http"
 
     # Марка для Auto.ru: путь /cars/lada/used/ и catalog_filter mark=LADA
@@ -8556,6 +8560,17 @@ def _avito_api_fetch(
         if web_json_items:
             print(f"  [Авито fast webJSON] {len(web_json_items)} объявлений")
             return web_json_items
+        # Если платный маршрут временно недоступен, используем только адреса,
+        # которые фоновая проверка уже подтвердила на настоящем каталоге Авито.
+        if _working_free_proxies:
+            try:
+                free_proxy_items = _try_free_proxies(1)
+            except Exception as exc:
+                free_proxy_items = []
+                print(f"  [Авито fast free-proxy] {str(exc)[:60]}")
+            if free_proxy_items:
+                print(f"  [Авито fast free-proxy] {len(free_proxy_items)} объявлений")
+                return free_proxy_items
         # HTTP 439 — антибот Авито для JSON без браузерных cookies. Раньше после
         # него быстрый поиск сразу уходил в поисковые индексы и возвращал пусто.
         # Делаем одну ограниченную Chrome-сессию через мобильный прокси:
@@ -16669,9 +16684,14 @@ async def _proxy_warmup_loop() -> None:
     Если настроен платный мобильный прокси — бесплатные не нужны (Авито ходит
     через мобильный, а у Auto.ru есть свой РФ-пул AUTORU_PROXIES), поэтому
     тяжёлый прогрев (80 запросов к Авито) пропускаем, чтобы не мешать поиску."""
-    if AVITO_PROXIES:
+    if AVITO_PROXIES and _paid_proxy_healthy is not False:
         print("  [прокси-прогрев] платный прокси активен — прогрев бесплатных отключён")
         return
+    if AVITO_PROXIES:
+        print(
+            "  [прокси-прогрев] платный прокси не прошёл проверку — "
+            "включаю резервный РФ-пул"
+        )
     loop = asyncio.get_running_loop()
     while True:
         try:
@@ -16682,7 +16702,7 @@ async def _proxy_warmup_loop() -> None:
 
 
 async def main():
-    global BOT_USERNAME, _registry_dirty
+    global BOT_USERNAME, _registry_dirty, _paid_proxy_healthy
     logging.basicConfig(level=logging.WARNING)
     _load_avito_cache()
     _load_price_history()
@@ -16780,6 +16800,7 @@ async def main():
             _avito_startup_url = _avito_startup_proxy.get("https") or _avito_startup_proxy.get("http") or ""
             _avito_startup_proto = _avito_startup_url.split("://", 1)[0] if "://" in _avito_startup_url else AVITO_PROXY_PROTOCOL
             r = _rq.get("https://api.ipify.org", proxies=_avito_startup_proxy, timeout=10)
+            _paid_proxy_healthy = r.status_code == 200 and bool((r.text or "").strip())
             print(f"  [прокси {_avito_startup_proto}] ✅ работает, IP: {r.text.strip()}")
             # Сразу проверяем доступ к Авито
             try:
@@ -16794,6 +16815,7 @@ async def main():
             # (см. ниже; сначала — самопроверка РФ-прокси для Auto.ru)
             pass
         except Exception as ep:
+            _paid_proxy_healthy = False
             print(f"  [прокси] ❌ {ep}")
 
     # Самопроверка РФ-прокси для Auto.ru — сразу видно в логах, пробивают ли
