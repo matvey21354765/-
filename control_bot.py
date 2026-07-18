@@ -40,6 +40,17 @@ def _parse_admin_ids() -> set[int]:
     return ids
 
 ADMIN_IDS = _parse_admin_ids()
+YOOMONEY_WALLET = os.getenv("YOOMONEY_WALLET", "").strip()
+SUPPORT_URL = os.getenv("SUPPORT_URL", "https://t.me/durunegonim").strip()
+
+
+def _support_url() -> str:
+    """Рабочая ссылка на поддержку с резервом на Telegram администратора."""
+    if SUPPORT_URL:
+        return SUPPORT_URL
+    if ADMIN_IDS:
+        return f"tg://user?id={next(iter(ADMIN_IDS))}"
+    return ""
 
 
 def _deploy_revision() -> str:
@@ -821,7 +832,20 @@ def _sanitize_social_price(item: dict) -> None:
     item["_price_int"] = 0
     item["price"] = "цена не указана"
     item["_no_price"] = True
-    for key in ("_market_price", "_savings_pct", "_market_lvl", "_market_n", "_below_market"):
+    _clear_market_fields(item)
+
+
+def _clear_market_fields(item: dict) -> None:
+    """Удаляет старый результат анализа рынка, не затрагивая само объявление."""
+    for key in (
+        "_market_price",
+        "_savings_pct",
+        "_market_lvl",
+        "_market_n",
+        "_below_market",
+        "_market_mileage_factor",
+        "_deal_score",
+    ):
         item.pop(key, None)
 
 
@@ -8793,6 +8817,7 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
         [KeyboardButton(text="🆕 Новые сегодня"), KeyboardButton(text="🎯 Следить за маркой")],
         [KeyboardButton(text="🔔 Уведомления"), KeyboardButton(text="🚗 Мой гараж")],
         [KeyboardButton(text="💼 Мои сделки"), KeyboardButton(text="⚙️ Настройки")],
+        [KeyboardButton(text="💎 Купить подписку"), KeyboardButton(text="🛟 Поддержка")],
         [KeyboardButton(text="❓ Помощь")],
         [KeyboardButton(text="🤝 Пригласить друга"), KeyboardButton(text="♻️ Сбросить историю")],
     ],
@@ -8807,6 +8832,7 @@ _ADMIN_KEYBOARD = ReplyKeyboardMarkup(
         [KeyboardButton(text="🆕 Новые сегодня"), KeyboardButton(text="🎯 Следить за маркой")],
         [KeyboardButton(text="🔔 Уведомления"), KeyboardButton(text="🚗 Мой гараж")],
         [KeyboardButton(text="💼 Мои сделки"), KeyboardButton(text="⚙️ Настройки")],
+        [KeyboardButton(text="💎 Купить подписку"), KeyboardButton(text="🛟 Поддержка")],
         [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="❓ Помощь")],
         [KeyboardButton(text="🤝 Пригласить друга"), KeyboardButton(text="♻️ Сбросить историю")],
     ],
@@ -10057,21 +10083,21 @@ def _subscription_offer_keyboard() -> InlineKeyboardMarkup:
 
 
 @dp.message(Command("buy", "subscribe"))
+@dp.message(F.text == "💎 Купить подписку")
 async def cmd_buy_subscription(msg: Message):
     """Показывает пользователю рабочие ссылки оплаты подписки."""
     import urllib.parse
 
-    wallet = os.getenv("YOOMONEY_WALLET", "").strip()
     plans = (
         ("Неделя", 349),
         ("Месяц", 999),
     )
     rows = []
-    if wallet:
+    if YOOMONEY_WALLET:
         for plan_name, amount in plans:
             label = f"sub_{msg.from_user.id}_{amount}_{int(time.time())}"
             pay_url = "https://yoomoney.ru/quickpay/confirm.xml?" + urllib.parse.urlencode({
-                "receiver": wallet,
+                "receiver": YOOMONEY_WALLET,
                 "quickpay-form": "button",
                 "paymentType": "AC",
                 "sum": str(amount),
@@ -10082,15 +10108,12 @@ async def cmd_buy_subscription(msg: Message):
                 text=f"💳 {plan_name} — {amount} ₽",
                 url=pay_url,
             )])
-    else:
-        support_url = os.getenv("SUPPORT_URL", "").strip()
-        if not support_url and ADMIN_IDS:
-            support_url = f"tg://user?id={next(iter(ADMIN_IDS))}"
-        if support_url:
-            rows.append([InlineKeyboardButton(
-                text="☎️ Написать для покупки",
-                url=support_url,
-            )])
+    support_url = _support_url()
+    if support_url:
+        rows.append([InlineKeyboardButton(
+            text="🛟 Поддержка / отправить чек",
+            url=support_url,
+        )])
 
     text = (
         "💎 <b>Подписка PerekupDrive</b>\n\n"
@@ -10100,6 +10123,22 @@ async def cmd_buy_subscription(msg: Message):
     )
     await msg.answer(
         text,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows) if rows else None,
+    )
+
+
+@dp.message(Command("support"))
+@dp.message(F.text == "🛟 Поддержка")
+async def cmd_support(msg: Message):
+    """Открывает прямой контакт поддержки из команды или главного меню."""
+    support_url = _support_url()
+    rows = []
+    if support_url:
+        rows.append([InlineKeyboardButton(text="🛟 Написать в поддержку", url=support_url)])
+    await msg.answer(
+        "🛟 <b>Поддержка PerekupDrive</b>\n\n"
+        "Напиши сюда, если поиск не отвечает, не прошла оплата или нужно активировать подписку.",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows) if rows else None,
     )
@@ -14318,6 +14357,8 @@ async def cmd_help(msg: Message):
         "🚗 *Мой гараж* — сохранённые объявления (кнопка ⭐ Сохранить)\n"
         "💼 *Мои сделки* — учёт купленных авто: вложено / продано / *прибыль / ROI / срок продажи* (для перекупа)\n"
         "⚙️ *Настройки* — город, бюджет, категория, площадки\n"
+        "💎 *Купить подписку* — выбрать тариф и перейти к оплате\n"
+        "🛟 *Поддержка* — написать администратору или отправить чек\n"
         "♻️ *Сбросить историю* — показать все объявления заново\n\n"
         "📌 *Значки на карточке:*\n"
         "🚦 Светофор выгодности: 🟢 выгодно и чисто · 🟡 нейтрально · 🔴 дорого/риск\n"
@@ -15874,6 +15915,7 @@ async def main():
         BotCommand(command="new",       description="🆕 Новые сегодня"),
         BotCommand(command="favorites", description="🚗 Мой гараж"),
         BotCommand(command="buy",       description="💎 Купить подписку"),
+        BotCommand(command="support",   description="🛟 Поддержка"),
         BotCommand(command="invite",    description="🤝 Пригласить друга"),
         BotCommand(command="settings",  description="⚙️ Настройки"),
         BotCommand(command="help",      description="❓ Помощь"),
