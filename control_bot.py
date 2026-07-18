@@ -9904,6 +9904,55 @@ def _subscription_offer_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+@dp.message(Command("buy", "subscribe"))
+async def cmd_buy_subscription(msg: Message):
+    """Показывает пользователю рабочие ссылки оплаты подписки."""
+    import urllib.parse
+
+    wallet = os.getenv("YOOMONEY_WALLET", "").strip()
+    plans = (
+        ("Неделя", 349),
+        ("Месяц", 999),
+    )
+    rows = []
+    if wallet:
+        for plan_name, amount in plans:
+            label = f"sub_{msg.from_user.id}_{amount}_{int(time.time())}"
+            pay_url = "https://yoomoney.ru/quickpay/confirm.xml?" + urllib.parse.urlencode({
+                "receiver": wallet,
+                "quickpay-form": "button",
+                "paymentType": "AC",
+                "sum": str(amount),
+                "label": label,
+                "targets": f"Подписка PerekupDrive: {plan_name}",
+            })
+            rows.append([InlineKeyboardButton(
+                text=f"💳 {plan_name} — {amount} ₽",
+                url=pay_url,
+            )])
+    else:
+        support_url = os.getenv("SUPPORT_URL", "").strip()
+        if not support_url and ADMIN_IDS:
+            support_url = f"tg://user?id={next(iter(ADMIN_IDS))}"
+        if support_url:
+            rows.append([InlineKeyboardButton(
+                text="☎️ Написать для покупки",
+                url=support_url,
+            )])
+
+    text = (
+        "💎 <b>Подписка PerekupDrive</b>\n\n"
+        "📅 Неделя — 349 ₽\n"
+        "🗓 Месяц — 999 ₽\n\n"
+        "Выбери тариф и после оплаты отправь чек администратору."
+    )
+    await msg.answer(
+        text,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows) if rows else None,
+    )
+
+
 async def _access_expiry_notice_loop():
     await asyncio.sleep(90)
     print("  [access] планировщик уведомлений о сроке доступа запущен")
@@ -15672,6 +15721,7 @@ async def main():
         BotCommand(command="search",    description="🔍 Найти авто"),
         BotCommand(command="new",       description="🆕 Новые сегодня"),
         BotCommand(command="favorites", description="🚗 Мой гараж"),
+        BotCommand(command="buy",       description="💎 Купить подписку"),
         BotCommand(command="invite",    description="🤝 Пригласить друга"),
         BotCommand(command="settings",  description="⚙️ Настройки"),
         BotCommand(command="help",      description="❓ Помощь"),
