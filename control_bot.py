@@ -239,13 +239,25 @@ def _rotate_proxy_ip(min_interval: float = 50.0, force: bool = False) -> bool:
         return False
     import time as _t
     now = _t.time()
-    if not force and now - _last_ip_rotate_ts < min_interval:
+    # Провайдер запрещает частые смены и отвечает "Already change IP".
+    # Даже вызовы с min_interval=0 не должны спамить endpoint подряд.
+    effective_interval = min_interval if force else max(min_interval, 20.0)
+    if now - _last_ip_rotate_ts < effective_interval:
         return False
     _last_ip_rotate_ts = now
     try:
         import requests as _rq
         r = _rq.get(AVITO_PROXY_ROTATE_URL, timeout=15)
-        ok = r.status_code == 200
+        body = (r.text or "").strip()
+        body_lower = body.lower()
+        rejected = (
+            "already change ip" in body_lower
+            or '"status":"err"' in body_lower.replace(" ", "")
+            or '"status": "err"' in body_lower
+            or body_lower.startswith("<!doctype html")
+            or body_lower.startswith("<html")
+        )
+        ok = r.status_code == 200 and not rejected
         print(f"[прокси] ротация IP: HTTP {r.status_code} {'✅' if ok else '❌'} {r.text[:80]!r}")
         if ok:
             _t.sleep(2)  # даём прокси применить новый IP
