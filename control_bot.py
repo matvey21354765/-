@@ -195,11 +195,10 @@ _last_ip_rotate_ts = 0.0
 # IP, но чистые РФ SOCKS5/резидентные IP обычно пропускает. Формат каждого:
 #   socks5://user:pass@host:port  (или http://...). Список через запятую в
 #   переменной AUTORU_PROXIES; ниже — дефолтные РФ-прокси пользователя.
-_AUTORU_PROXIES_DEFAULT = [
-    "socks5://hZoswb:f3dQZ6@193.187.144.4:8000",
-    "socks5://GPL5xs:mM4GHB@193.31.101.131:9928",
-    "socks5://xZ6MTF:9XEWJd@217.29.53.106:10248",
-]
+# Не используем старые встроенные адреса: если AUTORU_PROXIES не задан,
+# Auto.ru проходит через тот же актуальный мобильный прокси, что и Авито.
+# Иначе устаревший пул имеет приоритет и рабочий AVITO_PROXY_* игнорируется.
+_AUTORU_PROXIES_DEFAULT: list[str] = []
 AUTORU_PROXIES = [
     p.strip() for p in os.getenv("AUTORU_PROXIES", ",".join(_AUTORU_PROXIES_DEFAULT)).split(",")
     if p.strip()
@@ -455,7 +454,7 @@ def _env_int(name: str, default: int, min_value: int = 1) -> int:
 SEARCH_COOLDOWN_SEC = 45
 SEARCH_SOURCE_TIMEOUT_SEC = _env_int("SEARCH_SOURCE_TIMEOUT_SEC", 30)
 SEARCH_CRITICAL_SOURCE_GRACE_SEC = _env_int("SEARCH_CRITICAL_SOURCE_GRACE_SEC", 25)
-SEARCH_AUTORU_DEADLINE_SEC = _env_int("SEARCH_AUTORU_DEADLINE_SEC", 26)
+SEARCH_AUTORU_DEADLINE_SEC = _env_int("SEARCH_AUTORU_DEADLINE_SEC", 45)
 SEARCH_PRICE_FILL_LIMIT = _env_int("SEARCH_PRICE_FILL_LIMIT", 3, 0)
 SEARCH_PRICE_FILL_TIMEOUT_SEC = _env_int("SEARCH_PRICE_FILL_TIMEOUT_SEC", 4)
 SEARCH_DETAIL_CHECK_LIMIT = _env_int("SEARCH_DETAIL_CHECK_LIMIT", 0, 0)
