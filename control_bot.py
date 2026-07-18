@@ -295,7 +295,7 @@ def _rotate_proxy_ip(min_interval: float = 50.0, force: bool = False) -> bool:
                 response = _rq.get(
                     "https://api.ipify.org",
                     proxies=(_avito_proxy_variants(prefer_socks=False) or [{}])[0],
-                    timeout=6,
+                    timeout=3,
                 )
                 value = (response.text or "").strip()
                 if response.status_code == 200 and re.fullmatch(
@@ -308,7 +308,7 @@ def _rotate_proxy_ip(min_interval: float = 50.0, force: bool = False) -> bool:
             return ""
 
         ip_before = _proxy_ip()
-        r = _rq.get(AVITO_PROXY_ROTATE_URL, timeout=15)
+        r = _rq.get(AVITO_PROXY_ROTATE_URL, timeout=10)
         body = (r.text or "").strip()
         body_lower = body.lower()
         explicitly_rejected = (
@@ -320,13 +320,18 @@ def _rotate_proxy_ip(min_interval: float = 50.0, force: bool = False) -> bool:
             body_lower.startswith("<!doctype html")
             or body_lower.startswith("<html")
         )
-        ok = r.status_code == 200 and not explicitly_rejected and not html_response
+        # mobileproxy.space обычно отвечает HTML даже при успешной смене IP.
+        # В US East проверочный ipify периодически недоступен, поэтому раньше
+        # валидный HTTP 200 ошибочно считался неудачей и Avito даже не повторял
+        # запрос через новый IP. Ответ провайдера без явной ошибки достаточен
+        # для retry; внешний IP ниже проверяем только для диагностики.
+        ok = r.status_code == 200 and not explicitly_rejected
         ip_after = ""
         if r.status_code == 200 and not explicitly_rejected:
             # mobileproxy.space может вернуть обычную HTML-страницу даже при
             # успешной смене. Поэтому HTML сам по себе не ошибка: ждём применения
             # и подтверждаем результат по фактическому выходному IP прокси.
-            for _ in range(3):
+            for _ in range(1):
                 _t.sleep(1.5)
                 ip_after = _proxy_ip()
                 if ip_before and ip_after and ip_after != ip_before:
@@ -2356,6 +2361,92 @@ AUTORU_GEO_IDS = {
 
 # ── Парсер Auto.ru ──────────────────────────────────────────────
 
+def _normalize_autoru_photo_url(value) -> str:
+    """Возвращает пригодный URL фотографии Auto.ru из src/srcset/JSON.
+
+    Auto.ru использует несколько вариантов разметки: обычный ``src``,
+    ``source[srcset]``, JSON со слешами ``\\/`` и строки, где URL окружён
+    дескрипторами размера. Старый разбор принимал первый ``img`` (нередко
+    data-заглушку) и из-за этого карточка уходила в Telegram без фотографии.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return ""
+    import html as _html
+
+    raw = (
+        _html.unescape(value.strip().strip("\"'"))
+        .replace("\\/", "/")
+        .replace("\\u002F", "/")
+        .replace("\\u002f", "/")
+    )
+    candidates = []
+    for part in raw.split(","):
+        candidate = part.strip().split()[0] if part.strip() else ""
+        if candidate.startswith("url("):
+            candidate = candidate[4:].rstrip(")").strip("\"'")
+        candidates.append(candidate)
+    candidates.extend(
+        match.group(0)
+        for match in re.finditer(
+            r"(?:https?:)?//[^\"'<>\s,]+",
+            raw,
+            re.I,
+        )
+    )
+    for candidate in candidates:
+        if candidate.startswith("//"):
+            candidate = "https:" + candidate
+        lower = candidate.lower()
+        if not candidate.startswith(("http://", "https://")):
+            continue
+        if any(
+            blocked in lower
+            for blocked in (
+                "placeholder", "noimage", "no-image", "/stub", "favicon",
+                "/logo", "/icon", "default_image", "data:image",
+            )
+        ):
+            continue
+        if (
+            "avatars.mds.yandex.net" in lower
+            or "autoru.naydex.net" in lower
+            or "s.auto.ru" in lower
+            or (".auto.ru/" in lower and any(x in lower for x in ("/image", "/photo", "/media")))
+        ):
+            return candidate
+    return ""
+
+
+def _autoru_photo_from_value(value, depth: int = 0) -> str:
+    """Ищет первую реальную фотографию Auto.ru в произвольном JSON-объекте."""
+    if depth > 10 or value is None:
+        return ""
+    if isinstance(value, str):
+        return _normalize_autoru_photo_url(value)
+    if isinstance(value, list):
+        for element in value:
+            photo = _autoru_photo_from_value(element, depth + 1)
+            if photo:
+                return photo
+        return ""
+    if not isinstance(value, dict):
+        return ""
+    for key in (
+        "1200x900", "832x624", "456x342", "320x240",
+        "src", "url", "original", "srcset", "data-src", "data-srcset",
+    ):
+        if key in value:
+            photo = _autoru_photo_from_value(value.get(key), depth + 1)
+            if photo:
+                return photo
+    for nested in value.values():
+        if isinstance(nested, (dict, list)):
+            photo = _autoru_photo_from_value(nested, depth + 1)
+            if photo:
+                return photo
+    return ""
+
+
 def _autoru_parse_offers(data: dict, today) -> list[dict]:
     """Парсит список объявлений из JSON Auto.ru."""
     results = []
@@ -2434,14 +2525,7 @@ def _autoru_parse_offers(data: dict, today) -> list[dict]:
             if str(seller_type).upper() == "COMMERCIAL":
                 continue
             photos_list = offer.get("photos", []) or offer.get("images", []) or []
-            photo_url = ""
-            if photos_list:
-                first_photo = photos_list[0] if isinstance(photos_list[0], dict) else {}
-                sizes = first_photo.get("sizes", {}) or {}
-                photo_url = (
-                    sizes.get("1200x900") or sizes.get("832x624")
-                    or sizes.get("456x342") or first_photo.get("url", "") or ""
-                )
+            photo_url = _autoru_photo_from_value(photos_list)
             days = 0
             additional = offer.get("additional_info", {}) or offer.get("additionalInfo", {}) or {}
             date_str = additional.get("creation_date", "") or additional.get("creationDate", "")
@@ -2589,15 +2673,19 @@ def _autoru_parse_html(text: str, today) -> list[dict]:
                 title = f"{title}, {year}"
 
             photo_url = ""
-            if image:
-                photo_url = (
-                    image.get("src") or image.get("data-src")
-                    or image.get("data-lazy-src") or ""
-                )
-                if not photo_url and image.get("srcset"):
-                    photo_url = image.get("srcset", "").split(",")[0].strip().split(" ")[0]
-            if photo_url.startswith("//"):
-                photo_url = "https:" + photo_url
+            # В новой выдаче Auto.ru реальный URL часто находится не в первом
+            # img[src], а в picture/source[srcset] или ленивом data-srcset.
+            # Проверяем все варианты и игнорируем data-заглушки.
+            for media in card.select("picture source, img"):
+                for attr in (
+                    "src", "data-src", "data-lazy-src", "data-original",
+                    "srcset", "data-srcset",
+                ):
+                    photo_url = _normalize_autoru_photo_url(media.get(attr, ""))
+                    if photo_url:
+                        break
+                if photo_url:
+                    break
 
             days = 0
             text_lower = card_text.lower()
@@ -2625,7 +2713,11 @@ def _autoru_parse_html(text: str, today) -> list[dict]:
             results.append(item)
             dom_seen.add(item_url)
         if results:
-            print(f"  [Auto.ru] DOM HTML: {len(results)} объявлений")
+            with_photo = sum(1 for item in results if item.get("_photo_url"))
+            print(
+                f"  [Auto.ru] DOM HTML: {len(results)} объявлений, "
+                f"с фото={with_photo}"
+            )
     except Exception as exc:
         print(f"  [Auto.ru] DOM parse: {str(exc)[:80]}")
 
@@ -2733,9 +2825,7 @@ def _autoru_parse_html(text: str, today) -> list[dict]:
                 ctx,
                 anchor,
             )
-        photo_url = photo_m.group(1).replace("\\/", "/") if photo_m else ""
-        if photo_url.startswith("//"):
-            photo_url = "https:" + photo_url
+        photo_url = _normalize_autoru_photo_url(photo_m.group(1)) if photo_m else ""
         desc_m = _nearest_match(r'"description"\s*:\s*"([^"]{10,800})"', ctx, anchor)
         desc = _json_text(desc_m.group(1))[:400] if desc_m else ""
         date_m = _nearest_match(
@@ -2763,7 +2853,11 @@ def _autoru_parse_html(text: str, today) -> list[dict]:
         seen_urls.add(item_url)
 
     if results:
-        print(f"  [Auto.ru] regex HTML: {len(results)} объявлений")
+        with_photo = sum(1 for item in results if item.get("_photo_url"))
+        print(
+            f"  [Auto.ru] regex HTML: {len(results)} объявлений, "
+            f"с фото={with_photo}"
+        )
     return results
 
 
@@ -8846,41 +8940,58 @@ def _avito_api_fetch(
         if browser_html_items:
             print(f"  [Авито fast cffi] {len(browser_html_items)} объявлений")
             return browser_html_items
-        # RSS использует отдельный формат ответа и иногда остаётся доступным,
-        # когда webJSON/HTML уже получили 403/439.
-        try:
-            rss_items = _try_avito_rss(1)
-        except Exception as exc:
-            rss_items = []
-            print(f"  [Авито fast RSS] {str(exc)[:60]}")
-        if rss_items:
-            print(f"  [Авито fast RSS] {len(rss_items)} объявлений")
-            return rss_items
-        # Последний прямой маршрут — настоящий Chromium через уже обновлённый
-        # мобильный IP. Он выполняет JS-антибот, чего requests/curl_cffi не умеют.
-        try:
-            playwright_items = _try_playwright(1)
-        except Exception as exc:
-            playwright_items = []
-            print(f"  [Авито fast Playwright] {str(exc)[:60]}")
-        if playwright_items:
+        # RSS дважды ждёт по 8 секунд и на текущем Avito стабильно возвращает
+        # таймаут. Настоящий Chromium и областной индекс независимы, поэтому
+        # запускаем их одновременно: раньше они шли последовательно (22+36с)
+        # и Avito завершался уже после общего лимита пользовательского поиска.
+        def _fast_playwright() -> list[dict]:
+            try:
+                return _try_playwright(1)
+            except Exception as exc:
+                print(f"  [Авито fast Playwright] {str(exc)[:60]}")
+                return []
+
+        def _fast_index() -> list[dict]:
+            try:
+                return _try_yandex_snippets(
+                    1,
+                    max_seconds=SEARCH_AVITO_INDEX_TIMEOUT_SEC,
+                    max_results=48,
+                )
+            except Exception as exc:
+                print(f"  [Авито fast fallback] {str(exc)[:60]}")
+                return []
+
+        from concurrent.futures import ThreadPoolExecutor as _FastPool
+
+        fallback_batches: list[list[dict]] = []
+        with _FastPool(max_workers=2) as executor:
+            futures = [
+                executor.submit(_fast_playwright),
+                executor.submit(_fast_index),
+            ]
+            for future in futures:
+                try:
+                    batch = future.result()
+                except Exception:
+                    batch = []
+                if batch:
+                    fallback_batches.append(batch)
+
+        merged: list[dict] = []
+        seen_fallback_urls: set[str] = set()
+        for batch in fallback_batches:
+            for item in batch:
+                item_url = item.get("url", "")
+                if item_url and item_url not in seen_fallback_urls:
+                    seen_fallback_urls.add(item_url)
+                    merged.append(item)
+        if merged:
             print(
-                f"  [Авито fast Playwright] "
-                f"{len(playwright_items)} объявлений"
+                f"  [Авито fast fallback] {len(merged)} объявлений "
+                f"(Chromium + областной индекс)"
             )
-            return playwright_items
-        try:
-            indexed = _try_yandex_snippets(
-                1,
-                max_seconds=SEARCH_AVITO_INDEX_TIMEOUT_SEC,
-                max_results=48,
-            )
-        except Exception as exc:
-            indexed = []
-            print(f"  [Авито fast fallback] {str(exc)[:60]}")
-        if indexed:
-            print(f"  [Авито fast fallback] {len(indexed)} объявлений из поискового индекса")
-        return indexed
+        return merged
 
     # free_proxies даёт настоящую страницу Авито (десятки объявлений), DuckDuckGo —
     # ещё несколько. Запускаем ВСЁ параллельно и СЛИВАЕМ результаты, а не берём
@@ -12773,8 +12884,8 @@ def _fetch_and_check(url: str, source: str) -> dict | None:
                 return False
             if src == "avito" and "img.avito.st" not in lo and "images.avito.st" not in lo:
                 return False
-            # Auto.ru фото всегда на avatars.mds.yandex.net — остальное (логотипы, иконки) отклоняем
-            if src == "autoru" and "avatars.mds.yandex.net" not in lo:
+            # Auto.ru перенёс часть фотографий на новые CDN и в srcset.
+            if src == "autoru" and not _normalize_autoru_photo_url(u):
                 return False
             return True
 
@@ -12791,13 +12902,15 @@ def _fetch_and_check(url: str, source: str) -> dict | None:
         if not photo_url and source == "autoru":
             _am = re.search(r'"(?:1200x900|832x624|456x342)"\s*:\s*"((?:https?:)?//[^"]{15,})"', text)
             if _am:
-                raw = _am.group(1).replace("\\/", "/")
-                photo_url = ("https:" + raw) if raw.startswith("//") else raw
+                photo_url = _normalize_autoru_photo_url(_am.group(1))
             if not photo_url:
-                _am2 = re.search(r'"((?:https?:)?//avatars\.mds\.yandex\.net/[^"]{10,})"', text)
+                _am2 = re.search(
+                    r'"((?:https?:)?//(?:avatars\.mds\.yandex\.net|autoru\.naydex\.net|s\.auto\.ru)/[^"]{10,})"',
+                    text,
+                    re.I,
+                )
                 if _am2:
-                    raw = _am2.group(1).replace("\\/", "/")
-                    photo_url = ("https:" + raw) if raw.startswith("//") else raw
+                    photo_url = _normalize_autoru_photo_url(_am2.group(1))
             # Описание для Auto.ru из JSON
             if not description:
                 _dm = re.search(r'"description"\s*:\s*"((?:\\.|[^"\\]){20,400})"', text)
@@ -12807,17 +12920,30 @@ def _fetch_and_check(url: str, source: str) -> dict | None:
         if not photo_url:
             _cdn_kw_by_src = {
                 "avito":  ["img.avito.st", "images.avito.st"],
-                "autoru": ["avatars.mds.yandex", "s.auto.ru"],
+                "autoru": ["avatars.mds.yandex", "autoru.naydex.net", "s.auto.ru"],
                 "drom":   ["drom.ru/photos", "dromcdn"],
             }
             _cdn_kw = _cdn_kw_by_src.get(source, ["img.avito.st", "images.avito.st",
                                                     "avatars.mds.yandex", "dromcdn"])
-            for img in soup.select("img[src]"):
-                src_attr = img.get("src", "")
-                if src_attr.startswith("http") and any(x in src_attr for x in _cdn_kw):
-                    if _ok_photo(src_attr, source):
-                        photo_url = src_attr
+            for img in soup.select("picture source, img"):
+                for attr in ("src", "data-src", "data-lazy-src", "srcset", "data-srcset"):
+                    src_attr = img.get(attr, "")
+                    candidates = [src_attr]
+                    if source == "autoru":
+                        candidates = [_normalize_autoru_photo_url(src_attr)]
+                    for candidate in candidates:
+                        if (
+                            candidate
+                            and candidate.startswith("http")
+                            and any(x in candidate for x in _cdn_kw)
+                            and _ok_photo(candidate, source)
+                        ):
+                            photo_url = candidate
+                            break
+                    if photo_url:
                         break
+                if photo_url:
+                    break
         if photo_url and not photo_url.startswith("http"):
             photo_url = "https:" + photo_url if photo_url.startswith("//") else ""
 
@@ -13132,8 +13258,15 @@ async def _ensure_photo(item: dict) -> None:
             if not photo:
                 _am = re.search(r'"(?:1200x900|832x624|456x342)"\s*:\s*"((?:https?:)?//[^"]{15,})"', text)
                 if _am:
-                    raw = _am.group(1).replace("\\/", "/")
-                    photo = ("https:" + raw) if raw.startswith("//") else raw
+                    photo = _normalize_autoru_photo_url(_am.group(1))
+            if not photo:
+                _am = re.search(
+                    r'((?:https?:)?//(?:avatars\.mds\.yandex\.net|autoru\.naydex\.net|s\.auto\.ru)/[^"\'<\s]{10,})',
+                    text.replace("\\/", "/"),
+                    re.I,
+                )
+                if _am:
+                    photo = _normalize_autoru_photo_url(_am.group(1))
 
         # 3b. Regex fallback — любой avito.st URL (широкий паттерн)
         if need_photo and not photo:
@@ -13236,22 +13369,39 @@ async def _ensure_photo(item: dict) -> None:
                 _autoru_hdr = dict(_HDR)
                 _autoru_hdr["Referer"] = "https://auto.ru/"
                 _autoru_hdr["Accept"] = "text/html,application/xhtml+xml,*/*;q=0.9"
-                # Пробуем через прокси (РФ IP) — Auto.ru блокирует зарубежные серверы
-                try:
-                    from curl_cffi import requests as _cffi
-                    r = _cffi.get(url, impersonate="chrome124", timeout=15,
-                                  headers=_autoru_hdr, proxies=_avito_proxies())
-                    if r.status_code == 200 and len(r.text) > 5000:
-                        p, d, pi = _extract_from_page(r.text)
-                        if p: photo = p
-                        if d: desc = d
-                        if pi: price_int = pi
-                except Exception:
-                    pass
-                if not photo and not desc:
+                # Сначала РФ-прокси, затем прямой маршрут. У карточки уже может
+                # быть описание из каталога, но это не повод прекращать поиск
+                # фотографии: прежнее условие ``not photo and not desc`` именно
+                # так теряло изображения.
+                _routes = [_avito_proxies()]
+                if _routes[0]:
+                    _routes.append(None)
+                for _route in _routes:
                     try:
-                        r = _req.get(url, timeout=10, headers=_autoru_hdr,
-                                     proxies=_avito_proxies())
+                        from curl_cffi import requests as _cffi
+                        r = _cffi.get(
+                            url,
+                            impersonate="chrome124",
+                            timeout=5,
+                            headers=_autoru_hdr,
+                            proxies=_route,
+                        )
+                        if r.status_code == 200 and len(r.text) > 5000:
+                            p, d, pi = _extract_from_page(r.text)
+                            if p: photo = p
+                            if d: desc = d
+                            if pi: price_int = pi
+                    except Exception:
+                        pass
+                    if photo and (desc or not need_desc):
+                        break
+                if not photo:
+                    try:
+                        r = _req.get(
+                            url,
+                            timeout=5,
+                            headers=_autoru_hdr,
+                        )
                         if r.status_code == 200:
                             p, d, pi = _extract_from_page(r.text)
                             if p: photo = p
@@ -14136,27 +14286,40 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                     else:
                         _referer = "https://www.avito.ru/"
                         _px = _avito_proxies()
-                    # 1. curl_cffi — обходит блокировку CDN с Railway IP
-                    try:
-                        from curl_cffi import requests as _cffi
-                        r = _cffi.get(photo_url, impersonate="chrome124", timeout=5,
-                                      headers={"Referer": _referer},
-                                      proxies=_px)
-                        if r.status_code == 200 and len(r.content) > 3_000:
-                            return r.content
-                    except Exception:
-                        pass
-                    # 2. Обычный requests с Referer
-                    try:
-                        r2 = _req.get(photo_url, timeout=5, headers={
-                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                            "Referer": _referer,
-                            "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-                        }, proxies=_px)
-                        if r2.status_code == 200 and len(r2.content) > 3_000:
-                            return r2.content
-                    except Exception:
-                        pass
+                    # CDN фотографий обычно доступен напрямую. При временном
+                    # обрыве мобильного прокси прежний код повторял оба запроса
+                    # через тот же нерабочий маршрут и отправлял карточку без
+                    # изображения. Теперь после прокси обязательно пробуем
+                    # прямой Railway-маршрут.
+                    routes = [_px]
+                    if _px:
+                        routes.append(None)
+                    for route in routes:
+                        # 1. curl_cffi — корректный TLS-fingerprint Chrome
+                        try:
+                            from curl_cffi import requests as _cffi
+                            r = _cffi.get(
+                                photo_url,
+                                impersonate="chrome124",
+                                timeout=5,
+                                headers={"Referer": _referer},
+                                proxies=route,
+                            )
+                            if r.status_code == 200 and len(r.content) > 3_000:
+                                return r.content
+                        except Exception:
+                            pass
+                        # 2. Обычный requests с Referer
+                        try:
+                            r2 = _req.get(photo_url, timeout=5, headers={
+                                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                                "Referer": _referer,
+                                "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                            }, proxies=route)
+                            if r2.status_code == 200 and len(r2.content) > 3_000:
+                                return r2.content
+                        except Exception:
+                            pass
                     return None
 
                 content = await loop.run_in_executor(None, _download_photo)
@@ -14204,8 +14367,11 @@ async def send_batch(chat_id: int, uid: int, offset: int):
             return
         async with sem:
             try:
-                # Дром требует больше времени (cloudscraper + 3 fallback)
-                _t = 14 if it.get("source") == "drom" else 6
+                # Auto.ru сначала открывает карточку через российский прокси.
+                # Шесть секунд были меньше собственного сетевого таймаута и
+                # гарантированно обрывали дозагрузку отсутствующего srcset.
+                _source = it.get("source")
+                _t = 14 if _source == "drom" else (13 if _source == "autoru" else 6)
                 await asyncio.wait_for(_ensure_photo(it), timeout=_t)
             except Exception:
                 pass
