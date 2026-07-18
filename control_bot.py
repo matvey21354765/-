@@ -13,6 +13,7 @@ import datetime
 import subprocess
 import hashlib
 import html
+import threading
 from pathlib import Path
 import os
 
@@ -492,6 +493,7 @@ DEFAULT_TRIAL_DAYS = _env_int("DEFAULT_TRIAL_DAYS", 7, 1)
 _last_search_at: dict[int, float] = {}
 _SOURCE_RESULT_CACHE_TTL_SEC = 15 * 60
 _source_result_cache: dict[tuple[str, str], tuple[float, list[dict]]] = {}
+_AUTORU_BACKGROUND_LOCK = threading.Lock()
 
 
 def _remember_source_results(source: str, region: str, items: list[dict]) -> list[dict]:
@@ -2839,6 +2841,27 @@ def scrape_autoru(
     _remember_source_results("autoru", region, results)
     print(f"  [Auto.ru] итого {len(results)} объявлений")
     return results
+
+
+def _scrape_autoru_background(
+    region: str,
+    pages: int = 2,
+    price_min: int = 0,
+    price_max: int = 99_000_000,
+) -> list[dict]:
+    """Do not let monitor regions attack Auto.ru concurrently through one IP."""
+    if not _AUTORU_BACKGROUND_LOCK.acquire(blocking=False):
+        return _cached_source_results("autoru", region, price_min, price_max, limit=40)
+    try:
+        return scrape_autoru(
+            region,
+            pages=pages,
+            price_min=price_min,
+            price_max=price_max,
+            deadline_sec=20,
+        )
+    finally:
+        _AUTORU_BACKGROUND_LOCK.release()
 
 
 # ── Парсер Kolesa.ru ────────────────────────────────────────────
@@ -8227,6 +8250,8 @@ def _scrape_avito_direct(slug: str, pages: int, price_min: int, price_max: int, 
 _AVITO_REGION_CACHE: dict[str, tuple[float, list[dict]]] = {}
 _AVITO_REGION_CACHE_TTL = 24 * 60 * 60  # 24 часа — дольше кэш = меньше блокировок
 _AVITO_CACHE_FILE = Path("avito_region_cache.json")
+_AVITO_NETWORK_LOCK = _threading.Lock()
+_AVITO_BACKGROUND_LOCK = _threading.Lock()
 
 
 def _load_avito_cache():
@@ -8312,15 +8337,25 @@ def scrape_avito(
         print(f"  [Авито] кэш {cache_key}: {len(items)} объявлений (возраст {int(now-cached[0])}с)")
     else:
         # Скрейпим с фильтром бюджета (прокси) или без (бесплатный режим).
-        items = _scrape_avito_raw(
-            region,
-            pages=pages,
-            price_min=_scrape_pmin,
-            price_max=_scrape_pmax,
-            sort_by_date=sort_by_date,
-            brand=brand,
-            fast=fast,
-        )
+        # Все запросы Авито проходят через один мобильный IP. Параллельные
+        # обращения из поиска, прогрева и мониторинга мгновенно дают 429.
+        _got_avito_slot = _AVITO_NETWORK_LOCK.acquire(timeout=5 if fast else 1)
+        if _got_avito_slot:
+            try:
+                items = _scrape_avito_raw(
+                    region,
+                    pages=pages,
+                    price_min=_scrape_pmin,
+                    price_max=_scrape_pmax,
+                    sort_by_date=sort_by_date,
+                    brand=brand,
+                    fast=fast,
+                )
+            finally:
+                _AVITO_NETWORK_LOCK.release()
+        else:
+            items = []
+            print(f"  [Авито] сеть занята другим запросом — использую кэш {region}")
         if items:
             _AVITO_REGION_CACHE[cache_key] = (now, items)
             # Запись кэша на диск — в фоне, чтобы не держать пользователя. Делаем
@@ -8400,6 +8435,38 @@ def scrape_avito(
 
     out = [it for it in out if it.get("_price_int", 0) > 0 or _year_budget_ok(it, price_max)]
     return out
+
+
+def _scrape_avito_background(
+    region: str,
+    pages: int = 1,
+    price_min: int = 0,
+    price_max: int = 99_000_000,
+    sort_by_date: bool = True,
+) -> list[dict]:
+    """One background Avito request at a time; user searches keep priority."""
+    if not _AVITO_BACKGROUND_LOCK.acquire(blocking=False):
+        best: list[dict] = []
+        for key, (_ts, cached_items) in list(_AVITO_REGION_CACHE.items()):
+            if key == region or key.startswith(region + "_"):
+                if len(cached_items or []) > len(best):
+                    best = cached_items or []
+        return [
+            dict(it) for it in best
+            if (not it.get("_price_int"))
+            or (price_min <= int(it.get("_price_int") or 0) <= price_max)
+        ]
+    try:
+        return scrape_avito(
+            region,
+            pages=pages,
+            price_min=price_min,
+            price_max=price_max,
+            sort_by_date=sort_by_date,
+            fast=True,
+        )
+    finally:
+        _AVITO_BACKGROUND_LOCK.release()
 
 
 def _scrape_avito_raw(
@@ -11317,7 +11384,14 @@ async def cmd_new_today(msg: Message):
 
     # Запускаем Авито с сортировкой по дате
     items_avito = await loop.run_in_executor(
-        None, lambda: scrape_avito(region, pages=5, price_min=pmin, price_max=pmax, sort_by_date=True)
+        None, lambda: scrape_avito(
+            region,
+            pages=1,
+            price_min=pmin,
+            price_max=pmax,
+            sort_by_date=True,
+            fast=True,
+        )
     )
     items = list(items_avito)
 
@@ -11347,11 +11421,21 @@ async def cmd_new_today(msg: Message):
     suitable = _filter_by_category(suitable, category, brand)
     # Авито-эталон для "Сегодня": берём широкий срез без ценового фильтра
     _avito_ref_today = await loop.run_in_executor(
-        None, lambda: scrape_avito(region, pages=8, price_min=0, price_max=99_000_000)
+        None, lambda: scrape_avito(
+            region,
+            pages=1,
+            price_min=0,
+            price_max=99_000_000,
+            fast=True,
+        )
     )
     for _ar in _avito_ref_today:
         _ar["_market_ref_only"] = True
-    suitable = rank_by_market_price(suitable, ref_items=_avito_ref_today, avito_only_median=True)
+    suitable = rank_by_market_price(
+        suitable,
+        ref_items=_avito_ref_today or suitable,
+        avito_only_median=bool(_avito_ref_today),
+    )
     # Только ниже рынка
     suitable = _best_below_market_items(suitable)
 
@@ -11411,8 +11495,8 @@ async def cmd_global_search(msg: Message):
     # Запускаем все источники + TG-каналы параллельно
     scraper_map = {
         "drom":   lambda: scrape_drom(region, pages=10, price_min=pmin, price_max=pmax, brand=_br),
-        "autoru": lambda: scrape_autoru(region, pages=4, price_min=pmin, price_max=pmax, brand=_br),
-        "avito":  lambda: scrape_avito(region, pages=5, price_min=pmin, price_max=pmax, sort_by_date=True),
+        "autoru": lambda: scrape_autoru(region, pages=2, price_min=pmin, price_max=pmax, brand=_br, deadline_sec=24),
+        "avito":  lambda: scrape_avito(region, pages=1, price_min=pmin, price_max=pmax, sort_by_date=True, fast=True),
         "youla":  lambda: scrape_youla(region, pages=16, price_min=pmin, price_max=pmax, brand=_br),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
     }
@@ -11420,7 +11504,7 @@ async def cmd_global_search(msg: Message):
         (src, loop.run_in_executor(None, fn))
         for src, fn in scraper_map.items()
     ]
-    task_pairs.append(("tg", loop.run_in_executor(None, lambda: scrape_tg_channels(region, pmin, pmax))))
+    task_pairs.append(("tg", loop.run_in_executor(None, lambda: scrape_tg_channels(region, pmin, pmax, fast=True))))
     done, pending = await asyncio.wait([task for _, task in task_pairs], timeout=SEARCH_SOURCE_TIMEOUT_SEC)
     if pending:
         for task in pending:
@@ -14688,9 +14772,9 @@ def _discount_hunt_scrape_region(region: str) -> list[dict]:
     avito_ref: list[dict] = []
     try:
         if "avito" in DISCOUNT_HUNT_SOURCES:
-            avito_recent = scrape_avito(region, pages=2, sort_by_date=True) or []
+            avito_recent = _scrape_avito_background(region, pages=1, sort_by_date=True) or []
             raw.extend(avito_recent)
-            avito_ref = scrape_avito(region, pages=4, price_min=0, price_max=99_000_000) or avito_recent
+            avito_ref = avito_recent
     except Exception as e:
         print(f"  [охота] avito {region}: {str(e)[:60]}")
     try:
@@ -14700,13 +14784,17 @@ def _discount_hunt_scrape_region(region: str) -> list[dict]:
         print(f"  [охота] drom {region}: {str(e)[:60]}")
     try:
         if "autoru" in DISCOUNT_HUNT_SOURCES:
-            raw.extend(scrape_autoru(region, pages=2, price_min=0, price_max=99_000_000) or [])
+            raw.extend(_scrape_autoru_background(region, pages=2) or [])
     except Exception as e:
         print(f"  [охота] autoru {region}: {str(e)[:60]}")
     raw = [it for it in raw if it.get("url") and not is_dealer(it) and not is_not_running(it)]
     if not raw:
         return []
-    ranked = rank_by_market_price(raw, ref_items=avito_ref, avito_only_median=True)
+    ranked = rank_by_market_price(
+        raw,
+        ref_items=avito_ref or raw,
+        avito_only_median=bool(avito_ref),
+    )
     return [
         it for it in ranked
         if (it.get("_savings_pct") or 0) >= 5
@@ -15489,9 +15577,9 @@ async def _global_monitor_loop():
 
             # Скрейпим только нужные (регион, источник) параллельно
             _src_scrapers = {
-                "avito":  lambda r: scrape_avito(r, pages=3, sort_by_date=True),  # ⚡ свежие первыми
+                "avito":  lambda r: _scrape_avito_background(r, pages=1, sort_by_date=True),
                 "drom":   lambda r: scrape_drom(r, pages=3, price_min=0, price_max=99_000_000),
-                "autoru": lambda r: scrape_autoru(r, pages=3, price_min=0, price_max=99_000_000),
+                "autoru": lambda r: _scrape_autoru_background(r, pages=2),
                 "youla":  lambda r: scrape_youla(r, pages=3, price_min=0, price_max=99_000_000),
                 "vk":     lambda r: scrape_vk_groups(r, 0, 99_000_000),
                 "tg":     lambda r: scrape_tg_channels(r, 0, 99_000_000),
@@ -15809,7 +15897,11 @@ async def _warmup_cache():
             print(f"  [прогрев] обновляю {oldest_region} (возраст кэша {int(oldest_age)//60} мин)…")
             items = await loop.run_in_executor(
                 None,
-                lambda r=oldest_region: scrape_avito(r, pages=2, sort_by_date=False)
+                lambda r=oldest_region: _scrape_avito_background(
+                    r,
+                    pages=1,
+                    sort_by_date=False,
+                )
             )
             print(f"  [прогрев] {oldest_region}: {len(items)} объявлений в кэше")
         except Exception as e:
