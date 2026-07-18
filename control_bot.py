@@ -16668,12 +16668,15 @@ async def main():
     if AVITO_PROXY_HOST:
         try:
             import requests as _rq
-            r = _rq.get("https://api.ipify.org", proxies=_avito_proxies(), timeout=10)
-            print(f"  [прокси {AVITO_PROXY_PROTOCOL}] ✅ работает, IP: {r.text.strip()}")
+            _avito_startup_proxy = (_avito_proxy_variants(prefer_socks=True) or [{}])[0]
+            _avito_startup_url = _avito_startup_proxy.get("https") or _avito_startup_proxy.get("http") or ""
+            _avito_startup_proto = _avito_startup_url.split("://", 1)[0] if "://" in _avito_startup_url else AVITO_PROXY_PROTOCOL
+            r = _rq.get("https://api.ipify.org", proxies=_avito_startup_proxy, timeout=10)
+            print(f"  [прокси {_avito_startup_proto}] ✅ работает, IP: {r.text.strip()}")
             # Сразу проверяем доступ к Авито
             try:
                 ra = _rq.get("https://www.avito.ru/krasnoyarsk/avtomobili",
-                             proxies=_avito_proxies(), timeout=10,
+                             proxies=_avito_startup_proxy, timeout=10,
                              headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"})
                 has_listings = '"urlPath"' in ra.text or 'data-marker="item"' in ra.text
                 print(f"  [Авито тест] HTTP {ra.status_code}, {len(ra.text):,}б, объявления: {'✅ да' if has_listings else '❌ нет (капча/блок)'}")
