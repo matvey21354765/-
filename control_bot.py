@@ -8000,6 +8000,30 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
         and cached[1]
         and sum(1 for i in cached[1] if i.get("_price_int", 0)) < max(1, len(cached[1]) // 2)
     )
+    # Для пользовательского поиска сначала отдаём последнюю успешную пачку
+    # региона, даже если она была собрана для соседнего ценового диапазона.
+    # Общий фильтр бюджета ниже оставит только подходящие машины. Это не даёт
+    # зависшему/заблокированному прокси превратить готовый кэш в «не успел».
+    if sort_by_date and not cached:
+        regional_cached = [
+            (ts, its)
+            for key, (ts, its) in list(_AVITO_REGION_CACHE.items())
+            if (key == region or key.startswith(region + "_"))
+            and its
+            and (now - ts) < 24 * 60 * 60
+        ]
+        if regional_cached:
+            cached = max(regional_cached, key=lambda entry: entry[0])
+            _cache_ttl = 24 * 60 * 60
+            _cache_is_priceless = bool(
+                AVITO_PROXIES
+                and sum(1 for i in cached[1] if i.get("_price_int", 0))
+                < max(1, len(cached[1]) // 2)
+            )
+            print(
+                f"  [Авито] быстрый региональный кэш {region}: "
+                f"{len(cached[1])} объявлений"
+            )
     if cached and (now - cached[0]) < _cache_ttl and not _cache_is_priceless:
         items = cached[1]
         print(f"  [Авито] кэш {cache_key}: {len(items)} объявлений (возраст {int(now-cached[0])}с)")
@@ -8656,7 +8680,7 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
         [KeyboardButton(text="🆕 Новые сегодня"), KeyboardButton(text="🎯 Следить за маркой")],
         [KeyboardButton(text="🔔 Уведомления"), KeyboardButton(text="🚗 Мой гараж")],
         [KeyboardButton(text="💼 Мои сделки"), KeyboardButton(text="⚙️ Настройки")],
-        [KeyboardButton(text="❓ Помощь")],
+        [KeyboardButton(text="💎 Подписка"), KeyboardButton(text="❓ Помощь")],
         [KeyboardButton(text="🤝 Пригласить друга"), KeyboardButton(text="♻️ Сбросить историю")],
     ],
     resize_keyboard=True,
@@ -8671,6 +8695,7 @@ _ADMIN_KEYBOARD = ReplyKeyboardMarkup(
         [KeyboardButton(text="🔔 Уведомления"), KeyboardButton(text="🚗 Мой гараж")],
         [KeyboardButton(text="💼 Мои сделки"), KeyboardButton(text="⚙️ Настройки")],
         [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="❓ Помощь")],
+        [KeyboardButton(text="💎 Подписка")],
         [KeyboardButton(text="🤝 Пригласить друга"), KeyboardButton(text="♻️ Сбросить историю")],
     ],
     resize_keyboard=True,
@@ -9932,7 +9957,8 @@ def _subscription_plans_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-@dp.message(Command("subscribe"))
+@dp.message(Command("subscribe", "buy"))
+@dp.message(F.text == "💎 Подписка")
 @dp.callback_query(F.data == "subscription_plans")
 async def show_subscription_plans(event):
     text = (
@@ -15754,6 +15780,7 @@ async def main():
         BotCommand(command="search",    description="🔍 Найти авто"),
         BotCommand(command="new",       description="🆕 Новые сегодня"),
         BotCommand(command="favorites", description="🚗 Мой гараж"),
+        BotCommand(command="buy",       description="💎 Купить подписку"),
         BotCommand(command="invite",    description="🤝 Пригласить друга"),
         BotCommand(command="settings",  description="⚙️ Настройки"),
         BotCommand(command="help",      description="❓ Помощь"),
