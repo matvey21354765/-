@@ -293,7 +293,7 @@ def _rotate_proxy_ip(min_interval: float = 50.0, force: bool = False) -> bool:
             try:
                 response = _rq.get(
                     "https://api.ipify.org",
-                    proxies=(_avito_proxy_variants(prefer_socks=True) or [{}])[0],
+                    proxies=(_avito_proxy_variants(prefer_socks=False) or [{}])[0],
                     timeout=6,
                 )
                 value = (response.text or "").strip()
@@ -548,8 +548,15 @@ def _env_int(name: str, default: int, min_value: int = 1) -> int:
 
 SEARCH_COOLDOWN_SEC = 45
 SEARCH_SOURCE_TIMEOUT_SEC = _env_int("SEARCH_SOURCE_TIMEOUT_SEC", 30)
-SEARCH_CRITICAL_SOURCE_GRACE_SEC = _env_int("SEARCH_CRITICAL_SOURCE_GRACE_SEC", 25)
-SEARCH_AUTORU_DEADLINE_SEC = _env_int("SEARCH_AUTORU_DEADLINE_SEC", 45)
+# Auto.ru и Авито используют один мобильный прокси последовательно. После
+# обычных 30 секунд им нужен реальный резерв, иначе второй источник обрывается
+# уже после успешного ответа сайта, но до возврата результата в Telegram.
+SEARCH_CRITICAL_SOURCE_GRACE_SEC = max(
+    35, _env_int("SEARCH_CRITICAL_SOURCE_GRACE_SEC", 35)
+)
+SEARCH_AUTORU_DEADLINE_SEC = max(
+    30, _env_int("SEARCH_AUTORU_DEADLINE_SEC", 45)
+)
 SEARCH_PRICE_FILL_LIMIT = _env_int("SEARCH_PRICE_FILL_LIMIT", 3, 0)
 SEARCH_PRICE_FILL_TIMEOUT_SEC = _env_int("SEARCH_PRICE_FILL_TIMEOUT_SEC", 4)
 SEARCH_DETAIL_CHECK_LIMIT = max(10, _env_int("SEARCH_DETAIL_CHECK_LIMIT", 10, 0))
@@ -2869,6 +2876,20 @@ def scrape_autoru(
         max(8, int(deadline_sec)) if deadline_sec is not None else SEARCH_AUTORU_DEADLINE_SEC
     )
     _ar_empty_streak = 0
+    # У mobileproxy.space один адрес обслуживает HTTP и SOCKS5. В рабочем
+    # деплое Auto.ru отвечал по HTTP, но при кратком обрыве HTTP CONNECT бот
+    # сразу возвращал 0. Теперь каждый сетевой этап сначала повторяет тот же
+    # рабочий HTTP-маршрут, затем автоматически пробует SOCKS5.
+    _ar_mobile_proxy_variants = (
+        _avito_proxy_variants(prefer_socks=False) if AVITO_PROXIES else []
+    )
+    if not _ar_mobile_proxy_variants:
+        _ar_mobile_proxy_variants = [{}]
+
+    def _ar_proxy_tag(proxy: dict[str, str]) -> str:
+        value = proxy.get("https") or proxy.get("http") or ""
+        return "socks" if value.startswith("socks") else "http"
+
     # Марка для Auto.ru: путь /cars/lada/used/ и catalog_filter mark=LADA
     _brand_l = (brand or "").strip().lower()
     _AR_SLUG = {"land rover": "land_rover", "alfa": "alfa_romeo"}
@@ -2895,34 +2916,57 @@ def scrape_autoru(
     if not AUTORU_PROXIES:
         try:
             from curl_cffi import requests as _cffi_ar
-            _rc = _cffi_ar.get(
-                _ar_base_url, impersonate="chrome124", timeout=6,
-                headers={"Accept-Language": "ru-RU,ru;q=0.9",
-                         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                         "Referer": "https://auto.ru/", "Upgrade-Insecure-Requests": "1"},
-                proxies=_avito_proxies() or {},
-            )
-            _warm_html, _warm_status = _rc.text, _rc.status_code
-            # Переносим куки (spravka и т.п.) в requests-сессию для AJAX-фолбэка
-            try:
-                for _k, _v in _rc.cookies.get_dict().items():
-                    _ar_session.cookies.set(_k, _v)
-            except Exception:
-                pass
-            print(f"  [Auto.ru] curl_cffi прогрев: HTTP {_warm_status}, {len(_warm_html):,}б")
-        except Exception as _ec:
-            print(f"  [Auto.ru] curl_cffi прогрев: {str(_ec)[:60]}")
+        except Exception:
+            _cffi_ar = None
+        if _cffi_ar is not None:
+            for _ar_proxy in _ar_mobile_proxy_variants:
+                if time.time() > _ar_deadline:
+                    break
+                _ar_tag = _ar_proxy_tag(_ar_proxy)
+                try:
+                    _rc = _cffi_ar.get(
+                        _ar_base_url, impersonate="chrome124", timeout=6,
+                        headers={"Accept-Language": "ru-RU,ru;q=0.9",
+                                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                                 "Referer": "https://auto.ru/", "Upgrade-Insecure-Requests": "1"},
+                        proxies=_ar_proxy,
+                    )
+                    _warm_html, _warm_status = _rc.text, _rc.status_code
+                    # Переносим куки (spravka и т.п.) в requests-сессию для AJAX-фолбэка
+                    try:
+                        for _k, _v in _rc.cookies.get_dict().items():
+                            _ar_session.cookies.set(_k, _v)
+                    except Exception:
+                        pass
+                    print(
+                        f"  [Auto.ru] curl_cffi прогрев {_ar_tag}: "
+                        f"HTTP {_warm_status}, {len(_warm_html):,}б"
+                    )
+                    if len(_warm_html) >= 3_000:
+                        break
+                except Exception as _ec:
+                    print(f"  [Auto.ru] curl_cffi прогрев {_ar_tag}: {str(_ec)[:60]}")
         # 2) обычный requests — запасной, если curl_cffi не дал страницу
         if len(_warm_html) < 5_000:
-            try:
-                _warm = _ar_session.get(_ar_base_url, headers={
-                    "User-Agent": _ar_ua,
-                    "Accept": "text/html,application/xhtml+xml,*/*;q=0.9",
-                    "Accept-Language": "ru-RU,ru;q=0.9",
-                }, proxies=_avito_proxies(), timeout=5)
-                _warm_html, _warm_status = _warm.text, _warm.status_code
-            except Exception as _e:
-                print(f"  [Auto.ru] requests прогрев: {str(_e)[:60]}")
+            for _ar_proxy in _ar_mobile_proxy_variants:
+                if time.time() > _ar_deadline:
+                    break
+                _ar_tag = _ar_proxy_tag(_ar_proxy)
+                try:
+                    _warm = _ar_session.get(_ar_base_url, headers={
+                        "User-Agent": _ar_ua,
+                        "Accept": "text/html,application/xhtml+xml,*/*;q=0.9",
+                        "Accept-Language": "ru-RU,ru;q=0.9",
+                    }, proxies=_ar_proxy, timeout=5)
+                    _warm_html, _warm_status = _warm.text, _warm.status_code
+                    print(
+                        f"  [Auto.ru] requests прогрев {_ar_tag}: "
+                        f"HTTP {_warm_status}, {len(_warm_html):,}б"
+                    )
+                    if len(_warm_html) >= 3_000:
+                        break
+                except Exception as _e:
+                    print(f"  [Auto.ru] requests прогрев {_ar_tag}: {str(_e)[:60]}")
     _wl = _warm_html.lower()
     # Определяем, капча ли прогрев (для решения, парсить ли HTML-страницу).
     # НО не выходим — AJAX-методы могут сработать даже при капче на HTML.
@@ -3128,55 +3172,85 @@ def scrape_autoru(
         # Метод 0а: Прямой AJAX API с общим мобильным прокси. Пропускаем, если
         # есть выделенный РФ-пул (он уже отработал выше и не ловит капчу).
         if not batch and AVITO_PROXIES and not AUTORU_PROXIES:
-            try:
-                r_ajax = _req.post(
-                    "https://auto.ru/-/ajax/desktop/listing/",
-                    json=body,
-                    headers={**headers_ajax, "x-requested-with": "fetch"},
-                    proxies=_avito_proxies(),
-                    timeout=4,
-                )
-                print(f"  [Auto.ru] прокси AJAX стр.{p}: HTTP {r_ajax.status_code}, {len(r_ajax.text):,}б")
-                if r_ajax.status_code == 200:
-                    try:
-                        batch = _autoru_parse_offers(r_ajax.json(), today)
-                    except Exception:
-                        batch = _autoru_parse_html(r_ajax.text, today)
-            except Exception as e:
-                print(f"  [Auto.ru] прокси AJAX: {str(e)[:80]}")
+            for _ar_proxy in _ar_mobile_proxy_variants:
+                if batch or time.time() > _ar_deadline:
+                    break
+                _ar_tag = _ar_proxy_tag(_ar_proxy)
+                try:
+                    r_ajax = _req.post(
+                        "https://auto.ru/-/ajax/desktop/listing/",
+                        json=body,
+                        headers={**headers_ajax, "x-requested-with": "fetch"},
+                        proxies=_ar_proxy,
+                        timeout=4,
+                    )
+                    print(
+                        f"  [Auto.ru] прокси-{_ar_tag} AJAX стр.{p}: "
+                        f"HTTP {r_ajax.status_code}, {len(r_ajax.text):,}б"
+                    )
+                    if r_ajax.status_code == 200:
+                        try:
+                            batch = _autoru_parse_offers(r_ajax.json(), today)
+                        except Exception:
+                            batch = _autoru_parse_html(r_ajax.text, today)
+                except Exception as e:
+                    print(f"  [Auto.ru] прокси-{_ar_tag} AJAX: {str(e)[:80]}")
 
         # Метод 0b: Прямой HTML через общий мобильный прокси (пропускаем при РФ-пуле)
         if not batch and AVITO_PROXIES and not AUTORU_PROXIES:
-            try:
-                r0 = _req.get(html_url, headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    "Accept-Language": "ru-RU,ru;q=0.9",
-                    "Referer": f"https://auto.ru/{slug}/cars/used/",
-                }, timeout=4, proxies=_avito_proxies())
-                print(f"  [Auto.ru] прокси HTML стр.{p}: HTTP {r0.status_code}, {len(r0.text):,}б")
-                # Парсим любой не-капча ответ (мобильная страница может быть <50К)
-                if r0.status_code == 200 and not _autoru_is_captcha(r0.text):
-                    batch = _autoru_parse_html(r0.text, today)
-            except Exception as e:
-                print(f"  [Auto.ru] прокси HTML: {str(e)[:50]}")
+            for _ar_proxy in _ar_mobile_proxy_variants:
+                if batch or time.time() > _ar_deadline:
+                    break
+                _ar_tag = _ar_proxy_tag(_ar_proxy)
+                try:
+                    r0 = _req.get(html_url, headers={
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                        "Accept-Language": "ru-RU,ru;q=0.9",
+                        "Referer": f"https://auto.ru/{slug}/cars/used/",
+                    }, timeout=5, proxies=_ar_proxy)
+                    print(
+                        f"  [Auto.ru] прокси-{_ar_tag} HTML стр.{p}: "
+                        f"HTTP {r0.status_code}, {len(r0.text):,}б"
+                    )
+                    # Парсим любой не-капча ответ (мобильная страница может быть <50К)
+                    if r0.status_code == 200 and not _autoru_is_captcha(r0.text):
+                        batch = _autoru_parse_html(r0.text, today)
+                except Exception as e:
+                    print(f"  [Auto.ru] прокси-{_ar_tag} HTML: {str(e)[:60]}")
 
         # Метод 0c: curl_cffi через мобильный прокси (пропускаем при РФ-пуле)
         if not batch and not AUTORU_PROXIES:
             try:
                 from curl_cffi import requests as _cffi
+            except Exception:
+                _cffi = None
+            if _cffi is not None:
                 _cffi_hdrs0 = {
                     "Accept": "text/html,application/xhtml+xml,*/*;q=0.9",
                     "Accept-Language": "ru-RU,ru;q=0.9",
                     "Referer": f"https://auto.ru/{slug}/cars/used/",
                 }
-                rc0 = _cffi.get(html_url, impersonate="chrome124", timeout=4, headers=_cffi_hdrs0,
-                                proxies=_avito_proxies())
-                print(f"  [Auto.ru] curl_cffi стр.{p}: HTTP {rc0.status_code}, {len(rc0.text):,}б")
-                if rc0.status_code == 200 and not _autoru_is_captcha(rc0.text):
-                    batch = _autoru_parse_html(rc0.text, today)
-            except Exception as e:
-                print(f"  [Auto.ru] curl_cffi: {str(e)[:80]}")
+                for _ar_proxy in _ar_mobile_proxy_variants:
+                    if batch or time.time() > _ar_deadline:
+                        break
+                    _ar_tag = _ar_proxy_tag(_ar_proxy)
+                    try:
+                        rc0 = _cffi.get(
+                            html_url,
+                            impersonate="chrome124",
+                            timeout=5,
+                            headers=_cffi_hdrs0,
+                            proxies=_ar_proxy,
+                        )
+                        print(
+                            f"  [Auto.ru] curl_cffi-{_ar_tag} стр.{p}: "
+                            f"HTTP {rc0.status_code}, {len(rc0.text):,}б"
+                        )
+                        if rc0.status_code == 200 and not _autoru_is_captcha(rc0.text):
+                            batch = _autoru_parse_html(rc0.text, today)
+                    except Exception as e:
+                        print(f"  [Auto.ru] curl_cffi-{_ar_tag}: {str(e)[:80]}")
 
         # Метод 0d: бесплатные РФ-прокси — не требует настроек. Часть РФ ISP-IP
         # Яндекс НЕ режет капчей (в отличие от дата-центра). Пробуем AJAX (JSON)
@@ -7161,7 +7235,7 @@ def _avito_api_fetch(
         # Если прокси работает — идём через прокси первым (прямой IP даёт 339KB скелет-страницу)
         _attempts = []
         if AVITO_PROXIES and not _proxy_auth_failed:
-            _variants = _avito_proxy_variants(prefer_socks=True)
+            _variants = _avito_proxy_variants(prefer_socks=False)
             _attempts.extend(_variants[:1] if fast else _variants)
         # В пользовательском поиске Railway-IP заведомо заблокирован. Один
         # браузерный запрос через мобильный прокси полезнее, чем несколько
@@ -7924,7 +7998,7 @@ def _avito_api_fetch(
         # При firewall/429 на прокси — меняем IP и пробуем прокси ещё раз (до 2 ротаций).
         _proxy_order = []
         if AVITO_PROXIES and not _proxy_auth_failed:
-            _preferred_variants = _avito_proxy_variants(prefer_socks=True)
+            _preferred_variants = _avito_proxy_variants(prefer_socks=False)
             for _variant in (_preferred_variants[:1] if fast else _preferred_variants):
                 _variant_url = _variant.get("https") or _variant.get("http") or ""
                 _variant_tag = "прокси-socks" if _variant_url.startswith("socks") else "прокси-http"
@@ -7938,7 +8012,7 @@ def _avito_api_fetch(
             if _px == "ROTATE":
                 if not _rotate_proxy_ip(min_interval=0):
                     continue  # ротация недоступна — пропускаем
-                _px = (_avito_proxy_variants(prefer_socks=True) or [None])[0]
+                _px = (_avito_proxy_variants(prefer_socks=False) or [None])[0]
             try:
                 r = _req.get(
                     "https://www.avito.ru/web/1/js/items",
@@ -13926,10 +14000,44 @@ async def do_search_for_user(uid: int, reply_to):
     seen = load_seen(uid)
     loop = asyncio.get_running_loop()
 
+    # Один мобильный IP нельзя одновременно вращать для Авито и использовать
+    # для Auto.ru. Раньше оба потока стартовали вместе: Авито менял IP ровно в
+    # момент HTML-запроса Auto.ru, после чего CONNECT обрывался. Auto.ru идёт
+    # первым, затем освобождает общий прокси для Авито.
+    _protected_autoru_done = threading.Event()
+
+    def _run_user_autoru() -> list[dict]:
+        try:
+            with _AUTORU_BACKGROUND_LOCK:
+                return scrape_autoru(
+                    region,
+                    pages=2,
+                    price_min=pmin,
+                    price_max=pmax,
+                    brand=(brand if brand and brand != "any" else ""),
+                    deadline_sec=30,
+                )
+        finally:
+            _protected_autoru_done.set()
+
+    def _run_user_avito() -> list[dict]:
+        if "autoru" in enabled_sources:
+            _protected_autoru_done.wait(35)
+        with _AUTORU_BACKGROUND_LOCK:
+            return scrape_avito(
+                region,
+                pages=1,
+                price_min=pmin,
+                price_max=pmax,
+                sort_by_date=True,
+                brand=(brand if brand and brand != "any" else ""),
+                fast=True,
+            )
+
     scraper_map = {
         "drom":   lambda: scrape_drom(region, pages=10, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
-        "autoru": lambda: scrape_autoru(region, pages=2, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else ""), deadline_sec=24),
-        "avito":  lambda: scrape_avito(region, pages=1, price_min=pmin, price_max=pmax, sort_by_date=True, brand=(brand if brand and brand != "any" else ""), fast=True),
+        "autoru": _run_user_autoru,
+        "avito":  _run_user_avito,
         "youla":  lambda: scrape_youla(region, pages=16, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
         "tg":     lambda: scrape_tg_channels(region, pmin, pmax, fast=True),
@@ -13966,7 +14074,7 @@ async def do_search_for_user(uid: int, reply_to):
     if critical_pending:
         critical_done, _ = await asyncio.wait(
             critical_pending,
-            timeout=min(3, SEARCH_CRITICAL_SOURCE_GRACE_SEC),
+            timeout=SEARCH_CRITICAL_SOURCE_GRACE_SEC,
         )
         done = set(done) | set(critical_done)
         pending = set(pending) - set(critical_done)
@@ -16668,7 +16776,7 @@ async def main():
     if AVITO_PROXY_HOST:
         try:
             import requests as _rq
-            _avito_startup_proxy = (_avito_proxy_variants(prefer_socks=True) or [{}])[0]
+            _avito_startup_proxy = (_avito_proxy_variants(prefer_socks=False) or [{}])[0]
             _avito_startup_url = _avito_startup_proxy.get("https") or _avito_startup_proxy.get("http") or ""
             _avito_startup_proto = _avito_startup_url.split("://", 1)[0] if "://" in _avito_startup_url else AVITO_PROXY_PROTOCOL
             r = _rq.get("https://api.ipify.org", proxies=_avito_startup_proxy, timeout=10)
