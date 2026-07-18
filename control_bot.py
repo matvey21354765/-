@@ -1401,6 +1401,17 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
         all_for_median = [i for i in ref_items if _is_avito_ref(i)]
     else:
         all_for_median = [i for i in items if _is_avito_ref(i)]
+    # Если Авито временно не ответил, не отключаем анализ рынка на всех
+    # остальных площадках. Строим запасную медиану по найденным объявлениям
+    # Дрома, Auto.ru, Юлы, VK и Telegram; кандидаты всё равно сравниваются
+    # только с той же моделью и близкими годами ниже по функции.
+    if not all_for_median:
+        fallback_pool = list(ref_items or []) + list(items or [])
+        all_for_median = [
+            i for i in fallback_pool
+            if (i.get("source", "") or "").lower()
+            in {"drom", "autoru", "youla", "yula", "vk", "tg", "tg_channel"}
+        ]
     # Чистим эталон: дилеры завышают цену (→ фейковые скидки), битые занижают.
     # Также исключаем машины с запредельным пробегом (>500k км) — они не репрезентативны.
     # Медиана должна отражать РЕАЛЬНЫЙ рынок частников. Если после чистки данных
@@ -2595,6 +2606,68 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
         _ar_empty_streak = 0
         results.extend(batch)
         time.sleep(0.05)
+
+    # Последний быстрый резерв: поисковая выдача DuckDuckGo индексирует прямые
+    # карточки Auto.ru и доступна с Railway IP, даже когда Яндекс показывает
+    # капчу всем API/HTML-методам. Не запускаем её при успешном основном поиске.
+    if not results:
+        try:
+            from urllib.parse import parse_qs, unquote, urlparse
+            query_parts = [f"site:auto.ru/cars/used/sale/ {REGIONS.get(region, region)} автомобиль"]
+            if brand and brand != "any":
+                query_parts.append(brand)
+            if price_max < 99_000_000:
+                query_parts.append(f"до {price_max} рублей")
+            ddg = _req.get(
+                "https://html.duckduckgo.com/html/",
+                params={"q": " ".join(query_parts), "kl": "ru-ru"},
+                headers={
+                    "User-Agent": _ar_ua,
+                    "Accept-Language": "ru-RU,ru;q=0.9",
+                },
+                timeout=8,
+            )
+            if ddg.status_code == 200:
+                from bs4 import BeautifulSoup as _BS
+                soup = _BS(ddg.text, "html.parser")
+                for result in soup.select(".result"):
+                    link = result.select_one("a.result__a")
+                    if not link:
+                        continue
+                    raw_url = link.get("href", "")
+                    if "uddg=" in raw_url:
+                        raw_url = unquote(parse_qs(urlparse(raw_url).query).get("uddg", [""])[0])
+                    match = re.search(
+                        r"https?://(?:www\.)?auto\.ru/cars/used/sale/[^\s\"'<>]+",
+                        raw_url,
+                    )
+                    if not match:
+                        continue
+                    item_url = match.group(0).split("&")[0]
+                    title = link.get_text(" ", strip=True)
+                    snippet_el = result.select_one(".result__snippet")
+                    snippet = snippet_el.get_text(" ", strip=True) if snippet_el else ""
+                    price_match = re.search(
+                        r"(\d[\d\s]{3,10})\s*(?:₽|руб(?:\.|лей)?)",
+                        f"{title} {snippet}",
+                        re.I,
+                    )
+                    price_int = int(re.sub(r"\D", "", price_match.group(1))) if price_match else 0
+                    if not price_int or not (price_min <= price_int <= price_max):
+                        continue
+                    results.append({
+                        "source": "autoru",
+                        "title": re.sub(r"\s*[—|-]\s*Auto\.ru.*$", "", title, flags=re.I).strip(),
+                        "price": f"{price_int:,} ₽".replace(",", " "),
+                        "_price_int": price_int,
+                        "url": item_url,
+                        "description": snippet[:500],
+                        "date": str(today),
+                        "_date_known": False,
+                    })
+                print(f"  [Auto.ru DDG] резерв дал {len(results)} объявлений")
+        except Exception as e:
+            print(f"  [Auto.ru DDG] ошибка: {str(e)[:80]}")
 
     print(f"  [Auto.ru] итого {len(results)} объявлений")
     return results
@@ -11545,6 +11618,10 @@ async def enrich_and_filter(items: list[dict], max_check: int = 25) -> list[dict
             item["description"] = details["description"]
         if details.get("_avito_market"):
             _apply_page_market(item, int(details["_avito_market"]), "avito")
+        elif details.get("_drom_market"):
+            _apply_page_market(item, int(details["_drom_market"]), "drom")
+        elif details.get("_autoru_market"):
+            _apply_page_market(item, int(details["_autoru_market"]), "autoru")
         if details.get("_avito_rating"):
             item["_avito_rating"] = details["_avito_rating"]
             item["_avito_rating_score"] = details.get("_avito_rating_score")
@@ -12518,6 +12595,10 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                     item["_photo_url"] = details["_photo_url"]
                 if details.get("_avito_market") and item.get("_price_int"):
                     _apply_page_market(item, int(details["_avito_market"]), "avito")
+                elif details.get("_drom_market") and item.get("_price_int"):
+                    _apply_page_market(item, int(details["_drom_market"]), "drom")
+                elif details.get("_autoru_market") and item.get("_price_int"):
+                    _apply_page_market(item, int(details["_autoru_market"]), "autoru")
                 if details.get("_avito_rating"):
                     item["_avito_rating"] = details["_avito_rating"]
                     item["_avito_rating_score"] = details.get("_avito_rating_score")
@@ -12556,7 +12637,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         # Рыночную цену показываем на КАЖДОЙ машине, где она известна.
         deal_line = ""
         _lvl_now = str(item.get("_market_lvl") or "")
-        _avito_market_levels = {"avito", "near", "bracket", "medium", "wide", "model"}
+        _avito_market_levels = {"avito", "drom", "autoru", "near", "bracket", "medium", "wide", "model"}
         if _lvl_now and _lvl_now not in _avito_market_levels:
             _clear_market_fields(item)
         market = item.get("_market_price", 0)
@@ -12615,6 +12696,33 @@ async def send_batch(chat_id: int, uid: int, offset: int):
             f"💰 {price_line}{deal_line}\n"
             f"📅 {days_str}{mileage_str}"
         )
+        # Единый перекуп-анализ для КАЖДОЙ площадки. Источник карточки не важен:
+        # если рынок рассчитан по похожим машинам или собственной оценке площадки,
+        # показываем одинаковые ориентиры для Дрома, Avito, Auto.ru, Юлы, VK и TG.
+        if market and _pi:
+            _market_n = int(item.get("_market_n") or 0)
+            if _lvl_now in {"avito", "drom", "autoru"} or _market_n >= 7:
+                _confidence = "высокое"
+            elif _market_n >= 3:
+                _confidence = "среднее"
+            else:
+                _confidence = "мало данных"
+            if pct > 0:
+                _analysis_text = f"цены ниже рынка на ~{market - _pi:,} ₽ ({pct}%)"
+            elif pct < 0:
+                _analysis_text = f"цены выше рынка на ~{_pi - market:,} ₽ ({abs(pct)}%)"
+            else:
+                _analysis_text = "цена примерно соответствует рынку"
+            _resale = int(market * 0.96)
+            _resale_costs = int(_pi * 0.04) + 10_000
+            _reserve = _resale - _pi - _resale_costs
+            caption += (
+                f"\n📊 Анализ цены: {_analysis_text.replace(',', ' ')}"
+                f" · доверие: {_confidence}"
+                f"\n💵 Ориентир перепродажи ~{_resale:,} ₽".replace(",", " ")
+            )
+            if _reserve > 0:
+                caption += f"\nзапас после расходов ~{_reserve:,} ₽".replace(",", " ")
         _liq = _liquidity_note(item)  # 📊 ликвидность модели
         if _liq:
             caption += f"\n📊 {_liq}"
@@ -13399,9 +13507,12 @@ async def do_search_for_user(uid: int, reply_to):
         except Exception as _le:
             print(f"  [ликвидность] ошибка: {_le}")
     else:
-        print(f"  [рынок] нет Авито-эталона — рыночная цена не вычисляется")
-        for it in suitable:
-            _clear_market_fields(it)
+        print(f"  [рынок] нет Авито-эталона → считаем запасной рынок по всем найденным площадкам")
+        suitable = rank_by_market_price(
+            suitable,
+            ref_items=suitable,
+            avito_only_median=False,
+        )
     # Дилерские объявления — добавляем штраф к deal_score
     for it in suitable:
         if is_dealer(it):
@@ -13517,6 +13628,10 @@ async def do_search_for_user(uid: int, reply_to):
                     it["description"] = details["description"]
                 if details.get("_avito_market") and it.get("_price_int"):
                     _apply_page_market(it, int(details["_avito_market"]), "avito")
+                elif details.get("_drom_market") and it.get("_price_int"):
+                    _apply_page_market(it, int(details["_drom_market"]), "drom")
+                elif details.get("_autoru_market") and it.get("_price_int"):
+                    _apply_page_market(it, int(details["_autoru_market"]), "autoru")
                 if details.get("_avito_rating"):
                     it["_avito_rating"] = details["_avito_rating"]
                     it["_avito_rating_score"] = details.get("_avito_rating_score")
