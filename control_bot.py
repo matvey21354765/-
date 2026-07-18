@@ -553,10 +553,16 @@ SEARCH_SOURCE_TIMEOUT_SEC = _env_int("SEARCH_SOURCE_TIMEOUT_SEC", 30)
 # обычных 30 секунд им нужен реальный резерв, иначе второй источник обрывается
 # уже после успешного ответа сайта, но до возврата результата в Telegram.
 SEARCH_CRITICAL_SOURCE_GRACE_SEC = max(
-    45, _env_int("SEARCH_CRITICAL_SOURCE_GRACE_SEC", 45)
+    105, _env_int("SEARCH_CRITICAL_SOURCE_GRACE_SEC", 105)
 )
 SEARCH_AUTORU_DEADLINE_SEC = max(
-    30, _env_int("SEARCH_AUTORU_DEADLINE_SEC", 45)
+    40, _env_int("SEARCH_AUTORU_DEADLINE_SEC", 40)
+)
+SEARCH_AUTORU_INDEX_TIMEOUT_SEC = max(
+    18, _env_int("SEARCH_AUTORU_INDEX_TIMEOUT_SEC", 24)
+)
+SEARCH_AVITO_INDEX_TIMEOUT_SEC = max(
+    18, _env_int("SEARCH_AVITO_INDEX_TIMEOUT_SEC", 24)
 )
 SEARCH_PRICE_FILL_LIMIT = _env_int("SEARCH_PRICE_FILL_LIMIT", 3, 0)
 SEARCH_PRICE_FILL_TIMEOUT_SEC = _env_int("SEARCH_PRICE_FILL_TIMEOUT_SEC", 4)
@@ -2745,6 +2751,7 @@ def _autoru_search_fallback(
     price_max: int,
     brand: str = "",
     limit: int = 12,
+    max_seconds: int | None = None,
 ) -> list[dict]:
     """Быстрый резерв Auto.ru через уже проиндексированные страницы поиска.
 
@@ -2778,7 +2785,11 @@ def _autoru_search_fallback(
         ),
         "Accept-Language": "ru-RU,ru;q=0.9",
     }
-    search_deadline = time.time() + 12
+    search_deadline = time.time() + (
+        max_seconds
+        if max_seconds is not None
+        else SEARCH_AUTORU_INDEX_TIMEOUT_SEC
+    )
     search_pages: list[str] = []
     for idx, term in enumerate(search_terms):
         if time.time() >= search_deadline:
@@ -2796,12 +2807,12 @@ def _autoru_search_fallback(
                 endpoint,
                 params={"q": query, "kl": "ru-ru"},
                 headers=search_headers,
-                timeout=4,
+                timeout=max(2, min(6, int(search_deadline - time.time()) or 2)),
             )
             if (
                 response.status_code == 200
                 and len(response.text) >= 1_000
-                and response.text.lower().count("auto.ru/cars/used/sale/") > 1
+                and response.text.lower().count("auto.ru/cars/used/sale/") > 0
             ):
                 search_pages.append(response.text)
         except Exception as exc:
@@ -2812,35 +2823,39 @@ def _autoru_search_fallback(
     # У Mojeek и Brave отдельные лимиты. Brave на Railway обычно отдаёт
     # полноценные результаты, когда оба DDG-интерфейса вернули 202/429.
     if not search_pages and time.time() < search_deadline:
-        query = (
-            f'site:auto.ru/cars/used/sale/ "{region_name}" '
-            f'"{search_terms[0]}" "рублей на Авто.ру"{price_hint}'
-        )
-        alt_engines = [
-            ("https://www.mojeek.com/search", {"q": query}),
-            ("https://search.brave.com/search", {"q": query, "source": "web"}),
-        ]
-        for endpoint, params in alt_engines:
-            if time.time() >= search_deadline:
-                break
-            try:
-                response = _req.get(
-                    endpoint,
-                    params=params,
-                    headers=search_headers,
-                    timeout=5,
-                )
-                if (
-                    response.status_code == 200
-                    and len(response.text) >= 1_000
-                    and response.text.lower().count(
-                        "auto.ru/cars/used/sale/"
-                    ) > 1
-                ):
-                    search_pages.append(response.text)
+        for term in search_terms[:3]:
+            query = (
+                f'site:auto.ru/cars/used/sale/ "{region_name}" '
+                f'"{term}" "рублей на Авто.ру"{price_hint}'
+            )
+            alt_engines = [
+                ("https://www.mojeek.com/search", {"q": query}),
+                ("https://search.brave.com/search", {"q": query, "source": "web"}),
+            ]
+            for endpoint, params in alt_engines:
+                remaining = search_deadline - time.time()
+                if remaining <= 0:
                     break
-            except Exception:
-                continue
+                try:
+                    response = _req.get(
+                        endpoint,
+                        params=params,
+                        headers=search_headers,
+                        timeout=max(2, min(7, int(remaining) or 2)),
+                    )
+                    if (
+                        response.status_code == 200
+                        and len(response.text) >= 1_000
+                        and response.text.lower().count(
+                            "auto.ru/cars/used/sale/"
+                        ) > 0
+                    ):
+                        search_pages.append(response.text)
+                        break
+                except Exception:
+                    continue
+            if search_pages or time.time() >= search_deadline:
+                break
 
     if not search_pages:
         return []
@@ -2956,11 +2971,15 @@ def scrape_autoru(
     _configured_ar_proxy_variants = (
         _avito_proxy_variants(prefer_socks=False) if AVITO_PROXIES else []
     )
-    # Если самопроверка платного прокси упала, не расходуем весь дедлайн на два
-    # заведомо мёртвых маршрута. После следующего рестарта самопроверка снова
-    # включит HTTP/SOCKS, как только провайдер оживёт.
+    # Если самопроверка платного прокси упала, не расходуем весь дедлайн на
+    # HTTP+SOCKS. Однако один HTTP-маршрут сохраняем: ipify иногда недоступен,
+    # хотя сам каталог Auto.ru через этот же прокси открывается.
     if _paid_proxy_healthy is False:
-        _ar_mobile_proxy_variants = [{}]
+        # Проверка через ipify может упасть, хотя сам HTTP CONNECT к Auto.ru
+        # работает. Оставляем одну попытку через основной HTTP-маршрут, затем
+        # сразу идём напрямую; SOCKS и повторные варианты здесь только съедали
+        # пользовательский дедлайн.
+        _ar_mobile_proxy_variants = _configured_ar_proxy_variants[:1] + [{}]
     else:
         _ar_mobile_proxy_variants = _configured_ar_proxy_variants + [{}]
 
@@ -3289,6 +3308,10 @@ def scrape_autoru(
                             break
                 except Exception as e:
                     print(f"  [Auto.ru] резервный прокси {_fp}: {str(e)[:60]}")
+                    try:
+                        _working_free_proxies.remove(_fp)
+                    except ValueError:
+                        pass
 
         if not batch and AVITO_PROXIES and not AUTORU_PROXIES:
             for _ar_proxy in _ar_mobile_proxy_variants:
@@ -3301,7 +3324,7 @@ def scrape_autoru(
                         json=body,
                         headers={**headers_ajax, "x-requested-with": "fetch"},
                         proxies=_ar_proxy,
-                        timeout=4,
+                        timeout=8 if _ar_proxy else 4,
                     )
                     print(
                         f"  [Auto.ru] прокси-{_ar_tag} AJAX стр.{p}: "
@@ -3327,7 +3350,7 @@ def scrape_autoru(
                         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                         "Accept-Language": "ru-RU,ru;q=0.9",
                         "Referer": f"https://auto.ru/{slug}/cars/used/",
-                    }, timeout=5, proxies=_ar_proxy)
+                    }, timeout=10 if _ar_proxy else 5, proxies=_ar_proxy)
                     print(
                         f"  [Auto.ru] прокси-{_ar_tag} HTML стр.{p}: "
                         f"HTTP {r0.status_code}, {len(r0.text):,}б"
@@ -3358,7 +3381,7 @@ def scrape_autoru(
                         rc0 = _cffi.get(
                             html_url,
                             impersonate="chrome124",
-                            timeout=5,
+                            timeout=10 if _ar_proxy else 5,
                             headers=_cffi_hdrs0,
                             proxies=_ar_proxy,
                         )
@@ -3460,7 +3483,13 @@ def scrape_autoru(
         time.sleep(0.05)
 
     if not results:
-        results = _autoru_search_fallback(region, price_min, price_max, brand=brand)
+        results = _autoru_search_fallback(
+            region,
+            price_min,
+            price_max,
+            brand=brand,
+            max_seconds=SEARCH_AUTORU_INDEX_TIMEOUT_SEC,
+        )
     if not results:
         results = _cached_source_results("autoru", region, price_min, price_max, limit=30)
         if results:
@@ -8127,8 +8156,11 @@ def _avito_api_fetch(
                 _variant_url = _variant.get("https") or _variant.get("http") or ""
                 _variant_tag = "прокси-socks" if _variant_url.startswith("socks") else "прокси-http"
                 _proxy_order.append((_variant_tag, _variant))
+            # В быстром поиске одна дополнительная смена IP полезнее, чем сразу
+            # признавать Авито пустым после HTTP 439. Это ровно один повтор, а не
+            # бесконечная ротация мобильного прокси.
+            _proxy_order.append(("прокси-rot1", "ROTATE"))
             if not fast:
-                _proxy_order.append(("прокси-rot1", "ROTATE"))  # сменить IP и повторить
                 _proxy_order.append(("прокси-rot2", "ROTATE"))
         _proxy_order.append(("напрямую", None))  # напрямую (датацентр-IP)
         for _tag, _px in _proxy_order:
@@ -8704,7 +8736,11 @@ def _avito_api_fetch(
             print(f"  [Авито fast cffi] {len(browser_html_items)} объявлений")
             return browser_html_items
         try:
-            indexed = _try_yandex_snippets(1, max_seconds=6, max_results=12)
+            indexed = _try_yandex_snippets(
+                1,
+                max_seconds=SEARCH_AVITO_INDEX_TIMEOUT_SEC,
+                max_results=24,
+            )
         except Exception as exc:
             indexed = []
             print(f"  [Авито fast fallback] {str(exc)[:60]}")
@@ -14150,14 +14186,18 @@ async def do_search_for_user(uid: int, reply_to):
                     price_min=pmin,
                     price_max=pmax,
                     brand=(brand if brand and brand != "any" else ""),
-                    deadline_sec=35,
+                    deadline_sec=SEARCH_AUTORU_DEADLINE_SEC,
                 )
         finally:
             _protected_autoru_done.set()
 
     def _run_user_avito() -> list[dict]:
         if "autoru" in enabled_sources:
-            _protected_autoru_done.wait(40)
+            _protected_autoru_done.wait(
+                SEARCH_AUTORU_DEADLINE_SEC
+                + SEARCH_AUTORU_INDEX_TIMEOUT_SEC
+                + 5
+            )
         with _AUTORU_BACKGROUND_LOCK:
             return scrape_avito(
                 region,
