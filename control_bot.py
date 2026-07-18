@@ -259,20 +259,58 @@ def _rotate_proxy_ip(min_interval: float = 50.0, force: bool = False) -> bool:
     _last_ip_rotate_ts = now
     try:
         import requests as _rq
+
+        def _proxy_ip() -> str:
+            """Фактический внешний IP именно прокси, а не Railway."""
+            try:
+                response = _rq.get(
+                    "https://api.ipify.org",
+                    proxies=_avito_proxies() or {},
+                    timeout=6,
+                )
+                value = (response.text or "").strip()
+                if response.status_code == 200 and re.fullmatch(
+                    r"(?:\d{1,3}\.){3}\d{1,3}|[0-9a-fA-F:]{3,}",
+                    value,
+                ):
+                    return value
+            except Exception:
+                pass
+            return ""
+
+        ip_before = _proxy_ip()
         r = _rq.get(AVITO_PROXY_ROTATE_URL, timeout=15)
         body = (r.text or "").strip()
         body_lower = body.lower()
-        rejected = (
+        explicitly_rejected = (
             "already change ip" in body_lower
             or '"status":"err"' in body_lower.replace(" ", "")
             or '"status": "err"' in body_lower
-            or body_lower.startswith("<!doctype html")
+        )
+        html_response = (
+            body_lower.startswith("<!doctype html")
             or body_lower.startswith("<html")
         )
-        ok = r.status_code == 200 and not rejected
-        print(f"[прокси] ротация IP: HTTP {r.status_code} {'✅' if ok else '❌'} {r.text[:80]!r}")
-        if ok:
-            _t.sleep(2)  # даём прокси применить новый IP
+        ok = r.status_code == 200 and not explicitly_rejected and not html_response
+        ip_after = ""
+        if r.status_code == 200 and not explicitly_rejected:
+            # mobileproxy.space может вернуть обычную HTML-страницу даже при
+            # успешной смене. Поэтому HTML сам по себе не ошибка: ждём применения
+            # и подтверждаем результат по фактическому выходному IP прокси.
+            for _ in range(3):
+                _t.sleep(1.5)
+                ip_after = _proxy_ip()
+                if ip_before and ip_after and ip_after != ip_before:
+                    ok = True
+                    break
+        ip_change = (
+            f"{ip_before or '?'} → {ip_after or '?'}"
+            if html_response or ip_after else (ip_before or "?")
+        )
+        print(
+            f"[прокси] ротация IP: HTTP {r.status_code} "
+            f"{'✅' if ok else '❌'} IP {ip_change}"
+        )
         return ok
     except Exception as e:
         print(f"[прокси] ротация IP ошибка: {str(e)[:80]}")
