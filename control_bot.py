@@ -64,7 +64,9 @@ DEPLOY_ENVIRONMENT = os.getenv("RAILWAY_ENVIRONMENT_NAME", "-")
 
 # ── Токен ───────────────────────────────────────────────────────
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8923014188:AAHvNW2B5fin2XCmbVhlaLNjWhLwI3JhZ90")
-SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY", "b317ae63b4d847805e2f91a1dc073b40")
+# Ключ должен задаваться только в Railway Variables. Старый встроенный ключ
+# возвращает 401 и зря задерживает оба защищённых источника.
+SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY", "").strip()
 # Официальный API Авито (бесплатно): зарегистрируй приложение на https://developers.avito.ru/
 # и добавь переменные окружения AVITO_CLIENT_ID и AVITO_CLIENT_SECRET в Railway
 AVITO_CLIENT_ID     = os.getenv("AVITO_CLIENT_ID", "")
@@ -187,11 +189,9 @@ _last_ip_rotate_ts = 0.0
 # IP, но чистые РФ SOCKS5/резидентные IP обычно пропускает. Формат каждого:
 #   socks5://user:pass@host:port  (или http://...). Список через запятую в
 #   переменной AUTORU_PROXIES; ниже — дефолтные РФ-прокси пользователя.
-_AUTORU_PROXIES_DEFAULT = [
-    "socks5://hZoswb:f3dQZ6@193.187.144.4:8000",
-    "socks5://GPL5xs:mM4GHB@193.31.101.131:9928",
-    "socks5://xZ6MTF:9XEWJd@217.29.53.106:10248",
-]
+# Не подставляем устаревший отдельный пул. Если AUTORU_PROXIES явно не задан,
+# Auto.ru использует актуальный мобильный AVITO_PROXY_* вместе с Авито.
+_AUTORU_PROXIES_DEFAULT: list[str] = []
 AUTORU_PROXIES = [
     p.strip() for p in os.getenv("AUTORU_PROXIES", ",".join(_AUTORU_PROXIES_DEFAULT)).split(",")
     if p.strip()
@@ -447,7 +447,7 @@ def _env_int(name: str, default: int, min_value: int = 1) -> int:
 SEARCH_COOLDOWN_SEC = 45
 SEARCH_SOURCE_TIMEOUT_SEC = _env_int("SEARCH_SOURCE_TIMEOUT_SEC", 30)
 SEARCH_CRITICAL_SOURCE_GRACE_SEC = _env_int("SEARCH_CRITICAL_SOURCE_GRACE_SEC", 25)
-SEARCH_AUTORU_DEADLINE_SEC = _env_int("SEARCH_AUTORU_DEADLINE_SEC", 26)
+SEARCH_AUTORU_DEADLINE_SEC = _env_int("SEARCH_AUTORU_DEADLINE_SEC", 45)
 SEARCH_PRICE_FILL_LIMIT = _env_int("SEARCH_PRICE_FILL_LIMIT", 3, 0)
 SEARCH_PRICE_FILL_TIMEOUT_SEC = _env_int("SEARCH_PRICE_FILL_TIMEOUT_SEC", 4)
 SEARCH_DETAIL_CHECK_LIMIT = _env_int("SEARCH_DETAIL_CHECK_LIMIT", 0, 0)
@@ -7728,7 +7728,10 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
     # первый ответивший метод (иначе теряем большие пачки, что приходят чуть позже).
     # webJSON (/web/1/js/items) первым ВЕЗДЕ — главный рабочий метод (JSON, без JS/Cloudflare).
     _no_proxy_methods = [_try_avito_web_json, _try_playwright, _try_scraperapi_fast, _try_free_proxies, _try_yandex_snippets, _try_cffi_web, _try_curl_cffi, _try_cs_web, _try_mobile_site, _try_web_html, _try_avito_mobile_api, _try_avito_public_api, _try_avito_rss, _try_googlebot_ua, _try_avito_lite, _try_scraperapi, _try_avito_json_api]
-    _use_proxy = AVITO_PROXIES and not _proxy_auth_failed
+    # При наличии рабочего ScraperAPI не тратим пользовательский поиск на
+    # мобильный IP, уже попавший под 429/капчу: резидентный API становится
+    # основным маршрутом, а остальные методы остаются резервом.
+    _use_proxy = AVITO_PROXIES and not _proxy_auth_failed and not SCRAPER_API_KEY
     if _use_proxy:
         # Платный прокси (московский мобильный IP, Megafone/MTS).
         all_methods = [_try_avito_web_json, _try_avito_mobile_api, _try_web_html, _try_mobile_site, _try_avito_rss, _try_avito_json_api, _try_avito_xhr, _try_playwright, _try_googlebot_ua, _try_avito_lite, _try_avito_public_api]
