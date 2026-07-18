@@ -490,6 +490,52 @@ SEARCH_DETAIL_CHECK_TIMEOUT_SEC = _env_int("SEARCH_DETAIL_CHECK_TIMEOUT_SEC", 5)
 SEARCH_DETAIL_TOTAL_TIMEOUT_SEC = _env_int("SEARCH_DETAIL_TOTAL_TIMEOUT_SEC", 25)
 DEFAULT_TRIAL_DAYS = _env_int("DEFAULT_TRIAL_DAYS", 7, 1)
 _last_search_at: dict[int, float] = {}
+_SOURCE_RESULT_CACHE_TTL_SEC = 15 * 60
+_source_result_cache: dict[tuple[str, str], tuple[float, list[dict]]] = {}
+
+
+def _remember_source_results(source: str, region: str, items: list[dict]) -> list[dict]:
+    """Keeps useful late results from protected/slow sources for the active search."""
+    if not items:
+        return items
+    merged: list[dict] = []
+    seen_urls: set[str] = set()
+    old = _source_result_cache.get((source, region))
+    pools = [items]
+    if old and (time.time() - old[0]) < _SOURCE_RESULT_CACHE_TTL_SEC:
+        pools.append(old[1])
+    for pool in pools:
+        for item in pool or []:
+            url = _norm_url(item.get("url", ""))
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            merged.append(dict(item))
+    _source_result_cache[(source, region)] = (time.time(), merged[:200])
+    return items
+
+
+def _cached_source_results(
+    source: str,
+    region: str,
+    price_min: int,
+    price_max: int,
+    limit: int = 40,
+) -> list[dict]:
+    cached = _source_result_cache.get((source, region))
+    if not cached or (time.time() - cached[0]) >= _SOURCE_RESULT_CACHE_TTL_SEC:
+        return []
+    out: list[dict] = []
+    for item in cached[1]:
+        price = int(item.get("_price_int") or parse_price(item.get("price", "")) or 0)
+        if price and not (price_min <= price <= price_max):
+            continue
+        if not item.get("url"):
+            continue
+        out.append(dict(item))
+        if len(out) >= limit:
+            break
+    return out
 
 # Мониторинг новых объявлений
 MONITOR_INTERVAL = 15 * 60   # проверять каждые 15 минут
@@ -1439,9 +1485,10 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
     """
     from statistics import median
 
-    # Рынок считаем строго по Авито. Дром/Юла/VK/TG/Auto.ru используются как
-    # кандидаты для поиска, но не как источник рыночной медианы: иначе редкие
-    # или переоценённые объявления создают фейковую скидку.
+    # Авито остаётся приоритетным эталоном. Если он заблокирован, используем
+    # только автомобильные площадки с явными ценами (Дром/Auto.ru/Юла).
+    # Соцсети VK/TG в эталон не входят: там часто встречаются кредитные платежи,
+    # цены за запчасти и неполные объявления.
     def _is_avito_ref(it: dict) -> bool:
         return (it.get("source", "") or "").lower() == "avito"
 
@@ -1449,6 +1496,13 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
         all_for_median = [i for i in ref_items if _is_avito_ref(i)]
     else:
         all_for_median = [i for i in items if _is_avito_ref(i)]
+    if not all_for_median and not avito_only_median:
+        _fallback_pool = ref_items if ref_items is not None else items
+        all_for_median = [
+            i for i in (_fallback_pool or [])
+            if (i.get("source", "") or "").lower() in {"drom", "autoru", "youla", "yula"}
+            and int(i.get("_price_int") or 0) > 0
+        ]
     # Чистим эталон: дилеры завышают цену (→ фейковые скидки), битые занижают.
     # Также исключаем машины с запредельным пробегом (>500k км) — они не репрезентативны.
     # Медиана должна отражать РЕАЛЬНЫЙ рынок частников. Если после чистки данных
@@ -1584,11 +1638,17 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
             med = 0.0
             _lvl = ""
             _n = 0
-            # Market price source is Avito only: Avito page estimate first,
-            # then Avito median by similar listings.
+            # A platform's own page estimate is more precise than a cross-listing
+            # median. Prefer it for Avito/Drom/Auto.ru, then use similar cars.
             _avm = it.get("_avito_market", 0) or 0
+            _drm = it.get("_drom_market", 0) or 0
+            _arm = it.get("_autoru_market", 0) or 0
             if _avm and 30_000 < _avm < 50_000_000:
                 med, _lvl, _n = float(_avm), "avito", 30
+            elif _drm and 30_000 < _drm < 50_000_000:
+                med, _lvl, _n = float(_drm), "drom", 30
+            elif _arm and 30_000 < _arm < 50_000_000:
+                med, _lvl, _n = float(_arm), "autoru", 30
             elif len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 4:
                 med, _lvl, _n = _market_for(parts[0], int(parts[1]), p)
                 if med <= 0:
@@ -2355,7 +2415,14 @@ def _autoru_search_fallback(
     return out
 
 
-def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: int = 99_000_000, brand: str = "") -> list[dict]:
+def scrape_autoru(
+    region: str,
+    pages: int = 10,
+    price_min: int = 0,
+    price_max: int = 99_000_000,
+    brand: str = "",
+    deadline_sec: int | None = None,
+) -> list[dict]:
     slug = AUTORU_SLUGS.get(region, region)
     geo_ids = AUTORU_GEO_IDS.get(region, [])
     try:
@@ -2367,7 +2434,9 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
     today = datetime.date.today()
     # Жёсткий дедлайн: Auto.ru капча-защищён и часто виснет — не даём тормозить весь
     # поиск. Держим короткий бюджет: если IP чистый — успеваем, если капча — быстро выходим.
-    _ar_deadline = time.time() + SEARCH_AUTORU_DEADLINE_SEC
+    _ar_deadline = time.time() + (
+        max(8, int(deadline_sec)) if deadline_sec is not None else SEARCH_AUTORU_DEADLINE_SEC
+    )
     _ar_empty_streak = 0
     # Марка для Auto.ru: путь /cars/lada/used/ и catalog_filter mark=LADA
     _brand_l = (brand or "").strip().lower()
@@ -2439,6 +2508,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
             results.extend(_warm_items)
 
     if results:
+        _remember_source_results("autoru", region, results)
         return results
     # ВАЖНО: даже если прогрев поймал капчу — НЕ выходим. AJAX-методы (мобильный
     # API + desktop AJAX через прокси) часто работают, когда HTML-страница
@@ -2470,6 +2540,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
                     if _warm_items2:
                         print(f"  [Auto.ru] прогрев (ротация) дал {len(_warm_items2)} объявлений")
                         results.extend(_warm_items2)
+                        _remember_source_results("autoru", region, results)
                         return results
             except Exception as _ec2:
                 print(f"  [Auto.ru] прогрев после ротации: {str(_ec2)[:60]}")
@@ -2761,6 +2832,11 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
 
     if not results:
         results = _autoru_search_fallback(region, price_min, price_max, brand=brand)
+    if not results:
+        results = _cached_source_results("autoru", region, price_min, price_max, limit=30)
+        if results:
+            print(f"  [Auto.ru] восстановлено {len(results)} объявлений из общего кэша")
+    _remember_source_results("autoru", region, results)
     print(f"  [Auto.ru] итого {len(results)} объявлений")
     return results
 
@@ -3461,7 +3537,7 @@ def _social_make_title(text: str) -> str:
     return first_line[:100] or text[:100]
 
 
-def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict]:
+def scrape_tg_channels(region: str, price_min: int, price_max: int, fast: bool = False) -> list[dict]:
     """
     Ищет объявления о продаже авто в Telegram-каналах города.
     Стратегия: пробуем реальные публичные каналы через t.me/s/,
@@ -3534,6 +3610,8 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
     _seed_channels = list(dict.fromkeys(
         TG_REAL_CHANNELS.get(city_key, []) + TG_AUTO_CHANNELS.get(city_key, []) + _TG_FEDERAL_CHANNELS
     ))
+    if fast:
+        _seed_channels = _seed_channels[:14]
 
     def _discover_channels() -> list[str]:
         found: list[str] = []
@@ -3660,7 +3738,7 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
     _tg_phone_re2 = re.compile(r'(?:\+7|8)[\s\-]?\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}')
 
     def _parse_channel(channel: str) -> list[dict]:
-        """Парсит публичный TG канал через t.me/s/ — до 3 страниц."""
+        """Парсит публичный TG канал через t.me/s/."""
         import requests as _req_tme
         _tme_session = _req_tme.Session()  # t.me не блокирует Railway — прокси не нужен
         try:
@@ -3668,10 +3746,14 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
             seen_urls_ch: set[str] = set()
             today_d = datetime.date.today()
             before_id = None
-            for _page in range(3):
+            for _page in range(1 if fast else 3):
                 url_t = f"https://t.me/s/{channel}" if before_id is None else f"https://t.me/s/{channel}?before={before_id}"
                 try:
-                    r = _tme_session.get(url_t, timeout=7, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+                    r = _tme_session.get(
+                        url_t,
+                        timeout=4 if fast else 7,
+                        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+                    )
                     if r.status_code != 200:
                         print(f"  [TG] @{channel} HTTP {r.status_code}")
                         break
@@ -3778,12 +3860,14 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
         all_locs = list(dict.fromkeys([region_name_ru, oblast_name_ru]))
         queries = [f"site:t.me продам авто {_loc}" for _loc in all_locs]
         queries += [f"site:t.me автобарахолка {_loc}" for _loc in all_locs[:1]]
+        if fast:
+            queries = queries[:1]
         batch = []
         seen_u: set[str] = set()
         for q in queries:
             try:
                 r = session.get("https://html.duckduckgo.com/html/",
-                    params={"q": q, "kl": "ru-ru"}, timeout=9)
+                    params={"q": q, "kl": "ru-ru"}, timeout=4 if fast else 9)
                 if r.status_code != 200:
                     continue
                 html = _upq2.unquote(r.text)
@@ -3836,14 +3920,30 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
     # 1) сперва seed-каналы (параллельно, коротко), 2) дискавери — ТОЛЬКО если
     # seed дал мало результатов, и с жёстким лимитом времени.
     results: list[dict] = []
-    with _TPE_TG(max_workers=12) as _ch_ex:
-        for ch_batch in _ch_ex.map(_parse_channel, _seed_channels, timeout=11):
-            if ch_batch:
-                results.extend(ch_batch)
-                print(f"  [TG seed] {len(ch_batch)} объявлений")
+    try:
+        with _TPE_TG(max_workers=max(1, min(12, len(_seed_channels)))) as _ch_ex:
+            for ch_batch in _ch_ex.map(
+                _parse_channel,
+                _seed_channels,
+                timeout=7 if fast else 11,
+            ):
+                if ch_batch:
+                    results.extend(ch_batch)
+                    print(f"  [TG seed] {len(ch_batch)} объявлений")
+    except Exception as _tg_seed_error:
+        print(f"  [TG seed] лимит времени: {str(_tg_seed_error)[:60]}")
 
-    # Если seed-каналы дали достаточно — не тратим время на медленный дискавери.
-    if len(results) < 5:
+    # В быстром режиме разрешён один короткий индексный запрос; полный обход
+    # каталогов/поисковиков остаётся только фоновому режиму.
+    if fast and len(results) < 5:
+        try:
+            ddg_batch = _ddg_tg_posts()
+        except Exception:
+            ddg_batch = []
+        if ddg_batch:
+            results.extend(ddg_batch)
+            print(f"  [TG DDG fast] {len(ddg_batch)} постов")
+    elif len(results) < 5:
         with _TPE_TG(max_workers=2) as _dis_ex:
             _disc_fut = _dis_ex.submit(_discover_channels)
             _ddg_fut = _dis_ex.submit(_ddg_tg_posts)
@@ -3874,6 +3974,11 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
             continue
         seen_norm_tg.add(u)
         deduped_tg.append(it)
+    if not deduped_tg:
+        deduped_tg = _cached_source_results("tg", region, price_min, price_max, limit=30)
+        if deduped_tg:
+            print(f"  [TG] восстановлено {len(deduped_tg)} объявлений из кэша")
+    _remember_source_results("tg", region, deduped_tg)
     return deduped_tg
 
 
@@ -6337,7 +6442,16 @@ def _avito_get_oauth_token() -> str:
     return ""
 
 
-def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, today, sort_by_date: bool = False, brand: str = "") -> list[dict]:
+def _avito_api_fetch(
+    region: str,
+    pages: int,
+    price_min: int,
+    price_max: int,
+    today,
+    sort_by_date: bool = False,
+    brand: str = "",
+    fast: bool = False,
+) -> list[dict]:
     """
     Использует внутренний JSON API Авито (как мобильное приложение).
     Пробует несколько эндпоинтов с разными заголовками — мобильный сайт,
@@ -6420,7 +6534,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             try:
                 _r_mob = session.get(
                     "https://m.avito.ru/api/13/items",
-                    params=_mob_params, headers=_mob_hdrs, timeout=8,
+                    params=_mob_params, headers=_mob_hdrs, timeout=4 if fast else 8,
                 )
                 print(f"  [Авито mobileAPI0 напрямую] HTTP {_r_mob.status_code}, {len(_r_mob.text):,}б")
                 if _r_mob.status_code != 200:
@@ -6428,7 +6542,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             except Exception:
                 _r_mob = session.get(
                     "https://m.avito.ru/api/13/items",
-                    params=_mob_params, headers=_mob_hdrs, timeout=8,
+                    params=_mob_params, headers=_mob_hdrs, timeout=4 if fast else 8,
                     proxies=_avito_proxies(),
                 )
                 print(f"  [Авито mobileAPI0 прокси] HTTP {_r_mob.status_code}, {len(_r_mob.text):,}б")
@@ -6464,7 +6578,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
     # ── Метод 0b: Альтернативные эндпоинты мобильного API ─────────────────────
     # Пробуем новые версии API (v14, v15, v16) которые Авито использует сейчас
     # Пропускаем если уже потратили >10с на метод 0 (чтобы не превысить 70с таймаут бота)
-    if not results and AVITO_PROXIES and (time.time() - _api_start) < 10:
+    if not fast and not results and AVITO_PROXIES and (time.time() - _api_start) < 10:
         for _alt_url, _alt_ver in [
             ("https://m.avito.ru/api/16/items", "api16"),
             ("https://m.avito.ru/api/15/items", "api15"),
@@ -7880,6 +7994,19 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             print(f"  [DDG итого] {len(results_out)} объявлений Авито")
         return results_out
 
+    # Пользовательский поиск не должен зависать на десятках антибот-методов.
+    # После двух быстрых запросов берём реальные проиндексированные ссылки и
+    # возвращаем управление; полный медленный режим остаётся для мониторинга.
+    if fast:
+        try:
+            indexed = _try_yandex_snippets(1, max_seconds=6, max_results=12)
+        except Exception as exc:
+            indexed = []
+            print(f"  [Авито fast fallback] {str(exc)[:60]}")
+        if indexed:
+            print(f"  [Авито fast fallback] {len(indexed)} объявлений из поискового индекса")
+        return indexed
+
     # free_proxies даёт настоящую страницу Авито (десятки объявлений), DuckDuckGo —
     # ещё несколько. Запускаем ВСЁ параллельно и СЛИВАЕМ результаты, а не берём
     # первый ответивший метод (иначе теряем большие пачки, что приходят чуть позже).
@@ -8144,7 +8271,15 @@ def _avito_price_bucket(price_min: int, price_max: int) -> str:
     return f"{lo}_{hi}"
 
 
-def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int = 99_000_000, sort_by_date: bool = False, brand: str = "") -> list[dict]:
+def scrape_avito(
+    region: str,
+    pages: int = 5,
+    price_min: int = 0,
+    price_max: int = 99_000_000,
+    sort_by_date: bool = False,
+    brand: str = "",
+    fast: bool = False,
+) -> list[dict]:
     """
     Парсер Авито. Кэш хранится по РЕГИОНУ (без разбивки по цене), чтобы один
     успешный скрейп покрывал все ценовые диапазоны и не вызывал повторных блокировок.
@@ -8177,7 +8312,15 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
         print(f"  [Авито] кэш {cache_key}: {len(items)} объявлений (возраст {int(now-cached[0])}с)")
     else:
         # Скрейпим с фильтром бюджета (прокси) или без (бесплатный режим).
-        items = _scrape_avito_raw(region, pages=pages, price_min=_scrape_pmin, price_max=_scrape_pmax, sort_by_date=sort_by_date, brand=brand)
+        items = _scrape_avito_raw(
+            region,
+            pages=pages,
+            price_min=_scrape_pmin,
+            price_max=_scrape_pmax,
+            sort_by_date=sort_by_date,
+            brand=brand,
+            fast=fast,
+        )
         if items:
             _AVITO_REGION_CACHE[cache_key] = (now, items)
             # Запись кэша на диск — в фоне, чтобы не держать пользователя. Делаем
@@ -8259,7 +8402,15 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
     return out
 
 
-def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max: int = 99_000_000, sort_by_date: bool = False, brand: str = "") -> list[dict]:
+def _scrape_avito_raw(
+    region: str,
+    pages: int = 5,
+    price_min: int = 0,
+    price_max: int = 99_000_000,
+    sort_by_date: bool = False,
+    brand: str = "",
+    fast: bool = False,
+) -> list[dict]:
     """
     Бесплатный парсер Авито. Стратегия (порядок попыток):
     1. _avito_api_fetch: cloudscraper+Android UA, m.avito.ru, публичный API, веб-API —
@@ -8285,10 +8436,22 @@ def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max
 
     # ── Метод 1: API / мобильный сайт / cloudscraper ─────────────
     print(f"  [Авито] пробуем API-методы для {region}…")
-    api_results = _avito_api_fetch(region, pages, price_min, price_max, today, sort_by_date=sort_by_date, brand=brand)
+    api_results = _avito_api_fetch(
+        region,
+        pages,
+        price_min,
+        price_max,
+        today,
+        sort_by_date=sort_by_date,
+        brand=brand,
+        fast=fast,
+    )
     if api_results:
         print(f"  [Авито] API-метод дал {len(api_results)} объявлений")
         return api_results
+    if fast:
+        print("  [Авито] быстрый режим: API/индекс пусты, HTML-ветку не запускаем")
+        return []
     # API-методы не дали результатов — пробуем прямой HTML-скрейпинг (методы 2-3)
     print(f"  [Авито] API дал 0 — пробуем HTML-скрейпинг…")
 
@@ -12761,6 +12924,10 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                     item["_photo_url"] = details["_photo_url"]
                 if details.get("_avito_market") and item.get("_price_int"):
                     _apply_page_market(item, int(details["_avito_market"]), "avito")
+                elif details.get("_drom_market") and item.get("_price_int"):
+                    _apply_page_market(item, int(details["_drom_market"]), "drom")
+                elif details.get("_autoru_market") and item.get("_price_int"):
+                    _apply_page_market(item, int(details["_autoru_market"]), "autoru")
                 if details.get("_avito_rating"):
                     item["_avito_rating"] = details["_avito_rating"]
                     item["_avito_rating_score"] = details.get("_avito_rating_score")
@@ -12799,8 +12966,8 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         # Рыночную цену показываем на КАЖДОЙ машине, где она известна.
         deal_line = ""
         _lvl_now = str(item.get("_market_lvl") or "")
-        _avito_market_levels = {"avito", "near", "bracket", "medium", "wide", "model"}
-        if _lvl_now and _lvl_now not in _avito_market_levels:
+        _trusted_market_levels = {"avito", "drom", "autoru", "near", "bracket", "medium", "wide", "model"}
+        if _lvl_now and _lvl_now not in _trusted_market_levels:
             _clear_market_fields(item)
         market = item.get("_market_price", 0)
         pct = item.get("_savings_pct", 0)
@@ -12810,6 +12977,12 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                 pct = 0
         if market and _pi:
             saving = market - _pi
+            _market_n = int(item.get("_market_n") or 0)
+            _confidence = (
+                "высокое" if _lvl_now in {"avito", "drom", "autoru"} or _market_n >= 7
+                else "среднее" if _market_n >= 4
+                else "ограниченное"
+            )
             market_note = " с учётом пробега" if item.get("_market_mileage_factor") else ""
             if item.get("_market_lvl") == "drom":
                 market_note = " Дром" + market_note
@@ -12843,6 +13016,11 @@ async def send_batch(chat_id: int, uid: int, offset: int):
             else:
                 # По рынку
                 price_line += f"  ≈ рынок{market_note} ~{market:,} ₽".replace(",", " ")
+            deal_line += (
+                f"\n📊 Анализ рынка: {abs(pct):g}% "
+                f"{'ниже' if pct > 0 else ('выше' if pct < 0 else 'на уровне')} рынка"
+                f" · доверие: {_confidence}"
+            )
         elif _pi:
             deal_line = "\n📊 рынок: мало похожих авто для точной оценки"
 
@@ -13128,11 +13306,11 @@ async def do_search_for_user(uid: int, reply_to):
 
     scraper_map = {
         "drom":   lambda: scrape_drom(region, pages=10, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
-        "autoru": lambda: scrape_autoru(region, pages=4, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
-        "avito":  lambda: scrape_avito(region, pages=5, price_min=pmin, price_max=pmax, sort_by_date=True, brand=(brand if brand and brand != "any" else "")),
+        "autoru": lambda: scrape_autoru(region, pages=2, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else ""), deadline_sec=24),
+        "avito":  lambda: scrape_avito(region, pages=1, price_min=pmin, price_max=pmax, sort_by_date=True, brand=(brand if brand and brand != "any" else ""), fast=True),
         "youla":  lambda: scrape_youla(region, pages=16, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
-        "tg":     lambda: scrape_tg_channels(region, pmin, pmax),
+        "tg":     lambda: scrape_tg_channels(region, pmin, pmax, fast=True),
     }
     # Ищем ТОЛЬКО выбранные пользователем площадки.
     src_keys = [src for src in enabled_sources if src in scraper_map]
@@ -13146,7 +13324,13 @@ async def do_search_for_user(uid: int, reply_to):
     _avito_ref_fut = None
     if "avito" not in src_keys:
         _avito_ref_fut = loop.run_in_executor(
-            None, lambda: scrape_avito(region, pages=3, price_min=0, price_max=99_000_000)
+            None, lambda: scrape_avito(
+                region,
+                pages=1,
+                price_min=0,
+                price_max=99_000_000,
+                fast=True,
+            )
         )
     done, pending = await asyncio.wait(futures, timeout=SEARCH_SOURCE_TIMEOUT_SEC)
     # Авито и Auto.ru проходят более тяжёлую антибот-защиту и часто завершаются
@@ -13160,7 +13344,7 @@ async def do_search_for_user(uid: int, reply_to):
     if critical_pending:
         critical_done, _ = await asyncio.wait(
             critical_pending,
-            timeout=SEARCH_CRITICAL_SOURCE_GRACE_SEC,
+            timeout=min(3, SEARCH_CRITICAL_SOURCE_GRACE_SEC),
         )
         done = set(done) | set(critical_done)
         pending = set(pending) - set(critical_done)
@@ -13239,7 +13423,7 @@ async def do_search_for_user(uid: int, reply_to):
     if "autoru" in src_keys:
         autoru_idx = src_keys.index("autoru")
         if len(results[autoru_idx] or []) == 0:
-            autoru_cached: list[dict] = []
+            autoru_cached = _cached_source_results("autoru", region, pmin, pmax, limit=30)
             for it in (_search_cache.get(uid) or _load_cache(uid) or []):
                 if (it.get("source", "") or "").lower() != "autoru":
                     continue
@@ -13250,9 +13434,18 @@ async def do_search_for_user(uid: int, reply_to):
                     continue
                 autoru_cached.append(dict(it))
             if autoru_cached:
-                results[autoru_idx] = autoru_cached[:30]
+                results[autoru_idx] = _dedupe_search_items(autoru_cached)[:30]
                 source_status["autoru"] = "ok"
-                print(f"  [fallback] Auto.ru восстановлено {len(results[autoru_idx])} объявлений из кэша пользователя")
+                print(f"  [fallback] Auto.ru восстановлено {len(results[autoru_idx])} объявлений из общего кэша")
+
+    if "tg" in src_keys:
+        tg_idx = src_keys.index("tg")
+        if len(results[tg_idx] or []) == 0:
+            tg_cached = _cached_source_results("tg", region, pmin, pmax, limit=30)
+            if tg_cached:
+                results[tg_idx] = tg_cached
+                source_status["tg"] = "ok"
+                print(f"  [fallback] Telegram восстановлено {len(tg_cached)} объявлений из кэша")
 
     items = []
     stat_parts = []
@@ -13262,13 +13455,11 @@ async def do_search_for_user(uid: int, reply_to):
         status = source_status.get(src, "ok")
         if status == "timeout":
             print(f"  [scraper] {src}: timeout")
-            if src in ("avito", "autoru"):
-                stat_parts.append(f"{tag}: не успел")
+            stat_parts.append(f"{tag}: не успел")
         elif status == "error":
             print(f"  [scraper] {src}: error")
-            if src in ("avito", "autoru"):
-                stat_parts.append(f"{tag}: ошибка")
-        elif len(batch) == 0 and src in ("avito", "autoru"):
+            stat_parts.append(f"{tag}: ошибка")
+        elif len(batch) == 0:
             print(f"  [scraper] {src}: no data")
             stat_parts.append(f"{tag}: пусто")
         else:
@@ -13513,7 +13704,7 @@ async def do_search_for_user(uid: int, reply_to):
         items = items + _ref_copies
         print(f"  [рынок] Авито-эталон: {len(_ref_copies)} записей для медианы цен")
     else:
-        print(f"  [рынок] нет Авито-эталона — рыночная цена не будет вычислена")
+        print("  [рынок] нет Авито-эталона — используем Дром/Auto.ru/Юлу после фильтрации")
 
     # seen хранит нормализованные URL — сравниваем тоже по нормализованным
     seen_norm = {_norm_url(u) for u in seen}
@@ -13617,6 +13808,7 @@ async def do_search_for_user(uid: int, reply_to):
         if i.get("_market_ref_only") and (i.get("source", "") or "").lower() == "avito"
     ]
     _avito_available = bool(_ref_items)
+    _market_ref_items = list(_ref_items)
     if _avito_available:
         print(f"  [рынок] Авито-референс: {len(_ref_items)} объявлений → считаем рыночную цену")
         suitable = rank_by_market_price(suitable, ref_items=_ref_items, avito_only_median=True)
@@ -13642,9 +13834,20 @@ async def do_search_for_user(uid: int, reply_to):
         except Exception as _le:
             print(f"  [ликвидность] ошибка: {_le}")
     else:
-        print(f"  [рынок] нет Авито-эталона — рыночная цена не вычисляется")
-        for it in suitable:
-            _clear_market_fields(it)
+        _market_ref_items = [
+            i for i in suitable
+            if (i.get("source", "") or "").lower() in {"drom", "autoru", "youla", "yula"}
+            and int(i.get("_price_int") or 0) > 0
+        ]
+        print(
+            f"  [рынок] резервный эталон: {len(_market_ref_items)} объявлений "
+            f"Дром/Auto.ru/Юла"
+        )
+        suitable = rank_by_market_price(
+            suitable,
+            ref_items=_market_ref_items,
+            avito_only_median=False,
+        )
     # Дилерские объявления — добавляем штраф к deal_score
     for it in suitable:
         if is_dealer(it):
@@ -13760,6 +13963,10 @@ async def do_search_for_user(uid: int, reply_to):
                     it["description"] = details["description"]
                 if details.get("_avito_market") and it.get("_price_int"):
                     _apply_page_market(it, int(details["_avito_market"]), "avito")
+                elif details.get("_drom_market") and it.get("_price_int"):
+                    _apply_page_market(it, int(details["_drom_market"]), "drom")
+                elif details.get("_autoru_market") and it.get("_price_int"):
+                    _apply_page_market(it, int(details["_autoru_market"]), "autoru")
                 if details.get("_avito_rating"):
                     it["_avito_rating"] = details["_avito_rating"]
                     it["_avito_rating_score"] = details.get("_avito_rating_score")
@@ -13785,7 +13992,11 @@ async def do_search_for_user(uid: int, reply_to):
     for it in suitable:
         if _text_is_junk(it.get("title", ""), it.get("description", "")):
             it["_is_junk"] = True
-    suitable = rank_by_market_price(suitable, ref_items=_ref_items if _ref_items else [], avito_only_median=True)
+    suitable = rank_by_market_price(
+        suitable,
+        ref_items=_market_ref_items,
+        avito_only_median=_avito_available,
+    )
     suitable = _sort_by_deal(suitable)
 
     # После загрузки цен — выкидываем только те, у кого цена ИЗВЕСТНА и вышла за бюджет.
