@@ -7134,10 +7134,15 @@ def _avito_api_fetch(
         _attempts = []
         if AVITO_PROXIES and not _proxy_auth_failed:
             _attempts.append(_avito_proxies())
-        _attempts.append(None)  # прямой как резерв
+        # В пользовательском поиске Railway-IP заведомо заблокирован. Один
+        # браузерный запрос через мобильный прокси полезнее, чем несколько
+        # долгих попыток по обоим каналам.
+        if not fast or not _attempts:
+            _attempts.append(None)  # прямой как резерв
+        _profiles = ("chrome124",) if fast else ("chrome124", "chrome120", "chrome116")
         for _proxies in _attempts:
             _tag = "напрямую" if _proxies is None else "через прокси"
-            for _imp in ("chrome124", "chrome120", "chrome116"):
+            for _imp in _profiles:
                 try:
                     _sess = _cffi.Session(impersonate=_imp)
                     if _proxies:
@@ -7145,14 +7150,23 @@ def _avito_api_fetch(
                     # Прогрев: заходим на страницу города → получаем куки антибота
                     if p == 1:
                         try:
-                            _w = _sess.get(f"https://www.avito.ru/{slug}", timeout=10,
+                            _w = _sess.get(
+                                f"https://www.avito.ru/{slug}",
+                                timeout=5 if fast else 10,
                                            headers={"Accept-Language": "ru-RU,ru;q=0.9",
-                                                    "Upgrade-Insecure-Requests": "1"})
+                                                    "Upgrade-Insecure-Requests": "1"},
+                            )
                             print(f"  [Авито cffi {_tag}] прогрев {slug}: HTTP {_w.status_code}, куки={len(_sess.cookies)}")
-                            time.sleep(0.5)
+                            if not fast:
+                                time.sleep(0.5)
                         except Exception:
                             pass
-                    r = _sess.get(url, params=params, timeout=14, headers=_hdrs)
+                    r = _sess.get(
+                        url,
+                        params=params,
+                        timeout=8 if fast else 14,
+                        headers=_hdrs,
+                    )
                     print(f"  [Авито cffi {_tag}] стр.{p} {_imp}: HTTP {r.status_code}, {len(r.text):,}б, куки={len(_sess.cookies)}")
                     if r.status_code == 200 and ('"urlPath"' in r.text or '"canonicalUrl"' in r.text
                                                  or 'data-marker="item"' in r.text or '__NEXT_DATA__' in r.text):
@@ -8435,6 +8449,18 @@ def _avito_api_fetch(
         if web_json_items:
             print(f"  [Авито fast webJSON] {len(web_json_items)} объявлений")
             return web_json_items
+        # HTTP 439 — антибот Авито для JSON без браузерных cookies. Раньше после
+        # него быстрый поиск сразу уходил в поисковые индексы и возвращал пусто.
+        # Делаем одну ограниченную Chrome-сессию через мобильный прокси:
+        # максимум один профиль, 5с прогрев + 8с каталог.
+        try:
+            browser_html_items = _try_cffi_web(1)
+        except Exception as exc:
+            browser_html_items = []
+            print(f"  [Авито fast cffi] {str(exc)[:60]}")
+        if browser_html_items:
+            print(f"  [Авито fast cffi] {len(browser_html_items)} объявлений")
+            return browser_html_items
         try:
             indexed = _try_yandex_snippets(1, max_seconds=6, max_results=12)
         except Exception as exc:
@@ -10734,6 +10760,16 @@ async def cmd_buy_subscription(msg: Message):
     """Показывает пользователю рабочие ссылки оплаты подписки."""
     import urllib.parse
 
+    access_plan, access_days = _user_access_status(msg.from_user.id)
+    if access_days is None:
+        access_line = "⏳ Срок текущего доступа: уточняется"
+    elif access_days == 0:
+        access_line = "⏳ Пробный период завершён"
+    elif access_plan == "trial":
+        access_line = f"⏳ Пробный период: осталось {access_days} дн."
+    else:
+        access_line = f"⏳ Текущая подписка: осталось {access_days} дн."
+
     plans = (
         ("Неделя", 349),
         ("Месяц", 999),
@@ -10763,6 +10799,7 @@ async def cmd_buy_subscription(msg: Message):
 
     text = (
         "💎 <b>Подписка PerekupDrive</b>\n\n"
+        f"{access_line}\n\n"
         "📅 Неделя — 349 ₽\n"
         "🗓 Месяц — 999 ₽\n\n"
         "Выбери тариф и после оплаты отправь чек администратору."
@@ -11605,7 +11642,7 @@ async def cb_price_range(cb: CallbackQuery, state: FSMContext):
         f"🔍 Категория: {cat_label}{brand_label}\n"
         f"💰 Бюджет: {pmin:,} – {pmax:,} ₽\n\n"
         f"Выбери площадки для поиска:",
-        reply_markup=sources_keyboard(_get_enabled_sources(settings), show_back=False)
+        reply_markup=sources_keyboard(_get_enabled_sources(settings), show_back=True)
     )
 
 
@@ -11659,7 +11696,7 @@ async def fsm_price_max(msg: Message, state: FSMContext):
         f"🔍 Категория: {cat_label}{brand_label}\n"
         f"💰 Бюджет: {pmin:,} – {pmax:,} ₽\n\n"
         f"Выбери площадки для поиска:",
-        reply_markup=sources_keyboard(_get_enabled_sources(s), show_back=False)
+        reply_markup=sources_keyboard(_get_enabled_sources(s), show_back=True)
     )
 
 
@@ -13034,6 +13071,14 @@ def _register_user(uid: int, username: "str | None" = None, is_search: bool = Fa
     now = int(time.time())
     _is_new = k not in _USER_REGISTRY
     u = _USER_REGISTRY.get(k) or {"first_seen": now, "searches": 0}
+    first_seen = int(u.get("first_seen") or now)
+    u["first_seen"] = first_seen
+    # Сохраняем абсолютную дату окончания, а не «7 дней» при каждом запуске.
+    # Поэтому деплой/рестарт не начинает пробный период заново.
+    if not u.get("subscription_plan"):
+        u["subscription_plan"] = "trial"
+    if not int(u.get("subscription_expires_at") or 0):
+        u["subscription_expires_at"] = first_seen + DEFAULT_TRIAL_DAYS * 86400
     u["last_seen"] = now
     if username:
         u["username"] = username
@@ -13116,7 +13161,32 @@ def _days_left_from_ts(expires_ts: int | float | None) -> int | None:
     return max(1, (seconds + 86399) // 86400)
 
 
+def _user_access_status(uid: int) -> tuple[str, int | None]:
+    """Текущий план и остаток дней; PG приоритетен, реестр — резерв."""
+    try:
+        db = _get_db()
+        if db:
+            with db.cursor() as cur:
+                cur.execute(
+                    "SELECT subscription_plan, EXTRACT(EPOCH FROM subscription_expires_at) "
+                    "FROM bot_users WHERE uid=%s",
+                    (uid,),
+                )
+                row = cur.fetchone()
+                if row:
+                    return row[0] or "trial", _days_left_from_ts(int(row[1] or 0))
+    except Exception as exc:
+        print(f"  [access] status failed uid={uid}: {str(exc)[:80]}")
+    u = _USER_REGISTRY.get(str(uid)) or {}
+    plan = u.get("subscription_plan") or "trial"
+    expires_ts = int(u.get("subscription_expires_at") or 0)
+    if not expires_ts and u.get("first_seen"):
+        expires_ts = int(u["first_seen"]) + DEFAULT_TRIAL_DAYS * 86400
+    return plan, _days_left_from_ts(expires_ts)
+
+
 def _set_user_access(uid: int, days: int, plan: str = "paid") -> bool:
+    global _registry_dirty
     days = max(0, int(days))
     plan = (plan or "paid").strip()[:40]
     try:
@@ -13137,6 +13207,7 @@ def _set_user_access(uid: int, days: int, plan: str = "paid") -> bool:
         u["subscription_plan"] = plan
         u["subscription_expires_at"] = int(time.time()) + days * 86400
         _USER_REGISTRY[k] = u
+        _registry_dirty = True
         return True
     except Exception as e:
         print(f"  [access] set failed uid={uid}: {str(e)[:100]}")
@@ -13241,6 +13312,12 @@ async def _tg_backup_restore():
                     cur["searches"] = max(cur.get("searches", 0), v.get("searches", 0))
                     cur["first_seen"] = min(cur.get("first_seen") or v.get("first_seen", 0), v.get("first_seen", 0)) or v.get("first_seen", 0)
                     cur["last_seen"] = max(cur.get("last_seen", 0), v.get("last_seen", 0))
+                    # PG остаётся главным источником. Telegram-бэкап заполняет
+                    # срок только когда текущая запись его не содержит.
+                    if not cur.get("subscription_plan") and v.get("subscription_plan"):
+                        cur["subscription_plan"] = v["subscription_plan"]
+                    if not int(cur.get("subscription_expires_at") or 0) and int(v.get("subscription_expires_at") or 0):
+                        cur["subscription_expires_at"] = int(v["subscription_expires_at"])
             print(f"  [tg-backup] восстановлено {len(restored)} пользователей из Telegram")
     except Exception as e:
         print(f"  [tg-backup] restore: {str(e)[:80]}")
@@ -16515,6 +16592,16 @@ async def main():
         await _tg_backup_restore()
     except Exception:
         pass
+    # Нормализуем записи из старых файлов/бэкапов. Для каждого пользователя
+    # фиксируется одна абсолютная дата окончания пробного периода.
+    _now_registry = int(time.time())
+    for _u in _USER_REGISTRY.values():
+        _first = int(_u.get("first_seen") or _now_registry)
+        _u["first_seen"] = _first
+        if not _u.get("subscription_plan"):
+            _u["subscription_plan"] = "trial"
+        if not int(_u.get("subscription_expires_at") or 0):
+            _u["subscription_expires_at"] = _first + DEFAULT_TRIAL_DAYS * 86400
     _registry_dirty = True  # сохранить собранный реестр при первом бэкапе
     print(f"  [реестр] загружено пользователей: {len(_USER_REGISTRY)}")
     # Username бота берём ВСЕГДА из Telegram (get_me) — это единственный
