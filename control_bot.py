@@ -402,6 +402,28 @@ AVITO_REGION_SLUGS = {
     "rostov":       "rostovskaya_oblast",
 }
 
+# Названия всего субъекта РФ для резервного поиска по поисковым индексам.
+# В отличие от URL каталога, URL отдельного объявления содержит город
+# (например, /achinsk/avtomobili/...), поэтому индекс ищем по названию края/
+# области, а не ограничиваем только главным городом.
+AVITO_REGION_SEARCH_NAMES = {
+    "ekaterinburg": "Свердловская область",
+    "moscow":       "Москва и Московская область",
+    "spb":          "Санкт-Петербург и Ленинградская область",
+    "novosibirsk":  "Новосибирская область",
+    "kazan":        "Республика Татарстан",
+    "chelyabinsk":  "Челябинская область",
+    "ufa":          "Республика Башкортостан",
+    "krasnodar":    "Краснодарский край",
+    "omsk":         "Омская область",
+    "tyumen":       "Тюменская область",
+    "perm":         "Пермский край",
+    "krasnoyarsk":  "Красноярский край",
+    "voronezh":     "Воронежская область",
+    "samara":       "Самарская область",
+    "rostov":       "Ростовская область",
+}
+
 # Слаги для Дрома — область (geo-параметр)
 DROM_GEO = {
     "ekaterinburg": 12,    # Свердловская область
@@ -562,7 +584,7 @@ SEARCH_AUTORU_INDEX_TIMEOUT_SEC = max(
     18, _env_int("SEARCH_AUTORU_INDEX_TIMEOUT_SEC", 24)
 )
 SEARCH_AVITO_INDEX_TIMEOUT_SEC = max(
-    18, _env_int("SEARCH_AVITO_INDEX_TIMEOUT_SEC", 24)
+    30, _env_int("SEARCH_AVITO_INDEX_TIMEOUT_SEC", 36)
 )
 SEARCH_PRICE_FILL_LIMIT = _env_int("SEARCH_PRICE_FILL_LIMIT", 3, 0)
 SEARCH_PRICE_FILL_TIMEOUT_SEC = _env_int("SEARCH_PRICE_FILL_TIMEOUT_SEC", 4)
@@ -7142,7 +7164,10 @@ def _avito_api_fetch(
     except ImportError:
         return []
 
-    slug = AVITO_SLUGS.get(region, region)
+    # Каталог и Referer должны указывать на область/край. Раньше здесь
+    # использовался городской slug, хотя locationId уже был областным:
+    # часть методов поэтому возвращала только главный город.
+    slug = AVITO_REGION_SLUGS.get(region, AVITO_SLUGS.get(region, region))
     location_id = _avito_region_loc(region)
     results: list[dict] = []
 
@@ -8448,13 +8473,10 @@ def _avito_api_fetch(
         except ImportError:
             return []
 
-        slug_ru_name = {
-            "ekaterinburg": "Екатеринбург", "moskva": "Москва", "spb": "Санкт-Петербург",
-            "novosibirsk": "Новосибирск", "kazan": "Казань", "chelyabinsk": "Челябинск",
-            "ufa": "Уфа", "krasnodar": "Краснодар", "omsk": "Омск",
-            "rostov-na-donu": "Ростов", "tyumen": "Тюмень", "perm": "Пермь",
-            "krasnoyarsk": "Красноярск", "voronezh": "Воронеж", "samara": "Самара",
-        }.get(slug, slug)
+        region_search_name = AVITO_REGION_SEARCH_NAMES.get(
+            region,
+            REGIONS.get(region, region),
+        )
 
         _avito_url_re = re.compile(
             r'(?:https?://)?(?:www\.|m\.)?avito\.ru/[a-z0-9_.-]+/avtomobili/[a-z0-9_.%-]*\d{6,}',
@@ -8477,8 +8499,6 @@ def _avito_api_fetch(
                 if not raw.startswith("http"):
                     raw = "https://" + raw
                 clean = raw.split("?")[0].split("#")[0].rstrip("/")
-                if slug and f"/{slug}/" not in clean:
-                    return
                 if clean not in seen:
                     seen.add(clean)
                     found.append(clean)
@@ -8633,7 +8653,7 @@ def _avito_api_fetch(
                         r'https?://\S+|//\S+|uddg=\S+|rut=\S+|duckduckgo\.com\S*|www\.|avito\.ru\S*',
                         ' ', context_clean, flags=re.I,
                     )
-                    title = re.sub(r'\s+', ' ', title_src).strip(" -|·,")[:80] or f"Авто на Авито — {slug_ru_name}"
+                    title = re.sub(r'\s+', ' ', title_src).strip(" -|·,")[:80] or f"Авто на Авито — {region_search_name}"
 
                 # Fix C: Extract year from URL path first (more reliable than snippet)
                 year_from_url = 0
@@ -8675,7 +8695,8 @@ def _avito_api_fetch(
                     "source": "avito", "title": title,
                     "price": f"{price_int:,} ₽".replace(",", " ") if price_int else "цена не указана",
                     "_price_int": price_int, "url": clean_url, "_photo_url": photo_url,
-                    "description": context_clean[:400], "seller": "Авито (частник)",
+                    "description": context_clean[:400],
+                    "seller": f"Авито ({region_search_name}, частник)",
                     "_year": year, "_days_on_site": days_on_site,
                     "_date_known": days_on_site < 2,
                     "_photos": 1 if photo_url else 0,
@@ -8737,7 +8758,14 @@ def _avito_api_fetch(
             if time.time() > _ddg_deadline:
                 print(f"  [ddg] тайм-лимит {max_seconds}с, остановка на {brand}")
                 break
-            q = f"site:avito.ru/{slug}/avtomobili {brand}{_price_hint}{_year_hint}"
+            # URL отдельной машины содержит населённый пункт, а не slug области.
+            # Поэтому городской site:-фильтр терял Ачинск, Канск, Норильск и
+            # остальные города края. Точное название субъекта РФ сохраняет
+            # региональный охват, но разрешает любые города внутри него.
+            q = (
+                f'site:avito.ru автомобили "{region_search_name}" '
+                f'{brand}{_price_hint}{_year_hint} цена'
+            )
             proxy = proxy_pool[proxy_idx % len(proxy_pool)]
             html = ""
             if not _ddg_globally_blocked:
@@ -8845,7 +8873,7 @@ def _avito_api_fetch(
             indexed = _try_yandex_snippets(
                 1,
                 max_seconds=SEARCH_AVITO_INDEX_TIMEOUT_SEC,
-                max_results=24,
+                max_results=48,
             )
         except Exception as exc:
             indexed = []
@@ -9320,7 +9348,7 @@ def _scrape_avito_raw(
     2. Прямой HTTP-запрос с Desktop UA (иногда работает в определённых регионах).
     3. Headless Playwright + stealth — последний резерв, требует больше времени.
     """
-    slug = AVITO_SLUGS.get(region, region)
+    slug = AVITO_REGION_SLUGS.get(region, AVITO_SLUGS.get(region, region))
     today = datetime.date.today()
 
     # Перед сетевым скрейпом (кэш-промах) меняем IP прокси на свежий, чтобы
@@ -14734,24 +14762,6 @@ async def do_search_for_user(uid: int, reply_to):
     # seen хранит нормализованные URL — сравниваем тоже по нормализованным
     seen_norm = {_norm_url(u) for u in seen}
     skipped_norm = {_norm_url(u) for u in skipped}
-    def _display_fallback_candidates() -> list[dict]:
-        preferred: list[dict] = []
-        broader: list[dict] = []
-        for it in items:
-            if it.get("_market_ref_only") or not it.get("url"):
-                continue
-            if _norm_url(it.get("url", "")) in skipped_norm:
-                continue
-            price = int(it.get("_price_int") or parse_price(it.get("price", "")) or 0)
-            if price:
-                it["_price_int"] = price
-            if price and pmin <= price <= pmax:
-                preferred.append(it)
-            else:
-                broader.append(it)
-        return _safe_rank_search_items(preferred or broader)[:120]
-
-    _display_fallback = _display_fallback_candidates()
     already_seen_count = sum(
         1 for i in items
         if not is_dealer(i) and in_price_range(i, pmin, pmax)
@@ -14898,11 +14908,6 @@ async def do_search_for_user(uid: int, reply_to):
             it["_is_dealer"] = True
             it["_deal_score"] = it.get("_deal_score", 0) - 30
     suitable = _sort_by_deal(suitable)
-    if not suitable and _display_fallback:
-        suitable = _display_fallback
-        await reply_to.answer(
-            f"⚠️ Строгие фильтры убрали все карточки. Показываю {len(suitable)} найденных объявлений, чтобы выдача не была пустой."
-        )
 
     if not suitable:
         items_in_seen_count = sum(
@@ -14934,6 +14939,8 @@ async def do_search_for_user(uid: int, reply_to):
             fallback_items = _filter_by_category(list(without_cat_filter), category, "")
             if fallback_items:
                 fallback_items = rank_by_market_price(fallback_items, ref_items=[i for i in items if i.get("_market_ref_only")], avito_only_median=True)
+                fallback_items = _best_below_market_items(fallback_items)
+            if fallback_items:
                 for it in fallback_items:
                     if is_dealer(it):
                         it["_is_dealer"] = True
@@ -15054,46 +15061,17 @@ async def do_search_for_user(uid: int, reply_to):
         await reply_to.answer("😔 Не нашёл объявлений в твоём бюджете. Попробуй расширить диапазон цен: /settings")
         return
 
-    # Пользовательский поиск должен быть широким: если точных сделок мало, не
-    # срезаем выдачу до 1-2 карточек. Реальные скидки идут первыми, остальные
-    # релевантные объявления в бюджете остаются ниже в списке.
-    _market_items_count = sum(1 for i in suitable if i.get("_market_price") and i.get("_price_int"))
-    _below_count = sum(1 for i in suitable if _is_strong_below_market(i))
-    _market_available = _market_items_count > 0
-    if _market_available:
-        below_items = _best_below_market_items(suitable)
-        below_urls = {_norm_url(i.get("url", "")) for i in below_items}
-        market_items = _sort_by_deal([
-            i for i in suitable
-            if _norm_url(i.get("url", "")) not in below_urls
-            and i.get("_market_price") and i.get("_price_int")
-            and _is_market_candidate(i)
-        ])
-        market_urls = {_norm_url(i.get("url", "")) for i in market_items}
-        rest_items = _sort_by_deal([
-            i for i in suitable
-            if _norm_url(i.get("url", "")) not in below_urls
-            and _norm_url(i.get("url", "")) not in market_urls
-            and not (i.get("_market_price") and i.get("_price_int"))
-            and _is_market_candidate(i)
-        ])
-        suitable = _safe_rank_search_items(suitable)[:120]
-        _below_count = sum(1 for i in suitable if _is_strong_below_market(i))
-        _market_tail_count = sum(
-            1 for i in suitable
-            if i.get("_market_price") and i.get("_price_int") and not _is_strong_below_market(i)
-        )
-        print(
-            f"  [фильтр] ниже рынка={_below_count}, с рынком={_market_items_count}, "
-            f"рынок внизу={_market_tail_count}, показываем={len(suitable)}"
-        )
-    else:
-        suitable = _safe_rank_search_items(suitable)[:80]
-        print(f"  [фильтр] точных оценок нет → показываем {len(suitable)} объявлений в бюджете")
-
-    if not suitable and _display_fallback:
-        suitable = _display_fallback[:80]
-        print(f"  [fallback] final ranking empty -> showing {len(suitable)} basic listings")
+    # Финальная выдача — только доказанные сделки ниже рынка. Раньше здесь
+    # специально добавлялись обычные машины и карточки без рыночной оценки,
+    # из-за чего пользователь видел «рынок: мало похожих авто» и даже цены выше
+    # рынка. Теперь отсутствие точной оценки означает отсутствие карточки.
+    _before_strict_market = len(suitable)
+    suitable = _best_below_market_items(suitable)[:80]
+    _below_count = len(suitable)
+    print(
+        f"  [фильтр] строгий рынок: {_below_count}/{_before_strict_market} "
+        f"подтверждённых объявлений ниже рынка"
+    )
 
     if not suitable:
         await reply_to.answer(
@@ -15118,25 +15096,10 @@ async def do_search_for_user(uid: int, reply_to):
     src_found = list(dict.fromkeys(i.get("source","") for i in suitable if i.get("source")))
     src_icons = {"avito":"🟠","drom":"🔵","autoru":"🔴","youla":"🟡","vk":"💙","tg":"✈️"}
     src_str = " ".join(src_icons.get(s,"") for s in src_found if s)
-    if _market_available:
-        _extra = max(0, len(suitable) - _below_count)
-        if _below_count:
-            _msg = (
-                f"✅ {src_str} Найдено {_below_count} объявлений ниже рынка "
-                f"(≥{MARKET_DEAL_MIN_PCT:.0f}%)."
-            )
-            if _extra:
-                _msg += f"\n➕ Ещё {_extra} авто в бюджете — ниже в списке."
-        else:
-            _msg = (
-                f"✅ {src_str} Сильных скидок ≥{MARKET_DEAL_MIN_PCT:.0f}% сейчас нет.\n"
-                f"Показываю {len(suitable)} авто в бюджете, лучшие с анализом рынка сверху."
-            )
-    else:
-        _msg = (
-            f"✅ {src_str} Найдено {len(suitable)} авто в бюджете.\n"
-            f"⚠️ Точной рыночной оценки сейчас нет — показываю релевантные объявления, а не пустую выдачу."
-        )
+    _msg = (
+        f"✅ {src_str} Найдено {_below_count} подтверждённых объявлений ниже рынка "
+        f"(≥{MARKET_DEAL_MIN_PCT:.0f}%)."
+    )
     if _seen_cnt:
         _msg += f"\n♻️ {_seen_cnt} уже видел — они в конце."
 
@@ -15485,7 +15448,7 @@ async def cmd_test_avito(msg: Message):
     uid = msg.from_user.id
     s = load_settings(uid)
     region = s.get("region", "chelyabinsk")
-    slug = AVITO_SLUGS.get(region, region)
+    slug = AVITO_REGION_SLUGS.get(region, AVITO_SLUGS.get(region, region))
     url = f"https://www.avito.ru/{slug}/avtomobili"
 
     await msg.answer(f"🔬 Тестирую Авито для {REGIONS.get(region, region)}...\nURL: {url}")
