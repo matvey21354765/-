@@ -7155,6 +7155,13 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
         _scrape_pmin, _scrape_pmax = 0, 99_000_000
         _cache_ttl = _AVITO_REGION_CACHE_TTL
     cached = _AVITO_REGION_CACHE.get(cache_key)
+    # FIX: кэш от local_avito_scraper.py кладётся под ключ `region`
+    # (без бюджет-суффикса). При наличии прокси основной cache_key
+    # отличается — подхватываем точный ключ региона, если он свежий.
+    if (not cached or (now - cached[0]) >= _cache_ttl) and not AVITO_PROXIES:
+        _scraper_cache = _AVITO_REGION_CACHE.get(region)
+        if _scraper_cache and (now - _scraper_cache[0]) < _AVITO_REGION_CACHE_TTL:
+            cached = _scraper_cache
     # Игнорируем кэш из старых записей без цены (DDG-мусор прошлых версий).
     _cache_is_priceless = bool(
         cached and AVITO_PROXIES
@@ -7208,7 +7215,7 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
     if AVITO_PROXIES:
         out = [
             it for it in items
-            if it.get("_price_int") and (price_min <= it["_price_int"] <= price_max)
+            if (not it.get("_price_int")) or (price_min <= it["_price_int"] <= price_max)
         ]
     else:
         # Без прокси цену часто не достать — пропускаем безценовые как кандидатов.
@@ -13488,6 +13495,12 @@ async def main():
                 return
             # Кладём в кэш региона с «свежим» временем
             _AVITO_REGION_CACHE[region] = (time.time(), clean)
+            # FIX: scrape_avito при наличии прокси ищет ключ с бюджет-суффиксом
+            # (region_0_100000), поэтому кладём и под него, и под brand-варианты,
+            # чтобы кэш от скрапера гарантированно подхватился.
+            _AVITO_REGION_CACHE[f"{region}_0_100000"] = (time.time(), clean)
+            if brand:
+                _AVITO_REGION_CACHE[f"{region}_{brand}"] = (time.time(), clean)
             _save_avito_cache()
             await message.answer(
                 f"✅ Авито [{region}]: загружено {len(clean)} объявлений в кэш поиска"
