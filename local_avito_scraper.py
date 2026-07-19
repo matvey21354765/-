@@ -166,33 +166,68 @@ def scrape(region):
                     html = page.content()
                     title = page.title()
                     if "Доступ ограничен" in html or "captcha" in title.lower() or "Подтвердите" in html:
-                        print("Всё ещё заблокировано, останавливаюсь.")
-                        break
+                        print("Всё ещё заблокировано — пропускаю страницу, иду дальше.")
+                        continue
 
                 soup = BeautifulSoup(html, "lxml")
-                cards = soup.select("[data-marker='item']")
+                # Несколько вариантов селектора карточки — Авито часто меняет вёрстку
+                cards = soup.select("[data-marker='item']") or soup.select("[class*='iva-item-root']") or soup.select("div[itemtype='http://schema.org/Product']")
                 if not cards:
                     print("нет карточек, конец")
                     break
 
                 page_ok = 0
+                title_candidates = [
+                    "[itemprop='name']", "h3",
+                    "[class*='iva-item-title']",
+                    "[class*='title']",
+                    "a[class*='title']",
+                    "span[class*='title']",
+                    "div[class*='description'] h3",
+                    "meta[itemprop='name']",
+                ]
+                price_candidates = [
+                    "[itemprop='price']",
+                    "[class*='price']",
+                    "[class*='iva-item-price']",
+                    "meta[itemprop='price']",
+                ]
                 for card in cards:
                     try:
-                        title_el = card.select_one("[itemprop='name']") or card.select_one("h3")
-                        title = title_el.get_text(strip=True) if title_el else ""
+                        # Заголовок: ищем по нескольким селекторам, иначе по тексту ссылки
+                        title_el = None
+                        for sel in title_candidates:
+                            title_el = card.select_one(sel)
+                            if title_el:
+                                break
+                        if title_el and title_el.name == "meta":
+                            title = title_el.get("content", "").strip()
+                        else:
+                            title = title_el.get_text(strip=True) if title_el else ""
+                        if not title:
+                            # запасной вариант — первая ссылка с длинным текстом
+                            for a in card.select("a"):
+                                t = a.get_text(strip=True)
+                                if len(t) > 8:
+                                    title = t
+                                    break
                         if not title or is_dealer(title):
                             continue
 
-                        link_el = card.select_one(f"a[href*='/{slug.split('_')[0]}']") or card.select_one("a[itemprop='url']") or card.select_one("a[href*='avito.ru']")
+                        link_el = card.select_one(f"a[href*='/{slug.split('_')[0]}']") or card.select_one("a[itemprop='url']") or card.select_one("a[href*='avito.ru']") or card.select_one("a")
                         href = link_el.get("href", "") if link_el else ""
                         if href and not href.startswith("http"):
                             item_url = "https://www.avito.ru" + href
                         else:
                             item_url = href
-                        if not item_url:
+                        if not item_url or "avito.ru" not in item_url:
                             continue
 
-                        price_el = card.select_one("[itemprop='price']") or card.select_one("[class*='price']")
+                        price_el = None
+                        for sel in price_candidates:
+                            price_el = card.select_one(sel)
+                            if price_el:
+                                break
                         price = ""
                         if price_el:
                             price = price_el.get("content") or price_el.get_text(strip=True)
@@ -206,7 +241,7 @@ def scrape(region):
                             if src.startswith("http"):
                                 photo_url = src
 
-                        desc_el = card.select_one("[itemprop='description']") or card.select_one("[class*='iva-item-text']")
+                        desc_el = card.select_one("[itemprop='description']") or card.select_one("[class*='iva-item-text']") or card.select_one("[class*='description']")
                         description = desc_el.get_text(strip=True) if desc_el else ""
 
                         date_el = card.select_one("[data-marker='item-date']") or card.select_one("span[class*='date']")
@@ -214,6 +249,12 @@ def scrape(region):
                         date = parse_date(date_text)
                         days = max(0, (today - date).days) if date else 0
                         score = days * 0.3 + (10 if HOT.search(title) else 0)
+
+                        _price_int = parse_price(price)
+                        _year = 0
+                        ym = re.search(r"\b(19[5-9]\d|20[0-2]\d)\b", title)
+                        if ym:
+                            _year = int(ym.group(1))
 
                         results.append({
                             "source": "avito",
@@ -225,6 +266,8 @@ def scrape(region):
                             "_photo_url": photo_url,
                             "_days_on_site": days,
                             "_hot_score": round(score, 2),
+                            "_price_int": _price_int or 0,
+                            "_year": _year,
                             "description": description,
                             "seller": "",
                         })
@@ -232,7 +275,7 @@ def scrape(region):
                     except Exception:
                         pass
 
-                print(f"{page_ok} объявлений")
+                print(f"{page_ok} объявлений (всего накоплено: {len(results)})")
                 time.sleep(random.uniform(2, 4))
 
             except Exception as e:

@@ -13449,6 +13449,53 @@ async def main():
             await bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=admin_id))
         except Exception:
             pass
+    # ── Подхват файлов от local_avito_scraper.py ──────────────────────────
+    # Скрапер запускается на домашнем ПК (Авито блокирует серверные IP)
+    # и присылает боту документ avito_<region>.json. Бот кладёт эти
+    # объявления в кэш региона — они подмешиваются в обычный поиск.
+    @dp.message_handler(content_types=["document"])
+    async def _on_avito_document(message: Message):
+        doc = message.document
+        if not doc or not doc.file_name:
+            return
+        fname = doc.file_name
+        if not (fname.startswith("avito_") and fname.endswith(".json")):
+            return
+        try:
+            region = fname[len("avito_"):-len(".json")]
+            file = await doc.get_file()
+            data = await file.download_as_bytearray()
+            items = json.loads(bytes(data))
+            if not isinstance(items, list) or not items:
+                await message.answer(f"⚠️ Файл {fname}: нет объявлений")
+                return
+            # Дополняем обязательные поля, если скрапер их не прислал
+            clean = []
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                if not it.get("url") or not it.get("title"):
+                    continue
+                if not it.get("_price_int"):
+                    it["_price_int"] = parse_price(it.get("price", ""))
+                if not it.get("_year"):
+                    ym = re.search(r"\b(19[5-9]\d|20[0-2]\d)\b", it.get("title", ""))
+                    it["_year"] = int(ym.group(1)) if ym else 0
+                clean.append(it)
+            if not clean:
+                await message.answer(f"⚠️ Файл {fname}: невалидные объявления")
+                return
+            # Кладём в кэш региона с «свежим» временем
+            _AVITO_REGION_CACHE[region] = (time.time(), clean)
+            _save_avito_cache()
+            await message.answer(
+                f"✅ Авито [{region}]: загружено {len(clean)} объявлений в кэш поиска"
+            )
+            print(f"  [Авито doc] принято {len(clean)} объявлений для региона '{region}'")
+        except Exception as e:
+            await message.answer(f"❌ Ошибка обработки {fname}: {e}")
+            print(f"  [Авито doc] ошибка: {e}")
+
     await dp.start_polling(bot)
 
 
