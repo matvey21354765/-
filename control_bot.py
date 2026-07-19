@@ -13453,8 +13453,9 @@ async def main():
     # Скрапер запускается на домашнем ПК (Авито блокирует серверные IP)
     # и присылает боту документ avito_<region>.json. Бот кладёт эти
     # объявления в кэш региона — они подмешиваются в обычный поиск.
-    @dp.message_handler(content_types=["document"])
+    @dp.message_handler(F.document, content_types=["document"])
     async def _on_avito_document(message: Message):
+        print(f"  [doc] получен файл: {message.document.file_name if message.document else 'None'}")
         doc = message.document
         if not doc or not doc.file_name:
             return

@@ -34,7 +34,10 @@ except ImportError:
 # Тот же токен, что и у control_bot.py (берётся из .env / переменной окружения,
 # чтобы файл с локальным скрапером не хранил отдельный секрет).
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8923014188:AAHvNW2B5fin2XCmbVhlaLNjWhLwI3JhZ90")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "749256529"))
+# В .env у бота переменная называется ADMIN_IDS (список через запятую),
+# поэтому берём первый ID оттуда, иначе дефолт.
+_ADMINS_RAW = os.getenv("ADMIN_IDS") or os.getenv("ADMIN_ID") or "749256529"
+ADMIN_ID = int(_ADMINS_RAW.split(",")[0].strip())
 PAGES = int(os.getenv("AVITO_PAGES", "10"))
 
 REGIONS = {
