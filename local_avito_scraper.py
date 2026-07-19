@@ -299,6 +299,10 @@ if __name__ == "__main__":
         print("   playwright install chromium")
         sys.exit(1)
 
+    # Авто-цикл для VPS/сервера 24/7: python local_avito_scraper.py ekaterinburg --loop
+    loop_mode = "--loop" in sys.argv
+    interval_h = int(os.getenv("SCRAPER_LOOP_HOURS", "8"))
+
     region = sys.argv[1] if len(sys.argv) > 1 else ""
     if region not in REGIONS:
         print("Доступные регионы: " + ", ".join(REGIONS))
@@ -307,12 +311,29 @@ if __name__ == "__main__":
         print(f"❌ Неизвестный регион: {region}")
         sys.exit(1)
 
-    print(f"🔍 Парсю Авито: {region}...")
-    print("Откроется окно браузера — не закрывай его!\n")
-
-    items = scrape(region)
-    print(f"\nНайдено: {len(items)} подходящих объявлений")
-    if items:
-        send_to_bot(region, items)
+    if loop_mode:
+        print(f"🔁 Авто-цикл: каждые {interval_h}ч, регион {region}")
+        while True:
+            try:
+                print(f"\n=== {datetime.datetime.now()} ===")
+                print(f"🔍 Парсю Авито: {region}...")
+                items = scrape(region)
+                print(f"Найдено: {len(items)} подходящих объявлений")
+                if items:
+                    send_to_bot(region, items)
+                else:
+                    print("Ничего не найдено, жду следующий цикл.")
+            except Exception as e:
+                print(f"❌ Ошибка цикла: {e}")
+            print(f"⏳ Жду {interval_h}ч до следующего запуска...")
+            time.sleep(interval_h * 3600)
     else:
-        print("Ничего не найдено.")
+        print(f"🔍 Парсю Авито: {region}...")
+        print("Откроется окно браузера — не закрывай его!\n")
+
+        items = scrape(region)
+        print(f"\nНайдено: {len(items)} подходящих объявлений")
+        if items:
+            send_to_bot(region, items)
+        else:
+            print("Ничего не найдено.")
