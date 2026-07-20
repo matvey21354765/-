@@ -19,9 +19,7 @@ except ImportError:
 
 try:
     from bs4 import BeautifulSoup
-    HAS_BS4 = True
-except ImportError:
-    HAS_BS4 = False
+    
 
 MONTHS = {
     "янв":1,"фев":2,"мар":3,"апр":4,"май":5,"мая":5,
