@@ -13540,148 +13540,154 @@ async def _trial_notification_loop():
             pass
 
 
-    # Единый глобальный монитор — опрашивает всех активных пользователей каждые 2 минуты
-    print(">>> main(): создаём _global_monitor_loop", flush=True)
-    loop.create_task(_global_monitor_loop())
-    print(f"  [монитор] глобальный цикл запущен (интервал {GLOBAL_POLL_SEC}с)")
-    # Push-уведомления — раз в 2-3 дня всем пользователям
-    loop.create_task(_push_notification_loop())
-    print("  [push] цикл уведомлений запущен (интервал ~2.5 дня)")
-    loop.create_task(_admin_report_scheduler())
-    print("  [admin] планировщик отчётов запущен (09:00 МСК)")
-    loop.create_task(_analytics_persist_loop())
-    print("  [analytics] автосохранение статистики в PG запущено (раз в 3 мин)")
-    loop.create_task(_tg_backup_loop())
-    print("  [реестр] Telegram-бэкап статистики запущен (раз в 15 мин)")
-    # Прогрев кеша бесплатных прокси — тестирует их против Авито и кеширует рабочие
-    loop.create_task(_proxy_warmup_loop())
-    print("  [прокси-прогрев] запущен фоновый прогрев кеша прокси")
+    async def _post_startup():
+        # Единый глобальный монитор — опрашивает всех активных пользователей каждые 2 минуты
+        print(">>> main(): создаём _global_monitor_loop", flush=True)
+        loop.create_task(_global_monitor_loop())
+        print(f"  [монитор] глобальный цикл запущен (интервал {GLOBAL_POLL_SEC}с)")
+        # Push-уведомления — раз в 2-3 дня всем пользователям
+        loop.create_task(_push_notification_loop())
+        print("  [push] цикл уведомлений запущен (интервал ~2.5 дня)")
+        loop.create_task(_admin_report_scheduler())
+        print("  [admin] планировщик отчётов запущен (09:00 МСК)")
+        loop.create_task(_analytics_persist_loop())
+        print("  [analytics] автосохранение статистики в PG запущено (раз в 3 мин)")
+        loop.create_task(_tg_backup_loop())
+        print("  [реестр] Telegram-бэкап статистики запущен (раз в 15 мин)")
+        # Прогрев кеша бесплатных прокси — тестирует их против Авито и кеширует рабочие
+        loop.create_task(_proxy_warmup_loop())
+        print("  [прокси-прогрев] запущен фоновый прогрев кеша прокси")
 
-    # Уведомления об окончании тестового периода (за 3 и за 1 день)
-    loop.create_task(_trial_notification_loop())
-    print("  [тест] цикл уведомлений о конце теста запущен")
-    await _diag("циклы созданы")
+        # Уведомления об окончании тестового периода (за 3 и за 1 день)
+        loop.create_task(_trial_notification_loop())
+        print("  [тест] цикл уведомлений о конце теста запущен")
+        await _diag("циклы созданы")
 
-    # Веб-дашборд аналитики — работает параллельно, не блокирует polling.
-    # ВАЖНО: с таймаутом — если bind порта/сеть зависает, бот НЕ должен
-    # застревать здесь и пропускать start_polling (иначе он «не реагирует»).
-    print(">>> main(): запуск дашборда...", flush=True)
-    try:
-        await asyncio.wait_for(
-            analytics.start_dashboard(REGIONS, extra_routes=[("POST", "/yoomoney/webhook", _yoomoney_webhook)]),
-            timeout=20,
-        )
-        print(">>> main(): дашборд запущен", flush=True)
-        await _diag("дашборд OK")
-    except Exception as e:
-        print(f"  [дашборд] НЕ запущен (таймаут/ошибка, игнорируем): {e!r}", flush=True)
-        await _diag("дашборд ПРОПУЩЕН (ошибка)")
-
-    # Непрерывный фоновый прогрев кэша Авито: данные берутся через поисковики
-    # (не прямой запрос к avito.ru), поэтому риска IP-блокировки нет. Благодаря
-    # суточному кэшу один скрейп региона обслуживает всех пользователей — так
-    # бот тянет 50-100 человек без вложений.
-    loop.create_task(_warmup_cache())
-    print("  [прогрев] фоновый прогрев кэша Авито запущен")
-
-    public_commands = [
-        BotCommand(command="start",     description="🚀 Главное меню"),
-        BotCommand(command="search",    description="🔍 Найти авто"),
-        BotCommand(command="new",       description="🆕 Новые сегодня"),
-        BotCommand(command="favorites", description="🚗 Мой гараж"),
-        BotCommand(command="invite",    description="🤝 Пригласить друга"),
-        BotCommand(command="settings",  description="⚙️ Настройки"),
-        BotCommand(command="help",      description="❓ Помощь"),
-    ]
-    admin_commands = public_commands + [
-        BotCommand(command="stats",     description="📊 Статистика"),
-        BotCommand(command="dashboard", description="📈 Дашборд аналитики"),
-    ]
-    # Обычным пользователям — только публичные команды.
-    # С таймаутом: зависание API Telegram не должно блокировать старт бота.
-    print(">>> main(): set_my_commands (публичные)...", flush=True)
-    try:
-        await asyncio.wait_for(bot.set_my_commands(public_commands), timeout=20)
-        print(">>> main(): set_my_commands OK", flush=True)
-        await _diag("команды OK")
-    except Exception as e:
-        print(f"  [set_my_commands] ошибка (игнорируем): {e!r}", flush=True)
-        await _diag("команды ПРОПУЩЕНЫ (ошибка)")
-    # Администраторам — расширенный список (виден только им)
-    from aiogram.types import BotCommandScopeChat
-    for admin_id in ADMIN_IDS:
+        # Веб-дашборд аналитики — работает параллельно, не блокирует polling.
+        # ВАЖНО: с таймаутом — если bind порта/сеть зависает, бот НЕ должен
+        # застревать здесь и пропускать start_polling (иначе он «не реагирует»).
+        print(">>> main(): запуск дашборда...", flush=True)
         try:
             await asyncio.wait_for(
-                bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=admin_id)),
+                analytics.start_dashboard(REGIONS, extra_routes=[("POST", "/yoomoney/webhook", _yoomoney_webhook)]),
                 timeout=20,
             )
-        except Exception:
-            pass
-    # ── Подхват файлов от local_avito_scraper.py ──────────────────────────
-    # Скрапер запускается на домашнем ПК (Авито блокирует серверные IP)
-    # и присылает боту документ avito_<region>.json. Бот кладёт эти
-    # объявления в кэш региона — они подмешиваются в обычный поиск.
-    @dp.message(F.document)
-    async def _on_avito_document(message: Message):
-        print(f"  [doc] получен файл: {message.document.file_name if message.document else 'None'}")
-        doc = message.document
-        if not doc or not doc.file_name:
-            return
-        fname = doc.file_name
-        if not (fname.startswith("avito_") and fname.endswith(".json")):
-            return
-        try:
-            region = fname[len("avito_"):-len(".json")]
-            file = await doc.get_file()
-            data = await file.download_as_bytearray()
-            items = json.loads(bytes(data))
-            if not isinstance(items, list) or not items:
-                await message.answer(f"⚠️ Файл {fname}: нет объявлений")
-                return
-            # Дополняем обязательные поля, если скрапер их не прислал
-            clean = []
-            for it in items:
-                if not isinstance(it, dict):
-                    continue
-                if not it.get("url") or not it.get("title"):
-                    continue
-                if not it.get("_price_int"):
-                    it["_price_int"] = parse_price(it.get("price", ""))
-                if not it.get("_year"):
-                    ym = re.search(r"\b(19[5-9]\d|20[0-2]\d)\b", it.get("title", ""))
-                    it["_year"] = int(ym.group(1)) if ym else 0
-                clean.append(it)
-            if not clean:
-                await message.answer(f"⚠️ Файл {fname}: невалидные объявления")
-                return
-            # Кладём в кэш региона с «свежим» временем
-            _AVITO_REGION_CACHE[region] = (time.time(), clean)
-            # FIX: scrape_avito при наличии прокси ищет ключ с бюджет-суффиксом
-            # (region_0_100000), поэтому кладём и под него, и под brand-варианты,
-            # чтобы кэш от скрапера гарантированно подхватился.
-            _AVITO_REGION_CACHE[f"{region}_0_100000"] = (time.time(), clean)
-            if brand:
-                _AVITO_REGION_CACHE[f"{region}_{brand}"] = (time.time(), clean)
-            _save_avito_cache()
-            await message.answer(
-                f"✅ Авито [{region}]: загружено {len(clean)} объявлений в кэш поиска"
-            )
-            print(f"  [Авито doc] принято {len(clean)} объявлений для региона '{region}'")
+            print(">>> main(): дашборд запущен", flush=True)
+            await _diag("дашборд OK")
         except Exception as e:
-            await message.answer(f"❌ Ошибка обработки {fname}: {e}")
-            print(f"  [Авито doc] ошибка: {e}")
+            print(f"  [дашборд] НЕ запущен (таймаут/ошибка, игнорируем): {e!r}", flush=True)
+            await _diag("дашборд ПРОПУЩЕН (ошибка)")
 
-    print(">>> main(): все циклы запущены, переходим к start_polling", flush=True)
-    for _aid in ADMIN_IDS:
+        # Непрерывный фоновый прогрев кэша Авито: данные берутся через поисковики
+        # (не прямой запрос к avito.ru), поэтому риска IP-блокировки нет. Благодаря
+        # суточному кэшу один скрейп региона обслуживает всех пользователей — так
+        # бот тянет 50-100 человек без вложений.
+        loop.create_task(_warmup_cache())
+        print("  [прогрев] фоновый прогрев кэша Авито запущен")
+
+        public_commands = [
+            BotCommand(command="start",     description="🚀 Главное меню"),
+            BotCommand(command="search",    description="🔍 Найти авто"),
+            BotCommand(command="new",       description="🆕 Новые сегодня"),
+            BotCommand(command="favorites", description="🚗 Мой гараж"),
+            BotCommand(command="invite",    description="🤝 Пригласить друга"),
+            BotCommand(command="settings",  description="⚙️ Настройки"),
+            BotCommand(command="help",      description="❓ Помощь"),
+        ]
+        admin_commands = public_commands + [
+            BotCommand(command="stats",     description="📊 Статистика"),
+            BotCommand(command="dashboard", description="📈 Дашборд аналитики"),
+        ]
+        # Обычным пользователям — только публичные команды.
+        # С таймаутом: зависание API Telegram не должно блокировать старт бота.
+        print(">>> main(): set_my_commands (публичные)...", flush=True)
         try:
-            await asyncio.wait_for(
-                bot.send_message(_aid, "✅ [старт] Этап 2/2: PerekupDrive ПОЛНОСТЬЮ запущен и готов к работе. Циклы, дашборд и команды активны."),
-                timeout=15,
-            )
-        except Exception:
-            pass
+            await asyncio.wait_for(bot.set_my_commands(public_commands), timeout=20)
+            print(">>> main(): set_my_commands OK", flush=True)
+            await _diag("команды OK")
+        except Exception as e:
+            print(f"  [set_my_commands] ошибка (игнорируем): {e!r}", flush=True)
+            await _diag("команды ПРОПУЩЕНЫ (ошибка)")
+        # Администраторам — расширенный список (виден только им)
+        from aiogram.types import BotCommandScopeChat
+        for admin_id in ADMIN_IDS:
+            try:
+                await asyncio.wait_for(
+                    bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=admin_id)),
+                    timeout=20,
+                )
+            except Exception:
+                pass
+        # ── Подхват файлов от local_avito_scraper.py ──────────────────────────
+        # Скрапер запускается на домашнем ПК (Авито блокирует серверные IP)
+        # и присылает боту документ avito_<region>.json. Бот кладёт эти
+        # объявления в кэш региона — они подмешиваются в обычный поиск.
+        @dp.message(F.document)
+        async def _on_avito_document(message: Message):
+            print(f"  [doc] получен файл: {message.document.file_name if message.document else 'None'}")
+            doc = message.document
+            if not doc or not doc.file_name:
+                return
+            fname = doc.file_name
+            if not (fname.startswith("avito_") and fname.endswith(".json")):
+                return
+            try:
+                region = fname[len("avito_"):-len(".json")]
+                file = await doc.get_file()
+                data = await file.download_as_bytearray()
+                items = json.loads(bytes(data))
+                if not isinstance(items, list) or not items:
+                    await message.answer(f"⚠️ Файл {fname}: нет объявлений")
+                    return
+                # Дополняем обязательные поля, если скрапер их не прислал
+                clean = []
+                for it in items:
+                    if not isinstance(it, dict):
+                        continue
+                    if not it.get("url") or not it.get("title"):
+                        continue
+                    if not it.get("_price_int"):
+                        it["_price_int"] = parse_price(it.get("price", ""))
+                    if not it.get("_year"):
+                        ym = re.search(r"\b(19[5-9]\d|20[0-2]\d)\b", it.get("title", ""))
+                        it["_year"] = int(ym.group(1)) if ym else 0
+                    clean.append(it)
+                if not clean:
+                    await message.answer(f"⚠️ Файл {fname}: невалидные объявления")
+                    return
+                # Кладём в кэш региона с «свежим» временем
+                _AVITO_REGION_CACHE[region] = (time.time(), clean)
+                # FIX: scrape_avito при наличии прокси ищет ключ с бюджет-суффиксом
+                # (region_0_100000), поэтому кладём и под него, и под brand-варианты,
+                # чтобы кэш от скрапера гарантированно подхватился.
+                _AVITO_REGION_CACHE[f"{region}_0_100000"] = (time.time(), clean)
+                if brand:
+                    _AVITO_REGION_CACHE[f"{region}_{brand}"] = (time.time(), clean)
+                _save_avito_cache()
+                await message.answer(
+                    f"✅ Авито [{region}]: загружено {len(clean)} объявлений в кэш поиска"
+                )
+                print(f"  [Авито doc] принято {len(clean)} объявлений для региона '{region}'")
+            except Exception as e:
+                await message.answer(f"❌ Ошибка обработки {fname}: {e}")
+                print(f"  [Авито doc] ошибка: {e}")
+
+        print(">>> main(): все циклы запущены, переходим к start_polling", flush=True)
+        for _aid in ADMIN_IDS:
+            try:
+                await asyncio.wait_for(
+                    bot.send_message(_aid, "✅ [старт] Этап 2/2: PerekupDrive ПОЛНОСТЬЮ запущен и готов к работе. Циклы, дашборд и команды активны."),
+                    timeout=15,
+                )
+            except Exception:
+                pass
+    loop.create_task(_post_startup())
+    # Бот начинает отвечать на /start НЕМЕДЛЕННО, даже если сетап (циклы/дашборд/команды)
+    # зависнет или упадёт. Это устраняет симптом «бот не реагирует».
+    print(">>> main(): start_polling запускается немедленно — бот уже принимает сообщения", flush=True)
     await dp.start_polling(bot)
     print(">>> main(): start_polling завершён (бот остановлен)", flush=True)
+    return
 
 
 if __name__ == "__main__":
