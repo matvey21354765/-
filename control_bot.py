@@ -13485,6 +13485,7 @@ async def _trial_notification_loop():
 
 
     # Единый глобальный монитор — опрашивает всех активных пользователей каждые 2 минуты
+    print(">>> main(): создаём _global_monitor_loop", flush=True)
     loop.create_task(_global_monitor_loop())
     print(f"  [монитор] глобальный цикл запущен (интервал {GLOBAL_POLL_SEC}с)")
     # Push-уведомления — раз в 2-3 дня всем пользователям
@@ -13505,7 +13506,9 @@ async def _trial_notification_loop():
     print("  [тест] цикл уведомлений о конце теста запущен")
 
     # Веб-дашборд аналитики — работает параллельно, не блокирует polling
+    print(">>> main(): запуск дашборда...", flush=True)
     await analytics.start_dashboard(REGIONS, extra_routes=[("POST", "/yoomoney/webhook", _yoomoney_webhook)])
+    print(">>> main(): дашборд запущен", flush=True)
 
     # Непрерывный фоновый прогрев кэша Авито: данные берутся через поисковики
     # (не прямой запрос к avito.ru), поэтому риска IP-блокировки нет. Благодаря
@@ -13528,7 +13531,9 @@ async def _trial_notification_loop():
         BotCommand(command="dashboard", description="📈 Дашборд аналитики"),
     ]
     # Обычным пользователям — только публичные команды
+    print(">>> main(): set_my_commands (публичные)...", flush=True)
     await bot.set_my_commands(public_commands)
+    print(">>> main(): set_my_commands OK", flush=True)
     # Администраторам — расширенный список (виден только им)
     from aiogram.types import BotCommandScopeChat
     for admin_id in ADMIN_IDS:
