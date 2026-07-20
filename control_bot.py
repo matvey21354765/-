@@ -13450,6 +13450,16 @@ async def main():
 
     loop = asyncio.get_running_loop()
     print(">>> main(): тесты пройдены, создаём фоновые циклы", flush=True)
+    # Диагностика без логов: шлём админам этап запуска прямо в Telegram
+    try:
+        _rip = railway_ip if "railway_ip" in dir() else "?"
+    except Exception:
+        _rip = "?"
+    for _aid in ADMIN_IDS:
+        try:
+            await bot.send_message(_aid, f"🔧 [старт] Этап 1/2: тесты пройдены. Пользователей: {len(_USER_REGISTRY)}, Railway IP: {_rip}")
+        except Exception:
+            pass
 async def _trial_notification_loop():
     """Раз в 6 часов напоминает пользователям о скором окончании теста (за 3 и за 1 день)."""
     global _registry_dirty
@@ -13596,6 +13606,11 @@ async def _trial_notification_loop():
             print(f"  [Авито doc] ошибка: {e}")
 
     print(">>> main(): все циклы запущены, переходим к start_polling", flush=True)
+    for _aid in ADMIN_IDS:
+        try:
+            await bot.send_message(_aid, "✅ [старт] Этап 2/2: PerekupDrive ПОЛНОСТЬЮ запущен и готов к работе. Циклы, дашборд и команды активны.")
+        except Exception:
+            pass
     await dp.start_polling(bot)
     print(">>> main(): start_polling завершён (бот остановлен)", flush=True)
 
