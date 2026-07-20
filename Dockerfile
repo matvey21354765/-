@@ -25,10 +25,11 @@ RUN playwright install chromium
 
 COPY . .
 
-# Healthcheck: бот должен отвечать в Telegram. Проверяем доступность
-# веб-дашборда (поднят на :8080 внутри бота) как индикатор живости.
+# Healthcheck: бот должен отвечать. Проверяем дашборд на порту из $PORT
+# (Railway задаёт свой PORT; дашборд его слушает). При несовпадении
+# контейнер не помечается unhealthy и не перезапускается по кругу.
 HEALTHCHECK --interval=60s --timeout=5s --start-period=30s --retries=3 \
-  CMD curl -f -s http://localhost:8080/ >/dev/null 2>&1 || exit 1
+  CMD curl -f -s "http://localhost:${PORT:-8080}/" >/dev/null 2>&1 || exit 1
 
 # Production entrypoint: рендерит секреты из env и запускает бота.
 CMD ["sh", "start.sh"]
