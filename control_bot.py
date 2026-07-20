@@ -2,6 +2,8 @@
 Авто-брокер бот — публичная версия.
 Каждый пользователь выбирает регион и бюджет, бот ищет частников ниже рынка.
 """
+import sys
+print(">>> PROCESS STARTED: control_bot.py запущен, Python", sys.version.split()[0], flush=True)
 
 import asyncio
 import json
