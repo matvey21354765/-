@@ -28,7 +28,11 @@ COPY . .
 # Healthcheck: бот должен отвечать. Проверяем дашборд на порту из $PORT
 # (Railway задаёт свой PORT; дашборд его слушает). При несовпадении
 # контейнер не помечается unhealthy и не перезапускается по кругу.
-HEALTHCHECK --interval=60s --timeout=5s --start-period=30s --retries=3 \
+# Дашборд поднимается в первые секунды; стартап-тесты вынесены в фон,
+# поэтому контейнер здоров сразу. start-period большой — на случай медленного
+# холодного старта (import heavy deps). retries=3 чтобы кратковременные сбои
+# сети не убивали контейнер.
+HEALTHCHECK --interval=60s --timeout=5s --start-period=300s --retries=3 \
   CMD curl -f -s "http://localhost:${PORT:-8080}/" >/dev/null 2>&1 || exit 1
 
 # Production entrypoint: рендерит секреты из env и запускает бота.

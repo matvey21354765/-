@@ -13292,6 +13292,94 @@ async def _proxy_warmup_loop() -> None:
         await asyncio.sleep(900)
 
 
+# ── Фоновые стартап-тесты (прокси/Авито/поисковики) ──────────────────────────
+# Выполняются в отдельном потоке, чтобы НЕ блокировать запуск бота и HEALTHCHECK
+# Railway (иначе контейнер убивается по таймауту и бот не стартует).
+railway_ip = "?"
+
+
+def _run_startup_tests():
+    global railway_ip
+    # Логируем Railway IP (нужен для добавления в whitelist прокси)
+    try:
+        import requests as _rq
+        railway_ip = _rq.get("https://api.ipify.org", timeout=5).text.strip()
+        print(f"  [Railway IP] {railway_ip}  ← добавь этот IP в whitelist прокси!")
+    except Exception:
+        pass
+
+    # Тест прокси + тест доступа к Авито через прокси
+    if AVITO_PROXY_HOST:
+        try:
+            import requests as _rq
+            r = _rq.get("https://api.ipify.org", proxies=_avito_proxies(), timeout=10)
+            print(f"  [прокси {AVITO_PROXY_PROTOCOL}] ✅ работает, IP: {r.text.strip()}")
+            try:
+                ra = _rq.get("https://www.avito.ru/krasnoyarsk/avtomobili",
+                             proxies=_avito_proxies(), timeout=10,
+                             headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"})
+                has_listings = '"urlPath"' in ra.text or 'data-marker="item"' in ra.text
+                print(f"  [Авито тест] HTTP {ra.status_code}, {len(ra.text):,}б, объявления: {'✅ да' if has_listings else '❌ нет (капча/блок)'}")
+            except Exception as ea:
+                print(f"  [Авито тест] ❌ {ea}")
+            pass
+        except Exception as ep:
+            print(f"  [прокси] ❌ {ep}")
+
+    # Самопроверка РФ-прокси для Auto.ru
+    if AUTORU_PROXIES:
+        try:
+            from curl_cffi import requests as _cffi_t
+            for _p in AUTORU_PROXIES:
+                _pu = ("socks5h://" + _p[len("socks5://"):]) if _p.startswith("socks5://") else _p
+                _phost = _pu.split("@")[-1]
+                try:
+                    _rt = _cffi_t.get(
+                        "https://auto.ru/sankt-peterburg/cars/used/?seller_group=PRIVATE",
+                        impersonate="chrome124", timeout=9,
+                        headers={"Accept-Language": "ru-RU,ru;q=0.9",
+                                 "Referer": "https://auto.ru/"},
+                        proxies={"http": _pu, "https": _pu},
+                    )
+                    _cap = _autoru_is_captcha(_rt.text)
+                    _ok = _rt.status_code == 200 and not _cap and len(_rt.text) > 50_000
+                    _verdict = "✅ РАБОТАЕТ" if _ok else ("🧱 капча" if _cap else "⚠️ мало данных")
+                    print(f"  [Auto.ru тест] {_phost}: HTTP {_rt.status_code}, {len(_rt.text):,}б → {_verdict}")
+                except Exception as _et:
+                    print(f"  [Auto.ru тест] {_phost}: ❌ {str(_et)[:70]}")
+        except Exception as _e:
+            print(f"  [Auto.ru тест] curl_cffi недоступен: {str(_e)[:60]}")
+
+    if AVITO_PROXY_HOST:
+        try:
+            import requests as _rq
+            import urllib.parse as _up
+            _ua = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"}
+            _engines = [
+                ("bing", "https://www.bing.com/search", {"q": "site:avito.ru/moskva/avtomobili продам", "cc": "RU"}),
+                ("duckduckgo", "https://html.duckduckgo.com/html/", {"q": "site:avito.ru/moskva/avtomobili продам", "kl": "ru-ru"}),
+                ("yandex", "https://yandex.ru/search/", {"text": "site:avito.ru/moskva/avtomobili продам", "lr": "225"}),
+            ]
+            for _eng, _url, _params in _engines:
+                try:
+                    rt = _rq.get(_url, params=_params, proxies=_avito_proxies(), timeout=12, headers=_ua)
+                    _dec = rt.text
+                    for _ in range(2):
+                        _dec = _up.unquote(_dec)
+                    n_avito = _dec.lower().count("avito")
+                    n_urls = len(set(re.findall(r'avito\.ru/[a-z0-9_.-]+/avtomobili/[a-z0-9_.%-]*\d{6,}', _dec, re.I)))
+                    print(f"  [{_eng} тест] HTTP {rt.status_code}, размер: {len(rt.text):,}б, 'avito': {n_avito}, объявлений: {n_urls}")
+                    if n_avito > 0 and n_urls == 0:
+                        idx = _dec.lower().find("avito.ru/")
+                        if idx >= 0:
+                            print(f"  [{_eng} тест] образец: {_dec[idx:idx+110].replace(chr(10), ' ')}")
+                except Exception as ey:
+                    print(f"  [{_eng} тест] ❌ {str(ey)[:80]}")
+        except Exception as e:
+            print(f"  [прокси {AVITO_PROXY_PROTOCOL}] ❌ ошибка: {e}")
+            print(f"  [прокси] Добавь Railway IP в whitelist на сайте провайдера прокси!")
+
+
 async def main():
     global BOT_USERNAME, _registry_dirty
     logging.basicConfig(level=logging.WARNING)
@@ -13364,92 +13452,20 @@ async def main():
     print("✅ Авто-брокер бот запущен!")
     print("  [ВЕРСИЯ] 2026-06-22-v18 :: subscription middleware")
 
-    # Логируем Railway IP (нужен для добавления в whitelist прокси)
-    try:
-        import requests as _rq
-        railway_ip = _rq.get("https://api.ipify.org", timeout=5).text.strip()
-        print(f"  [Railway IP] {railway_ip}  ← добавь этот IP в whitelist прокси!")
-    except Exception:
-        pass
-
-    # Тест прокси + тест доступа к Авито через прокси
-    if AVITO_PROXY_HOST:
+    # ── Стартап-тесты (прокси/Авито/поисковики) ──────────────────────────────
+    # Это тяжёлые синхронные сетевые вызовы с таймаутами 9-12с, которые ВСЕ
+    # падают (Railway IP заблокирован Авито/поисковиками) и блокируют старт
+    # ~70-90с. Запускаем ИХ В ФОНЕ (отдельный поток), чтобы бот и дашборд
+    # поднялись сразу и HEALTHCHECK Railway не убил контейнер по таймауту.
+    async def _bg_startup_tests():
         try:
-            import requests as _rq
-            r = _rq.get("https://api.ipify.org", proxies=_avito_proxies(), timeout=10)
-            print(f"  [прокси {AVITO_PROXY_PROTOCOL}] ✅ работает, IP: {r.text.strip()}")
-            # Сразу проверяем доступ к Авито
-            try:
-                ra = _rq.get("https://www.avito.ru/krasnoyarsk/avtomobili",
-                             proxies=_avito_proxies(), timeout=10,
-                             headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"})
-                has_listings = '"urlPath"' in ra.text or 'data-marker="item"' in ra.text
-                print(f"  [Авито тест] HTTP {ra.status_code}, {len(ra.text):,}б, объявления: {'✅ да' if has_listings else '❌ нет (капча/блок)'}")
-            except Exception as ea:
-                print(f"  [Авито тест] ❌ {ea}")
-            # Тест поисковиков через прокси — рабочий путь к Авито в обход блокировки.
-            # (см. ниже; сначала — самопроверка РФ-прокси для Auto.ru)
+            await asyncio.get_running_loop().run_in_executor(None, _run_startup_tests)
+        except Exception:
             pass
-        except Exception as ep:
-            print(f"  [прокси] ❌ {ep}")
-
-    # Самопроверка РФ-прокси для Auto.ru — сразу видно в логах, пробивают ли
-    # они капчу Яндекса (HTTP 200 + большой размер = ок; ~13КБ = капча).
-    if AUTORU_PROXIES:
-        try:
-            from curl_cffi import requests as _cffi_t
-            for _p in AUTORU_PROXIES:
-                _pu = ("socks5h://" + _p[len("socks5://"):]) if _p.startswith("socks5://") else _p
-                _phost = _pu.split("@")[-1]
-                try:
-                    _rt = _cffi_t.get(
-                        "https://auto.ru/sankt-peterburg/cars/used/?seller_group=PRIVATE",
-                        impersonate="chrome124", timeout=9,
-                        headers={"Accept-Language": "ru-RU,ru;q=0.9",
-                                 "Referer": "https://auto.ru/"},
-                        proxies={"http": _pu, "https": _pu},
-                    )
-                    _cap = _autoru_is_captcha(_rt.text)
-                    _ok = _rt.status_code == 200 and not _cap and len(_rt.text) > 50_000
-                    _verdict = "✅ РАБОТАЕТ" if _ok else ("🧱 капча" if _cap else "⚠️ мало данных")
-                    print(f"  [Auto.ru тест] {_phost}: HTTP {_rt.status_code}, {len(_rt.text):,}б → {_verdict}")
-                except Exception as _et:
-                    print(f"  [Auto.ru тест] {_phost}: ❌ {str(_et)[:70]}")
-        except Exception as _e:
-            print(f"  [Auto.ru тест] curl_cffi недоступен: {str(_e)[:60]}")
-
-    if AVITO_PROXY_HOST:
-        try:
-            import requests as _rq
-            # Пробуем все три и смотрим, кто реально отдаёт ссылки на объявления.
-            import urllib.parse as _up
-            _ua = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"}
-            _engines = [
-                ("bing", "https://www.bing.com/search", {"q": "site:avito.ru/moskva/avtomobili продам", "cc": "RU"}),
-                ("duckduckgo", "https://html.duckduckgo.com/html/", {"q": "site:avito.ru/moskva/avtomobili продам", "kl": "ru-ru"}),
-                ("yandex", "https://yandex.ru/search/", {"text": "site:avito.ru/moskva/avtomobili продам", "lr": "225"}),
-            ]
-            for _eng, _url, _params in _engines:
-                try:
-                    rt = _rq.get(_url, params=_params, proxies=_avito_proxies(), timeout=12, headers=_ua)
-                    _dec = rt.text
-                    for _ in range(2):
-                        _dec = _up.unquote(_dec)
-                    n_avito = _dec.lower().count("avito")
-                    n_urls = len(set(re.findall(r'avito\.ru/[a-z0-9_.-]+/avtomobili/[a-z0-9_.%-]*\d{6,}', _dec, re.I)))
-                    print(f"  [{_eng} тест] HTTP {rt.status_code}, размер: {len(rt.text):,}б, 'avito': {n_avito}, объявлений: {n_urls}")
-                    if n_avito > 0 and n_urls == 0:
-                        idx = _dec.lower().find("avito.ru/")
-                        if idx >= 0:
-                            print(f"  [{_eng} тест] образец: {_dec[idx:idx+110].replace(chr(10), ' ')}")
-                except Exception as ey:
-                    print(f"  [{_eng} тест] ❌ {str(ey)[:80]}")
-        except Exception as e:
-            print(f"  [прокси {AVITO_PROXY_PROTOCOL}] ❌ ошибка: {e}")
-            print(f"  [прокси] Добавь Railway IP в whitelist на сайте провайдера прокси!")
+    asyncio.create_task(_bg_startup_tests())
 
     loop = asyncio.get_running_loop()
-    print(">>> main(): тесты пройдены, создаём фоновые циклы", flush=True)
+    print(">>> main(): тесты запущены в фоне, создаём фоновые циклы", flush=True)
 
     async def _diag(stage: str):
         # Промежуточный отчёт этапов запуска прямо в Telegram (минуя логи)
@@ -13631,6 +13647,17 @@ if __name__ == "__main__":
     import sys as _sys
     import traceback as _tb
 
+    async def _alert_admin(text: str):
+        # Дублируем критические ошибки прямо в Telegram (минуя логи Railway)
+        try:
+            for _aid in ADMIN_IDS:
+                try:
+                    await bot.send_message(_aid, text[:4000])
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     def _exc_handler(loop, context):
         # Печатаем ВСЕ необработанные ошибки циклов в stdout (Railway их покажет)
         print("  [FATAL-LOOP] необработанная ошибка в фоне:", file=_sys.stderr)
@@ -13639,6 +13666,14 @@ if __name__ == "__main__":
             context.get("exception"),
             context.get("exception").__traceback__ if context.get("exception") else None,
         ) if context.get("exception") else print("  context:", context, file=_sys.stderr)
+        # Дублируем в Telegram
+        _emsg = "🚨 [FATAL-LOOP]\n" + "".join(
+            _tb.format_exception_only(type(context.get("exception")), context.get("exception")))[:3500
+        ] if context.get("exception") else f"🚨 [FATAL-LOOP] context: {context}"
+        try:
+            loop.create_task(_alert_admin(_emsg))
+        except Exception:
+            pass
 
     try:
         loop = asyncio.new_event_loop()
@@ -13649,4 +13684,9 @@ if __name__ == "__main__":
     except Exception as _e:
         print("  [FATAL] main() упал с исключением:", file=_sys.stderr)
         _tb.print_exc()
+        try:
+            loop.run_until_complete(_alert_admin(
+                "🚨 [FATAL] main() упал:\n" + _tb.format_exc()[:3500]))
+        except Exception:
+            pass
         raise
