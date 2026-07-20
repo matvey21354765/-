@@ -7778,8 +7778,11 @@ class SubscriptionMiddleware(BaseMiddleware):
         try:
             u = getattr(event, "from_user", None)
             if u and u.id:
-                # Только регистрация/last_seen; поиск считается в do_search
-                await asyncio.get_running_loop().run_in_executor(
+                # Только регистрация/last_seen; поиск считается в do_search.
+                # ВАЖНО: НЕ ждём завершения (без await) — иначе каждое сообщение
+                # блокируется на connect_timeout БД (~5с при недоступном PG) и
+                # бот «очень долго реагирует» на /start. Запускаем «огнём и забыть».
+                asyncio.get_running_loop().run_in_executor(
                     None, lambda: _register_user(u.id, u.username, False)
                 )
         except Exception:
@@ -10880,11 +10883,15 @@ _search_cache: dict[int, list[dict]] = {}
 # PostgreSQL кеш поиска (переживает перезапуск Railway)
 _DB_URL = os.getenv("DATABASE_URL", "")
 _db_conn = None
+_db_dead = False  # если PG недоступен — не пробиваем connect_timeout на каждый вызов
 _db_lock = __import__("threading").Lock()
 
 def _get_db():
-    global _db_conn
+    global _db_conn, _db_dead
     if not _DB_URL:
+        return None
+    if _db_dead:
+        # Однажды убедились, что БД недоступна — больше не тратим ~5с на reconnect
         return None
     import psycopg2
     with _db_lock:
@@ -10928,6 +10935,7 @@ def _get_db():
                         )
                     """)
         except Exception:
+            _db_dead = True
             return None
         return _db_conn
 
