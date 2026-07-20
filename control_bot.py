@@ -13449,6 +13449,7 @@ async def main():
             print(f"  [прокси] Добавь Railway IP в whitelist на сайте провайдера прокси!")
 
     loop = asyncio.get_running_loop()
+    print(">>> main(): тесты пройдены, создаём фоновые циклы", flush=True)
 async def _trial_notification_loop():
     """Раз в 6 часов напоминает пользователям о скором окончании теста (за 3 и за 1 день)."""
     global _registry_dirty
@@ -13589,8 +13590,31 @@ async def _trial_notification_loop():
             await message.answer(f"❌ Ошибка обработки {fname}: {e}")
             print(f"  [Авито doc] ошибка: {e}")
 
+    print(">>> main(): все циклы запущены, переходим к start_polling", flush=True)
     await dp.start_polling(bot)
+    print(">>> main(): start_polling завершён (бот остановлен)", flush=True)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    import sys as _sys
+    import traceback as _tb
+
+    def _exc_handler(loop, context):
+        # Печатаем ВСЕ необработанные ошибки циклов в stdout (Railway их покажет)
+        print("  [FATAL-LOOP] необработанная ошибка в фоне:", file=_sys.stderr)
+        _tb.print_exception(
+            context.get("exception", type(None)),
+            context.get("exception"),
+            context.get("exception").__traceback__ if context.get("exception") else None,
+        ) if context.get("exception") else print("  context:", context, file=_sys.stderr)
+
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.set_exception_handler(_exc_handler)
+        print(">>> main(): старт", flush=True)
+        loop.run_until_complete(main())
+    except Exception as _e:
+        print("  [FATAL] main() упал с исключением:", file=_sys.stderr)
+        _tb.print_exc()
+        raise
