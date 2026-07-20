@@ -1,1 +1,1 @@
-worker: python control_bot.py
+worker: sh start.sh

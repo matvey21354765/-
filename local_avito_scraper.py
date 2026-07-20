@@ -34,7 +34,10 @@ except ImportError:
 # Тот же токен, что и у control_bot.py (берётся из .env / переменной окружения,
 # чтобы файл с локальным скрапером не хранил отдельный секрет).
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8923014188:AAHvNW2B5fin2XCmbVhlaLNjWhLwI3JhZ90")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "749256529"))
+# В .env у бота переменная называется ADMIN_IDS (список через запятую),
+# поэтому берём первый ID оттуда, иначе дефолт.
+_ADMINS_RAW = os.getenv("ADMIN_IDS") or os.getenv("ADMIN_ID") or "749256529"
+ADMIN_ID = int(_ADMINS_RAW.split(",")[0].strip())
 PAGES = int(os.getenv("AVITO_PAGES", "10"))
 
 REGIONS = {
@@ -166,33 +169,68 @@ def scrape(region):
                     html = page.content()
                     title = page.title()
                     if "Доступ ограничен" in html or "captcha" in title.lower() or "Подтвердите" in html:
-                        print("Всё ещё заблокировано, останавливаюсь.")
-                        break
+                        print("Всё ещё заблокировано — пропускаю страницу, иду дальше.")
+                        continue
 
                 soup = BeautifulSoup(html, "lxml")
-                cards = soup.select("[data-marker='item']")
+                # Несколько вариантов селектора карточки — Авито часто меняет вёрстку
+                cards = soup.select("[data-marker='item']") or soup.select("[class*='iva-item-root']") or soup.select("div[itemtype='http://schema.org/Product']")
                 if not cards:
                     print("нет карточек, конец")
                     break
 
                 page_ok = 0
+                title_candidates = [
+                    "[itemprop='name']", "h3",
+                    "[class*='iva-item-title']",
+                    "[class*='title']",
+                    "a[class*='title']",
+                    "span[class*='title']",
+                    "div[class*='description'] h3",
+                    "meta[itemprop='name']",
+                ]
+                price_candidates = [
+                    "[itemprop='price']",
+                    "[class*='price']",
+                    "[class*='iva-item-price']",
+                    "meta[itemprop='price']",
+                ]
                 for card in cards:
                     try:
-                        title_el = card.select_one("[itemprop='name']") or card.select_one("h3")
-                        title = title_el.get_text(strip=True) if title_el else ""
+                        # Заголовок: ищем по нескольким селекторам, иначе по тексту ссылки
+                        title_el = None
+                        for sel in title_candidates:
+                            title_el = card.select_one(sel)
+                            if title_el:
+                                break
+                        if title_el and title_el.name == "meta":
+                            title = title_el.get("content", "").strip()
+                        else:
+                            title = title_el.get_text(strip=True) if title_el else ""
+                        if not title:
+                            # запасной вариант — первая ссылка с длинным текстом
+                            for a in card.select("a"):
+                                t = a.get_text(strip=True)
+                                if len(t) > 8:
+                                    title = t
+                                    break
                         if not title or is_dealer(title):
                             continue
 
-                        link_el = card.select_one(f"a[href*='/{slug.split('_')[0]}']") or card.select_one("a[itemprop='url']") or card.select_one("a[href*='avito.ru']")
+                        link_el = card.select_one(f"a[href*='/{slug.split('_')[0]}']") or card.select_one("a[itemprop='url']") or card.select_one("a[href*='avito.ru']") or card.select_one("a")
                         href = link_el.get("href", "") if link_el else ""
                         if href and not href.startswith("http"):
                             item_url = "https://www.avito.ru" + href
                         else:
                             item_url = href
-                        if not item_url:
+                        if not item_url or "avito.ru" not in item_url:
                             continue
 
-                        price_el = card.select_one("[itemprop='price']") or card.select_one("[class*='price']")
+                        price_el = None
+                        for sel in price_candidates:
+                            price_el = card.select_one(sel)
+                            if price_el:
+                                break
                         price = ""
                         if price_el:
                             price = price_el.get("content") or price_el.get_text(strip=True)
@@ -206,7 +244,7 @@ def scrape(region):
                             if src.startswith("http"):
                                 photo_url = src
 
-                        desc_el = card.select_one("[itemprop='description']") or card.select_one("[class*='iva-item-text']")
+                        desc_el = card.select_one("[itemprop='description']") or card.select_one("[class*='iva-item-text']") or card.select_one("[class*='description']")
                         description = desc_el.get_text(strip=True) if desc_el else ""
 
                         date_el = card.select_one("[data-marker='item-date']") or card.select_one("span[class*='date']")
@@ -214,6 +252,12 @@ def scrape(region):
                         date = parse_date(date_text)
                         days = max(0, (today - date).days) if date else 0
                         score = days * 0.3 + (10 if HOT.search(title) else 0)
+
+                        _price_int = parse_price(price)
+                        _year = 0
+                        ym = re.search(r"\b(19[5-9]\d|20[0-2]\d)\b", title)
+                        if ym:
+                            _year = int(ym.group(1))
 
                         results.append({
                             "source": "avito",
@@ -225,6 +269,8 @@ def scrape(region):
                             "_photo_url": photo_url,
                             "_days_on_site": days,
                             "_hot_score": round(score, 2),
+                            "_price_int": _price_int or 0,
+                            "_year": _year,
                             "description": description,
                             "seller": "",
                         })
@@ -232,7 +278,7 @@ def scrape(region):
                     except Exception:
                         pass
 
-                print(f"{page_ok} объявлений")
+                print(f"{page_ok} объявлений (всего накоплено: {len(results)})")
                 time.sleep(random.uniform(2, 4))
 
             except Exception as e:
@@ -253,6 +299,10 @@ if __name__ == "__main__":
         print("   playwright install chromium")
         sys.exit(1)
 
+    # Авто-цикл для VPS/сервера 24/7: python local_avito_scraper.py ekaterinburg --loop
+    loop_mode = "--loop" in sys.argv
+    interval_h = int(os.getenv("SCRAPER_LOOP_HOURS", "8"))
+
     region = sys.argv[1] if len(sys.argv) > 1 else ""
     if region not in REGIONS:
         print("Доступные регионы: " + ", ".join(REGIONS))
@@ -261,12 +311,29 @@ if __name__ == "__main__":
         print(f"❌ Неизвестный регион: {region}")
         sys.exit(1)
 
-    print(f"🔍 Парсю Авито: {region}...")
-    print("Откроется окно браузера — не закрывай его!\n")
-
-    items = scrape(region)
-    print(f"\nНайдено: {len(items)} подходящих объявлений")
-    if items:
-        send_to_bot(region, items)
+    if loop_mode:
+        print(f"🔁 Авто-цикл: каждые {interval_h}ч, регион {region}")
+        while True:
+            try:
+                print(f"\n=== {datetime.datetime.now()} ===")
+                print(f"🔍 Парсю Авито: {region}...")
+                items = scrape(region)
+                print(f"Найдено: {len(items)} подходящих объявлений")
+                if items:
+                    send_to_bot(region, items)
+                else:
+                    print("Ничего не найдено, жду следующий цикл.")
+            except Exception as e:
+                print(f"❌ Ошибка цикла: {e}")
+            print(f"⏳ Жду {interval_h}ч до следующего запуска...")
+            time.sleep(interval_h * 3600)
     else:
-        print("Ничего не найдено.")
+        print(f"🔍 Парсю Авито: {region}...")
+        print("Откроется окно браузера — не закрывай его!\n")
+
+        items = scrape(region)
+        print(f"\nНайдено: {len(items)} подходящих объявлений")
+        if items:
+            send_to_bot(region, items)
+        else:
+            print("Ничего не найдено.")
