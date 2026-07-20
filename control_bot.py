@@ -13480,9 +13480,14 @@ async def main():
 
     async def _diag(stage: str):
         # Промежуточный отчёт этапов запуска прямо в Telegram (минуя логи)
+        # FIX: оборачиваем send_message в wait_for — если API Telegram висит,
+        # стартап не должен блокироваться навсегда.
         for _aid in ADMIN_IDS:
             try:
-                await bot.send_message(_aid, f"🔧 [старт] этап: {stage}")
+                await asyncio.wait_for(
+                    bot.send_message(_aid, f"🔧 [старт] этап: {stage}"),
+                    timeout=15,
+                )
             except Exception:
                 pass
 
@@ -13493,7 +13498,10 @@ async def main():
         _rip = "?"
     for _aid in ADMIN_IDS:
         try:
-            await bot.send_message(_aid, f"🔧 [старт] Этап 1/2: тесты пройдены. Пользователей: {len(_USER_REGISTRY)}, Railway IP: {_rip}")
+            await asyncio.wait_for(
+                bot.send_message(_aid, f"🔧 [старт] Этап 1/2: тесты пройдены. Пользователей: {len(_USER_REGISTRY)}, Railway IP: {_rip}"),
+                timeout=15,
+            )
         except Exception:
             pass
 async def _trial_notification_loop():
@@ -13552,11 +13560,20 @@ async def _trial_notification_loop():
     print("  [тест] цикл уведомлений о конце теста запущен")
     await _diag("циклы созданы")
 
-    # Веб-дашборд аналитики — работает параллельно, не блокирует polling
+    # Веб-дашборд аналитики — работает параллельно, не блокирует polling.
+    # ВАЖНО: с таймаутом — если bind порта/сеть зависает, бот НЕ должен
+    # застревать здесь и пропускать start_polling (иначе он «не реагирует»).
     print(">>> main(): запуск дашборда...", flush=True)
-    await analytics.start_dashboard(REGIONS, extra_routes=[("POST", "/yoomoney/webhook", _yoomoney_webhook)])
-    print(">>> main(): дашборд запущен", flush=True)
-    await _diag("дашборд OK")
+    try:
+        await asyncio.wait_for(
+            analytics.start_dashboard(REGIONS, extra_routes=[("POST", "/yoomoney/webhook", _yoomoney_webhook)]),
+            timeout=20,
+        )
+        print(">>> main(): дашборд запущен", flush=True)
+        await _diag("дашборд OK")
+    except Exception as e:
+        print(f"  [дашборд] НЕ запущен (таймаут/ошибка, игнорируем): {e!r}", flush=True)
+        await _diag("дашборд ПРОПУЩЕН (ошибка)")
 
     # Непрерывный фоновый прогрев кэша Авито: данные берутся через поисковики
     # (не прямой запрос к avito.ru), поэтому риска IP-блокировки нет. Благодаря
@@ -13578,16 +13595,24 @@ async def _trial_notification_loop():
         BotCommand(command="stats",     description="📊 Статистика"),
         BotCommand(command="dashboard", description="📈 Дашборд аналитики"),
     ]
-    # Обычным пользователям — только публичные команды
+    # Обычным пользователям — только публичные команды.
+    # С таймаутом: зависание API Telegram не должно блокировать старт бота.
     print(">>> main(): set_my_commands (публичные)...", flush=True)
-    await bot.set_my_commands(public_commands)
-    print(">>> main(): set_my_commands OK", flush=True)
-    await _diag("команды OK")
+    try:
+        await asyncio.wait_for(bot.set_my_commands(public_commands), timeout=20)
+        print(">>> main(): set_my_commands OK", flush=True)
+        await _diag("команды OK")
+    except Exception as e:
+        print(f"  [set_my_commands] ошибка (игнорируем): {e!r}", flush=True)
+        await _diag("команды ПРОПУЩЕНЫ (ошибка)")
     # Администраторам — расширенный список (виден только им)
     from aiogram.types import BotCommandScopeChat
     for admin_id in ADMIN_IDS:
         try:
-            await bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=admin_id))
+            await asyncio.wait_for(
+                bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=admin_id)),
+                timeout=20,
+            )
         except Exception:
             pass
     # ── Подхват файлов от local_avito_scraper.py ──────────────────────────
@@ -13647,7 +13672,10 @@ async def _trial_notification_loop():
     print(">>> main(): все циклы запущены, переходим к start_polling", flush=True)
     for _aid in ADMIN_IDS:
         try:
-            await bot.send_message(_aid, "✅ [старт] Этап 2/2: PerekupDrive ПОЛНОСТЬЮ запущен и готов к работе. Циклы, дашборд и команды активны.")
+            await asyncio.wait_for(
+                bot.send_message(_aid, "✅ [старт] Этап 2/2: PerekupDrive ПОЛНОСТЬЮ запущен и готов к работе. Циклы, дашборд и команды активны."),
+                timeout=15,
+            )
         except Exception:
             pass
     await dp.start_polling(bot)
