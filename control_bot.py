@@ -13461,16 +13461,19 @@ async def main():
     print("  [ВЕРСИЯ] 2026-06-22-v18 :: subscription middleware")
 
     # ── Стартап-тесты (прокси/Авито/поисковики) ──────────────────────────────
-    # Это тяжёлые синхронные сетевые вызовы с таймаутами 9-12с, которые ВСЕ
-    # падают (Railway IP заблокирован Авито/поисковиками) и блокируют старт
-    # ~70-90с. Запускаем ИХ В ФОНЕ (отдельный поток), чтобы бот и дашборд
-    # поднялись сразу и HEALTHCHECK Railway не убил контейнер по таймауту.
-    async def _bg_startup_tests():
-        try:
-            await asyncio.get_running_loop().run_in_executor(None, _run_startup_tests)
-        except Exception:
-            pass
-    asyncio.create_task(_bg_startup_tests())
+    # Тяжёлые сетевые вызовы; при недоступном Railway IP они падают по таймауту
+    # и, что важнее, СЪЕДАЮТ ПАМЯТЬ (загрузка страниц + curl_cffi) — на жёстком
+    # лимите Railway это приводит к OOM-kill контейнера сразу после старта.
+    # Поэтому ПО УМОЛЧАНИЮ ОТКЛЮЧЕНЫ. Включить: переменная STARTUP_TESTS=1.
+    if os.getenv("STARTUP_TESTS") == "1":
+        async def _bg_startup_tests():
+            try:
+                await asyncio.get_running_loop().run_in_executor(None, _run_startup_tests)
+            except Exception:
+                pass
+        asyncio.create_task(_bg_startup_tests())
+    else:
+        print("  [тесты] пропущены (STARTUP_TESTS != 1) — экономим память", flush=True)
 
     loop = asyncio.get_running_loop()
     print(">>> main(): тесты запущены в фоне, создаём фоновые циклы", flush=True)
