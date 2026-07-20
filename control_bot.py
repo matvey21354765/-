@@ -13450,6 +13450,15 @@ async def main():
 
     loop = asyncio.get_running_loop()
     print(">>> main(): тесты пройдены, создаём фоновые циклы", flush=True)
+
+    async def _diag(stage: str):
+        # Промежуточный отчёт этапов запуска прямо в Telegram (минуя логи)
+        for _aid in ADMIN_IDS:
+            try:
+                await bot.send_message(_aid, f"🔧 [старт] этап: {stage}")
+            except Exception:
+                pass
+
     # Диагностика без логов: шлём админам этап запуска прямо в Telegram
     try:
         _rip = railway_ip if "railway_ip" in dir() else "?"
@@ -13514,11 +13523,13 @@ async def _trial_notification_loop():
     # Уведомления об окончании тестового периода (за 3 и за 1 день)
     loop.create_task(_trial_notification_loop())
     print("  [тест] цикл уведомлений о конце теста запущен")
+    await _diag("циклы созданы")
 
     # Веб-дашборд аналитики — работает параллельно, не блокирует polling
     print(">>> main(): запуск дашборда...", flush=True)
     await analytics.start_dashboard(REGIONS, extra_routes=[("POST", "/yoomoney/webhook", _yoomoney_webhook)])
     print(">>> main(): дашборд запущен", flush=True)
+    await _diag("дашборд OK")
 
     # Непрерывный фоновый прогрев кэша Авито: данные берутся через поисковики
     # (не прямой запрос к avito.ru), поэтому риска IP-блокировки нет. Благодаря
@@ -13544,6 +13555,7 @@ async def _trial_notification_loop():
     print(">>> main(): set_my_commands (публичные)...", flush=True)
     await bot.set_my_commands(public_commands)
     print(">>> main(): set_my_commands OK", flush=True)
+    await _diag("команды OK")
     # Администраторам — расширенный список (виден только им)
     from aiogram.types import BotCommandScopeChat
     for admin_id in ADMIN_IDS:
