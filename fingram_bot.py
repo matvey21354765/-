@@ -1478,9 +1478,15 @@ async def main():
     import aiohttp
     from aiogram.client.session.aiohttp import AiohttpSession
 
-    ssl_ctx = ssl.create_default_context()
-    ssl_ctx.check_hostname = False
-    ssl_ctx.verify_mode = ssl.CERT_NONE
+    # По умолчанию — строгая проверка сертификатов (защита от MITM).
+    # Отключать ТОЛЬКО для локального SOCKS-прокси (Xray) через
+    # переменную DISABLE_SSL_VERIFY=1.
+    if os.getenv("DISABLE_SSL_VERIFY") == "1":
+        ssl_ctx = ssl.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
+    else:
+        ssl_ctx = ssl.create_default_context()
 
     connector = aiohttp.TCPConnector(ssl=ssl_ctx)
     http_session = aiohttp.ClientSession(connector=connector)

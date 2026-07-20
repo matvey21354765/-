@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y \
     libatspi2.0-0 libx11-6 libxcomposite1 libxdamage1 \
     libxext6 libxfixes3 libxrandr2 libgbm1 libxcb1 \
     libxkbcommon0 libpango-1.0-0 libcairo2 libasound2t64 \
-    wget ca-certificates fonts-liberation unzip curl \
+    wget ca-certificates fonts-liberation unzip curl gettext-base \
     --no-install-recommends && rm -rf /var/lib/apt/lists/*
 
 # Устанавливаем xray-core для VLESS прокси
@@ -25,5 +25,10 @@ RUN playwright install chromium
 
 COPY . .
 
-# Production entrypoint: keep in sync with Procfile and README.md.
-CMD ["python", "control_bot.py"]
+# Healthcheck: бот должен отвечать в Telegram. Проверяем доступность
+# веб-дашборда (поднят на :8080 внутри бота) как индикатор живости.
+HEALTHCHECK --interval=60s --timeout=5s --start-period=30s --retries=3 \
+  CMD curl -f -s http://localhost:8080/ >/dev/null 2>&1 || exit 1
+
+# Production entrypoint: рендерит секреты из env и запускает бота.
+CMD ["sh", "start.sh"]

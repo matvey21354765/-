@@ -3,6 +3,9 @@ __pycache__/
 .claude/
 .avito_cookies.json
 avito_region_cache.json
+xray_config.json
+.env
+.DS_Store
 price_history.json
 users/
 external_avito/
