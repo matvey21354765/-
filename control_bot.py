@@ -7158,9 +7158,10 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
     # FIX: кэш от local_avito_scraper.py кладётся под ключ `region`
     # (без бюджет-суффикса). При наличии прокси основной cache_key
     # отличается — подхватываем точный ключ региона, если он свежий.
-    if (not cached or (now - cached[0]) >= _cache_ttl) and not AVITO_PROXIES:
-        _scraper_cache = _AVITO_REGION_CACHE.get(region)
-        if _scraper_cache and (now - _scraper_cache[0]) < _AVITO_REGION_CACHE_TTL:
+    # Работает и в режиме с прокси, и без него.
+    _scraper_cache = _AVITO_REGION_CACHE.get(region)
+    if _scraper_cache and (not cached or (now - cached[0]) >= _cache_ttl):
+        if (now - _scraper_cache[0]) < _AVITO_REGION_CACHE_TTL:
             cached = _scraper_cache
     # Игнорируем кэш из старых записей без цены (DDG-мусор прошлых версий).
     _cache_is_priceless = bool(
@@ -7252,6 +7253,8 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
         return True
 
     out = [it for it in out if it.get("_price_int", 0) > 0 or _year_budget_ok(it, price_max)]
+    # Свежие объявления — первыми (меньше дней на сайте = новее).
+    out.sort(key=lambda it: (it.get("_days_on_site", 999), -it.get("_price_int", 0)))
     return out
 
 
@@ -8153,6 +8156,11 @@ async def cmd_start(msg: Message, state: FSMContext):
     s = load_settings(msg.from_user.id)
     name = msg.from_user.first_name or "друг"
     is_new_user = not s.get("region")
+    _t = _trial_info(msg.from_user.id)
+    if _t["ended"]:
+        _trial_line = "⏳ Тестовый период завершён — оформите подписку, чтобы продолжить поиск."
+    else:
+        _trial_line = f"⏳ Тестовый период: осталось *{_t['days_left']}* дн. из {_t['total']}."
 
     if is_new_user:
         # Новый пользователь — красивое приветствие
@@ -8164,6 +8172,7 @@ async def cmd_start(msg: Message, state: FSMContext):
             f"1️⃣ Настроить поиск по всем площадкам (Авито, Дром, Авто.ру, ВК, Telegram) под свои параметры.\n\n"
             f"2️⃣ Сохранить интересные авто в Избранное.\n\n"
             f"3️⃣ Включить поискового агента — бот сам пришлёт новые объявления.\n\n"
+            f"{_trial_line}\n\n"
             f"👇 Начнём с настройки поиска:",
             parse_mode="Markdown",
             reply_markup=kb_for(msg.from_user.id),
@@ -8176,7 +8185,8 @@ async def cmd_start(msg: Message, state: FSMContext):
             f"👋 Привет, {name}! Я *PerekupDrive* — бот для поиска авто ниже рыночной цены.\n\n"
             f"🔍 Ищу объявления от частных лиц на Авито\n"
             f"📊 Сравниваю цены с рынком и нахожу выгодные\n"
-            f"🔔 Могу присылать уведомления когда появится новое выгодное авто",
+            f"🔔 Могу присылать уведомления когда появится новое выгодное авто\n\n"
+            f"{_trial_line}",
             parse_mode="Markdown",
             reply_markup=kb_for(msg.from_user.id),
         )
@@ -10959,6 +10969,9 @@ _USER_REGISTRY: "dict[str, dict]" = {}
 _registry_dirty = False
 _registry_new_user = False  # появился НОВЫЙ пользователь → бэкап в ближайшую минуту
 
+# Длительность бесплатного тестового периода (дней)
+TRIAL_DAYS = 7
+
 
 def _register_user(uid: int, username: "str | None" = None, is_search: bool = False):
     """Обновляет реестр (в памяти + PG). Вызывается на каждое сообщение."""
@@ -10968,6 +10981,14 @@ def _register_user(uid: int, username: "str | None" = None, is_search: bool = Fa
     _is_new = k not in _USER_REGISTRY
     u = _USER_REGISTRY.get(k) or {"first_seen": now, "searches": 0}
     u["last_seen"] = now
+    # Тестовый период отсчитываем от момента первого появления пользователя
+    if "trial_start" not in u:
+        u["trial_start"] = now
+    # Бонусные дни (за рефералов) прибавляются к тесту
+    if "bonus_days" not in u:
+        u["bonus_days"] = 0
+    if "trial_notified" not in u:
+        u["trial_notified"] = []
     if username:
         u["username"] = username
     if is_search:
@@ -10991,6 +11012,26 @@ def _register_user(uid: int, username: "str | None" = None, is_search: bool = Fa
                 )
     except Exception:
         pass
+
+
+def _trial_info(uid: int) -> dict:
+    """Возвращает данные тестового периода пользователя.
+
+    Returns: {"days_left": int, "total": int, "ended": bool, "start": int, "bonus": int}
+    """
+    u = _USER_REGISTRY.get(str(uid)) or {}
+    start = u.get("trial_start") or u.get("first_seen") or int(time.time())
+    bonus = int(u.get("bonus_days", 0) or 0)
+    total = TRIAL_DAYS + bonus
+    elapsed_days = (int(time.time()) - start) / 86400.0
+    days_left = int(total - elapsed_days)
+    return {
+        "days_left": max(0, days_left),
+        "total": total,
+        "ended": days_left <= 0,
+        "start": start,
+        "bonus": bonus,
+    }
 
 
 def _set_user_monitoring(uid: int, on: bool):
@@ -13408,6 +13449,40 @@ async def main():
             print(f"  [прокси] Добавь Railway IP в whitelist на сайте провайдера прокси!")
 
     loop = asyncio.get_running_loop()
+async def _trial_notification_loop():
+    """Раз в 6 часов напоминает пользователям о скором окончании теста (за 3 и за 1 день)."""
+    global _registry_dirty
+    while True:
+        try:
+            await asyncio.sleep(6 * 3600)
+            for uid, u in dict(_USER_REGISTRY).items():
+                try:
+                    info = _trial_info(int(uid))
+                    if info["ended"]:
+                        continue
+                    dleft = info["days_left"]
+                    notified = u.setdefault("trial_notified", [])
+                    for threshold in (3, 1):
+                        if dleft == threshold and threshold not in notified:
+                            try:
+                                await bot.send_message(
+                                    int(uid),
+                                    f"⏳ *До конца тестового периода осталось {dleft} дн.*\n\n"
+                                    f"Бот нашёл для вас выгодные авто ниже рынка. "
+                                    f"Оформите подписку, чтобы не прервать поиск и "
+                                    f"продолжать получать уведомления о новых объявлениях.",
+                                    parse_mode="Markdown",
+                                )
+                                notified.append(threshold)
+                                _registry_dirty = True
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+
     # Единый глобальный монитор — опрашивает всех активных пользователей каждые 2 минуты
     loop.create_task(_global_monitor_loop())
     print(f"  [монитор] глобальный цикл запущен (интервал {GLOBAL_POLL_SEC}с)")
@@ -13423,6 +13498,10 @@ async def main():
     # Прогрев кеша бесплатных прокси — тестирует их против Авито и кеширует рабочие
     loop.create_task(_proxy_warmup_loop())
     print("  [прокси-прогрев] запущен фоновый прогрев кеша прокси")
+
+    # Уведомления об окончании тестового периода (за 3 и за 1 день)
+    loop.create_task(_trial_notification_loop())
+    print("  [тест] цикл уведомлений о конце теста запущен")
 
     # Веб-дашборд аналитики — работает параллельно, не блокирует polling
     await analytics.start_dashboard(REGIONS, extra_routes=[("POST", "/yoomoney/webhook", _yoomoney_webhook)])
