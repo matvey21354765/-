@@ -18,7 +18,8 @@ except ImportError:
     HAS_CLOUDSCRAPER = False
 
 try:
-    from bs4 import BeautifulSoup
+    try: from bs4 import BeautifulSoup HAS_BS4 = True
+except ImportError: HAS_BS4 = False BeautifulSoup = None
     
 
 MONTHS = {
