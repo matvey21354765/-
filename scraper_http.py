@@ -18,9 +18,12 @@ except ImportError:
     HAS_CLOUDSCRAPER = False
 
 try:
-    try: from bs4 import BeautifulSoup HAS_BS4 = True
-except ImportError: HAS_BS4 = False BeautifulSoup = None
-    
+    from bs4 import BeautifulSoup
+    HAS_BS4 = True
+except ImportError:
+    HAS_BS4 = False
+    BeautifulSoup = None
+
 
 MONTHS = {
     "янв":1,"фев":2,"мар":3,"апр":4,"май":5,"мая":5,
@@ -271,7 +274,7 @@ def scrape_drom_http(pages=30, start_page=1) -> list[dict]:
     return results
 
 
-def merge_and_save(new_items: list[dict]) -> list[dict]:
+def merge_and_save(new_items: list[dict]):
     """Объединяет с существующим listings.json и сохраняет."""
     existing = {}
     if Path(OUTPUT_FILE).exists():
