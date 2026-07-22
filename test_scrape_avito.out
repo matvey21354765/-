@@ -1,0 +1,65 @@
+>>> PROCESS STARTED: control_bot.py запущен, Python 3.14.6
+[прокси] ⚡ Используем встроенный прокси mproxy.site
+[прокси] ✅ http://mproxy.site:16358
+[Auto.ru] ✅ пул РФ-прокси: 3 шт. — обход капчи через чистые РФ IP
+[прокси] ротация IP: HTTP 200 ✅ '<!DOCTYPE html>\n<html lang="en" data-theme="light">\n<head>\n<meta charset="utf-8"'
+  [Авито] пробуем API-методы для moscow…
+  [Авито mobileAPI0 напрямую] HTTP 404, 55б
+  [Авито mobileAPI0 прокси] HTTP 429, 27,444б
+  [Авито api16] HTTP 429, 27,444б
+  [Авито api15] HTTP 429, 27,444б
+  [Авито api14] HTTP 429, 27,444б
+  [Авито mapItems] HTTP 404, 19б
+  [Авито webJSON прокси] стр.1: firewall (IP лимит) → смена IP
+[прокси] ротация IP: HTTP 200 ✅ '<!DOCTYPE html>\n<html lang="en" data-theme="light">\n<head>\n<meta charset="utf-8"'
+  [Авито webJSON прокси-rot1] стр.1: HTTP 439
+[прокси] ротация IP: HTTP 200 ✅ '<!DOCTYPE html>\n<html lang="en" data-theme="light">\n<head>\n<meta charset="utf-8"'
+  [Авито webJSON прокси-rot2] стр.1: firewall (IP лимит) → смена IP
+  [Авито webJSON напрямую] стр.1: HTTP 439
+  [Авито mobileAPI напрямую] стр.1 16: HTTP 429, 27,444б
+  [Авито mobileAPI напрямую] стр.1 16: HTTP 404, 55б
+  [Авито mobileAPI прокси] стр.1: HTTPSConnectionPool(host='m.avito.ru', port=443): Read timed
+  [Авито mobileAPI прокси] стр.1 16: HTTP 404, 55б
+  [Авито mobileAPI напрямую] стр.1 16: HTTP 429, 27,444б
+  [Авито mobileAPI напрямую] стр.1 16: HTTP 404, 55б
+  [Авито mobileAPI прокси] стр.1 16: HTTP 429, 27,444б
+  [Авито mobileAPI прокси] стр.1 16: HTTP 429, 27,444б
+  [Авито mobileAPI напрямую] стр.1 15: HTTP 429, 27,444б
+  [Авито mobileAPI напрямую] стр.1 15: HTTP 429, 27,444б
+  [Авито mobileAPI прокси] стр.1 15: HTTP 429, 27,444б
+  [Авито mobileAPI прокси] стр.1 15: HTTP 429, 27,444б
+  [Авито mobileAPI напрямую] стр.1 14: HTTP 429, 27,444б
+  [Авито mobileAPI напрямую] стр.1 14: HTTP 429, 27,444б
+  [Авито mobileAPI прокси] стр.1 14: HTTP 429, 27,444б
+  [Авито mobileAPI прокси] стр.1 14: HTTP 429, 27,444б
+  [Авито mobileAPI напрямую] стр.1 13: HTTP 429, 27,444б
+  [Авито mobileAPI напрямую] стр.1 13: HTTP 429, 27,444б
+  [Авито mobileAPI прокси] стр.1 13: HTTP 429, 27,444б
+  [Авито mobileAPI прокси] стр.1 13: HTTP 429, 27,444б
+  [Авито mobileAPI напрямую] стр.1 13: HTTP 429, 27,444б
+  [Авито mobileAPI напрямую] стр.1 13: HTTP 429, 27,444б
+  [Авито mobileAPI прокси] стр.1 13: HTTP 429, 27,444б
+  [Авито mobileAPI прокси] стр.1 13: HTTP 429, 27,444б
+  [Авито mobileAPI напрямую] стр.1 9: HTTP 429, 27,444б
+  [Авито mobileAPI напрямую] стр.1 9: HTTP 429, 27,444б
+  [Авито mobileAPI прокси] стр.1 9: HTTP 429, 27,444б
+  [Авито mobileAPI прокси] стр.1 9: HTTP 429, 27,444б
+  [Авито] платный прокси не дал объявлений — fallback на бесплатные прокси и поисковики
+  [ddg] lada: +20 (итого=20)
+  [ddglite] kia: +16 (итого=36)
+  [DDG итого] 36 объявлений Авито
+  [Авито fallback] _try_yandex_snippets стр.1: +36 (всего 36)
+  [Авито API] объединено 36 объявлений из всех методов
+  [Авито] API-метод дал 36 объявлений
+  [Авито] скрейп OK: 36 объявлений → кэш (moscow_0_99000000)
+RESULT: 36
+ - Kia/Ceed Asgbagicaktgtg3Kmcjitg2Uosg&Amp;Rut=Ffc32D89F4D433Aa0539C15B452C1Fe61Bd 400 000 ₽ 400000 0 https://www.avito.ru/moskva/avtomobili/kia/ceed-ASgBAgICAkTgtg3KmCjitg
+ - Kia/Ceed Asgbagicaktgtg3Kmcjitg2Uosg 400 000 ₽ 400000 0 https://www.avito.ru/moskva/avtomobili/kia/ceed-ASgBAgICAkTgtg3KmCjitg
+ - Kia/Picanto Asgbagicaktgtg3Kmcjitg3Yrcg&Amp;Rut=3D4Ecbda26F7959Dcba6883749F9D60E 240 000 ₽ 240000 0 https://www.avito.ru/moskva/avtomobili/kia/picanto-ASgBAgICAkTgtg3KmCj
+ - Kia/Picanto Asgbagicaktgtg3Kmcjitg3Yrcg 240 000 ₽ 240000 0 https://www.avito.ru/moskva/avtomobili/kia/picanto-ASgBAgICAkTgtg3KmCj
+ - Vaz Lada/2107 Asgbagicaktgtg3Gmsjitg3Omig&Amp;Rut=F01D6D900625F34A8B012Dbce18869 цена не указана 0 0 https://www.avito.ru/moskva/avtomobili/vaz_lada/2107-ASgBAgICAkTgtg3Gm
+ - Vaz Lada/2107 Asgbagicaktgtg3Gmsjitg3Omig цена не указана 0 0 https://www.avito.ru/moskva/avtomobili/vaz_lada/2107-ASgBAgICAkTgtg3Gm
+ - Vaz Lada 2112 1.6 Mt 2007 240 000 Km 8142712952&Amp;Rut=4B908493335119Dd7F390C44 цена не указана 0 2007 https://www.avito.ru/moskva/avtomobili/vaz_lada_2112_1.6_mt_2007_240_0
+ - Vaz Lada 2112 1.6 Mt 2007 240 000 Km цена не указана 0 2007 https://www.avito.ru/moskva/avtomobili/vaz_lada_2112_1.6_mt_2007_240_0
+ - Vaz Lada 2109 1.5 Mt 2004 197 610 Km 8226744483&Amp;Rut=684B62Ee5577A11814Adc0F6 цена не указана 0 2004 https://www.avito.ru/moskva/avtomobili/vaz_lada_2109_1.5_mt_2004_197_6
+ - Vaz Lada 2109 1.5 Mt 2004 197 610 Km цена не указана 0 2004 https://www.avito.ru/moskva/avtomobili/vaz_lada_2109_1.5_mt_2004_197_6

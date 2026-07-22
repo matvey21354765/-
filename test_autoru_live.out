@@ -1,0 +1,17 @@
+>>> PROCESS STARTED: control_bot.py запущен, Python 3.14.6
+[прокси] ⚡ Используем встроенный прокси mproxy.site
+[прокси] ✅ http://mproxy.site:16358
+[Auto.ru] ✅ пул РФ-прокси: 3 шт. — обход капчи через чистые РФ IP
+HTML size: 2855875
+  [Auto.ru] inline JSON: 34 объявлений
+RESULT: 34
+ - Audi Q7 50 TDI II (4M) Рестайлинг 6 300 000 ₽ 6300000 2019 https://auto.ru/cars/used/sale/audi/q7/1133218498-58ef81b2/
+ - Mercedes-Benz V-Класс Long 250 d длинный III (W447) Рестайлинг 7 800 000 ₽ 7800000 2019 https://auto.ru/cars/used/sale/mercedes/v_klasse/1133156091-c601d6a3/
+ - Cadillac ATS I 1 300 000 ₽ 1300000 2012 https://auto.ru/cars/used/sale/cadillac/ats/1133458313-d5a47eb3/
+ - Mercedes-Benz GL-Класс AMG 63 AMG 2 200 000 ₽ 2200000 2012 https://auto.ru/cars/used/sale/mercedes/gl_klasse_amg/1125347713-c09f0
+ - Infiniti Q50 I 1 500 000 ₽ 1500000 2013 https://auto.ru/cars/used/sale/infiniti/q50/1132894327-c1570f1e/
+ - Maserati Quattroporte V 3 950 000 ₽ 3950000 2003 https://auto.ru/cars/used/sale/maserati/quattroporte/1128588208-2179ef
+ - Mercedes-Benz SL-Класс AMG SL 63 63 AMG IV (R232) 14 700 000 ₽ 14700000 2021 https://auto.ru/cars/used/sale/mercedes/sl_klasse_amg/1133266377-15150
+ - Xiaomi SU7 I 5 250 000 ₽ 5250000 2023 https://auto.ru/cars/used/sale/xiaomi/su7/1131843596-a49073d9/
+ - Alpina B7 LWB 4WD Long F01/F02 3 000 000 ₽ 3000000 2010 https://auto.ru/cars/used/sale/alpina/b7/1126183942-864610ee/
+ - JAC S7 I 1 210 000 ₽ 1210000 2020 https://auto.ru/cars/used/sale/jac/s7/1131905959-e6ef1c10/

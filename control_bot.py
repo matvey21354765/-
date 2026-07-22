@@ -1567,7 +1567,7 @@ def _autoru_is_captcha(text: str) -> bool:
 
 
 def _autoru_parse_html(text: str, today) -> list[dict]:
-    """Извлекает объявления из HTML Auto.ru (__INITIAL_STATE__ или regex)."""
+    """Извлекает объявления из HTML Auto.ru (inline JSON, __INITIAL_STATE__ или regex)."""
     results = []
 
     # Метод 1: window.__INITIAL_STATE__ и другие встроенные JSON-блоки
@@ -1604,7 +1604,97 @@ def _autoru_parse_html(text: str, today) -> list[dict]:
         except Exception as e:
             print(f"  [Auto.ru] {marker} json error: {e}")
 
-    # Метод 2: regex по паттернам Auto.ru в сыром HTML/JSON
+    # Метод 2: современный SSR Auto.ru — inline JSON-объекты с полем saleId.
+    # Каждое объявление представлено отдельным JSON-объектом в HTML.
+    try:
+        seen_ids: set[str] = set()
+        for m in re.finditer(r'"saleId"\s*:\s*"', text):
+            pos = m.start()
+            # Идём назад до открывающей скобки текущего объекта
+            depth = 0
+            start = None
+            for i in range(pos - 1, -1, -1):
+                ch = text[i]
+                if ch == "}":
+                    depth += 1
+                elif ch == "{":
+                    if depth == 0:
+                        start = i
+                        break
+                    depth -= 1
+            if start is None:
+                continue
+            # Идём вперёд до закрывающей скобки
+            depth = 0
+            end = None
+            for i in range(start, len(text)):
+                ch = text[i]
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end = i
+                        break
+            if end is None:
+                continue
+            try:
+                obj = json.loads(text[start:end + 1])
+            except Exception:
+                continue
+            sale_id = obj.get("saleId") or obj.get("id")
+            if not sale_id or sale_id in seen_ids:
+                continue
+            # Только частные продавцы
+            if obj.get("seller_type") != "PRIVATE":
+                continue
+            url = obj.get("url", "")
+            if not url.startswith("https://auto.ru/cars/"):
+                continue
+            price_info = obj.get("price_info") or {}
+            price_val = price_info.get("price", 0)
+            if not isinstance(price_val, int) or price_val < 10_000:
+                continue
+            vi = obj.get("vehicle_info") or {}
+            mark_info = vi.get("mark_info") or {}
+            model_info = vi.get("model_info") or {}
+            super_gen = vi.get("super_gen") or {}
+            mark = mark_info.get("name", "")
+            model = model_info.get("name", "")
+            year = super_gen.get("year_from", 0)
+            title = obj.get("title") or f"{mark} {model} {year}".strip()
+            price_str = f"{price_val:,} ₽".replace(",", " ")
+            # Фото
+            photo_url = ""
+            images = (vi.get("state") or {}).get("image_urls") or []
+            if images:
+                photo_url = images[0].get("sizes", {}).get("1200x900", "")
+                if not photo_url:
+                    photo_url = images[0].get("sizes", {}).get("832x624", "")
+                if not photo_url:
+                    photo_url = images[0].get("sizes", {}).get("456x342", "")
+            if photo_url.startswith("//"):
+                photo_url = "https:" + photo_url
+            # Описание / пробег
+            mileage = (vi.get("state") or {}).get("mileage", 0)
+            desc = f"{year} г., {mileage:,} км".replace(",", " ") if year or mileage else ""
+            item = {
+                "source": "autoru", "title": title, "price": price_str,
+                "url": url, "date": str(today),
+                "_photos": 1 if photo_url else 0, "_days_on_site": 0,
+                "description": desc, "seller": "", "_photo_url": photo_url,
+                "_price_int": price_val, "_year": year, "mileage": mileage,
+            }
+            item["_hot_score"] = hot_score(item)
+            seen_ids.add(sale_id)
+            results.append(item)
+        if results:
+            print(f"  [Auto.ru] inline JSON: {len(results)} объявлений")
+            return results
+    except Exception as e:
+        print(f"  [Auto.ru] inline JSON parse error: {e}")
+
+    # Метод 3: regex по паттернам Auto.ru в сыром HTML/JSON (запасной)
     # Auto.ru URLs: https://auto.ru/cars/used/sale/brand/model/id/
     seen_urls: set[str] = set()
     for m in re.finditer(
@@ -1691,13 +1781,13 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
         _ar_base_url += f"&price_to={price_max}"
     _warm_html = ""
     _warm_status = 0
-    # Если задан выделенный РФ-пул (AUTORU_PROXIES) — прогрев через общий мобильный
-    # прокси НЕ делаем: он всё равно ловит капчу и лишь тратит 6-11с, замедляя весь
-    # поиск. Сразу идём в цикл, где Метод 0* берёт объявления через РФ-прокси.
+    # Прогреваем сессию через доступный прокси. Если задан РФ-пул — попробуем
+    # его в основном цикле, но предварительный прогрев через мобильный прокси
+    # даёт рабочие куки и часто возвращает HTML с объявлениями сразу.
     # 1) curl_cffi (Chrome TLS-отпечаток) через прокси — ЛУЧШИЙ обход анти-бота
     #    Яндекса, который проверяет TLS-fingerprint. Обычный requests почти всегда
     #    ловит капчу, а curl_cffi проходит чаще.
-    if not AUTORU_PROXIES:
+    if AVITO_PROXIES or not AUTORU_PROXIES:
         try:
             from curl_cffi import requests as _cffi_ar
             _rc = _cffi_ar.get(
@@ -6835,35 +6925,25 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                 })
             return out
 
-        # Список марок зависит от бюджета
+        # Список марок зависит от бюджета. Берём топ-8, чтобы уложиться в тайм-лимит.
         if price_max <= 200_000:
-            # Fix D: For cheap budgets, use specific cheap model names to avoid DDG
-            # returning expensive Chinese brands (EXEED, Tank, Haval, Geely, Chery etc.)
             _all_brands = [
-                "lada", "ваз", "daewoo nexia", "daewoo matiz", "chevrolet lacetti",
-                "nissan almera", "toyota corolla", "hyundai accent", "kia rio",
-                "ford focus", "opel astra", "renault logan", "volkswagen polo",
+                "lada", "ваз", "daewoo nexia", "nissan almera",
+                "toyota corolla", "hyundai accent", "kia rio", "ford focus",
             ]
         elif price_max <= 500_000:
             _all_brands = [
                 "lada", "kia", "hyundai", "toyota", "nissan", "renault",
-                "volkswagen", "ford", "opel", "chevrolet", "mitsubishi",
-                "honda", "mazda", "skoda", "daewoo", "bmw", "mercedes",
+                "volkswagen", "ford",
             ]
         else:
             _all_brands = [
                 "lada", "kia", "hyundai", "toyota", "nissan", "volkswagen",
-                "renault", "ford", "skoda", "bmw", "mercedes", "mazda",
-                "chevrolet", "mitsubishi", "honda", "opel",
+                "renault", "bmw",
             ]
 
         results_out: list[dict] = []
         seen_urls: set[str] = set()
-
-        # Подготавливаем список прокси для ротации IP (снижает вероятность 202)
-        proxy_pool = [None]  # начинаем без прокси (Railway IP)
-        for _pa in list(_working_free_proxies)[:4]:
-            proxy_pool.append({"http": f"http://{_pa}", "https": f"http://{_pa}"})
 
         proxy_idx = 0
         lite_flag = False  # чередуем html/lite
@@ -6878,28 +6958,25 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         elif price_max <= 600_000:
             _year_hint = " 2012 2016 2018"
 
-        # Тайм-лимит для всего DDG-цикла: максимум 45 секунд
-        _ddg_deadline = time.time() + 45
+        # Тайм-лимит для всего DDG-цикла: максимум 25 секунд (fallback должен
+        # уложиться в общий таймаут scrape_avito).
+        _ddg_deadline = time.time() + 25
 
         for brand in _all_brands:
-            if len(results_out) >= 40:
+            if len(results_out) >= 30:
                 break
             if time.time() > _ddg_deadline:
-                print(f"  [ddg] тайм-лимит 45с, остановка на {brand}")
+                print(f"  [ddg] тайм-лимит, остановка на {brand}")
                 break
             q = f"site:avito.ru/{slug}/avtomobili {brand}{_price_hint}{_year_hint}"
-            # Пауза 2-3.5с между запросами — достаточно для обхода DDG rate-limit,
-            # но не так долго, чтобы вылезти за тайм-лимит scrape_avito.
-            time.sleep(random.uniform(2.0, 3.5))
-            proxy = proxy_pool[proxy_idx % len(proxy_pool)]
-            html = _fetch_ddg(q, use_lite=lite_flag, proxy=proxy)
+            # Пауза 0.8-1.5с — DDG редко банит при такой скорости, но держим
+            # fallback быстрым.
+            time.sleep(random.uniform(0.8, 1.5))
+            html = _fetch_ddg(q, use_lite=lite_flag, proxy=None)
             if not html:
-                # 202/блок — сразу пробуем через прокси и другой endpoint
-                proxy_idx += 1
-                proxy = proxy_pool[proxy_idx % len(proxy_pool)]
                 lite_flag = not lite_flag
-                time.sleep(2)
-                html = _fetch_ddg(q, use_lite=lite_flag, proxy=proxy)
+                time.sleep(0.8)
+                html = _fetch_ddg(q, use_lite=lite_flag, proxy=None)
             if not html:
                 # DDG полностью заблокирован — резервные поисковики (Mojeek/Brave)
                 html = _fetch_alt_engines(q, proxy=None)
@@ -6916,13 +6993,8 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                 eng = "ddglite" if lite_flag else "ddg"
                 if added:
                     print(f"  [{eng}] {brand}: +{added} (итого={len(results_out)})")
-                else:
-                    print(f"  [{eng}] {brand}: 0 объявлений для {slug}")
-            else:
-                print(f"  [ddg] {brand}: заблокирован (202/429), пропускаем")
-            # Чередуем движок и ротируем прокси
+            # Чередуем движок
             lite_flag = not lite_flag
-            proxy_idx += 1
 
         if results_out:
             print(f"  [DDG итого] {len(results_out)} объявлений Авито")
@@ -7050,15 +7122,15 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
     # FIX: платный прокси (mobileproxy.space) часто целиком забанен у Авито.
     # Если JSON-методы через него не дали результата — пробуем бесплатные
     # прокси и поисковики (DDG/Mojeek/Brave), которые работают даже с
-    # датацентровых Railway-IP. Даём на fallback до 35 секунд.
+    # датацентровых Railway-IP. Даём на fallback до 30 секунд.
     if not results and _use_proxy and not os.getenv("SKIP_AVITO_FALLBACK"):
         print(f"  [Авито] платный прокси не дал объявлений — fallback на бесплатные прокси и поисковики")
-        _fb_soft_deadline = time.time() + 35
-        _fb_tasks = [(m, 1) for m in _no_proxy_methods]
-        _ex2 = _TPE(max_workers=min(6, len(_fb_tasks)))
+        _fb_soft_deadline = time.time() + 30
+        _fb_tasks = [(m, 1) for m in (_try_yandex_snippets, _try_free_proxies)]
+        _ex2 = _TPE(max_workers=2)
         try:
             fut_map2 = {_ex2.submit(m, pg): (m, pg) for (m, pg) in _fb_tasks}
-            for fut in _as_completed(fut_map2, timeout=45):
+            for fut in _as_completed(fut_map2, timeout=35):
                 try:
                     b = fut.result()
                 except Exception:
@@ -7892,7 +7964,7 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
         [KeyboardButton(text="🆕 Новые сегодня"), KeyboardButton(text="🎯 Следить за маркой")],
         [KeyboardButton(text="🔔 Уведомления"), KeyboardButton(text="🚗 Мой гараж")],
         [KeyboardButton(text="💼 Мои сделки"), KeyboardButton(text="⚙️ Настройки")],
-        [KeyboardButton(text="❓ Помощь")],
+        [KeyboardButton(text="💎 Подписка"), KeyboardButton(text="❓ Помощь")],
         [KeyboardButton(text="🤝 Пригласить друга"), KeyboardButton(text="♻️ Сбросить историю")],
     ],
     resize_keyboard=True,
@@ -7906,7 +7978,8 @@ _ADMIN_KEYBOARD = ReplyKeyboardMarkup(
         [KeyboardButton(text="🆕 Новые сегодня"), KeyboardButton(text="🎯 Следить за маркой")],
         [KeyboardButton(text="🔔 Уведомления"), KeyboardButton(text="🚗 Мой гараж")],
         [KeyboardButton(text="💼 Мои сделки"), KeyboardButton(text="⚙️ Настройки")],
-        [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="❓ Помощь")],
+        [KeyboardButton(text="💎 Подписка"), KeyboardButton(text="📊 Статистика")],
+        [KeyboardButton(text="❓ Помощь")],
         [KeyboardButton(text="🤝 Пригласить друга"), KeyboardButton(text="♻️ Сбросить историю")],
     ],
     resize_keyboard=True,
@@ -12986,7 +13059,14 @@ async def _send_monitor_item(uid: int, it: dict):
             try:
                 import requests as _req
                 from aiogram.types import BufferedInputFile
-                resp = _req.get(photo_url, timeout=10, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Referer": "https://www.avito.ru/"})
+                loop = asyncio.get_running_loop()
+                resp = await loop.run_in_executor(
+                    None,
+                    lambda: _req.get(
+                        photo_url, timeout=10,
+                        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Referer": "https://www.avito.ru/"}
+                    )
+                )
                 if resp.status_code == 200 and len(resp.content) > 2000:
                     await bot.send_photo(uid, photo=BufferedInputFile(resp.content, "photo.jpg"), caption=caption, reply_markup=kb)
                     sent = True
