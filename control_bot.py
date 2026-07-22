@@ -12781,6 +12781,40 @@ _PUSH_MESSAGES = [
 
 _PUSH_INTERVAL_SEC = 4 * 24 * 3600  # не чаще одного полезного сообщения в 4 дня
 
+async def _trial_notification_loop():
+    """Раз в 6 часов напоминает пользователям о скором окончании теста (за 3 и за 1 день)."""
+    global _registry_dirty
+    while True:
+        try:
+            await asyncio.sleep(6 * 3600)
+            for uid, u in dict(_USER_REGISTRY).items():
+                try:
+                    info = _trial_info(int(uid))
+                    if info["ended"]:
+                        continue
+                    dleft = info["days_left"]
+                    notified = u.setdefault("trial_notified", [])
+                    for threshold in (3, 1):
+                        if dleft == threshold and threshold not in notified:
+                            try:
+                                await bot.send_message(
+                                    int(uid),
+                                    f"⏳ *До конца тестового периода осталось {dleft} дн.*\n\n"
+                                    f"Бот нашёл для вас выгодные авто ниже рынка. "
+                                    f"Оформите подписку, чтобы не прервать поиск и "
+                                    f"продолжать получать уведомления о новых объявлениях.",
+                                    parse_mode="Markdown",
+                                )
+                                notified.append(threshold)
+                                _registry_dirty = True
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+
 async def _push_notification_loop():
     """Раз в 2-3 дня отправляет всем пользователям мотивирующее сообщение для возврата в бот."""
     import random as _rnd
