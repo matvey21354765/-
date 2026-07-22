@@ -593,6 +593,38 @@ def save_skipped(uid: int, skipped: set):
     f.write_text(json.dumps(list(skipped), ensure_ascii=False), encoding="utf-8")
 
 
+# Асинхронные обёртки для файловых/JSON операций — чтобы фоновые циклы
+# не блокировали event loop при большом числе пользователей.
+async def aload_settings(uid: int) -> dict:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, load_settings, uid)
+
+
+async def asave_settings(uid: int, s: dict):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, save_settings, uid, s)
+
+
+async def aload_seen(uid: int) -> set:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, load_seen, uid)
+
+
+async def asave_seen(uid: int, seen: set):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, save_seen, uid, seen)
+
+
+async def aload_skipped(uid: int) -> set:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, load_skipped, uid)
+
+
+async def asave_skipped(uid: int, skipped: set):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, save_skipped, uid, skipped)
+
+
 # ── Фильтры ─────────────────────────────────────────────────────
 
 def parse_price(s: str) -> int | None:
@@ -6636,8 +6668,10 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             "krasnoyarsk": "Красноярск", "voronezh": "Воронеж", "samara": "Самара",
         }.get(slug, slug)
 
+        # FIX: современные URL Авито содержат буквенно-цифровые ID (например
+        # /vaz_lada/2107-ASgBAgICAkTgtg3GmSjitg3Omig), не только цифровые.
         _avito_url_re = re.compile(
-            r'(?:https?://)?(?:www\.|m\.)?avito\.ru/[a-z0-9_.-]+/avtomobili/[a-z0-9_.%-]*\d{6,}',
+            r'(?:https?://)?(?:www\.|m\.)?avito\.ru/[a-z0-9_.-]+/avtomobili/[^"\'<>\s]{10,}',
             re.I,
         )
         _price_re = re.compile(r"(\d[\d\s]{2,8})\s*(?:₽|тыс\.?\s*р(?:уб)?\.?|руб\.?)", re.I)
@@ -7012,6 +7046,42 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             _ex.shutdown(wait=False)
 
     results = list(merged.values())
+
+    # FIX: платный прокси (mobileproxy.space) часто целиком забанен у Авито.
+    # Если JSON-методы через него не дали результата — пробуем бесплатные
+    # прокси и поисковики (DDG/Mojeek/Brave), которые работают даже с
+    # датацентровых Railway-IP. Даём на fallback до 35 секунд.
+    if not results and _use_proxy and not os.getenv("SKIP_AVITO_FALLBACK"):
+        print(f"  [Авито] платный прокси не дал объявлений — fallback на бесплатные прокси и поисковики")
+        _fb_soft_deadline = time.time() + 35
+        _fb_tasks = [(m, 1) for m in _no_proxy_methods]
+        _ex2 = _TPE(max_workers=min(6, len(_fb_tasks)))
+        try:
+            fut_map2 = {_ex2.submit(m, pg): (m, pg) for (m, pg) in _fb_tasks}
+            for fut in _as_completed(fut_map2, timeout=45):
+                try:
+                    b = fut.result()
+                except Exception:
+                    b = []
+                if b:
+                    added = 0
+                    for it in b:
+                        u = it.get("url")
+                        key = _listing_key(u)
+                        if u and key and key not in _seen_keys:
+                            _seen_keys.add(key)
+                            merged[u] = it
+                            added += 1
+                    if added:
+                        _m, _pg = fut_map2[fut]
+                        print(f"  [Авито fallback] {_m.__name__} стр.{_pg}: +{added} (всего {len(merged)})")
+                if len(merged) >= 40 or (merged and time.time() > _fb_soft_deadline):
+                    break
+        except Exception as e:
+            print(f"  [Авито fallback] пул: {str(e)[:60]}")
+        finally:
+            _ex2.shutdown(wait=False)
+        results = list(merged.values())
 
     # Если прокси сломан (407) и ничего не нашли — перезапускаем без прокси
     if not results and _proxy_auth_failed and _use_proxy:
@@ -12818,6 +12888,7 @@ async def _trial_notification_loop():
 async def _push_notification_loop():
     """Раз в 2-3 дня отправляет всем пользователям мотивирующее сообщение для возврата в бот."""
     import random as _rnd
+    loop = asyncio.get_running_loop()
     # Первый запуск — подождать сутки чтобы не слать сразу после перезапуска
     await asyncio.sleep(24 * 3600)
     while True:
@@ -12827,17 +12898,24 @@ async def _push_notification_loop():
                 if not user_path.is_dir() or not user_path.name.isdigit():
                     continue
                 uid = int(user_path.name)
-                if not load_settings(uid).get("tips_enabled", True):
+                try:
+                    s = await aload_settings(uid)
+                except Exception:
+                    continue
+                if not s.get("tips_enabled", True):
                     continue
                 notif_file = user_path / "last_push_notif.txt"
                 try:
-                    if notif_file.exists():
-                        last_sent = float(notif_file.read_text().strip())
-                        if now - last_sent < _PUSH_INTERVAL_SEC:
-                            continue
+                    exists = await loop.run_in_executor(None, notif_file.exists)
+                    last_sent = 0.0
+                    if exists:
+                        txt = await loop.run_in_executor(None, notif_file.read_text)
+                        last_sent = float(txt.strip() or 0)
+                    if now - last_sent < _PUSH_INTERVAL_SEC:
+                        continue
                     msg = _rnd.choice(_PUSH_MESSAGES)
                     await bot.send_message(uid, msg)
-                    notif_file.write_text(str(now))
+                    await loop.run_in_executor(None, notif_file.write_text, str(now))
                     await asyncio.sleep(0.1)  # защита от flood
                 except Exception:
                     pass
@@ -12933,7 +13011,7 @@ async def _global_monitor_loop():
         _region_src_cache.clear()
         try:
             # Собираем всех пользователей с включённым мониторингом
-            if not USERS_DIR.exists():
+            if not await loop.run_in_executor(None, USERS_DIR.exists):
                 continue
             active_users: list[dict] = []
             for user_path in USERS_DIR.iterdir():
@@ -12941,9 +13019,11 @@ async def _global_monitor_loop():
                     continue
                 try:
                     sf = user_path / "settings.json"
-                    if not sf.exists():
+                    sf_exists = await loop.run_in_executor(None, sf.exists)
+                    if not sf_exists:
                         continue
-                    s = json.loads(sf.read_text(encoding="utf-8"))
+                    sf_text = await loop.run_in_executor(None, sf.read_text, "utf-8")
+                    s = json.loads(sf_text)
                     if s.get("monitor_enabled") and s.get("region"):
                         active_users.append({"uid": int(user_path.name), **s})
                 except Exception:
@@ -13025,8 +13105,8 @@ async def _global_monitor_loop():
                     if not raw:
                         continue
 
-                    seen = load_seen(uid)
-                    skipped = load_skipped(uid)
+                    seen = await aload_seen(uid)
+                    skipped = await aload_skipped(uid)
 
                     new_items = [
                         it for it in raw
@@ -13039,7 +13119,7 @@ async def _global_monitor_loop():
                     ]
                     if not new_items:
                         seen.update(it["url"] for it in raw if it.get("url"))
-                        save_seen(uid, seen)
+                        await asave_seen(uid, seen)
                         continue
 
                     # Считаем рыночную цену по ВСЕМУ каталогу (raw + авито референс) — чем больше, тем точнее
@@ -13111,7 +13191,7 @@ async def _global_monitor_loop():
 
                     if not new_below:
                         seen.update(it["url"] for it in new_items)
-                        save_seen(uid, seen)
+                        await asave_seen(uid, seen)
                         continue
 
                     # Если задан track_brand — фильтруем уведомления о скидках по марке
@@ -13140,7 +13220,7 @@ async def _global_monitor_loop():
                             await asyncio.sleep(0.3)
 
                     seen.update(it["url"] for it in new_items)
-                    save_seen(uid, seen)
+                    await asave_seen(uid, seen)
 
                 except Exception as e:
                     print(f"  [глоб.монитор] uid обработка: {e}")
@@ -13490,10 +13570,25 @@ def _run_startup_tests():
 async def main():
     global BOT_USERNAME, _registry_dirty
     logging.basicConfig(level=logging.WARNING)
-    _load_avito_cache()
-    _load_price_history()
-    _analytics_restore()  # восстановить статистику из PG (контейнер эфемерный)
-    _restore_referrals()  # восстановить рефералов из PG
+    loop = asyncio.get_running_loop()
+    # Тяжёлые синхронные загрузки при старте — в executor, чтобы не блокировать
+    # event loop до запуска polling (иначе бот "зависает" на старте).
+    try:
+        await loop.run_in_executor(None, _load_avito_cache)
+    except Exception as e:
+        print(f"  [main] _load_avito_cache: {e}")
+    try:
+        await loop.run_in_executor(None, _load_price_history)
+    except Exception as e:
+        print(f"  [main] _load_price_history: {e}")
+    try:
+        await loop.run_in_executor(None, _analytics_restore)
+    except Exception as e:
+        print(f"  [main] _analytics_restore: {e}")
+    try:
+        await loop.run_in_executor(None, _restore_referrals)
+    except Exception as e:
+        print(f"  [main] _restore_referrals: {e}")
     # Реестр пользователей собираем из ВСЕХ доступных источников (чтобы не потерять
     # уже существующих): PG → папки users/ → analytics → Telegram-бэкап.
     try:
@@ -13503,20 +13598,21 @@ async def main():
         pass
     # Папки users/<uid> — каждый, кто хоть раз пользовался ботом
     try:
-        if USERS_DIR.exists():
+        if await loop.run_in_executor(None, USERS_DIR.exists):
             for _p in USERS_DIR.iterdir():
                 if not (_p.is_dir() and _p.name.isdigit()):
                     continue
                 if _p.name in _USER_REGISTRY:
                     continue
                 try:
-                    _st = (_p / "settings.json").stat()
+                    _st = await loop.run_in_executor(None, (_p / "settings.json").stat)
                     _fs = int(_st.st_mtime)
                 except Exception:
                     _fs = int(time.time())
                 _mon = False
                 try:
-                    _s = json.loads((_p / "settings.json").read_text(encoding="utf-8"))
+                    _txt = await loop.run_in_executor(None, (_p / "settings.json").read_text, "utf-8")
+                    _s = json.loads(_txt)
                     _mon = bool(_s.get("monitor_enabled"))
                 except Exception:
                     pass
