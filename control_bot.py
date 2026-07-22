@@ -151,12 +151,13 @@ if AVITO_PROXY_HOST and (AVITO_PROXY_PORT or _AVITO_PROXY_PORTS):
 
 # Хардкодный fallback — если env vars не заданы в Railway, используем прокси из кода
 if not AVITO_PROXIES and not _proxy_auth_failed:
-    _HARDCODED_PROXY = "http://ilkin:EDNyWFYHyH2Y@mproxy.site:16358"
+    # Fallback: мобильный прокси mobileproxy.space (huba / EDNyWFYHy228)
+    _HARDCODED_PROXY = "http://huba:EDNyWFYHy228@mproxy.site:16358"
     AVITO_PROXIES = {"http": _HARDCODED_PROXY, "https": _HARDCODED_PROXY}
     AVITO_PROXY_HOST = "mproxy.site"
     AVITO_PROXY_PORT = "16358"
-    AVITO_PROXY_USER = "ilkin"
-    AVITO_PROXY_PASS = "EDNyWFYHyH2Y"
+    AVITO_PROXY_USER = "huba"
+    AVITO_PROXY_PASS = "EDNyWFYHy228"
     print("[прокси] ⚡ Используем встроенный прокси mproxy.site")
 
 _proxy_display = f"{AVITO_PROXY_PROTOCOL}://{AVITO_PROXY_HOST}:{AVITO_PROXY_PORT}" if AVITO_PROXIES else None
@@ -164,7 +165,7 @@ print(f"[прокси] {'✅ ' + _proxy_display if _proxy_display else '❌ не
 
 # Ссылка ротации IP мобильного прокси (mobileproxy.space «Ссылка для смены IP»).
 # Если задана — бот сам меняет IP перед скрейпом Авито, обходя rate-limit (429).
-AVITO_PROXY_ROTATE_URL = os.getenv("AVITO_PROXY_ROTATE_URL", "")
+AVITO_PROXY_ROTATE_URL = os.getenv("AVITO_PROXY_ROTATE_URL", "https://changeip.mobileproxy.space/?proxy_key=cc1eb5e0f15ebd98b63a7ae2a08b4f24")
 
 # Токен приложения Auto.ru (заголовок x-authorization для apiauto.ru).
 # Эндпоинт apiauto.ru отдаёт чистый JSON без капчи Яндекса — самый надёжный
@@ -2748,7 +2749,7 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Accept-Language": "ru-RU,ru;q=0.9",
     })
-    _TG_FALLBACK_PROXY = "http://ilkin:EDNyWFYHyH2Y@mproxy.site:16358"
+    _TG_FALLBACK_PROXY = "http://huba:EDNyWFYHy228@mproxy.site:16358"
     _tg_proxy_url = (
         os.getenv("PROXY_URL") or
         os.getenv("AVITO_PROXY_URL") or
@@ -3431,7 +3432,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
     })
     # Русский резидентный прокси — обходит блокировки VK API / Yandex / DDG
     # Хардкодим как абсолютный fallback чтобы работало даже без Railway env vars
-    _VK_FALLBACK_PROXY = "http://ilkin:EDNyWFYHyH2Y@mproxy.site:16358"
+    _VK_FALLBACK_PROXY = "http://huba:EDNyWFYHy228@mproxy.site:16358"
     _vk_proxy_url = (
         os.getenv("PROXY_URL") or
         os.getenv("AVITO_PROXY_URL") or
@@ -8161,11 +8162,15 @@ async def cmd_start(msg: Message, state: FSMContext):
     s = load_settings(msg.from_user.id)
     name = msg.from_user.first_name or "друг"
     is_new_user = not s.get("region")
-    _t = _trial_info(msg.from_user.id)
-    if _t["ended"]:
-        _trial_line = "⏳ Тестовый период завершён — оформите подписку, чтобы продолжить поиск."
+    _sub = _subscription_info(msg.from_user.id)
+    if _sub["ended"]:
+        _subscription_line = "⏳ Подписка завершена — оформите подписку, чтобы продолжить поиск."
     else:
-        _trial_line = f"⏳ Тестовый период: осталось *{_t['days_left']}* дн. из {_t['total']}."
+        _plan = "Платная" if _sub["is_paid"] else "Тестовая"
+        _subscription_line = (
+            f"⏳ {_plan} подписка «{_sub['title']}»: "
+            f"осталось *{_sub['days_left']}* дн. из {_sub['total_days']}."
+        )
 
     if is_new_user:
         # Новый пользователь — красивое приветствие
@@ -8177,7 +8182,7 @@ async def cmd_start(msg: Message, state: FSMContext):
             f"1️⃣ Настроить поиск по всем площадкам (Авито, Дром, Авто.ру, ВК, Telegram) под свои параметры.\n\n"
             f"2️⃣ Сохранить интересные авто в Избранное.\n\n"
             f"3️⃣ Включить поискового агента — бот сам пришлёт новые объявления.\n\n"
-            f"{_trial_line}\n\n"
+            f"{_subscription_line}\n\n"
             f"👇 Начнём с настройки поиска:",
             parse_mode="Markdown",
             reply_markup=kb_for(msg.from_user.id),
@@ -8191,7 +8196,7 @@ async def cmd_start(msg: Message, state: FSMContext):
             f"🔍 Ищу объявления от частных лиц на Авито\n"
             f"📊 Сравниваю цены с рынком и нахожу выгодные\n"
             f"🔔 Могу присылать уведомления когда появится новое выгодное авто\n\n"
-            f"{_trial_line}",
+            f"{_subscription_line}",
             parse_mode="Markdown",
             reply_markup=kb_for(msg.from_user.id),
         )
@@ -9790,6 +9795,16 @@ async def cb_setup_back_to_price(cb: CallbackQuery, state: FSMContext):
 @dp.message(F.text == "⚙️ Настройки")
 async def cmd_settings(msg: Message, state: FSMContext):
     await state.clear()
+    _sub = _subscription_info(msg.from_user.id)
+    if _sub["ended"]:
+        _sub_line = "⏳ Подписка завершена — оформите подписку, чтобы продолжить поиск."
+    else:
+        _plan = "Платная" if _sub["is_paid"] else "Тестовая"
+        _sub_line = (
+            f"⏳ {_plan} подписка «{_sub['title']}»: "
+            f"осталось *{_sub['days_left']}* дн. из {_sub['total_days']}."
+        )
+    await msg.answer(_sub_line, parse_mode="Markdown")
     await msg.answer("🔍 Шаг 1/4: Что ищем?", reply_markup=category_keyboard())
     await state.set_state(Setup.category)
 
@@ -10186,6 +10201,16 @@ async def cb_src_all(cb: CallbackQuery):
 async def cb_open_settings(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
     await state.clear()
+    _sub = _subscription_info(cb.from_user.id)
+    if _sub["ended"]:
+        _sub_line = "⏳ Подписка завершена — оформите подписку, чтобы продолжить поиск."
+    else:
+        _plan = "Платная" if _sub["is_paid"] else "Тестовая"
+        _sub_line = (
+            f"⏳ {_plan} подписка «{_sub['title']}»: "
+            f"осталось *{_sub['days_left']}* дн. из {_sub['total_days']}."
+        )
+    await cb.message.answer(_sub_line, parse_mode="Markdown")
     await cb.message.answer("🔍 Шаг 1/4: Что ищем?", reply_markup=category_keyboard())
     await state.set_state(Setup.category)
 
@@ -11041,6 +11066,44 @@ def _trial_info(uid: int) -> dict:
         "ended": days_left <= 0,
         "start": start,
         "bonus": bonus,
+    }
+
+
+def _subscription_info(uid: int) -> dict:
+    """Возвращает актуальную подписку пользователя: paid или trial.
+
+    Returns: {
+        "type": str,          # "week"/"month"/"free"
+        "title": str,
+        "days_left": int,
+        "total_days": int,
+        "ended": bool,
+        "is_paid": bool,
+    }
+    """
+    s = load_settings(uid)
+    until = float(s.get("subscription_until", 0) or 0)
+    now = time.time()
+    if until > now:
+        plan_key = s.get("subscription_type", "month")
+        plan = SUBSCRIPTION_PLANS.get(plan_key, SUBSCRIPTION_PLANS["month"])
+        days_left = int((until - now) / 86400.0)
+        return {
+            "type": plan_key,
+            "title": plan["title"],
+            "days_left": max(0, days_left),
+            "total_days": plan["days"],
+            "ended": False,
+            "is_paid": True,
+        }
+    trial = _trial_info(uid)
+    return {
+        "type": "free",
+        "title": "Тестовый период",
+        "days_left": trial["days_left"],
+        "total_days": trial["total"],
+        "ended": trial["ended"],
+        "is_paid": False,
     }
 
 
