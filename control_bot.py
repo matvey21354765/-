@@ -427,6 +427,17 @@ def _norm_url(u: str) -> str:
     return u
 
 
+def _listing_key(u: str) -> str:
+    """Канонический ID объявления — числовой ID в конце urlPath.
+    Авито и другие площадки иногда дублируют одно объявление с разными
+    query-параметрами/хэшами; дедупим по числовому ID, если он есть."""
+    if not u:
+        return ""
+    base = u.split("?")[0].rstrip("/")
+    m = re.search(r'(\d{6,})$', base)
+    return m.group(1) if m else base
+
+
 def load_seen(uid: int) -> set:
     # Try PostgreSQL first (survives Railway restarts)
     try:
@@ -657,6 +668,58 @@ def is_dealer(item: dict) -> bool:
     return any(k in text for k in DEALER_KEYWORDS)
 
 
+# Слова, однозначно указывающие, что объявление НЕ о продаже легкового авто
+_NON_CAR_KEYWORDS = {
+    "резина", "шины", "шина", "диски", "диск", "колеса", "колесо",
+    "запчасти", "запчасть", "аккумулятор", "акб", "масло", "фильтр",
+    "фары", "фара", "бампер", "дверь", "двери", "капот", "крыша", "кузов",
+    "салон", "тонировка", "сигнализация", "магнитола", "камера", "видеорегистратор",
+    "багажник", "прицеп", "эвакуатор", "аренда", "прокат", "такси", "яндекс",
+    "доставка", "грузоперевозки", "грузовик", "грузовой", "автобус", "мото",
+    "скутер", "квадроцикл", "снегоход", "прицепы", "полуприцеп",
+}
+
+# Популярные марки легковых авто — если хотя бы одна есть, это с большой вероятностью авто
+_CAR_BRANDS = {
+    "lada", "ваз", "kia", "hyundai", "toyota", "nissan", "volkswagen", "vw",
+    "renault", "bmw", "mercedes", "audi", "skoda", "ford", "opel", "chevrolet",
+    "mitsubishi", "subaru", "lexus", "infiniti", "volvo", "jeep", "suzuki",
+    "honda", "mazda", "peugeot", "citroen", "land rover", "porsche", "chery",
+    "geely", "haval", "tank", "jetta", "changan", "exeed", "omoda", "jac",
+    "gac", "fiat", "alfa romeo", "mini", "smart", "tesla", "cadillac", "dodge",
+    "chrysler", "hummer", "isuzu", "daihatsu", "ssangyong", "tagaz", "gaz", "uaz",
+    "москвич", "niva", "гранта", "веста", "калина", "приора", " priora ",
+    "onix", "monza", "polo", "solaris", "rio", "creta", "tucson", "sportage",
+    "rav4", "camry", "corolla", "focus", "octavia", "rapid", "logan", "duster",
+    "xray", "sandeero", "x5", "x3", "x6", "x1", "q5", "q7", "a4", "a6", "c class",
+    "e class", "golf", "tiguan", "kuga", "eco", "ceed", "cerato", "elantra",
+}
+
+
+def _is_car_advertisement(item: dict) -> bool:
+    """True, если объявление точно о продаже легкового автомобиля."""
+    title = str(item.get("title", "")).lower()
+    desc = str(item.get("description", "")).lower()
+    url = str(item.get("url", "")).lower()
+    full = title + " " + desc
+
+    # Явно не авто
+    if any(k in full for k in _NON_CAR_KEYWORDS):
+        return False
+
+    # Обязательно: легковая категория Авито/Дрома или явный год
+    has_year = bool(re.search(r"\b(19[5-9]\d|20[0-3]\d)\b", title + " " + url))
+    is_car_url = "/avtomobili/" in url or "/cars/" in url
+    has_brand = any(b in title for b in _CAR_BRANDS)
+
+    # Если есть марка + год или URL легковой — это авто
+    if (has_brand and has_year) or (is_car_url and (has_year or has_brand)):
+        return True
+
+    # Если нет ни марки, ни года, ни легкового URL — скорее всего не то, что ищем
+    return False
+
+
 _RESELLER_KEYWORDS = (
     "выкуп авто", "автоподбор", "подбор авто", "обмен с доплат", "трейд-ин",
     "trade-in", "автосалон", "скупка авто", "продажа авто под ключ",
@@ -768,7 +831,9 @@ def _car_group_key(title: str) -> str:
     """
     t = title.lower()
     # Удаляем префиксы площадок
-    for _pfx in ("авито", "дром", "auto.ru", "autoru", "вконтакте", "tg", "telegram"):
+    for _pfx in ("авито", "дром", "auto.ru", "autoru", "avito.ru", "drom.ru",
+                 "вконтакте", "vk", "vk.com", "телеграм", "telegram", "tg",
+                 "юла", "youla"):
         t = re.sub(rf'^\s*{re.escape(_pfx)}\s*', '', t)
     # Убираем скобочные пометки: "ВАЗ (LADA) 2114" → "ВАЗ 2114" (иначе не матчится с ВК)
     t = re.sub(r'\([^)]*\)', ' ', t)
@@ -1009,10 +1074,14 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
         s2 = [x for x in s if 0.4 * m <= x <= 2.5 * m]
         return float(median(s2)) if len(s2) >= 2 else float(m)
 
-    # Цены строго по модели И году: model -> {year -> [prices]}. Рынок считаем
-    # ТОЛЬКО по той же модели в близких годах — никаких «все годы»/«вся марка»,
-    # иначе 2001 Corolla сравнивается с 2018 и даёт фейковую «скидку».
-    model_year: dict[str, dict] = {}
+    # Индексы рыночных цен: от точных (модель+год) к широким (вся марка).
+    # Fallback нужен, чтобы редкие машины (например, с Юлы/ВК) тоже получали
+    # оценку, но чем шире окно — тем меньше доверия и жёстче кап на % скидки.
+    model_year: dict[str, dict[int, list]] = {}
+    model_all: dict[str, list] = {}
+    brand_year: dict[str, dict[int, list]] = {}
+    brand_all: dict[str, list] = {}
+
     for it in all_for_median:
         p = it.get("_price_int", 0)
         if p <= 0:
@@ -1021,11 +1090,19 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
         parts = key.rsplit(" ", 1)
         if len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 4:
             model, yr = parts[0], int(parts[1])
-            if model:
-                model_year.setdefault(model, {}).setdefault(yr, []).append(p)
+        else:
+            model, yr = key, 0
+        if not model:
+            continue
+        brand = model.split()[0] if model.split() else ""
+        model_year.setdefault(model, {}).setdefault(yr, []).append(p)
+        model_all.setdefault(model, []).append(p)
+        if brand:
+            brand_year.setdefault(brand, {}).setdefault(yr, []).append(p)
+            brand_all.setdefault(brand, []).append(p)
 
     def _est_price(prices: list, lvl: str, cand_p):
-        """Медиана цен той же модели/года с отсечением выбросов. Leave-one-out:
+        """Медиана цен с отсечением выбросов. Leave-one-out:
         убираем ОДНУ цену самого кандидата, чтобы дешёвая находка не занижала свой
         же «рынок». Возвращает (медиана, уровень, число_образцов)."""
         pr = list(prices)
@@ -1033,31 +1110,50 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
             pr.remove(cand_p)
         return _trimmed_median(pr), lvl, len(pr)
 
+    def _collect_years(index: dict, yr: int, window: int) -> list:
+        """Собирает цены из index для годов [yr-window .. yr+window]."""
+        out = []
+        for delta in range(-window, window + 1):
+            out += index.get(yr + delta, [])
+        return out
+
     def _market_for(model: str, yr: int, cand_p=None):
-        """Рыночная цена по той же модели: окно ±1 год (точно, ≥3), затем ±2 (≥4),
-        затем ±4 (грубее, ≥6). Возвращает (медиана, уровень, N)|(0,'',0)."""
+        """Иерархический fallback для рыночной цены:
+        1) модель ±1 год (≥2) — near
+        2) модель ±2 года  (≥3) — bracket
+        3) модель ±4 года  (≥4) — wide_model
+        4) вся модель      (≥5) — all_model
+        5) марка ±2 года   (≥4) — brand_year
+        6) вся марка       (≥5) — brand_all
+        Возвращает (медиана, уровень, N)|(0,'',0)."""
         yrs = model_year.get(model)
-        if not yrs:
-            return 0.0, "", 0
-        near = []
-        for y in (yr - 1, yr, yr + 1):
-            near += yrs.get(y, [])
-        # Двух независимых аналогов достаточно для точной модели в окне ±1 год.
-        # Раньше порог 3 оставлял редкие объявления Юлы без анализа вообще.
-        if len(near) >= 2:
-            return _est_price(near, "near", cand_p)
-        wide = list(near)
-        for y in (yr - 2, yr + 2):
-            wide += yrs.get(y, [])
-        if len(wide) >= 3:
-            return _est_price(wide, "bracket", cand_p)
-        # Последний шанс покрытия: та же модель в окне ±4 года (шире, но всё ещё
-        # одна модель — не смешиваем марки). Нужно достаточно образцов.
-        widest = list(wide)
-        for y in (yr - 4, yr - 3, yr + 3, yr + 4):
-            widest += yrs.get(y, [])
-        if len(widest) >= 4:
-            return _est_price(widest, "wide", cand_p)
+        if yrs:
+            near = _collect_years(yrs, yr, 1)
+            if len(near) >= 2:
+                return _est_price(near, "near", cand_p)
+            wide = _collect_years(yrs, yr, 2)
+            if len(wide) >= 3:
+                return _est_price(wide, "bracket", cand_p)
+            widest = _collect_years(yrs, yr, 4)
+            if len(widest) >= 4:
+                return _est_price(widest, "wide_model", cand_p)
+
+        all_m = model_all.get(model, [])
+        if len(all_m) >= 5:
+            return _est_price(all_m, "all_model", cand_p)
+
+        brand = model.split()[0] if model.split() else ""
+        if brand and brand != model:
+            by_brand = brand_year.get(brand)
+            if by_brand:
+                b_near = _collect_years(by_brand, yr, 2)
+                if len(b_near) >= 5:
+                    return _est_price(b_near, "brand_year", cand_p)
+            b_all = brand_all.get(brand, [])
+            # Очень широкий fallback: только при большой выборке и с жёстким капом
+            if len(b_all) >= 10:
+                return _est_price(b_all, "brand_all", cand_p)
+
         return 0.0, "", 0
 
     for it in items:
@@ -1083,9 +1179,18 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
                 savings_pct = round((1 - p / med) * 100, 1)
                 # Показываем ДАЖЕ очень большие скидки (−80% и глубже). Отсекаем
                 # только явные ошибки парсинга цены: >92% (цена = ~8% рынка — это
-                # почти всегда пробег/опечатка, а не машина). Для широкого окна
-                # (±4 года) чуть строже — 70%, т.к. рынок там грубее.
-                _cap = 70 if _lvl.startswith("wide") else 92
+                # почти всегда пробег/опечатка, а не машина). Чем шире fallback,
+                # тем жёстче кап — иначе грубая оценка даст фейковые «−90%».
+                _CAP_BY_LVL = {
+                    "avito": 95,
+                    "near": 92,
+                    "bracket": 80,
+                    "wide_model": 65,
+                    "all_model": 50,
+                    "brand_year": 45,
+                    "brand_all": 40,
+                }
+                _cap = _CAP_BY_LVL.get(_lvl, 70)
                 if savings_pct > _cap:
                     med = 0
                     savings_pct = 0.0
@@ -1144,33 +1249,36 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
 
 def _sort_by_deal(items: list[dict]) -> list[dict]:
     """
-    Идеальная сортировка: сначала самые выгодные + висящие дольше.
-
-    Логика:
-      Tier 0 — ниже рынка (savings_pct > 0):
-        Ключ: -(savings_pct * 2 + age_bonus)
-        age_bonus = min(days, 90) * 0.5   → макс 45 очков за 90 дней
-        savings   = pct * 2               → -30% даёт 60 очков
-        Смысл: среди одинакового % скидки тот, кто висит дольше, идёт первым.
-        Пример: -25% 0 дней = 50 очков, -25% 30 дней = 65 очков → 30-дневный первый.
-                -40% 0 дней = 80 очков → всё равно выше -25%, правильно.
-
-      Tier 1 — по рынку или выше, но цена известна:
-        Сортировка: дешевле → выше (покупатель ищет минимум)
-
-      Tier 2 — цена неизвестна: в конец
-
-      Tier 10 — уже просмотрено: самый конец
+    Сортировка результата:
+      Tier 0 — свежие объявления ниже рынка (≤3 дней)
+      Tier 1 — остальные объявления ниже рынка
+      Tier 2 — по рынку или выше, но цена известна
+      Tier 3 — цена неизвестна
+      Tier 10 — уже просмотрено
+    Внутри Tier 0/1 сначала самые выгодные, затем дольше висящие/срочные.
     """
     def _tier(x) -> int:
         if x.get("_already_seen"):
             return 10
         pct = x.get("_savings_pct", 0) or 0
         if pct > 0:
-            return 0
+            days = x.get("_days_on_site", 999) or 999
+            return 0 if days <= 3 else 1
         if x.get("_price_int", 0) > 0:
+            return 2
+        return 3
+
+    def _fresh_tier(x) -> int:
+        """Внутри Tier 0 свежие идут первыми: 0 — сегодня/вчера, 1 — до 3 дн,
+        2 — до 7 дн, 3 — старше."""
+        days = x.get("_days_on_site", 999) or 999
+        if days <= 1:
+            return 0
+        if days <= 3:
             return 1
-        return 2
+        if days <= 7:
+            return 2
+        return 3
 
     def _primary_savings(x) -> float:
         """Главный ключ Tier 0: % скидки от рынка, взвешенный ДОВЕРИЕМ к рынку.
@@ -1180,9 +1288,19 @@ def _sort_by_deal(items: list[dict]) -> list[dict]:
         if x.get("_is_junk"):
             pct -= 100  # битые/не на ходу — в самый низ выгодных
         n = x.get("_market_n", 0) or 0
+        lvl = str(x.get("_market_lvl", ""))
         conf = min(1.0, n / 8.0)
-        if str(x.get("_market_lvl", "")).startswith("wide"):
-            conf *= 0.7
+        # Чем шире fallback, тем меньше доверия к "скидке"
+        _CONF_MULT = {
+            "avito": 1.0,
+            "near": 1.0,
+            "bracket": 0.85,
+            "wide_model": 0.65,
+            "all_model": 0.55,
+            "brand_year": 0.45,
+            "brand_all": 0.35,
+        }
+        conf *= _CONF_MULT.get(lvl, 0.6)
         # Никогда не обнуляем скидку полностью (0.5 — минимум), но хорошо
         # подкреплённые сделки поднимаются выше шатких.
         return pct * (0.5 + 0.5 * conf)
@@ -1195,7 +1313,7 @@ def _sort_by_deal(items: list[dict]) -> list[dict]:
         return min(days, 90) * 0.5 + hot
 
     def _deal_rank(x) -> float:
-        """Композитный рейтинг сделки для Tier 0 (больше — выше):
+        """Композитный рейтинг сделки для Tier 0/1 (больше — выше):
         1) глубина скидки % (с учётом доверия к рынку) — основной сигнал;
         2) абсолютная выгода в рублях — −25% на дорогой машине ценнее −40% на дешёвой;
         3) свежесть — среди равных свежие объявления чуть выше (успеть первым)."""
@@ -1206,7 +1324,7 @@ def _sort_by_deal(items: list[dict]) -> list[dict]:
         if market and price and market > price:
             rub_bonus = min((market - price) / 25_000.0, 25.0)
         days = x.get("_days_on_site", 0) or 0
-        fresh_bonus = 15.0 if days <= 1 else (7.0 if days <= 3 else (2.0 if days <= 7 else 0.0))
+        fresh_bonus = 20.0 if days <= 1 else (10.0 if days <= 3 else (3.0 if days <= 7 else 0.0))
         if x.get("_is_junk"):
             rub_bonus = fresh_bonus = 0.0
         return base + rub_bonus + fresh_bonus
@@ -1224,18 +1342,12 @@ def _sort_by_deal(items: list[dict]) -> list[dict]:
             print(f"  [сортировка] убрано без фото: {_dropped}, осталось {len(_with_photo)}")
         items = _with_photo
 
-    # Порядок ключей:
-    #   1) тир (ниже рынка → по рынку → без цены → просмотренные),
-    #   2) наличие фото (объявления без фото падают вниз своего тира),
-    #   3) внутри Tier 0 — СТРОГО по величине скидки от рынка (самые выгодные вверху),
-    #      при почти равной скидке — кто дольше висит/срочная продажа.
-    #   Никакого округления в «полки»: −30% всегда выше −5%.
     items.sort(key=lambda x: (
         _tier(x),
         _no_photo(x),
-        (-round(_deal_rank(x), 1), -_secondary(x))
-        if _tier(x) == 0
-        else (x.get("_price_int", 999_999_999), 0),
+        _fresh_tier(x) if _tier(x) in (0, 1) else 0,
+        -round(_deal_rank(x), 1),
+        -_secondary(x),
     ))
     return items
 
@@ -10182,14 +10294,22 @@ async def cmd_global_search(msg: Message):
     if stat_parts:
         await msg.answer("📊 " + " | ".join(stat_parts))
 
-    _seen_g: set[str] = set()
+    _seen_norm_g: set[str] = set()
+    _seen_id_g: set[str] = set()
     deduped_g: list[dict] = []
     for i in items:
         u = _norm_url(i.get("url", ""))
-        if u and u not in _seen_g:
-            _seen_g.add(u)
-            i["url"] = u
-            deduped_g.append(i)
+        lid = _listing_key(u)
+        if not u:
+            continue
+        # Дедуп по нормализованному URL; если URL разные, но ID одинаковый — тоже дедуп
+        if u in _seen_norm_g or (lid and lid in _seen_id_g):
+            continue
+        _seen_norm_g.add(u)
+        if lid:
+            _seen_id_g.add(lid)
+        i["url"] = u
+        deduped_g.append(i)
     items = deduped_g
 
     seen_norm_g = {_norm_url(u) for u in seen}
@@ -10206,6 +10326,7 @@ async def cmd_global_search(msg: Message):
         i for i in items
         if not is_dealer(i)
         and not is_not_running(i)
+        and _is_car_advertisement(i)
         and in_price_range(i, pmin, pmax)
         and i.get("url")
         and i["url"] not in skipped_norm_g
@@ -10286,14 +10407,21 @@ async def cmd_vk_tg_search(msg: Message):
     if stat_parts:
         await msg.answer("📊 " + " | ".join(stat_parts))
 
-    _seen_v: set[str] = set()
+    _seen_norm_v: set[str] = set()
+    _seen_id_v: set[str] = set()
     deduped_v: list[dict] = []
     for i in items:
         u = _norm_url(i.get("url", ""))
-        if u and u not in _seen_v:
-            _seen_v.add(u)
-            i["url"] = u
-            deduped_v.append(i)
+        lid = _listing_key(u)
+        if not u:
+            continue
+        if u in _seen_norm_v or (lid and lid in _seen_id_v):
+            continue
+        _seen_norm_v.add(u)
+        if lid:
+            _seen_id_v.add(lid)
+        i["url"] = u
+        deduped_v.append(i)
     items = deduped_v
 
     skipped_norm_v = {_norm_url(u) for u in skipped}
@@ -10307,7 +10435,8 @@ async def cmd_vk_tg_search(msg: Message):
 
     suitable = [
         i for i in items
-        if in_price_range(i, pmin, pmax)
+        if _is_car_advertisement(i)
+        and in_price_range(i, pmin, pmax)
         and i.get("url")
         and i["url"] not in skipped_norm_v
     ]
@@ -13187,20 +13316,31 @@ async def _global_monitor_loop():
 
                     raw = []
                     avito_ref = []  # Авито данные только для рыночной цены (если пользователь Авито не выбрал)
+                    _seen_raw_norm: set[str] = set()
+                    _seen_raw_id: set[str] = set()
                     for reg in all_regions:
                         for src in user_srcs | {"avito"}:  # всегда включаем авито для рыночной цены
                             if src in ("vk", "tg") and not do_vk_tg:
                                 continue
                             key_rs = f"{reg}:{src}"
                             items_rs = _region_src_cache.get(key_rs, [])
-                            # Помечаем регион для уведомлений
                             for it in items_rs:
+                                u = _norm_url(it.get("url", ""))
+                                if not u:
+                                    continue
+                                lid = _listing_key(u)
+                                if u in _seen_raw_norm or (lid and lid in _seen_raw_id):
+                                    continue
+                                _seen_raw_norm.add(u)
+                                if lid:
+                                    _seen_raw_id.add(lid)
+                                it["url"] = u
                                 it["_monitor_region"] = reg
-                            if src == "avito" and src not in user_srcs:
-                                # Авито не выбрано пользователем — только для рыночной цены
-                                avito_ref.extend(items_rs)
-                            else:
-                                raw.extend(items_rs)
+                                if src == "avito" and src not in user_srcs:
+                                    # Авито не выбрано пользователем — только для рыночной цены
+                                    avito_ref.append(it)
+                                else:
+                                    raw.append(it)
 
                     if not raw:
                         continue
@@ -13215,6 +13355,7 @@ async def _global_monitor_loop():
                         and it["url"] not in skipped
                         and not is_dealer(it)
                         and not is_not_running(it)
+                        and _is_car_advertisement(it)
                         and in_price_range(it, pmin, pmax)
                     ]
                     if not new_items:
