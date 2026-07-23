@@ -6775,7 +6775,10 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             def _add(raw: str):
                 if not raw.startswith("http"):
                     raw = "https://" + raw
-                clean = raw.split("?")[0].split("#")[0].rstrip("/")
+                # Очищаем от query, hash и HTML-entities &, оставшихся после DDG
+                clean = raw.split("?")[0].split("#")[0].split("&")[0].rstrip("/")
+                if clean.endswith("&Amp") or clean.endswith("&amp"):
+                    clean = clean[:-4].rstrip("/")
                 if slug and f"/{slug}/" not in clean:
                     return
                 if clean not in seen:

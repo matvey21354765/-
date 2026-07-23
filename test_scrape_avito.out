@@ -5,61 +5,39 @@
 [прокси] ротация IP: HTTP 200 ✅ '<!DOCTYPE html>\n<html lang="en" data-theme="light">\n<head>\n<meta charset="utf-8"'
   [Авито] пробуем API-методы для moscow…
   [Авито mobileAPI0 напрямую] HTTP 404, 55б
-  [Авито mobileAPI0 прокси] HTTP 429, 27,444б
-  [Авито api16] HTTP 429, 27,444б
-  [Авито api15] HTTP 429, 27,444б
-  [Авито api14] HTTP 429, 27,444б
-  [Авито mapItems] HTTP 404, 19б
-  [Авито webJSON прокси] стр.1: firewall (IP лимит) → смена IP
+  [Авито mobileAPI0] HTTPSConnectionPool(host='m.avito.ru', port=443): Read timed
+  [Авито api16] HTTPSConnectionPool(host='m.avito.ru', port=443): Read timed
+  [Авито api15] HTTPSConnectionPool(host='m.avito.ru', port=443): Read timed
+  [Авито api14] HTTPSConnectionPool(host='m.avito.ru', port=443): Read timed
+  [Авито mapItems] HTTPSConnectionPool(host='www.avito.ru', port=443): Read tim
+  [Авито webJSON прокси] стр.1: HTTPSConnectionPool(host='www.avito.ru', port=443): Read timed out. (r
 [прокси] ротация IP: HTTP 200 ✅ '<!DOCTYPE html>\n<html lang="en" data-theme="light">\n<head>\n<meta charset="utf-8"'
-  [Авито webJSON прокси-rot1] стр.1: HTTP 439
+  [Авито webJSON прокси-rot1] стр.1: HTTPSConnectionPool(host='www.avito.ru', port=443): Read timed out. (r
 [прокси] ротация IP: HTTP 200 ✅ '<!DOCTYPE html>\n<html lang="en" data-theme="light">\n<head>\n<meta charset="utf-8"'
-  [Авито webJSON прокси-rot2] стр.1: firewall (IP лимит) → смена IP
-  [Авито webJSON напрямую] стр.1: HTTP 439
-  [Авито mobileAPI напрямую] стр.1 16: HTTP 429, 27,444б
-  [Авито mobileAPI напрямую] стр.1 16: HTTP 404, 55б
-  [Авито mobileAPI прокси] стр.1: HTTPSConnectionPool(host='m.avito.ru', port=443): Read timed
-  [Авито mobileAPI прокси] стр.1 16: HTTP 404, 55б
-  [Авито mobileAPI напрямую] стр.1 16: HTTP 429, 27,444б
-  [Авито mobileAPI напрямую] стр.1 16: HTTP 404, 55б
-  [Авито mobileAPI прокси] стр.1 16: HTTP 429, 27,444б
-  [Авито mobileAPI прокси] стр.1 16: HTTP 429, 27,444б
-  [Авито mobileAPI напрямую] стр.1 15: HTTP 429, 27,444б
-  [Авито mobileAPI напрямую] стр.1 15: HTTP 429, 27,444б
-  [Авито mobileAPI прокси] стр.1 15: HTTP 429, 27,444б
-  [Авито mobileAPI прокси] стр.1 15: HTTP 429, 27,444б
-  [Авито mobileAPI напрямую] стр.1 14: HTTP 429, 27,444б
-  [Авито mobileAPI напрямую] стр.1 14: HTTP 429, 27,444б
-  [Авито mobileAPI прокси] стр.1 14: HTTP 429, 27,444б
-  [Авито mobileAPI прокси] стр.1 14: HTTP 429, 27,444б
-  [Авито mobileAPI напрямую] стр.1 13: HTTP 429, 27,444б
-  [Авито mobileAPI напрямую] стр.1 13: HTTP 429, 27,444б
-  [Авито mobileAPI прокси] стр.1 13: HTTP 429, 27,444б
-  [Авито mobileAPI прокси] стр.1 13: HTTP 429, 27,444б
-  [Авито mobileAPI напрямую] стр.1 13: HTTP 429, 27,444б
-  [Авито mobileAPI напрямую] стр.1 13: HTTP 429, 27,444б
-  [Авито mobileAPI прокси] стр.1 13: HTTP 429, 27,444б
-  [Авито mobileAPI прокси] стр.1 13: HTTP 429, 27,444б
-  [Авито mobileAPI напрямую] стр.1 9: HTTP 429, 27,444б
-  [Авито mobileAPI напрямую] стр.1 9: HTTP 429, 27,444б
-  [Авито mobileAPI прокси] стр.1 9: HTTP 429, 27,444б
-  [Авито mobileAPI прокси] стр.1 9: HTTP 429, 27,444б
+  [Авито webJSON прокси-rot2] стр.1: HTTPSConnectionPool(host='www.avito.ru', port=443): Read timed out. (r
+  [Авито webJSON напрямую] стр.1: firewall (IP лимит) → смена IP
   [Авито] платный прокси не дал объявлений — fallback на бесплатные прокси и поисковики
-  [ddg] lada: +20 (итого=20)
-  [ddglite] kia: +16 (итого=36)
-  [DDG итого] 36 объявлений Авито
-  [Авито fallback] _try_yandex_snippets стр.1: +36 (всего 36)
-  [Авито API] объединено 36 объявлений из всех методов
-  [Авито] API-метод дал 36 объявлений
-  [Авито] скрейп OK: 36 объявлений → кэш (moscow_0_99000000)
-RESULT: 36
- - Kia/Ceed Asgbagicaktgtg3Kmcjitg2Uosg&Amp;Rut=Ffc32D89F4D433Aa0539C15B452C1Fe61Bd 400 000 ₽ 400000 0 https://www.avito.ru/moskva/avtomobili/kia/ceed-ASgBAgICAkTgtg3KmCjitg
- - Kia/Ceed Asgbagicaktgtg3Kmcjitg2Uosg 400 000 ₽ 400000 0 https://www.avito.ru/moskva/avtomobili/kia/ceed-ASgBAgICAkTgtg3KmCjitg
- - Kia/Picanto Asgbagicaktgtg3Kmcjitg3Yrcg&Amp;Rut=3D4Ecbda26F7959Dcba6883749F9D60E 240 000 ₽ 240000 0 https://www.avito.ru/moskva/avtomobili/kia/picanto-ASgBAgICAkTgtg3KmCj
- - Kia/Picanto Asgbagicaktgtg3Kmcjitg3Yrcg 240 000 ₽ 240000 0 https://www.avito.ru/moskva/avtomobili/kia/picanto-ASgBAgICAkTgtg3KmCj
- - Vaz Lada/2107 Asgbagicaktgtg3Gmsjitg3Omig&Amp;Rut=F01D6D900625F34A8B012Dbce18869 цена не указана 0 0 https://www.avito.ru/moskva/avtomobili/vaz_lada/2107-ASgBAgICAkTgtg3Gm
+  [ddg] lada: +10 (итого=10)
+  [alt-engine] kia: получены данные через резерв
+  [alt-engine] hyundai: получены данные через резерв
+  [alt-engine] toyota: получены данные через резерв
+  [alt-engine] nissan: получены данные через резерв
+  [alt-engine] volkswagen: получены данные через резерв
+  [alt-engine] renault: получены данные через резерв
+  [alt-engine] bmw: получены данные через резерв
+  [DDG итого] 10 объявлений Авито
+  [Авито fallback] _try_yandex_snippets стр.1: +10 (всего 10)
+  [Авито API] объединено 10 объявлений из всех методов
+  [Авито] API-метод дал 10 объявлений
+  [Авито] скрейп OK: 10 объявлений → кэш (moscow_0_99000000)
+RESULT: 10
+ - Vaz Lada Asgbagicautgtg3Gmsg 610 000 ₽ 610000 0 https://www.avito.ru/moskva/avtomobili/vaz_lada-ASgBAgICAUTgtg3GmSg
  - Vaz Lada/2107 Asgbagicaktgtg3Gmsjitg3Omig цена не указана 0 0 https://www.avito.ru/moskva/avtomobili/vaz_lada/2107-ASgBAgICAkTgtg3Gm
- - Vaz Lada 2112 1.6 Mt 2007 240 000 Km 8142712952&Amp;Rut=4B908493335119Dd7F390C44 цена не указана 0 2007 https://www.avito.ru/moskva/avtomobili/vaz_lada_2112_1.6_mt_2007_240_0
- - Vaz Lada 2112 1.6 Mt 2007 240 000 Km цена не указана 0 2007 https://www.avito.ru/moskva/avtomobili/vaz_lada_2112_1.6_mt_2007_240_0
- - Vaz Lada 2109 1.5 Mt 2004 197 610 Km 8226744483&Amp;Rut=684B62Ee5577A11814Adc0F6 цена не указана 0 2004 https://www.avito.ru/moskva/avtomobili/vaz_lada_2109_1.5_mt_2004_197_6
+ - S Probegom/Vaz Lada Asgbagicaksgfmjmaec2Dcazka цена не указана 0 0 https://www.avito.ru/moskva/avtomobili/s_probegom/vaz_lada-ASgBAgICAkS
  - Vaz Lada 2109 1.5 Mt 2004 197 610 Km цена не указана 0 2004 https://www.avito.ru/moskva/avtomobili/vaz_lada_2109_1.5_mt_2004_197_6
+ - Vaz Lada 2112 1.6 Mt 2007 240 000 Km цена не указана 0 2007 https://www.avito.ru/moskva/avtomobili/vaz_lada_2112_1.6_mt_2007_240_0
+ - Vaz Lada 4X4 Niva 1.7 Mt 1995 150 000 Km цена не указана 0 1995 https://www.avito.ru/moskva/avtomobili/vaz_lada_4x4_niva_1.7_mt_1995_1
+ - Vaz Lada 2111 1.5 Mt 2000 114 331 Km цена не указана 0 2000 https://www.avito.ru/moskva/avtomobili/vaz_lada_2111_1.5_mt_2000_114_3
+ - Novyy/Vaz Lada/Iskra/Ot Dilera Asgbagicbesgfmbmaec2Dcazkok2Dzkugxxs6Hsqmzad цена не указана 0 0 https://www.avito.ru/moskva/avtomobili/novyy/vaz_lada/iskra/ot_dilera-
+ - Novyy/Vaz Lada/4X4 Niva Asgbagica0Sgfmbmaec2Dcazkok2Dbqcka цена не указана 0 0 https://www.avito.ru/moskva/avtomobili/novyy/vaz_lada/4x4_niva-ASgBAgI
+ - Vaz Lada Iskra 1.6 Mt 2026 цена не указана 0 2026 https://www.avito.ru/moskva/avtomobili/vaz_lada_iskra_1.6_mt_2026_8218
