@@ -1206,7 +1206,7 @@ def _sort_by_deal(items: list[dict]) -> list[dict]:
         if market and price and market > price:
             rub_bonus = min((market - price) / 25_000.0, 25.0)
         days = x.get("_days_on_site", 0) or 0
-        fresh_bonus = 6.0 if days <= 1 else (3.0 if days <= 3 else 0.0)
+        fresh_bonus = 15.0 if days <= 1 else (7.0 if days <= 3 else (2.0 if days <= 7 else 0.0))
         if x.get("_is_junk"):
             rub_bonus = fresh_bonus = 0.0
         return base + rub_bonus + fresh_bonus
@@ -6764,7 +6764,9 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             r'(?:https?://)?(?:www\.|m\.)?avito\.ru/[a-z0-9_.-]+/avtomobili/[^"\'<>\s]{10,}',
             re.I,
         )
-        _price_re = re.compile(r"(\d[\d\s]{2,8})\s*(?:₽|тыс\.?\s*р(?:уб)?\.?|руб\.?)", re.I)
+        _price_re = re.compile(r"(\d[\d\s]{2,8})\s*(?:₽|руб|тыс\.?\s*р(?:уб)?\.?|р\.?)", re.I)
+        # Резерв: любое число 30-50 тыс. без суффикса — часто цена в сниппете DDG без ₽
+        _price_re2 = re.compile(r"\b(\d[\d\s]{4,8})\b", re.I)
         _price_json_re = re.compile(r'["\']?price["\']?\s*[=:]\s*["\']?(\d{4,9})(?:\.0+)?["\']?', re.I)
         _year_re = re.compile(r"\b(19[5-9]\d|20[012]\d)\b")
 
@@ -6798,6 +6800,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             return found
 
         def _parse_price_snip(text: str) -> int:
+            # Сначала ищем явную цену с ₽/руб/тыс.
             for m in _price_re.finditer(text):
                 raw = re.sub(r"\D", "", m.group(1))
                 if not raw:
@@ -6807,6 +6810,20 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                 if "тыс" in suffix:
                     val *= 1000
                 if 50_000 <= val <= 50_000_000:
+                    return val
+            # Резерв: числа 50k-5m без суффикса — часто цена в сниппете поисковика.
+            # Исключаем числа, явно похожие на пробег (рядом с "км").
+            for m in _price_re2.finditer(text):
+                raw = re.sub(r"\D", "", m.group(1))
+                if not raw:
+                    continue
+                val = int(raw)
+                if 50_000 <= val <= 5_000_000:
+                    # Проверяем, не является ли это пробегом
+                    span = m.span()
+                    ctx = text[max(0, span[0]-15):min(len(text), span[1]+15)].lower()
+                    if "км" in ctx or "km" in ctx or "тыс" in ctx:
+                        continue
                     return val
             return 0
 
@@ -13547,12 +13564,8 @@ def _pre_warm_free_proxies_sync() -> None:
 
 async def _proxy_warmup_loop() -> None:
     """Фоновая задача: прогревает кеш бесплатных прокси каждые 15 минут.
-    Если настроен платный мобильный прокси — бесплатные не нужны (Авито ходит
-    через мобильный, а у Auto.ru есть свой РФ-пул AUTORU_PROXIES), поэтому
-    тяжёлый прогрев (80 запросов к Авито) пропускаем, чтобы не мешать поиску."""
-    if AVITO_PROXIES:
-        print("  [прокси-прогрев] платный прокси активен — прогрев бесплатных отключён")
-        return
+    Даже если настроен платный мобильный прокси, бесплатные остаются резервом
+    на случай, если Авито забанит мобильный IP (частая ситуация)."""
     loop = asyncio.get_running_loop()
     while True:
         try:

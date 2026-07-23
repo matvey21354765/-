@@ -1,3 +1,0 @@
-err chrome124: Failed to perform, curl: (28) Connection timed out after 10007 milliseconds. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
-err chrome120: Failed to perform, curl: (28) Connection timed out after 10004 milliseconds. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
-err chrome116: Failed to perform, curl: (28) Connection timed out after 10008 milliseconds. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
