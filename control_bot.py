@@ -19,6 +19,9 @@ import urllib.parse
 from pathlib import Path
 import os
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
     Message, CallbackQuery,
@@ -232,6 +235,61 @@ def _rotate_proxy_ip(min_interval: float = 50.0, force: bool = False) -> bool:
     except Exception as e:
         print(f"[прокси] ротация IP ошибка: {str(e)[:80]}")
         return False
+
+
+def _curl_cffi_get(url: str, params: dict | None = None, headers: dict | None = None,
+                   proxies: dict | None = None, timeout: float = 14.0,
+                   retries: int = 3) -> "object | None":
+    """GET через curl_cffi с имитацией Chrome и повторными попытками.
+
+    Повторяет запрос до `retries` раз при HTTP 429/439, таймаутах и сетевых
+    ошибках, делая паузу 3 сек между попытками (время переподключения
+    мобильного прокси LTEspace).
+    """
+    try:
+        from curl_cffi import requests as cffi_req
+    except ImportError:
+        return None
+
+    _proxies = proxies or AVITO_PROXIES or {}
+    _headers = {
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1",
+        "Referer": "https://www.avito.ru/",
+    }
+    if headers:
+        _headers.update(headers)
+
+    last_exc = None
+    for attempt in range(1, retries + 1):
+        try:
+            sess = cffi_req.Session(impersonate="chrome120")
+            if _proxies:
+                sess.proxies = _proxies
+            r = sess.get(url, params=params, headers=_headers, timeout=timeout)
+            if r.status_code in (429, 439):
+                print(f"  [curl_cffi] {url}: HTTP {r.status_code} (попытка {attempt}/{retries}), ждём 3с...")
+                import time as _t
+                _t.sleep(3)
+                continue
+            return r
+        except Exception as e:
+            last_exc = e
+            err = str(e).lower()
+            if any(x in err for x in ("timeout", "timed out", "429", "439", "connection", "connect")):
+                print(f"  [curl_cffi] {url}: сетевая ошибка (попытка {attempt}/{retries}): {str(e)[:80]}")
+                import time as _t
+                _t.sleep(3)
+                continue
+            break
+    print(f"  [curl_cffi] {url}: исчерпаны попытки: {last_exc}")
+    return None
+
 
 # ── Регионы ─────────────────────────────────────────────────────
 REGIONS = {
@@ -5884,14 +5942,9 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
     def _try_cffi_web(p: int) -> list[dict]:
         """curl_cffi Chrome impersonation с прогревом сессии (куки) — главный метод Авито.
 
-        ВАЖНО (проверено /avito_debug 2026-06): прямой запрос без сессии отдаёт
-        200, но скелет-страницу 339КБ без данных (антибот-challenge). Решение:
-        curl_cffi Session с прогревом — сначала заходим на главную (получаем куки
-        __cf_bm/cookies), потом запрашиваем каталог — тогда отдаёт полную SSR-страницу."""
-        try:
-            from curl_cffi import requests as _cffi
-        except ImportError:
-            return []
+        Использует центральный хелпер _curl_cffi_get, который делает до 3 попыток
+        при HTTP 429/439 и сетевых таймаутах (пауза 3с — время переподключения LTE).
+        """
         _brand_path = f"/{brand}" if brand and brand != "any" else ""
         url = f"https://www.avito.ru/{slug}/avtomobili{_brand_path}"
         params: dict = {"seller_type": "1"}
@@ -5901,59 +5954,30 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             params["pmin"] = price_min
         if price_max < 99_000_000:
             params["pmax"] = price_max
-        _hdrs = {
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-            "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "same-origin",
-            "Sec-Fetch-User": "?1",
-            "Upgrade-Insecure-Requests": "1",
-            "Referer": f"https://www.avito.ru/{slug}",
-        }
-        # Если прокси работает — идём через прокси первым (прямой IP даёт 339KB скелет-страницу)
-        _attempts = []
-        if AVITO_PROXIES and not _proxy_auth_failed:
-            _attempts.append(_avito_proxies())
-        _attempts.append(None)  # прямой как резерв
-        for _proxies in _attempts:
-            _tag = "напрямую" if _proxies is None else "через прокси"
-            for _imp in ("chrome124", "chrome120", "chrome116"):
-                try:
-                    _sess = _cffi.Session(impersonate=_imp)
-                    if _proxies:
-                        _sess.proxies = _proxies
-                    # Прогрев: заходим на страницу города → получаем куки антибота
-                    if p == 1:
-                        try:
-                            _w = _sess.get(f"https://www.avito.ru/{slug}", timeout=10,
-                                           headers={"Accept-Language": "ru-RU,ru;q=0.9",
-                                                    "Upgrade-Insecure-Requests": "1"})
-                            print(f"  [Авито cffi {_tag}] прогрев {slug}: HTTP {_w.status_code}, куки={len(_sess.cookies)}")
-                            time.sleep(0.5)
-                        except Exception:
-                            pass
-                    r = _sess.get(url, params=params, timeout=14, headers=_hdrs)
-                    print(f"  [Авито cffi {_tag}] стр.{p} {_imp}: HTTP {r.status_code}, {len(r.text):,}б, куки={len(_sess.cookies)}")
-                    if r.status_code == 200 and ('"urlPath"' in r.text or '"canonicalUrl"' in r.text
-                                                 or 'data-marker="item"' in r.text or '__NEXT_DATA__' in r.text):
-                        res = _parse_avito_html(r.text, slug, today)
-                        if res:
-                            print(f"  [Авито cffi {_tag}] стр.{p}: {len(res)} объявлений ✅")
-                            return res
-                        print(f"  [Авито cffi {_tag}] стр.{p}: 200, но парсер 0")
-                    elif r.status_code == 200:
-                        # 200 но скелет-страница без данных — пробуем следующий профиль/сессию
-                        print(f"  [Авито cffi {_tag}] стр.{p} {_imp}: 200 скелет ({len(r.text):,}б), след. профиль")
-                        continue
-                    elif r.status_code == 429:
-                        print(f"  [Авито cffi {_tag}] стр.{p}: 429 rate limit, ждём 3с...")
-                        time.sleep(3)
-                        break  # этот канал забанен — следующий
-                    elif r.status_code in (403, 503):
-                        break  # этот канал забанен — следующий
-                except Exception as e:
-                    print(f"  [Авито cffi {_tag}] стр.{p}: {str(e)[:80]}")
+
+        # Прогрев: заходим на страницу города → получаем куки антибота
+        if p == 1:
+            _curl_cffi_get(f"https://www.avito.ru/{slug}", timeout=10)
+
+        r = _curl_cffi_get(
+            url,
+            params=params,
+            headers={"Referer": f"https://www.avito.ru/{slug}"},
+            timeout=14,
+            retries=3,
+        )
+        if not r:
+            return []
+        print(f"  [Авито cffi] стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
+        if r.status_code == 200 and ('"urlPath"' in r.text or '"canonicalUrl"' in r.text
+                                     or 'data-marker="item"' in r.text or '__NEXT_DATA__' in r.text):
+            res = _parse_avito_html(r.text, slug, today)
+            if res:
+                print(f"  [Авито cffi] стр.{p}: {len(res)} объявлений ✅")
+                return res
+            print(f"  [Авито cffi] стр.{p}: 200, но парсер 0")
+        elif r.status_code == 200:
+            print(f"  [Авито cffi] стр.{p}: 200 скелет ({len(r.text):,}б)")
         return []
 
     def _try_cs_web(p: int) -> list[dict]:
@@ -7208,11 +7232,10 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
     # Остановиться при первом методе давшем объявления.
     if _use_proxy:
         # ТОЛЬКО быстрые JSON-методы. Каждый = 1 запрос, ~1-2с.
-        # HTML/Playwright методы выброшены: они медленные (25-30с), требуют JS
-        # (отдают Cloudflare-скелет) и детектятся Авито как бот. Через прокси
-        # они только жгут IP и время. Если JSON-методы не прошли (IP в 429) —
-        # быстро выходим и показываем Дром/ВК/TG, а не ждём 55с впустую.
-        _p1_methods = [_try_avito_web_json, _try_avito_mobile_api,
+        # curl_cffi с chrome120 — главный рабочий метод: имитирует реальный
+        # Chrome/TLS и обходит 429/439 через повторные попытки. HTML/Playwright
+        # методы выброшены: они медленные и детектятся Авито как бот.
+        _p1_methods = [_try_cffi_web, _try_avito_web_json, _try_avito_mobile_api,
                        _try_avito_json_api, _try_avito_xhr]
         # Доп. страницы добавим тем же методом что сработал
         tasks = [(m, 1) for m in _p1_methods]
@@ -11924,66 +11947,9 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         ]
         kb = InlineKeyboardMarkup(inline_keyboard=[row1, row2, row3])
 
+        # URL-only режим: не качаем фото на сервер, отдаём Telegram прямую ссылку.
         photo_url = item.get("_photo_url", "")
         if photo_url:
-            try:
-                import requests as _req
-                from aiogram.types import BufferedInputFile
-                loop = asyncio.get_running_loop()
-
-                def _download_photo():
-                    _item_source = item.get("source", "")
-                    # Referer и прокси зависят от источника.
-                    # TG/VK CDN доступны напрямую с Railway — прокси Авито им мешает.
-                    if _item_source == "autoru":
-                        _referer = "https://auto.ru/"
-                        _px = _avito_proxies()
-                    elif _item_source == "drom":
-                        _referer = "https://auto.drom.ru/"
-                        _px = _avito_proxies()
-                    elif _item_source in ("tg", "tg_channel"):
-                        _referer = "https://t.me/"
-                        _px = None  # Telegram CDN — напрямую, без прокси Авито
-                    elif _item_source == "vk":
-                        _referer = "https://vk.com/"
-                        _px = None  # VK CDN — напрямую
-                    elif _item_source == "youla":
-                        _referer = "https://youla.ru/"
-                        _px = None  # Youla CDN — напрямую, без прокси
-                    else:
-                        _referer = "https://www.avito.ru/"
-                        _px = _avito_proxies()
-                    # 1. curl_cffi — обходит блокировку CDN с Railway IP
-                    try:
-                        from curl_cffi import requests as _cffi
-                        r = _cffi.get(photo_url, impersonate="chrome124", timeout=5,
-                                      headers={"Referer": _referer},
-                                      proxies=_px)
-                        if r.status_code == 200 and len(r.content) > 3_000:
-                            return r.content
-                    except Exception:
-                        pass
-                    # 2. Обычный requests с Referer
-                    try:
-                        r2 = _req.get(photo_url, timeout=5, headers={
-                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                            "Referer": _referer,
-                            "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-                        }, proxies=_px)
-                        if r2.status_code == 200 and len(r2.content) > 3_000:
-                            return r2.content
-                    except Exception:
-                        pass
-                    return None
-
-                content = await loop.run_in_executor(None, _download_photo)
-                if content:
-                    photo_bytes = BufferedInputFile(content, filename="photo.jpg")
-                    await bot.send_photo(chat_id, photo=photo_bytes, caption=caption, reply_markup=kb)
-                    return True
-            except Exception:
-                pass
-            # Fallback: передаём URL напрямую Telegram
             try:
                 await bot.send_photo(chat_id, photo=photo_url, caption=caption, reply_markup=kb)
                 return True
@@ -13298,7 +13264,7 @@ async def cmd_tips_on(msg: Message):
 
 
 # ── Глобальный монитор — один цикл на всех пользователей ─────────
-GLOBAL_POLL_SEC = 120   # опрос каждые 2 минуты
+GLOBAL_POLL_SEC = 30    # опрос каждые 30 секунд — 1 запрос на круг для всех
 
 async def _send_monitor_item(uid: int, it: dict):
     """Отправляет одно объявление пользователю из монитора."""
@@ -13337,46 +13303,134 @@ async def _send_monitor_item(uid: int, it: dict):
         ],
     ])
     photo_url = it.get("_photo_url", "")
-    sent = False
     if photo_url:
         try:
             await bot.send_photo(uid, photo=photo_url, caption=caption, reply_markup=kb)
-            sent = True
+            return
         except Exception:
             pass
-        if not sent:
+    await bot.send_message(uid, caption, reply_markup=kb)
+
+
+async def _send_track_brand_item(uid: int, it: dict, brand_label: str) -> None:
+    """Отправляет уведомление о появлении машины отслеживаемой марки."""
+    user_region = it.get("_monitor_region", "")
+    region_name = REGIONS.get(user_region, user_region)
+    url = it.get("url", "")
+    sid = url_to_id(url)
+    pct = it.get("_savings_pct", 0)
+    market = it.get("_market_price", 0)
+    price_line = it.get("price", "—") or "—"
+    if market and pct > 0:
+        price_line += f" ▼ рынок ~{market:,} ₽ (-{pct}%)".replace(",", " ")
+    days = it.get("_days_on_site", 0)
+    days_label = "только что" if days == 0 else f"{days} дн. назад"
+    src_icon = {"avito": "🟠", "drom": "🔵", "autoru": "🔴", "vk": "💙", "tg": "✈️"}.get(
+        it.get("source", ""), "📌"
+    )
+    caption = (
+        f"🔔 {src_icon} Новая {brand_label} в {region_name}!\n"
+        f"🚗 {it.get('title', '')}\n"
+        f"💰 {price_line}\n"
+        f"🕐 Появилось {days_label}"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🔗 Открыть", url=url),
+            InlineKeyboardButton(text="⭐ Сохранить", callback_data=f"fav|{sid}|{uid}"),
+        ],
+        [
+            InlineKeyboardButton(text="🔍 Пробить машину (штрафы, аресты)", callback_data=f"check|{sid}|{uid}"),
+        ],
+    ])
+    photo_url = it.get("_photo_url", "")
+    if photo_url:
+        try:
+            await bot.send_photo(uid, photo=photo_url, caption=caption, reply_markup=kb)
+            return
+        except Exception:
+            pass
+    await bot.send_message(uid, caption, reply_markup=kb)
+
+
+# ── Глобальная дедупликация объявлений для монитора ─────────────
+_GLOBAL_SEEN_DB_PATH = Path("data/global_seen.db")
+_global_seen_cache: set[str] = set()
+_global_seen_loaded: bool = False
+
+
+def _init_global_seen_db() -> None:
+    try:
+        _GLOBAL_SEEN_DB_PATH.parent.mkdir(exist_ok=True)
+        import sqlite3
+        conn = sqlite3.connect(str(_GLOBAL_SEEN_DB_PATH))
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS seen_urls (url TEXT PRIMARY KEY, ts REAL)"
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_seen_ts ON seen_urls(ts)")
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"  [global_seen] init error: {e}")
+
+
+def _load_global_seen() -> set[str]:
+    """Загружает URLs, виденные монитором за последние 7 дней (SQLite)."""
+    global _global_seen_cache, _global_seen_loaded
+    if _global_seen_loaded:
+        return _global_seen_cache
+    _init_global_seen_db()
+    try:
+        import sqlite3
+        conn = sqlite3.connect(str(_GLOBAL_SEEN_DB_PATH))
+        cur = conn.execute(
+            "SELECT url FROM seen_urls WHERE ts > ?",
+            (time.time() - 7 * 24 * 3600,),
+        )
+        _global_seen_cache = {row[0] for row in cur.fetchall()}
+        conn.close()
+        _global_seen_loaded = True
+        print(f"  [global_seen] загружено {len(_global_seen_cache)} url")
+    except Exception as e:
+        print(f"  [global_seen] load error: {e}")
+    return _global_seen_cache
+
+
+def _add_global_seen(urls: set[str]) -> None:
+    """Сохраняет новые URL в глобальную дедупликацию."""
+    if not urls:
+        return
+    _global_seen_cache.update(urls)
+    try:
+        import sqlite3
+        conn = sqlite3.connect(str(_GLOBAL_SEEN_DB_PATH))
+        now = time.time()
+        for u in urls:
             try:
-                import requests as _req
-                from aiogram.types import BufferedInputFile
-                loop = asyncio.get_running_loop()
-                resp = await loop.run_in_executor(
-                    None,
-                    lambda: _req.get(
-                        photo_url, timeout=10,
-                        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Referer": "https://www.avito.ru/"}
-                    )
+                conn.execute(
+                    "INSERT OR IGNORE INTO seen_urls(url, ts) VALUES(?, ?)",
+                    (u, now),
                 )
-                if resp.status_code == 200 and len(resp.content) > 2000:
-                    await bot.send_photo(uid, photo=BufferedInputFile(resp.content, "photo.jpg"), caption=caption, reply_markup=kb)
-                    sent = True
             except Exception:
                 pass
-    if not sent:
-        await bot.send_message(uid, caption, reply_markup=kb)
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"  [global_seen] save error: {e}")
 
 
 async def _global_monitor_loop():
-    """Единый глобальный цикл — раз в 2 минуты опрашивает все источники для активных пользователей."""
+    """Единый глобальный цикл — раз в 30 секунд опрашивает источники для активных пользователей."""
     print("  [глоб.монитор] запущен")
     loop = asyncio.get_running_loop()
-    # VK/TG медленнее — опрашиваем раз в 10 минут (каждый 5-й тик по 2 минуты)
+    # VK/TG медленнее — опрашиваем раз в 10 минут (каждый 20-й тик по 30 сек)
     _vk_tg_tick = 0
     # Кэш результатов по (регион, источник) чтобы не скрейпить дважды для разных пользователей
     _region_src_cache: dict[str, list[dict]] = {}
     while True:
         await asyncio.sleep(GLOBAL_POLL_SEC)
         _vk_tg_tick += 1
-        do_vk_tg = (_vk_tg_tick % 5 == 0)  # раз в 10 минут
+        do_vk_tg = (_vk_tg_tick % 20 == 0)  # раз в 10 минут
         _region_src_cache.clear()
         try:
             # Собираем всех пользователей с включённым мониторингом
@@ -13442,6 +13496,28 @@ async def _global_monitor_loop():
                             _region_src_cache[key_rs] = []
                     else:
                         _region_src_cache[key_rs] = []
+
+            # Глобальная дедупликация: один URL не рассылается никому дважды
+            # и не появляется в следующих кругах.
+            global_seen = await loop.run_in_executor(None, _load_global_seen)
+            new_global_urls: set[str] = set()
+            for key_rs, items in list(_region_src_cache.items()):
+                kept = []
+                for it in items:
+                    nu = _norm_url(it.get("url", ""))
+                    if not nu:
+                        continue
+                    if nu in global_seen:
+                        continue
+                    kept.append(it)
+                    new_global_urls.add(nu)
+                _region_src_cache[key_rs] = kept
+            if new_global_urls:
+                await loop.run_in_executor(None, _add_global_seen, new_global_urls)
+                print(f"  [глоб.монитор] новых URL в круге: {len(new_global_urls)}")
+
+            # Все исходящие сообщения собираем в один gather для параллельной рассылки.
+            _monitor_send_tasks: list = []
 
             # Для каждого пользователя собираем raw из его регионов и площадок
             for u in active_users:
@@ -13529,46 +13605,7 @@ async def _global_monitor_loop():
                                 track_brand.capitalize()
                             )
                             for it in brand_new[:3]:
-                                it_region = it.get("_monitor_region", u.get("region", ""))
-                                region_name_tb = REGIONS.get(it_region, it_region)
-                                url_tb = it.get("url", "")
-                                sid_tb = url_to_id(url_tb)
-                                pct_tb = it.get("_savings_pct", 0)
-                                market_tb = it.get("_market_price", 0)
-                                price_line_tb = it.get("price", "—") or "—"
-                                if market_tb and pct_tb > 0:
-                                    price_line_tb += f" ▼ рынок ~{market_tb:,} ₽ (-{pct_tb}%)".replace(",", " ")
-                                days_tb = it.get("_days_on_site", 0)
-                                days_label_tb = "только что" if days_tb == 0 else f"{days_tb} дн. назад"
-                                src_tb = it.get("source", "")
-                                src_icon_tb = {"avito": "🟠", "drom": "🔵", "autoru": "🔴", "vk": "💙", "tg": "✈️"}.get(src_tb, "📌")
-                                caption_tb = (
-                                    f"🔔 {src_icon_tb} Новая {brand_label} в {region_name_tb}!\n"
-                                    f"🚗 {it.get('title', '')}\n"
-                                    f"💰 {price_line_tb}\n"
-                                    f"🕐 Появилось {days_label_tb}"
-                                )
-                                kb_tb = InlineKeyboardMarkup(inline_keyboard=[
-                                    [
-                                        InlineKeyboardButton(text="🔗 Открыть", url=url_tb),
-                                        InlineKeyboardButton(text="⭐ Сохранить", callback_data=f"fav|{sid_tb}|{uid}"),
-                                    ],
-                                    [
-                                        InlineKeyboardButton(text="🔍 Пробить машину (штрафы, аресты)", callback_data=f"check|{sid_tb}|{uid}"),
-                                    ],
-                                ])
-                                try:
-                                    photo_tb = it.get("_photo_url", "")
-                                    if photo_tb:
-                                        await bot.send_photo(uid, photo=photo_tb, caption=caption_tb, reply_markup=kb_tb)
-                                    else:
-                                        await bot.send_message(uid, caption_tb, reply_markup=kb_tb)
-                                except Exception:
-                                    try:
-                                        await bot.send_message(uid, caption_tb, reply_markup=kb_tb)
-                                    except Exception:
-                                        pass
-                                await asyncio.sleep(0.3)
+                                _monitor_send_tasks.append(_send_track_brand_item(uid, it, brand_label))
 
                     if not new_below:
                         seen.update(it["url"] for it in new_items)
@@ -13591,20 +13628,24 @@ async def _global_monitor_loop():
                         srcs_in_batch = list(dict.fromkeys(it.get("source", "") for it in new_below))
                         src_icon_map = {"avito": "🟠", "drom": "🔵", "autoru": "🔴", "vk": "💙", "tg": "✈️"}
                         srcs_label = " ".join(src_icon_map.get(s, "") for s in srcs_in_batch if s)
-                        await bot.send_message(
+                        _monitor_send_tasks.append(bot.send_message(
                             uid,
                             f"🔔 {srcs_label} *{regs_label}* — {len(new_below)} новых авто ниже рынка!",
                             parse_mode="Markdown",
-                        )
+                        ))
                         for it in new_below[:5]:
-                            await _send_monitor_item(uid, it)
-                            await asyncio.sleep(0.3)
+                            _monitor_send_tasks.append(_send_monitor_item(uid, it))
 
                     seen.update(it["url"] for it in new_items)
                     await asave_seen(uid, seen)
 
                 except Exception as e:
                     print(f"  [глоб.монитор] uid обработка: {e}")
+
+            # Рассылка всем подписчикам параллельно
+            if _monitor_send_tasks:
+                print(f"  [глоб.монитор] рассылка {len(_monitor_send_tasks)} сообщений...")
+                await asyncio.gather(*_monitor_send_tasks, return_exceptions=True)
 
         except Exception as e:
             print(f"  [глоб.монитор] ошибка цикла: {e}")
@@ -13646,7 +13687,7 @@ async def cmd_monitor(msg: Message):
     pmax = s.get("price_max", 99_000_000)
     await msg.answer(
         f"🔔 *Уведомления · ⚡ Ранний доступ*\n\n"
-        f"Бот каждые ~2 мин проверяет Авито (сортировка «сначала свежие») и "
+        f"Бот каждые ~30 сек проверяет Авито (сортировка «сначала свежие») и "
         f"присылает новые авто ниже рынка первым — по сути, ты видишь объявления "
         f"раньше тех, кто листает вручную.\n\n"
         f"Статус: {status}\n"
