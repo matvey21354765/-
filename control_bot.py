@@ -11574,7 +11574,8 @@ def _subscription_badge(uid: int, html: bool = False) -> str:
         return f"⏳ {b}Подписка завершена{e}\nОформите подписку, чтобы продолжить поиск."
     total = max(1, info["total_days"])
     left = max(0, info["days_left"])
-    seg = 10
+    # Один сегмент = один день, но не больше 10, чтобы не растягивалась строка
+    seg = min(total, 10)
     filled = max(0, min(seg, round(left / total * seg)))
     bar = "🟢" * filled + "⚪" * (seg - filled)
     plan = info["title"]
