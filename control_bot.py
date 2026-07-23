@@ -7512,6 +7512,7 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
     else:
         # Скрейпим с фильтром бюджета (прокси) или без (бесплатный режим).
         items = _scrape_avito_raw(region, pages=pages, price_min=_scrape_pmin, price_max=_scrape_pmax, sort_by_date=sort_by_date, brand=brand)
+        print(f"  [Авито debug] после _scrape_avito_raw: {len(items)} items")
         # При прокси, если бюджет-скрейп не дал результатов из-за блокировки,
         # пробуем полный диапазон — кэш полного диапазона надежнее и используется
         # всеми пользователями региона.
@@ -7554,6 +7555,46 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
             elif cached:
                 items = cached[1]
                 print(f"  [Авито] пусто → устаревший кэш: {len(items)} шт")
+        print(f"  [Авито debug] после fallback-кэша: {len(items)} items")
+
+    # Последний резерв: headless Playwright + stealth
+    if not items:
+        try:
+            import playwright_avito_scraper as _pws
+            print(f"  [Авито] пробуем Playwright + stealth...")
+            _pw_coro = _pws.scrape_avito_playwright(
+                region,
+                pages=max(1, min(pages, 5)),
+                price_min=_scrape_pmin,
+                price_max=_scrape_pmax,
+                sort_by_date=sort_by_date,
+                brand=brand,
+            )
+            try:
+                _pw_loop = asyncio.get_running_loop()
+                pw_items = _pw_loop.run_until_complete(_pw_coro)
+            except RuntimeError:
+                pw_items = asyncio.run(_pw_coro)
+            print(f"  [Авито debug] после Playwright: {len(pw_items)} items")
+            if pw_items:
+                items = pw_items
+                _AVITO_REGION_CACHE[cache_key] = (now, items)
+                try:
+                    _snap = dict(_AVITO_REGION_CACHE)
+                    def _flush_pw_cache(_data=_snap):
+                        try:
+                            _AVITO_CACHE_FILE.write_text(
+                                json.dumps({"version": 4, "data": _data}, ensure_ascii=False),
+                                encoding="utf-8",
+                            )
+                        except Exception:
+                            pass
+                    _threading.Thread(target=_flush_pw_cache, daemon=True).start()
+                except Exception:
+                    pass
+                print(f"  [Авито] Playwright OK: {len(items)} объявлений → кэш ({cache_key})")
+        except Exception as _pw_err:
+            print(f"  [Авито] Playwright fallback ошибка: {_pw_err}")
 
     # Фильтр по бюджету в памяти.
     # С рабочим прокси Авито отдаёт реальные цены, поэтому объявления БЕЗ цены —
@@ -7569,6 +7610,7 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
             it for it in items
             if (not it.get("_price_int")) or (price_min <= it["_price_int"] <= price_max)
         ]
+    print(f"  [Авито debug] после фильтра по цене: {len(out)} out (pmin={price_min}, pmax={price_max})")
 
     # Fix A: Hard post-merge year/budget filter — eliminates DDG results with
     # price_int=0 that are obviously wrong year/budget combos (e.g. 2025 EXEED
@@ -7598,6 +7640,9 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
         return True
 
     out = [it for it in out if it.get("_price_int", 0) > 0 or _year_budget_ok(it, price_max)]
+    print(f"  [Авито debug] после _year_budget_ok: {len(out)} out")
+    for _dbg_i, _dbg_it in enumerate(out[:5]):
+        print(f"  [Авито debug] item {_dbg_i}: price={_dbg_it.get('_price_int')}, year={_dbg_it.get('_year') or _dbg_it.get('year')}, title={_dbg_it.get('title','')[:60]}")
     # Свежие объявления — первыми (меньше дней на сайте = новее).
     out.sort(key=lambda it: (it.get("_days_on_site", 999), -it.get("_price_int", 0)))
     return out
