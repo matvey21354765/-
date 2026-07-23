@@ -1257,7 +1257,7 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
                 return _est_price(widest, "wide_model", cand_p)
 
         all_m = model_all.get(model, [])
-        if len(all_m) >= 5:
+        if len(all_m) >= 6:
             return _est_price(all_m, "all_model", cand_p)
 
         brand = model.split()[0] if model.split() else ""
@@ -1265,12 +1265,9 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
             by_brand = brand_year.get(brand)
             if by_brand:
                 b_near = _collect_years(by_brand, yr, 2)
-                if len(b_near) >= 5:
+                # Слишком широкий fallback по марке даёт фейковый "рынок"
+                if len(b_near) >= 8:
                     return _est_price(b_near, "brand_year", cand_p)
-            b_all = brand_all.get(brand, [])
-            # Очень широкий fallback: только при большой выборке и с жёстким капом
-            if len(b_all) >= 10:
-                return _est_price(b_all, "brand_all", cand_p)
 
         return 0.0, "", 0
 
@@ -1289,8 +1286,10 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
             # объявления от Авито: она может отличаться у двух одинаковых машин.
             # Одна модель и год должны получать одну медиану на всех площадках.
             _avm = it.get("_avito_market", 0) or 0
-            if not avito_only_median and _avm and 30_000 < _avm < 50_000_000:
-                med, _lvl, _n = float(_avm), "avito", 30
+            # Если Авито сам дал рыночную оценку — используем её в первую очередь:
+            # это самый точный бенчмарк (own estimate).
+            if _avm and 30_000 < _avm < 50_000_000:
+                med, _lvl, _n = float(_avm), "avito", 15
             elif len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 4:
                 med, _lvl, _n = _market_for(parts[0], int(parts[1]), p)
             if med > 0:
@@ -1468,6 +1467,39 @@ def _sort_by_deal(items: list[dict]) -> list[dict]:
         -_secondary(x),
     ))
     return items
+
+
+def _price_analysis_text(item: dict) -> str:
+    """Красивый блок анализа цены в стиле Авито.
+
+    Возвращает пустую строку, если рыночная цена неизвестна.
+    """
+    market = item.get("_market_price", 0) or 0
+    price = item.get("_price_int", 0) or 0
+    pct = item.get("_savings_pct", 0) or 0
+    n = item.get("_market_n", 0) or 0
+    if not market or not price:
+        return ""
+    saving = market - price
+    if n >= 10:
+        trust = "высокое"
+    elif n >= 5:
+        trust = "среднее"
+    else:
+        trust = "мало данных"
+    lines = [
+        f"📊 Анализ цены: ниже рынка на ~{saving:,} ₽ ({pct}%)".replace(",", " ")
+        + f" · доверие: {trust} ({n} аналогов)",
+        f"└ Рынок ~{market:,} ₽ · цена {price:,} ₽".replace(",", " "),
+    ]
+    costs = int(price * 0.04) + 10_000
+    profit = saving - costs
+    if profit > 0:
+        resale = price + profit
+        lines.append(
+            f"└ Ориентир перепродажи ~{resale:,} ₽ · запас после расходов ~{profit:,} ₽".replace(",", " ")
+        )
+    return "\n".join(lines)
 
 
 # ── Парсер Дрома ────────────────────────────────────────────────
@@ -8571,19 +8603,12 @@ async def cmd_start(msg: Message, state: FSMContext):
     s = load_settings(msg.from_user.id)
     name = msg.from_user.first_name or "друг"
     is_new_user = not s.get("region")
-    _sub = _subscription_info(msg.from_user.id)
-    if _sub["ended"]:
-        _subscription_line = "⏳ Подписка завершена — оформите подписку, чтобы продолжить поиск."
-    else:
-        _plan = "Платная" if _sub["is_paid"] else "Тестовая"
-        _subscription_line = (
-            f"⏳ {_plan} подписка «{_sub['title']}»: "
-            f"осталось *{_sub['days_left']}* дн. из {_sub['total_days']}."
-        )
+    _subscription_line = _subscription_badge(msg.from_user.id)
 
     if is_new_user:
         # Новый пользователь — красивое приветствие
         await msg.answer(
+            f"{_subscription_line}\n\n"
             f"👋 *Добро пожаловать в PerekupDrive, {name}!*\n\n"
             f"Ты получил *7 дней полного доступа*.\n"
             f"Всё бесплатно, без ограничений.\n\n"
@@ -8591,7 +8616,6 @@ async def cmd_start(msg: Message, state: FSMContext):
             f"1️⃣ Настроить поиск по всем площадкам (Авито, Дром, Авто.ру, ВК, Telegram) под свои параметры.\n\n"
             f"2️⃣ Сохранить интересные авто в Избранное.\n\n"
             f"3️⃣ Включить поискового агента — бот сам пришлёт новые объявления.\n\n"
-            f"{_subscription_line}\n\n"
             f"👇 Начнём с настройки поиска:",
             parse_mode="Markdown",
             reply_markup=kb_for(msg.from_user.id),
@@ -8601,11 +8625,11 @@ async def cmd_start(msg: Message, state: FSMContext):
     else:
         # Старый пользователь — дружелюбное приветствие
         await msg.answer(
+            f"{_subscription_line}\n\n"
             f"👋 Привет, {name}! Я *PerekupDrive* — бот для поиска авто ниже рыночной цены.\n\n"
             f"🔍 Ищу объявления от частных лиц на Авито\n"
             f"📊 Сравниваю цены с рынком и нахожу выгодные\n"
-            f"🔔 Могу присылать уведомления когда появится новое выгодное авто\n\n"
-            f"{_subscription_line}",
+            f"🔔 Могу присылать уведомления когда появится новое выгодное авто",
             parse_mode="Markdown",
             reply_markup=kb_for(msg.from_user.id),
         )
@@ -10224,16 +10248,7 @@ async def cb_setup_back_to_price(cb: CallbackQuery, state: FSMContext):
 @dp.message(F.text == "⚙️ Настройки")
 async def cmd_settings(msg: Message, state: FSMContext):
     await state.clear()
-    _sub = _subscription_info(msg.from_user.id)
-    if _sub["ended"]:
-        _sub_line = "⏳ Подписка завершена — оформите подписку, чтобы продолжить поиск."
-    else:
-        _plan = "Платная" if _sub["is_paid"] else "Тестовая"
-        _sub_line = (
-            f"⏳ {_plan} подписка «{_sub['title']}»: "
-            f"осталось *{_sub['days_left']}* дн. из {_sub['total_days']}."
-        )
-    await msg.answer(_sub_line, parse_mode="Markdown")
+    await msg.answer(_subscription_badge(msg.from_user.id), parse_mode="Markdown")
     await msg.answer("🔍 Шаг 1/4: Что ищем?", reply_markup=category_keyboard())
     await state.set_state(Setup.category)
 
@@ -10654,16 +10669,7 @@ async def cb_src_all(cb: CallbackQuery):
 async def cb_open_settings(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
     await state.clear()
-    _sub = _subscription_info(cb.from_user.id)
-    if _sub["ended"]:
-        _sub_line = "⏳ Подписка завершена — оформите подписку, чтобы продолжить поиск."
-    else:
-        _plan = "Платная" if _sub["is_paid"] else "Тестовая"
-        _sub_line = (
-            f"⏳ {_plan} подписка «{_sub['title']}»: "
-            f"осталось *{_sub['days_left']}* дн. из {_sub['total_days']}."
-        )
-    await cb.message.answer(_sub_line, parse_mode="Markdown")
+    await cb.message.answer(_subscription_badge(cb.from_user.id), parse_mode="Markdown")
     await cb.message.answer("🔍 Шаг 1/4: Что ищем?", reply_markup=category_keyboard())
     await state.set_state(Setup.category)
 
@@ -11560,6 +11566,21 @@ def _subscription_info(uid: int) -> dict:
     }
 
 
+def _subscription_badge(uid: int, html: bool = False) -> str:
+    """Красивый счётчик дней подписки для вывода в начале сообщений."""
+    info = _subscription_info(uid)
+    b, e = ("<b>", "</b>") if html else ("*", "*")
+    if info["ended"]:
+        return f"⏳ {b}Подписка завершена{e}\nОформите подписку, чтобы продолжить поиск."
+    total = max(1, info["total_days"])
+    left = max(0, info["days_left"])
+    seg = 10
+    filled = max(0, min(seg, round(left / total * seg)))
+    bar = "🟢" * filled + "⚪" * (seg - filled)
+    plan = info["title"]
+    return f"⏳ {b}{plan}{e} · осталось {b}{left}{e} из {b}{total}{e} дн.\n{bar}"
+
+
 def _set_user_monitoring(uid: int, on: bool):
     global _registry_dirty
     k = str(uid)
@@ -11886,11 +11907,14 @@ async def send_batch(chat_id: int, uid: int, offset: int):
 
         dealer_tag = " 🏢" if item.get("_is_dealer") else ""
         _light = _traffic_light(item)  # 🚦 светофор выгодности/чистоты
+        _analysis = _price_analysis_text(item)
         caption = (
             f"{_light} {source_tag} {item.get('title', '')}{hot_tag}{dealer_tag}\n"
             f"💰 {price_line}{deal_line}\n"
-            f"📅 {days_str}{mileage_str}"
         )
+        if _analysis:
+            caption += f"{_analysis}\n"
+        caption += f"📅 {days_str}{mileage_str}"
         _liq = _liquidity_note(item)  # 📊 ликвидность модели
         if _liq:
             caption += f"\n📊 {_liq}"
@@ -12660,6 +12684,7 @@ async def do_search_for_user(uid: int, reply_to):
     src_found = list(dict.fromkeys(i.get("source","") for i in suitable if i.get("source")))
     src_icons = {"avito":"🟠","drom":"🔵","autoru":"🔴","vk":"💙","tg":"✈️"}
     src_str = " ".join(src_icons.get(s,"") for s in src_found if s)
+    _badge = _subscription_badge(uid)
     if _avito_available:
         _extra = len(suitable) - _below_count
         _msg = f"✅ {src_str} Найдено {_below_count} объявлений ниже рынка!"
@@ -12670,7 +12695,7 @@ async def do_search_for_user(uid: int, reply_to):
     if _seen_cnt:
         _msg += f"\n♻️ {_seen_cnt} уже видел — они в конце."
 
-    await reply_to.answer(_msg)
+    await reply_to.answer(f"{_badge}\n\n{_msg}", parse_mode="Markdown")
     await send_batch(reply_to.chat.id, uid, 0)
 
 
@@ -13716,8 +13741,7 @@ async def cmd_invite(msg: Message):
     paid_history = entry.get("paid_history", {})
     paid_count = sum(len(v) for v in paid_history.values())
     bonus_days = entry.get("bonus_days", 0)
-    _sub_info = _subscription_info(uid)
-    _days_left_text = f"⏳ У тебя осталось <b>{_sub_info['days_left']}</b> дн. доступа.\n\n"
+    _days_left_text = _subscription_badge(uid, html=True) + "\n\n"
     # Берём имя бота из Telegram (надёжно), не из возможно-устаревшей переменной
     try:
         me = await bot.get_me()
