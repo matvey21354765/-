@@ -606,7 +606,8 @@ def _record_referral_payment(uid: int) -> dict | None:
     data[inviter_key]["paid_invited"] = paid_list
 
     bonus = 3
-    milestone = len(paid_list) == 10
+    # Циклический бонус: +30 дней за каждые 10 оплативших друзей
+    milestone = len(paid_list) > 0 and len(paid_list) % 10 == 0
     if milestone:
         bonus += 30
     data[inviter_key]["bonus_days"] = data[inviter_key].get("bonus_days", 0) + bonus
@@ -8450,9 +8451,9 @@ async def cmd_start(msg: Message, state: FSMContext):
                         _un = f" (@{msg.from_user.username})" if msg.from_user.username else ""
                         _cnt = _ref_res.get("count", 0)
                         _txt = (
-                            f"🎉 *По твоей ссылке перешёл друг!*\n\n"
+                            f"🎉 *По твоей ссылке зарегистрировался новый пользователь!*\n\n"
                             f"👤 {_fname}{_un}\n"
-                            f"👥 Всего приглашено: *{_cnt}*\n"
+                            f"👥 Зарегистрировалось: *{_cnt}*\n"
                             f"🎁 +3 дня доступа будут начислены, когда друг оплатит подписку."
                         )
                         try:
@@ -9289,13 +9290,18 @@ async def _yoomoney_webhook(request):
         _ref_pay = _record_referral_payment(uid)
         if _ref_pay:
             _added = _ref_pay.get("added_days", 3)
+            _paid = _ref_pay['paid_count']
+            _to_next = 10 - (_paid % 10) if _paid % 10 != 0 else 0
             _txt = (
-                f"🎉 *Твой друг оплатил подписку!*\n\n"
-                f"👥 Оплативших друзей: *{_ref_pay['paid_count']}*\n"
-                f"🎁 +{_added} дн. доступа (всего бонусом: {_ref_pay['bonus_days']} дн.)"
+                f"🎉 *Друг оплатил подписку!*\n\n"
+                f"🎁 +{_added} дн. доступа начислено.\n"
+                f"👥 Оплативших друзей: *{_paid}*"
             )
             if _ref_pay["milestone"]:
-                _txt += "\n\n🏆 *10 друзей оплатили — бонус +30 дней получен!*"
+                _txt += "\n🏆 *Бонус +30 дней за 10 оплат получен!*"
+            elif _to_next > 0:
+                _txt += f"\n➡️ До следующих +30 дней осталось: *{_to_next}*"
+            _txt += f"\n💰 Всего бонусом: {_ref_pay['bonus_days']} дн."
             try:
                 await bot.send_message(_ref_pay["inviter_uid"], _txt, parse_mode="Markdown")
             except Exception:
@@ -12696,6 +12702,8 @@ async def cb_check_car(cb: CallbackQuery):
     lines.append("\nОткрой нужный сервис (все бесплатные, кроме полного отчёта):")
 
     rows = []
+    # Автокод — комплексная проверка авто (основная кнопка)
+    rows.append([InlineKeyboardButton(text="🔍 Пробить машину на Автокоде", url="https://avtocod.ru/")])
     # ГИБДД — ДТП, розыск, ограничения (аресты), история регистрации (по VIN)
     rows.append([InlineKeyboardButton(text="🚔 ГИБДД: ДТП, аресты, розыск", url="https://xn--90adear.xn--p1ai/check/auto")])
     # ФССП — долги и исполнительные производства
@@ -13598,23 +13606,24 @@ async def cmd_invite(msg: Message):
         _un = BOT_USERNAME
     ref_link = f"https://t.me/{_un}?start=ref_{uid}"
     share_text = "Нашёл бота который ищет авто ниже рынка на Авито, Дроме, Авто.ру, ВК и Telegram — попробуй!"
-    _bonus_line = f"🎁 Бонусных дней: <b>{bonus_days}</b>\n" if bonus_days else ""
+    _to_next = (10 - (paid_count % 10)) % 10
+    _bonus_line = f"🎁 Заработано дней: <b>{bonus_days}</b>\n" if bonus_days else ""
     _milestone_line = ""
-    if paid_count >= 10:
-        _milestone_line = f"🏆 Бонус +30 дней получен за 10 оплативших друзей\n"
+    if paid_count >= 10 and paid_count % 10 == 0:
+        _milestone_line = f"🏆 Бонус +30 дней получен за {paid_count} оплативших друзей\n"
     elif paid_count > 0:
-        _milestone_line = f"🏆 До +30 дней осталось оплат: <b>{10 - paid_count}</b>\n"
+        _milestone_line = f"🏆 До следующих +30 дней осталось оплат: <b>{_to_next}</b>\n"
     # HTML: подчёркивания в ссылке остаются буквальными (Markdown их «съедал» → курсив)
     await msg.answer(
-        f"📲 <b>Пригласи друга в PerekupDrive</b>\n\n"
-        f"За каждого друга, который оплатит подписку — <b>+3 дня доступа</b>.\n"
-        f"Когда 10 друзей оплатят — дополнительно <b>+30 дней</b>.\n\n"
-        f"👥 Перешло по ссылке: <b>{invited_count}</b>\n"
-        f"💳 Оплатило подписку: <b>{paid_count}</b>\n"
+        f"📲 <b>Приглашай друзей в PerekupDrive</b>\n\n"
+        f"За каждого друга, который впервые оплатит подписку — <b>+3 дня доступа</b>.\n"
+        f"За каждые 10 оплативших друзей — дополнительно <b>+30 дней</b>.\n\n"
+        f"👥 Зарегистрировалось: <b>{invited_count}</b>\n"
+        f"💳 Оплатило подписку: <b>{paid_count}</b> из 10\n"
         f"{_bonus_line}{_milestone_line}\n"
-        f"🔗 <b>Твоя ссылка</b> (нажми, чтобы скопировать):\n"
+        f"🔗 <b>Твоя персональная ссылка:</b>\n"
         f"<code>{ref_link}</code>\n\n"
-        f"Когда друг перейдёт по ссылке — пришлю тебе уведомление 🔔",
+        f"Я уведомлю тебя, когда друг зарегистрируется или оплатит подписку 🔔",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="📤 Поделиться ссылкой", url=f"https://t.me/share/url?url={ref_link}&text={share_text}")],
