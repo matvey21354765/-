@@ -538,55 +538,98 @@ def _get_or_create_referral(uid: int) -> dict:
         import random as _random
         import string as _string
         code = "".join(_random.choices(_string.ascii_uppercase + _string.digits, k=6))
-        data[key] = {"code": code, "invited": [], "bonus_days": 0}
+        data[key] = {"code": code, "invited": [], "paid_invited": [], "bonus_days": 0}
         _save_referrals(data)
     return data[key]
 
 def _record_referral(new_uid: int, inviter_uid: int):
-    """Records that new_uid was invited by inviter_uid."""
+    """Records that new_uid was invited by inviter_uid.
+    Бонусы начисляются только после оплаты подписки другом."""
     data = _load_referrals()
     inviter_key = str(inviter_uid)
     new_key = str(new_uid)
-    
+
     # Don't record if already has an inviter
     if data.get(new_key, {}).get("inviter"):
         return
-    
+
     # Ensure inviter exists
     if inviter_key not in data:
         _get_or_create_referral(inviter_uid)
         data = _load_referrals()
-    
+
     # Ensure new user exists
     if new_key not in data:
         import random as _random
         import string as _string
         code = "".join(_random.choices(_string.ascii_uppercase + _string.digits, k=6))
-        data[new_key] = {"code": code, "invited": [], "bonus_days": 0}
-    
+        data[new_key] = {"code": code, "invited": [], "paid_invited": [], "bonus_days": 0}
+
     # Record inviter for new user
     data[new_key]["inviter"] = inviter_uid
-    
-    # Add to inviter's invited list
+
+    # Add to inviter's invited list (переходы — без начисления дней)
     invited_list = data[inviter_key].get("invited", [])
     _is_new = new_uid not in invited_list
-    _milestone = False
     if _is_new:
         invited_list.append(new_uid)
         data[inviter_key]["invited"] = invited_list
 
-        # Give +3 days bonus per invited friend
-        data[inviter_key]["bonus_days"] = data[inviter_key].get("bonus_days", 0) + 3
+    _save_referrals(data)
+    return {"is_new": _is_new, "count": len(invited_list),
+            "paid_count": len(data[inviter_key].get("paid_invited", [])),
+            "bonus_days": data[inviter_key].get("bonus_days", 0)}
 
-        # Milestone: 10 friends = +30 extra days
-        if len(invited_list) == 10:
-            data[inviter_key]["bonus_days"] = data[inviter_key].get("bonus_days", 0) + 30
-            _milestone = True
+
+def _record_referral_payment(uid: int) -> dict | None:
+    """Вызывается при успешной оплате подписки пользователем uid.
+    Если у него есть inviter — пригласивший получает +3 дня к подписке,
+    а при достижении 10 оплативших друзей — ещё +30 дней.
+    Возвращает инфо для уведомления или None, если бонус уже выдан."""
+    data = _load_referrals()
+    key = str(uid)
+    entry = data.get(key)
+    if not entry:
+        return None
+    inviter_uid = entry.get("inviter")
+    if not inviter_uid:
+        return None
+    inviter_key = str(inviter_uid)
+    if inviter_key not in data:
+        return None
+
+    paid_list = data[inviter_key].get("paid_invited", [])
+    if uid in paid_list:
+        return None  # уже начисляли за эту оплату
+
+    paid_list.append(uid)
+    data[inviter_key]["paid_invited"] = paid_list
+
+    bonus = 3
+    milestone = len(paid_list) == 10
+    if milestone:
+        bonus += 30
+    data[inviter_key]["bonus_days"] = data[inviter_key].get("bonus_days", 0) + bonus
+
+    # Сразу продлеваем подписку пригласившего на начисленные дни
+    try:
+        s = load_settings(inviter_uid)
+        now = time.time()
+        current_until = float(s.get("subscription_until", 0) or 0)
+        new_until = max(now, current_until) + bonus * 86400
+        s["subscription_until"] = new_until
+        save_settings(inviter_uid, s)
+    except Exception as e:
+        print(f"  [referral-payment] не удалось продлить подписку {inviter_uid}: {e}")
 
     _save_referrals(data)
-    # Возвращаем инфо для уведомления пригласившего
-    return {"is_new": _is_new, "count": len(invited_list), "milestone": _milestone,
-            "bonus_days": data[inviter_key].get("bonus_days", 0)}
+    return {
+        "inviter_uid": inviter_uid,
+        "paid_count": len(paid_list),
+        "bonus_days": data[inviter_key].get("bonus_days", 0),
+        "milestone": milestone,
+        "added_days": bonus,
+    }
 
 
 def load_skipped(uid: int) -> set:
@@ -8410,10 +8453,8 @@ async def cmd_start(msg: Message, state: FSMContext):
                             f"🎉 *По твоей ссылке перешёл друг!*\n\n"
                             f"👤 {_fname}{_un}\n"
                             f"👥 Всего приглашено: *{_cnt}*\n"
-                            f"🎁 +3 дня доступа (всего бонусом: {_ref_res.get('bonus_days', 0)} дн.)"
+                            f"🎁 +3 дня доступа будут начислены, когда друг оплатит подписку."
                         )
-                        if _ref_res.get("milestone"):
-                            _txt += "\n\n🏆 *10 друзей — +30 дней сверху!*"
                         try:
                             await bot.send_message(inviter_uid, _txt, parse_mode="Markdown")
                         except Exception:
@@ -9244,6 +9285,21 @@ async def _yoomoney_webhook(request):
     s = load_settings(uid)
     if s.get("payment_operation_id") != operation_id:
         await _activate_subscription(uid, plan_key, operation_id, received)
+        # Начисляем реферальные бонусы пригласившему (только за факт оплаты)
+        _ref_pay = _record_referral_payment(uid)
+        if _ref_pay:
+            _added = _ref_pay.get("added_days", 3)
+            _txt = (
+                f"🎉 *Твой друг оплатил подписку!*\n\n"
+                f"👥 Оплативших друзей: *{_ref_pay['paid_count']}*\n"
+                f"🎁 +{_added} дн. доступа (всего бонусом: {_ref_pay['bonus_days']} дн.)"
+            )
+            if _ref_pay["milestone"]:
+                _txt += "\n\n🏆 *10 друзей оплатили — бонус +30 дней получен!*"
+            try:
+                await bot.send_message(_ref_pay["inviter_uid"], _txt, parse_mode="Markdown")
+            except Exception:
+                pass
     return web.Response(status=200, text="ok")
 
 
@@ -13532,6 +13588,7 @@ async def cmd_invite(msg: Message):
     data = _load_referrals()
     entry = data.get(str(uid), {})
     invited_count = len(entry.get("invited", []))
+    paid_count = len(entry.get("paid_invited", []))
     bonus_days = entry.get("bonus_days", 0)
     # Берём имя бота из Telegram (надёжно), не из возможно-устаревшей переменной
     try:
@@ -13542,13 +13599,18 @@ async def cmd_invite(msg: Message):
     ref_link = f"https://t.me/{_un}?start=ref_{uid}"
     share_text = "Нашёл бота который ищет авто ниже рынка на Авито, Дроме, Авто.ру, ВК и Telegram — попробуй!"
     _bonus_line = f"🎁 Бонусных дней: <b>{bonus_days}</b>\n" if bonus_days else ""
-    _milestone_line = f"🏆 До +30 дней осталось пригласить: <b>{10 - invited_count}</b>\n" if 0 < invited_count < 10 else ""
+    _milestone_line = ""
+    if paid_count >= 10:
+        _milestone_line = f"🏆 Бонус +30 дней получен за 10 оплативших друзей\n"
+    elif paid_count > 0:
+        _milestone_line = f"🏆 До +30 дней осталось оплат: <b>{10 - paid_count}</b>\n"
     # HTML: подчёркивания в ссылке остаются буквальными (Markdown их «съедал» → курсив)
     await msg.answer(
         f"📲 <b>Пригласи друга в PerekupDrive</b>\n\n"
-        f"Сейчас идёт тестовый период — бот полностью бесплатен для всех.\n"
-        f"За каждого друга — <b>+3 дня доступа</b>, за 10 друзей — <b>+30 дней</b>.\n\n"
-        f"👥 Приглашено: <b>{invited_count}</b> друзей\n"
+        f"За каждого друга, который оплатит подписку — <b>+3 дня доступа</b>.\n"
+        f"Когда 10 друзей оплатят — дополнительно <b>+30 дней</b>.\n\n"
+        f"👥 Перешло по ссылке: <b>{invited_count}</b>\n"
+        f"💳 Оплатило подписку: <b>{paid_count}</b>\n"
         f"{_bonus_line}{_milestone_line}\n"
         f"🔗 <b>Твоя ссылка</b> (нажми, чтобы скопировать):\n"
         f"<code>{ref_link}</code>\n\n"
