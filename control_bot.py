@@ -7512,6 +7512,14 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
     else:
         # Скрейпим с фильтром бюджета (прокси) или без (бесплатный режим).
         items = _scrape_avito_raw(region, pages=pages, price_min=_scrape_pmin, price_max=_scrape_pmax, sort_by_date=sort_by_date, brand=brand)
+        # При прокси, если бюджет-скрейп не дал результатов из-за блокировки,
+        # пробуем полный диапазон — кэш полного диапазона надежнее и используется
+        # всеми пользователями региона.
+        if not items and AVITO_PROXIES and (_scrape_pmin != 0 or _scrape_pmax != 99_000_000):
+            print(f"  [Авито] бюджет-скрейп пуст — пробуем полный диапазон")
+            items = _scrape_avito_raw(region, pages=pages, price_min=0, price_max=99_000_000, sort_by_date=sort_by_date, brand=brand)
+            if items:
+                cache_key = f"{region}_0_99000000" + (f"_{brand}" if brand else "")
         if items:
             _AVITO_REGION_CACHE[cache_key] = (now, items)
             # Запись кэша на диск — в фоне, чтобы не держать пользователя. Делаем
@@ -7553,7 +7561,7 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
     if AVITO_PROXIES:
         out = [
             it for it in items
-            if (not it.get("_price_int")) or (price_min <= it["_price_int"] <= price_max)
+            if it.get("_price_int") and (price_min <= it["_price_int"] <= price_max)
         ]
     else:
         # Без прокси цену часто не достать — пропускаем безценовые как кандидатов.
@@ -10248,20 +10256,27 @@ async def cmd_new_today(msg: Message):
 
     # Запускаем Авито с сортировкой по дате
     items_avito = await loop.run_in_executor(
-        None, lambda: scrape_avito(region, pages=5, price_min=pmin, price_max=pmax, sort_by_date=True)
+        None, lambda: scrape_avito(region, pages=5, price_min=0, price_max=99_000_000, sort_by_date=True)
     )
     items = list(items_avito)
 
     seen_norm_today = {_norm_url(u) for u in load_seen(uid)}
     skipped_norm_today = {_norm_url(u) for u in skipped}
     _seen_u2: set[str] = set()
+    _seen_id2: set[str] = set()
     deduped2: list[dict] = []
     for i in items:
         u = _norm_url(i.get("url", ""))
-        if u and u not in _seen_u2:
-            _seen_u2.add(u)
-            i["url"] = u
-            deduped2.append(i)
+        lid = _listing_key(u)
+        if not u:
+            continue
+        if u in _seen_u2 or (lid and lid in _seen_id2):
+            continue
+        _seen_u2.add(u)
+        if lid:
+            _seen_id2.add(lid)
+        i["url"] = u
+        deduped2.append(i)
     items = deduped2
 
     # Фильтр: только за последние 24 часа (_days_on_site <= 1)
@@ -10346,7 +10361,7 @@ async def cmd_global_search(msg: Message):
     scraper_map = {
         "drom":   lambda: scrape_drom(region, pages=15, price_min=pmin, price_max=pmax, brand=_br),
         "autoru": lambda: scrape_autoru(region, pages=4, price_min=pmin, price_max=pmax, brand=_br),
-        "avito":  lambda: scrape_avito(region, pages=10, price_min=pmin, price_max=pmax, sort_by_date=False),
+        "avito":  lambda: scrape_avito(region, pages=10, price_min=0, price_max=99_000_000, sort_by_date=False),
         "youla":  lambda: scrape_youla(region, pages=5, price_min=pmin, price_max=pmax, brand=_br),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
     }
@@ -12051,7 +12066,7 @@ async def do_search_for_user(uid: int, reply_to):
     scraper_map = {
         "drom":   lambda: scrape_drom(region, pages=15, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
         "autoru": lambda: scrape_autoru(region, pages=8, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
-        "avito":  lambda: scrape_avito(region, pages=10, price_min=pmin, price_max=pmax, sort_by_date=False, brand=(brand if brand and brand != "any" else "")),
+        "avito":  lambda: scrape_avito(region, pages=10, price_min=0, price_max=99_000_000, sort_by_date=False, brand=(brand if brand and brand != "any" else "")),
         "youla":  lambda: scrape_youla(region, pages=12, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
         "tg":     lambda: scrape_tg_channels(region, pmin, pmax),
@@ -13615,6 +13630,8 @@ async def cmd_invite(msg: Message):
     paid_history = entry.get("paid_history", {})
     paid_count = sum(len(v) for v in paid_history.values())
     bonus_days = entry.get("bonus_days", 0)
+    _sub_info = _subscription_info(uid)
+    _days_left_text = f"⏳ У тебя осталось <b>{_sub_info['days_left']}</b> дн. доступа.\n\n"
     # Берём имя бота из Telegram (надёжно), не из возможно-устаревшей переменной
     try:
         me = await bot.get_me()
