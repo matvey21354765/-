@@ -4656,15 +4656,45 @@ def _avito_price_rating(it: dict) -> tuple:
         if phrase in blob:
             text, score = phrase, sc
             break
-    # Числовая рыночная оценка Авито, если попалась в JSON
+
+    # Числовая рыночная оценка Авито — ищем в JSON рекурсивно по ключам,
+    # а не только плоским regex (marketPrice часто лежит внутри объекта).
+    _MARKET_KEYS_RE = re.compile(r"market|average|estimate|median|reference", re.I)
+
+    def _find_market_prices(obj, found=None, depth=0):
+        if found is None:
+            found = []
+        if depth > 12:
+            return found
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                if isinstance(k, str) and _MARKET_KEYS_RE.search(k):
+                    if isinstance(v, (int, float)) and 30_000 < v < 50_000_000:
+                        found.append(int(v))
+                    elif isinstance(v, dict):
+                        for sub_k, sub_v in v.items():
+                            if isinstance(sub_v, (int, float)) and 30_000 < sub_v < 50_000_000:
+                                found.append(int(sub_v))
+                else:
+                    _find_market_prices(v, found, depth + 1)
+        elif isinstance(obj, list):
+            for v in obj:
+                _find_market_prices(v, found, depth + 1)
+        return found
+
     market = 0
-    m = re.search(
-        r'"(?:marketprice|averageprice|avgprice|estimateprice|marketvalue|priceestimate)"\s*:\s*\{?[^}]*?(\d{5,9})',
-        blob)
-    if m:
-        v = int(m.group(1))
-        if 30_000 < v < 50_000_000:
-            market = v
+    prices = _find_market_prices(it)
+    if prices:
+        market = int(sorted(prices)[-1])
+    if not market:
+        # Fallback на старый regex для HTML-строк
+        m = re.search(
+            r'"(?:marketprice|averageprice|avgprice|estimateprice|marketvalue|priceestimate)"\s*:\s*\{?[^}]*?(\d{5,9})',
+            blob)
+        if m:
+            v = int(m.group(1))
+            if 30_000 < v < 50_000_000:
+                market = v
     return text, score, market
 
 
@@ -12497,6 +12527,18 @@ async def do_search_for_user(uid: int, reply_to):
         _ref_src = "Авито" if _n_av_ref >= 5 else "резервный источник"
         print(f"  [рынок] {_ref_src}-референс: {len(_ref_items)} объявлений → считаем рыночную цену")
         suitable = rank_by_market_price(suitable, ref_items=_ref_items, avito_only_median=True)
+        # Если для конкретной модели Авито-эталона не хватило — пробуем Дром/Auto.ru/Юлу
+        _missing_market = [it for it in suitable if not it.get("_market_price")]
+        if _missing_market:
+            _fallback_ref = [
+                i for i in items
+                if not i.get("_market_ref_only")
+                and i.get("source") in ("drom", "autoru", "youla")
+                and i.get("_price_int", 0)
+            ]
+            if _fallback_ref:
+                print(f"  [рынок] fallback для моделей без Авито-оценки: {len(_missing_market)} шт, эталон {len(_fallback_ref)}")
+                rank_by_market_price(_missing_market, ref_items=_fallback_ref, avito_only_median=False)
         # 📊 Ликвидность: сколько таких в продаже и средний срок продажи (по эталону)
         try:
             from statistics import median as _median
