@@ -36,6 +36,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 import analytics
 import crm
+import referrals
 
 # ── Админы (для /stats) ─────────────────────────────────────────
 def _parse_admin_ids() -> set[int]:
@@ -612,100 +613,45 @@ def _get_or_create_referral(uid: int) -> dict:
         _save_referrals(data)
     return data[key]
 
-def _record_referral(new_uid: int, inviter_uid: int):
-    """Records that new_uid was invited by inviter_uid.
-    Бонусы начисляются только после оплаты подписки другом."""
-    data = _load_referrals()
-    inviter_key = str(inviter_uid)
-    new_key = str(new_uid)
-
-    # Don't record if already has an inviter
-    if data.get(new_key, {}).get("inviter"):
-        return
-
-    # Ensure inviter exists
-    if inviter_key not in data:
-        _get_or_create_referral(inviter_uid)
-        data = _load_referrals()
-
-    # Ensure new user exists
-    if new_key not in data:
-        import random as _random
-        import string as _string
-        code = "".join(_random.choices(_string.ascii_uppercase + _string.digits, k=6))
-        data[new_key] = {"code": code, "invited": [], "paid_history": {}, "bonus_days": 0}
-
-    # Record inviter for new user
-    data[new_key]["inviter"] = inviter_uid
-
-    # Add to inviter's invited list (переходы — без начисления дней)
-    invited_list = data[inviter_key].get("invited", [])
-    _is_new = new_uid not in invited_list
-    if _is_new:
-        invited_list.append(new_uid)
-        data[inviter_key]["invited"] = invited_list
-
-    _save_referrals(data)
-    return {"is_new": _is_new, "count": len(invited_list),
-            "paid_count": len(data[inviter_key].get("paid_invited", [])),
-            "bonus_days": data[inviter_key].get("bonus_days", 0)}
-
-
-def _record_referral_payment(uid: int) -> dict | None:
-    """Вызывается при успешной оплате подписки пользователем uid.
-    Пригласивший получает +3 дня за каждую уникальную дату оплаты реферала.
-    За каждые 10 уникальных оплат (по дням) — дополнительно +30 дней.
-    Возвращает инфо для уведомления или None, если за сегодня уже начислено."""
-    data = _load_referrals()
-    key = str(uid)
-    entry = data.get(key)
-    if not entry:
-        return None
-    inviter_uid = entry.get("inviter")
-    if not inviter_uid:
-        return None
-    inviter_key = str(inviter_uid)
-    if inviter_key not in data:
-        return None
-
-    today = datetime.date.today().isoformat()
-    inviter = data[inviter_key]
-    history: dict[str, list] = inviter.setdefault("paid_history", {})
-    uid_history = history.setdefault(key, [])
-    if today in uid_history:
-        return None  # за сегодня уже начисляли
-
-    uid_history.append(today)
-
-    # Общее число уникальных оплат по дням
-    paid_count = sum(len(dates) for dates in history.values())
-
-    bonus = 3
-    # Циклический бонус: +30 дней за каждые 10 уникальных оплат
-    milestone = paid_count > 0 and paid_count % 10 == 0
-    if milestone:
-        bonus += 30
-    inviter["bonus_days"] = inviter.get("bonus_days", 0) + bonus
-
-    # Сразу продлеваем подписку пригласившего на начисленные дни
-    try:
-        s = load_settings(inviter_uid)
-        now = time.time()
-        current_until = float(s.get("subscription_until", 0) or 0)
-        new_until = max(now, current_until) + bonus * 86400
-        s["subscription_until"] = new_until
-        save_settings(inviter_uid, s)
-    except Exception as e:
-        print(f"  [referral-payment] не удалось продлить подписку {inviter_uid}: {e}")
-
-    _save_referrals(data)
+def _record_referral(new_uid: int, inviter_uid: int) -> dict:
+    """Records that new_uid was invited by inviter_uid (wrapper for referrals module)."""
+    res = referrals.attach_referrer(new_uid, inviter_uid, "ref")
+    status = referrals.get_referral_status(inviter_uid)
     return {
-        "inviter_uid": inviter_uid,
-        "paid_count": paid_count,
-        "bonus_days": inviter.get("bonus_days", 0),
-        "milestone": milestone,
-        "added_days": bonus,
+        "is_new": res.get("ok") and res.get("reason") == "attached",
+        "count": status["registered_count"],
+        "paid_count": status["paid_count"],
+        "bonus_days": status["reward_days_total"],
     }
+
+
+def _extend_subscription_days(uid: int, days: int) -> None:
+    """Продлевает подписку пользователя на указанное число дней."""
+    if days <= 0:
+        return
+    try:
+        s = load_settings(uid)
+        now = time.time()
+        current = float(s.get("subscription_until", 0) or 0)
+        s["subscription_until"] = max(now, current) + days * 86400
+        save_settings(uid, s)
+    except Exception as e:
+        print(f"  [referral] не удалось продлить подписку {uid} на {days} дн: {e}")
+
+
+def _record_referral_payment(
+    uid: int,
+    plan_key: str,
+    payment_id: str,
+    original_amount: int,
+    paid_amount: int,
+    discount_amount: int,
+    applied_discount_type: str | None = None,
+) -> dict | None:
+    """Вызывается при успешной оплате подписки пользователем uid."""
+    return referrals.record_payment(
+        uid, plan_key, payment_id, original_amount, paid_amount, discount_amount, applied_discount_type
+    )
 
 
 def load_skipped(uid: int) -> set:
@@ -8608,10 +8554,10 @@ async def cmd_start(msg: Message, state: FSMContext):
                         _un = f" (@{msg.from_user.username})" if msg.from_user.username else ""
                         _cnt = _ref_res.get("count", 0)
                         _txt = (
-                            f"🎉 *По твоей ссылке зарегистрировался новый пользователь!*\n\n"
-                            f"👤 {_fname}{_un}\n"
-                            f"👥 Зарегистрировалось: *{_cnt}*\n"
-                            f"🎁 +3 дня доступа будут начислены, когда друг оплатит подписку."
+                            f"🎉 *Новый пользователь зарегистрировался по твоей ссылке!*\n\n"
+                            f"👤 {_fname}{_un}\n\n"
+                            f"Когда он впервые оплатит подписку, ты получишь до 4 бонусных дней.\n\n"
+                            f"👥 Всего зарегистрировалось: *{_cnt}*"
                         )
                         try:
                             await bot.send_message(inviter_uid, _txt, parse_mode="Markdown")
@@ -9324,20 +9270,29 @@ async def cb_yoomoney(cb: CallbackQuery):
     plan = SUBSCRIPTION_PLANS.get(plan_key)
     if not plan or not YOOMONEY_WALLET:
         await cb.answer("Оплата временно не настроена", show_alert=True); return
-    label = f"sub_{cb.from_user.id}_{plan_key}_{int(time.time())}"
+    uid = cb.from_user.id
+    label = f"sub_{uid}_{plan_key}_{int(time.time())}"
+    price = referrals.create_invoice(uid, plan_key, label)
+    sum_amount = price["final"]
+    discount_note = ""
+    if price["discount"] > 0:
+        discount_note = f"\n🎁 Применена реферальная скидка {price['discount']} ₽ (итого {sum_amount} ₽ вместо {plan['amount']} ₽)."
     params = {
         "receiver": YOOMONEY_WALLET, "quickpay-form": "button",
-        "paymentType": "AC", "sum": str(plan["amount"]), "label": label,
+        "paymentType": "AC", "sum": str(sum_amount), "label": label,
         "targets": f"Подписка на бот: {plan['title']}",
     }
     if PUBLIC_URL:
         params["successURL"] = f"https://t.me/{BOT_USERNAME}"
     pay_url = "https://yoomoney.ru/quickpay/confirm.xml?" + urllib.parse.urlencode(params)
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"💳 Оплатить {plan['amount']} ₽", url=pay_url)],
+        [InlineKeyboardButton(text=f"💳 Оплатить {sum_amount} ₽", url=pay_url)],
         [InlineKeyboardButton(text="☎️ Поддержка", url="https://t.me/durunegonim")],
     ])
-    await cb.message.answer("Счёт сформирован. После оплаты дождись сообщения об активации.", reply_markup=kb)
+    await cb.message.answer(
+        f"Счёт сформирован. После оплаты дождись сообщения об активации.{discount_note}",
+        reply_markup=kb,
+    )
     await cb.answer()
 
 
@@ -9378,7 +9333,7 @@ def _claim_promo(uid: int, code: str) -> bool:
     return True
 
 
-async def _activate_subscription(uid: int, plan_key: str, operation_id: str, amount: int = 0):
+async def _activate_subscription(uid: int, plan_key: str, operation_id: str, amount: int = 0, is_paid: bool = True):
     plan = SUBSCRIPTION_PLANS[plan_key]
     s = load_settings(uid)
     now = time.time(); current = float(s.get("subscription_until", 0) or 0)
@@ -9403,7 +9358,7 @@ async def cmd_promo(msg: Message):
         await msg.answer("Формат: <code>/promo КОД</code>", parse_mode="HTML"); return
     if not _claim_promo(msg.from_user.id, parts[1]):
         await msg.answer("❌ Промокод неверный или уже использован."); return
-    await _activate_subscription(msg.from_user.id, "month", "promo:" + parts[1].strip().upper(), 0)
+    await _activate_subscription(msg.from_user.id, "month", "promo:" + parts[1].strip().upper(), 0, is_paid=False)
 
 
 @dp.message(Command("promo_codes"))
@@ -9483,31 +9438,41 @@ async def _yoomoney_webhook(request):
     if not m or form.get("unaccepted", "false").lower() == "true":
         return web.Response(status=200, text="ignored")
     uid, plan_key = int(m.group(1)), m.group(2)
+    invoice = referrals.get_invoice(label)
+    expected_amount = invoice["final_amount"] if invoice else SUBSCRIPTION_PLANS[plan_key]["amount"]
+    original_amount = invoice["original_amount"] if invoice else expected_amount
+    discount_amount = invoice["discount_amount"] if invoice else 0
+    applied_discount_type = invoice["applied_discount_type"] if invoice else None
     received = int(float(form.get("withdraw_amount") or form.get("amount") or 0))
-    if received < SUBSCRIPTION_PLANS[plan_key]["amount"]:
+    if received < expected_amount:
         return web.Response(status=400, text="amount mismatch")
     operation_id = form.get("operation_id", "")
     s = load_settings(uid)
     if s.get("payment_operation_id") != operation_id:
-        await _activate_subscription(uid, plan_key, operation_id, received)
+        await _activate_subscription(uid, plan_key, operation_id, received, is_paid=True)
+        referrals.mark_invoice_paid(label)
         # Начисляем реферальные бонусы пригласившему (только за факт оплаты)
-        _ref_pay = _record_referral_payment(uid)
-        if _ref_pay:
-            _added = _ref_pay.get("added_days", 3)
-            _paid = _ref_pay['paid_count']
-            _to_next = 10 - (_paid % 10) if _paid % 10 != 0 else 0
-            _txt = (
-                f"🎉 *Друг оплатил подписку!*\n\n"
-                f"🎁 +{_added} дн. доступа начислено.\n"
-                f"👥 Оплативших друзей: *{_paid}*"
+        _ref_pay = _record_referral_payment(
+            uid, plan_key, operation_id, original_amount, received, discount_amount, applied_discount_type
+        )
+        if _ref_pay and _ref_pay.get("ok"):
+            _extend_subscription_days(_ref_pay["referrer_id"], _ref_pay["total_reward_days"])
+            _status = referrals.get_referral_status(_ref_pay["referrer_id"])
+            _paid = _status["paid_count"]
+            _remaining = _status["remaining_to_milestone"]
+            _sub_until_ts = load_settings(_ref_pay["referrer_id"]).get("subscription_until", time.time())
+            _sub_until = datetime.datetime.fromtimestamp(_sub_until_ts).strftime("%d.%m.%Y")
+            _txt = referrals.format_payment_notification(
+                _ref_pay["referrer_id"], plan_key,
+                _ref_pay["base_reward_days"], _ref_pay["milestone_reward_days"],
+                _ref_pay["total_reward_days"], _paid, _sub_until,
             )
             if _ref_pay["milestone"]:
-                _txt += "\n🏆 *Бонус +30 дней за 10 оплат получен!*"
-            elif _to_next > 0:
-                _txt += f"\n➡️ До следующих +30 дней осталось: *{_to_next}*"
-            _txt += f"\n💰 Всего бонусом: {_ref_pay['bonus_days']} дн."
+                _txt += "\n\n🏆 <b>Цель достигнута!</b> Каждые 5 оплативших друзей — +5 дней."
+            else:
+                _txt += f"\n\n🏆 До дополнительных +5 дней: <b>{_remaining}</b>"
             try:
-                await bot.send_message(_ref_pay["inviter_uid"], _txt, parse_mode="Markdown")
+                await bot.send_message(_ref_pay["referrer_id"], _txt, parse_mode="HTML")
             except Exception:
                 pass
     return web.Response(status=200, text="ok")
@@ -13841,6 +13806,38 @@ async def cmd_monitor(msg: Message):
 
 
 # ── CRM-колбеки ───────────────────────────────────────────────────────
+@dp.callback_query(F.data == "ref_stats")
+async def cb_ref_stats(cb: CallbackQuery):
+    await cb.answer()
+    uid = cb.from_user.id
+    status = referrals.get_referral_status(uid)
+    link = referrals.get_referral_link(uid, BOT_USERNAME or "PerekupDriveBot")
+    cycle = status["current_cycle_count"]
+    progress_bar = "🟢" * cycle + "⚪" * (5 - cycle)
+    text = (
+        "📊 <b>Твоя реферальная статистика</b>\n\n"
+        f"👥 Зарегистрировалось: <b>{status['registered_count']}</b>\n"
+        f"💳 Впервые оплатило: <b>{status['paid_count']}</b>\n"
+        f"{progress_bar} {cycle}/5\n\n"
+        f"До дополнительных +5 дней: <b>{status['remaining_to_milestone']}</b>\n"
+        f"🎁 Всего начислено: <b>{status['reward_days_total']}</b> дней\n\n"
+        f"🔗 <b>Ссылка:</b>\n<code>{link}</code>"
+    )
+    await cb.message.answer(text, parse_mode="HTML")
+
+
+@dp.callback_query(F.data == "ref_terms")
+async def cb_ref_terms(cb: CallbackQuery):
+    await cb.answer()
+    await cb.message.answer(referrals.format_terms_text(), parse_mode="HTML")
+
+
+@dp.callback_query(F.data == "ref_back")
+async def cb_ref_back(cb: CallbackQuery):
+    await cb.answer()
+    await cb.message.answer("Главное меню", reply_markup=kb_for(cb.from_user.id))
+
+
 @dp.callback_query(F.data == "open_subscribe")
 async def cb_open_subscribe(cb: CallbackQuery):
     await cb.answer()
@@ -13866,46 +13863,13 @@ BOT_USERNAME = os.getenv("BOT_USERNAME", "")
 @dp.message(F.text == "🤝 Пригласить друга")
 async def cmd_invite(msg: Message):
     uid = msg.from_user.id
-    entry = _get_or_create_referral(uid)
-    data = _load_referrals()
-    entry = data.get(str(uid), {})
-    invited_count = len(entry.get("invited", []))
-    paid_history = entry.get("paid_history", {})
-    paid_count = sum(len(v) for v in paid_history.values())
-    bonus_days = entry.get("bonus_days", 0)
-    _days_left_text = _subscription_badge(uid, html=True) + "\n\n"
-    # Берём имя бота из Telegram (надёжно), не из возможно-устаревшей переменной
     try:
         me = await bot.get_me()
-        _un = me.username or BOT_USERNAME
+        _un = me.username or BOT_USERNAME or "PerekupDriveBot"
     except Exception:
-        _un = BOT_USERNAME
-    ref_link = f"https://t.me/{_un}?start=ref_{uid}"
-    share_text = "Нашёл бота который ищет авто ниже рынка на Авито, Дроме, Авто.ру, ВК и Telegram — попробуй!"
-    _to_next = (10 - (paid_count % 10)) % 10
-    _to_next = 10 if _to_next == 0 and paid_count == 0 else _to_next
-    _bonus_line = f"🎁 Заработано дней: <b>{bonus_days}</b>\n" if bonus_days else ""
-    _milestone_line = ""
-    if paid_count >= 10 and paid_count % 10 == 0:
-        _milestone_line = f"🏆 Бонус +30 дней получен за {paid_count} оплат друзей\n"
-    elif paid_count > 0:
-        _milestone_line = f"🏆 До следующих +30 дней осталось оплат: <b>{_to_next}</b>\n"
-    # HTML: подчёркивания в ссылке остаются буквальными (Markdown их «съедал» → курсив)
-    await msg.answer(
-        f"📲 <b>Приглашай друзей в PerekupDrive</b>\n\n"
-        f"За каждого друга, который впервые оплатит подписку — <b>+3 дня доступа</b>.\n"
-        f"За каждые 10 оплативших друзей — дополнительно <b>+30 дней</b>.\n\n"
-        f"👥 Зарегистрировалось: <b>{invited_count}</b>\n"
-        f"💳 Оплатило подписку: <b>{paid_count}</b> из 10\n"
-        f"{_bonus_line}{_milestone_line}\n"
-        f"🔗 <b>Твоя персональная ссылка:</b>\n"
-        f"<code>{ref_link}</code>\n\n"
-        f"Я уведомлю тебя, когда друг зарегистрируется или оплатит подписку 🔔",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📤 Поделиться ссылкой", url=f"https://t.me/share/url?url={ref_link}&text={share_text}")],
-        ])
-    )
+        _un = BOT_USERNAME or "PerekupDriveBot"
+    screen = referrals.format_invite_screen(uid, _un)
+    await msg.answer(screen["text"], parse_mode="HTML", reply_markup=screen["keyboard"])
 
 
 async def _warmup_cache():
@@ -14174,6 +14138,10 @@ async def main():
         await loop.run_in_executor(None, _restore_referrals)
     except Exception as e:
         print(f"  [main] _restore_referrals: {e}")
+    try:
+        await loop.run_in_executor(None, referrals.init_referrals_db)
+    except Exception as e:
+        print(f"  [main] referrals.init_referrals_db: {e}")
     # Реестр пользователей собираем из ВСЕХ доступных источников (чтобы не потерять
     # уже существующих): PG → папки users/ → analytics → Telegram-бэкап.
     try:
