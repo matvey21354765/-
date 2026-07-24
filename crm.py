@@ -56,6 +56,11 @@ _SOURCE_ICON = {
 }
 
 
+# Состояние CRM-шедулера (для диагностики)
+_crm_scheduler_task: "asyncio.Task | None" = None
+_crm_scheduler_running: bool = False
+
+
 # ── Подключение к БД ──────────────────────────────────────────────────
 def _get_db():
     """Возвращает соединение с PostgreSQL или fallback на control_bot._get_db()."""
@@ -716,9 +721,118 @@ async def _process_crm_queue(bot) -> None:
             print(f"  [CRM] ошибка обработки события {ev.get('id')} для {uid}: {e}")
 
 
+# ── Диагностика / admin-команды ───────────────────────────────────────
+def crm_db_source() -> str:
+    """Возвращает используемое хранилище: PostgreSQL или JSON fallback."""
+    return "PostgreSQL" if _get_db() is not None else "JSON fallback"
+
+
+def scheduler_status() -> dict:
+    """Состояние CRM-шедулера."""
+    task = _crm_scheduler_task
+    running = _crm_scheduler_running
+    done = bool(task and task.done()) if task else False
+    return {
+        "running": running and not done,
+        "task_exists": task is not None,
+        "task_done": done,
+        "cancelled": bool(task and task.cancelled()) if task else False,
+    }
+
+
+def _fmt_ts(ts: float | None) -> str | None:
+    if ts is None:
+        return None
+    try:
+        return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return str(ts)
+
+
+def get_pending_events_for_uid(uid: int) -> list[dict]:
+    """Все необработанные CRM-события пользователя."""
+    db = _get_db()
+    rows = []
+    if db:
+        try:
+            with db.cursor() as cur:
+                cur.execute(
+                    "SELECT id, event_type, priority, payload, created_at "
+                    "FROM crm_events WHERE uid = %s AND processed = FALSE "
+                    "ORDER BY priority ASC, created_at ASC",
+                    (uid,),
+                )
+                for r in cur.fetchall():
+                    payload = r[3]
+                    if isinstance(payload, str):
+                        try:
+                            payload = json.loads(payload)
+                        except Exception:
+                            payload = {}
+                    created = r[4]
+                    created_iso = (
+                        created.strftime("%Y-%m-%d %H:%M:%S")
+                        if isinstance(created, datetime.datetime)
+                        else str(created)
+                    )
+                    rows.append(
+                        {
+                            "id": r[0],
+                            "event_type": r[1],
+                            "priority": r[2],
+                            "payload": payload or {},
+                            "created_at": created_iso,
+                        }
+                    )
+        except Exception as e:
+            print(f"  [CRM] ошибка чтения событий uid {uid}: {e}")
+    if not rows:
+        for ev in _load_pending_events():
+            if ev.get("uid") == uid:
+                rows.append(
+                    {
+                        "id": ev.get("id"),
+                        "event_type": ev.get("event_type"),
+                        "priority": ev.get("priority"),
+                        "payload": ev.get("payload", {}),
+                        "created_at": ev.get("created_at"),
+                    }
+                )
+    return rows
+
+
+def get_user_crm_info(uid: int) -> dict:
+    """Полная CRM-диагностика по пользователю."""
+    info = _get_last_crm_info(uid)
+    last_crm_ts = info.get("last_crm_message")
+    if last_crm_ts:
+        next_allowed_ts = last_crm_ts + CRM_COOLDOWN_HOURS * 3600
+        next_allowed = _fmt_ts(next_allowed_ts)
+    else:
+        next_allowed = "now"
+    return {
+        "uid": uid,
+        "crm_enabled": bool(info.get("crm_enabled", True)),
+        "last_activity": _fmt_ts(info.get("last_activity")),
+        "last_search": _fmt_ts(info.get("last_search")),
+        "last_crm_message": _fmt_ts(last_crm_ts),
+        "last_crm_type": info.get("last_crm_type"),
+        "next_allowed": next_allowed,
+        "pending_events": get_pending_events_for_uid(uid),
+    }
+
+
+async def send_continue_search_test(bot, uid: int) -> bool:
+    """Отправляет тестовое production-сообщение «продолжить поиск»."""
+    return await _send_crm_message(bot, uid, "continue_search", {"uid": uid})
+
+
 # ── Планировщик ──────────────────────────────────────────────────────
 async def start_crm_scheduler(bot, interval: int = 300) -> None:
     """Фоновый цикл: проверяет триггеры и отправляет CRM-сообщения."""
+    global _crm_scheduler_task, _crm_scheduler_running
+    _crm_scheduler_running = True
+    _crm_scheduler_task = asyncio.current_task()
     print(f"  [CRM] планировщик запущен (интервал {interval}с)")
     while True:
         try:

@@ -9414,6 +9414,55 @@ async def cmd_promo_codes(msg: Message):
     await msg.answer_document(BufferedInputFile(body, "promo_codes_100.txt"), caption="100 одноразовых промокодов на месяц")
 
 
+@dp.message(Command("crm_status"))
+async def cmd_crm_status(msg: Message):
+    """Временная админ-команда: диагностика CRM-пользователя."""
+    if msg.from_user.id not in ADMIN_IDS:
+        return
+    uid = msg.from_user.id
+    info = crm.get_user_crm_info(uid)
+    sched = crm.scheduler_status()
+    db_source = crm.crm_db_source()
+    pending_lines = []
+    for ev in info.get("pending_events", []):
+        pending_lines.append(
+            f"  • {ev['event_type']} (priority={ev['priority']}, id={ev['id']}, created={ev['created_at']})"
+        )
+    if not pending_lines:
+        pending_lines.append("  (нет)")
+    sched_status = "✅ работает" if sched.get("running") else "❌ не работает"
+    text = (
+        f"<b>CRM-статус</b> (uid <code>{uid}</code>)\n\n"
+        f"crm_enabled: <b>{info['crm_enabled']}</b>\n"
+        f"last_activity: <code>{info['last_activity'] or '—'}</code>\n"
+        f"last_search: <code>{info['last_search'] or '—'}</code>\n"
+        f"last_crm_message: <code>{info['last_crm_message'] or '—'}</code>\n"
+        f"last_crm_type: <code>{info['last_crm_type'] or '—'}</code>\n"
+        f"next_allowed: <code>{info['next_allowed']}</code>\n\n"
+        f"<b>Шедулер:</b> {sched_status} (task_exists={sched.get('task_exists')})\n"
+        f"<b>Хранилище:</b> {db_source}\n\n"
+        f"<b>Ожидающие события:</b>\n" + "\n".join(pending_lines)
+    )
+    await msg.answer(text, parse_mode="HTML")
+
+
+@dp.message(Command("crm_test"))
+async def cmd_crm_test(msg: Message):
+    """Временная админ-команда: отправить тестовое CRM-сообщение себе."""
+    if msg.from_user.id not in ADMIN_IDS:
+        return
+    parts = (msg.text or "").split(maxsplit=1)
+    if len(parts) < 2 or parts[1].strip().lower() != "continue":
+        await msg.answer("Формат: <code>/crm_test continue</code>", parse_mode="HTML")
+        return
+    uid = msg.from_user.id
+    ok = await crm.send_continue_search_test(bot, uid)
+    if ok:
+        await msg.answer("✅ Тестовое сообщение «продолжить поиск» отправлено. Проверь личные сообщения.")
+    else:
+        await msg.answer("❌ Не удалось отправить тестовое сообщение. Смотри логи.")
+
+
 @dp.message(Command("support"))
 @dp.message(F.text == "☎️ Поддержка")
 async def cmd_support(msg: Message):
