@@ -35,6 +35,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
 import analytics
+import crm
 
 # ── Админы (для /stats) ─────────────────────────────────────────
 def _parse_admin_ids() -> set[int]:
@@ -8257,9 +8258,11 @@ class SubscriptionMiddleware(BaseMiddleware):
                 # ВАЖНО: НЕ ждём завершения (без await) — иначе каждое сообщение
                 # блокируется на connect_timeout БД (~5с при недоступном PG) и
                 # бот «очень долго реагирует» на /start. Запускаем «огнём и забыть».
-                asyncio.get_running_loop().run_in_executor(
+                loop = asyncio.get_running_loop()
+                loop.run_in_executor(
                     None, lambda: _register_user(u.id, u.username, False)
                 )
+                loop.run_in_executor(None, crm.update_last_seen, u.id)
         except Exception:
             pass
         return await handler(event, data)
@@ -9383,6 +9386,12 @@ async def _activate_subscription(uid: int, plan_key: str, operation_id: str, amo
               "subscription_until": max(now, current) + plan["days"] * 86400,
               "payment_operation_id": operation_id})
     save_settings(uid, s)
+    # CRM: благодарность за оплату
+    try:
+        until_date = datetime.datetime.fromtimestamp(s["subscription_until"]).strftime("%d.%m.%Y")
+        await crm.send_payment_thanks(bot, uid, until_date)
+    except Exception:
+        pass
     await bot.send_message(uid, f"✅ Оплата подтверждена! Доступ «{plan['title']}» активирован.")
     await notify_admins_subscription(uid, "", plan["title"], amount)
 
@@ -12723,6 +12732,11 @@ async def do_search_for_user(uid: int, reply_to):
         await asyncio.get_running_loop().run_in_executor(None, lambda: _register_user(uid, None, True))
     except Exception:
         pass
+    # CRM: фиксируем последний поиск для триггера возврата
+    try:
+        await asyncio.get_running_loop().run_in_executor(None, crm.update_last_search, uid)
+    except Exception:
+        pass
     _seen_cnt = sum(1 for i in suitable if i.get("_already_seen"))
     src_found = list(dict.fromkeys(i.get("source","") for i in suitable if i.get("source")))
     src_icons = {"avito":"🟠","drom":"🔵","autoru":"🔴","vk":"💙","tg":"✈️"}
@@ -13661,6 +13675,7 @@ async def _global_monitor_loop():
                     )
 
                     # Уведомления по слежению за маркой (независимо от скидки)
+                    brand_new: list[dict] = []
                     if track_brand:
                         brand_new = [
                             it for it in new_items
@@ -13703,6 +13718,12 @@ async def _global_monitor_loop():
                         ))
                         for it in new_below[:5]:
                             _monitor_send_tasks.append(_send_monitor_item(uid, it))
+
+                    # CRM-напоминание о новом объявлении (с антиспамом)
+                    if new_below:
+                        asyncio.create_task(crm.notify_new_listing(bot, uid, new_below[0]))
+                    if track_brand and brand_new:
+                        asyncio.create_task(crm.notify_new_listing(bot, uid, brand_new[0]))
 
                     seen.update(it["url"] for it in new_items)
                     await asave_seen(uid, seen)
@@ -13768,6 +13789,25 @@ async def cmd_monitor(msg: Message):
         parse_mode="Markdown",
         reply_markup=_notify_keyboard(s),
     )
+
+
+# ── CRM-колбеки ───────────────────────────────────────────────────────
+@dp.callback_query(F.data == "open_subscribe")
+async def cb_open_subscribe(cb: CallbackQuery):
+    await cb.answer()
+    await cmd_subscribe(cb.message)
+
+
+@dp.callback_query(F.data == "open_monitor")
+async def cb_open_monitor(cb: CallbackQuery):
+    await cb.answer()
+    await cmd_monitor(cb.message)
+
+
+@dp.callback_query(F.data == "crm_continue_search")
+async def cb_crm_continue_search(cb: CallbackQuery):
+    await cb.answer("Запускаю поиск...")
+    await do_search_for_user(cb.from_user.id, cb.message)
 
 
 BOT_USERNAME = os.getenv("BOT_USERNAME", "")
@@ -14197,6 +14237,10 @@ async def main():
             pass
 
     async def _post_startup():
+        # CRM-система удержания
+        crm.init_crm_db()
+        loop.create_task(crm.start_crm_scheduler(bot))
+        print("  [CRM] планировщик удержания запущен")
         # Единый глобальный монитор — опрашивает всех активных пользователей каждые 2 минуты
         print(">>> main(): создаём _global_monitor_loop", flush=True)
         loop.create_task(_global_monitor_loop())
