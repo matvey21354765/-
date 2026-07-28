@@ -3,6 +3,11 @@
 Каждый пользователь выбирает регион и бюджет, бот ищет частников ниже рынка.
 """
 import sys
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except (AttributeError, OSError):
+    pass
 print(">>> PROCESS STARTED: control_bot.py запущен, Python", sys.version.split()[0], flush=True)
 
 import asyncio
@@ -94,12 +99,8 @@ if AVITO_PROXY_PORT_MIN and AVITO_PROXY_PORT_MAX:
 
 # Альтернативный способ задать прокси — одна переменная PROXY_URL
 # Форматы: http://user:pass@host:port  /  socks5://user:pass@host:port  /  host:port
-_PROXY_URL_RAW = (
-    os.getenv("PROXY_URL", "") or
-    os.getenv("HTTPS_PROXY", "") or
-    os.getenv("HTTP_PROXY", "") or
-    ""
-)
+PROXY_URL = os.getenv("PROXY_URL", "").strip()
+_PROXY_URL_RAW = PROXY_URL
 # Не берём Railway-системный прокси (он не является резидентным)
 if _PROXY_URL_RAW and "__agentproxy" in _PROXY_URL_RAW:
     _PROXY_URL_RAW = ""
@@ -141,6 +142,11 @@ def _avito_proxies() -> "dict[str, str] | None":
 def _mark_proxy_failed(err: str) -> None:
     """Помечаем прокси как сломанный при ошибке 407/403/аутентификации."""
     global _proxy_auth_failed
+    # Явно заданный PROXY_URL — обязательный маршрут скрейпинга. Краткий 403/407
+    # во время ротации не должен незаметно переключать запросы на IP сервера.
+    if PROXY_URL:
+        print(f"[прокси] временная ошибка LTE-прокси, прямое соединение запрещено: {str(err)[:80]}")
+        return
     e = str(err).lower()
     if any(s in e for s in ("407", "proxy authentication required", "proxy authentication", "tunnel connection failed", "forbidden")):
         if not _proxy_auth_failed:
@@ -188,14 +194,14 @@ def _fetch_with_retry(
 ):
     """Универсальный HTTP-запрос через curl_cffi с retry и TLS-отпечатком."""
     from curl_cffi import requests as _cffi
-    _proxy, _proxy_auth = _prepare_curl_cffi_proxy(proxies or _avito_proxies() or None)
+    request_proxies = proxies or _avito_proxies() or None
     last_err = None
     for attempt in range(1, retries + 1):
         try:
             if method.upper() == "GET":
-                r = _cffi.get(url, params=params, headers=headers, impersonate=impersonate, timeout=timeout, proxy=_proxy.get("all") if _proxy else None, proxy_auth=_proxy_auth)
+                r = _cffi.get(url, params=params, headers=headers, impersonate=impersonate, timeout=timeout, proxies=request_proxies)
             else:
-                r = _cffi.post(url, json=json, headers=headers, impersonate=impersonate, timeout=timeout, proxy=_proxy.get("all") if _proxy else None, proxy_auth=_proxy_auth)
+                r = _cffi.post(url, json=json, headers=headers, impersonate=impersonate, timeout=timeout, proxies=request_proxies)
             if r.status_code in (429, 439, 503, 502, 407, 403):
                 last_err = f"HTTP {r.status_code}"
                 print(f"  [fetch] {url[:60]} → {last_err} (попытка {attempt}/{retries})")
@@ -225,7 +231,7 @@ print(f"[прокси] {'✅ ' + _proxy_display if _proxy_display else '❌ не
 
 # Ссылка ротации IP мобильного прокси (mobileproxy.space «Ссылка для смены IP»).
 # Если задана — бот сам меняет IP перед скрейпом Авито, обходя rate-limit (429).
-AVITO_PROXY_ROTATE_URL = os.getenv("AVITO_PROXY_ROTATE_URL", "https://changeip.mobileproxy.space/?proxy_key=cc1eb5e0f15ebd98b63a7ae2a08b4f24")
+AVITO_PROXY_ROTATE_URL = os.getenv("AVITO_PROXY_ROTATE_URL", "").strip()
 
 # Токен приложения Auto.ru (заголовок x-authorization для apiauto.ru).
 # Эндпоинт apiauto.ru отдаёт чистый JSON без капчи Яндекса — самый надёжный
@@ -238,11 +244,7 @@ _last_ip_rotate_ts = 0.0
 # IP, но чистые РФ SOCKS5/резидентные IP обычно пропускает. Формат каждого:
 #   socks5://user:pass@host:port  (или http://...). Список через запятую в
 #   переменной AUTORU_PROXIES; ниже — дефолтные РФ-прокси пользователя.
-_AUTORU_PROXIES_DEFAULT = [
-    "socks5://hZoswb:f3dQZ6@193.187.144.4:8000",
-    "socks5://GPL5xs:mM4GHB@193.31.101.131:9928",
-    "socks5://xZ6MTF:9XEWJd@217.29.53.106:10248",
-]
+_AUTORU_PROXIES_DEFAULT: list[str] = []
 AUTORU_PROXIES = [
     p.strip() for p in os.getenv("AUTORU_PROXIES", ",".join(_AUTORU_PROXIES_DEFAULT)).split(",")
     if p.strip()
@@ -257,13 +259,15 @@ def _autoru_proxy_dicts() -> "list[dict]":
         if p.startswith("socks5://"):
             p = "socks5h://" + p[len("socks5://"):]
         out.append({"http": p, "https": p})
-    return out
+    return out or ([_avito_proxies()] if _avito_proxies() else [])
 
 # Диагностика готовности Auto.ru: Яндекс режет капчей любой «грязный» IP.
 if AUTORU_API_TOKEN:
     print("[Auto.ru] ✅ токен apiauto.ru задан — чистый JSON без капчи")
 elif AUTORU_PROXIES:
     print(f"[Auto.ru] ✅ пул РФ-прокси: {len(AUTORU_PROXIES)} шт. — обход капчи через чистые РФ IP")
+elif PROXY_URL:
+    print("[Auto.ru] ✅ используется единый LTE-прокси из PROXY_URL")
 elif AVITO_PROXY_ROTATE_URL:
     print("[Auto.ru] ✅ ротация IP настроена — капча будет обходиться сменой IP")
 else:
@@ -336,8 +340,7 @@ def _curl_cffi_get(url: str, params: dict | None = None, headers: dict | None = 
     except ImportError:
         return None
 
-    _proxy, _proxy_auth = _prepare_curl_cffi_proxy(proxies or _avito_proxies() or None)
-    _proxy_url = _proxy.get("all") if _proxy else None
+    request_proxies = proxies or _avito_proxies() or None
     _headers = {
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8",
@@ -354,13 +357,15 @@ def _curl_cffi_get(url: str, params: dict | None = None, headers: dict | None = 
     last_exc = None
     for attempt in range(1, retries + 1):
         try:
-            sess = cffi_req.Session(impersonate=impersonate, proxy=_proxy_url, proxy_auth=_proxy_auth)
-            r = sess.get(url, params=params, headers=_headers, timeout=timeout)
+            sess = cffi_req.Session(impersonate=impersonate)
+            r = sess.get(
+                url, params=params, headers=_headers, timeout=timeout,
+                proxies=request_proxies,
+            )
             if r.status_code in (429, 439, 407, 403):
                 print(f"  [curl_cffi] {url}: HTTP {r.status_code} (попытка {attempt}/{retries}), ждём 3с...")
                 if r.status_code == 407:
                     _mark_proxy_failed("407")
-                    break
                 import time as _t
                 _t.sleep(3)
                 continue
@@ -372,7 +377,6 @@ def _curl_cffi_get(url: str, params: dict | None = None, headers: dict | None = 
                 print(f"  [curl_cffi] {url}: сетевая ошибка (попытка {attempt}/{retries}): {str(e)[:80]}")
                 if "407" in err or "proxy authentication" in err or "tunnel" in err:
                     _mark_proxy_failed(str(e))
-                    break
                 import time as _t
                 _t.sleep(3)
                 continue
@@ -8276,28 +8280,66 @@ from aiogram import BaseMiddleware
 from aiogram.types import TelegramObject, Update
 
 class SubscriptionMiddleware(BaseMiddleware):
-    """Подписка отключена — пропускаем всех. Заодно регистрируем пользователя
-    в надёжном реестре PG (счётчик статистики, переживает деплой)."""
+    """Регистрирует пользователя и закрывает функции бота после окончания доступа."""
     async def __call__(self, handler, event: TelegramObject, data: dict):
+        user = getattr(event, "from_user", None)
         try:
-            u = getattr(event, "from_user", None)
-            if u and u.id:
-                # Только регистрация/last_seen; поиск считается в do_search.
-                # ВАЖНО: НЕ ждём завершения (без await) — иначе каждое сообщение
-                # блокируется на connect_timeout БД (~5с при недоступном PG) и
-                # бот «очень долго реагирует» на /start. Запускаем «огнём и забыть».
+            if user and user.id:
+                # Память обновляем сразу: иначе первое сообщение нового пользователя
+                # могло провериться раньше, чем фоновая регистрация успеет создать trial.
+                _register_user(user.id, user.username, False, persist_db=False)
                 loop = asyncio.get_running_loop()
                 loop.run_in_executor(
-                    None, lambda: _register_user(u.id, u.username, False)
+                    None,
+                    lambda: _register_user(user.id, user.username, False, persist_db=True),
                 )
-                loop.run_in_executor(None, crm.update_last_seen, u.id)
+                loop.run_in_executor(None, crm.update_last_seen, user.id)
         except Exception:
             pass
+
+        if not user or user.id in ADMIN_IDS:
+            return await handler(event, data)
+
+        # Команды и кнопки, необходимые для входа и покупки, доступны всегда.
+        text = (getattr(event, "text", None) or "").strip()
+        callback_data = (getattr(event, "data", None) or "").strip()
+        allowed_commands = ("/start", "/subscribe", "/promo")
+        allowed_callbacks = (
+            "sub_plan|", "pay|", "check_payment|", "promo|", "promo_help",
+            "yoomoney|", "subscription", "open_subscription", "open_subscribe",
+        )
+        if text.startswith(allowed_commands) or text in {"💎 Подписка", "💎 Купить подписку", "💎 Выбрать тариф"}:
+            return await handler(event, data)
+        if callback_data.startswith(allowed_callbacks):
+            return await handler(event, data)
+
+        if _subscription_info(user.id)["ended"]:
+            message = getattr(event, "message", None)
+            target = message if message is not None else event
+            offer = (
+                "🔒 <b>Доступ к PerekupDrive приостановлен</b>\n\n"
+                "Ваш 7-дневный тестовый период или оплаченная подписка завершились. "
+                "Поиск, мониторинг и инструменты анализа временно недоступны.\n\n"
+                "Продлите доступ — и бот снова будет круглосуточно отслеживать новые "
+                "объявления и сразу сообщать о выгодных автомобилях."
+            )
+            try:
+                if isinstance(event, CallbackQuery):
+                    await event.answer("Для продолжения работы продлите подписку", show_alert=True)
+                await target.answer(
+                    offer,
+                    parse_mode="HTML",
+                    reply_markup=_subscription_keyboard(),
+                )
+            except Exception:
+                pass
+            return None
         return await handler(event, data)
 
 async def _check_and_gate(msg_or_cb) -> bool:
-    """Оставлен для совместимости, основная проверка теперь в middleware."""
-    return True
+    """Совместимая ручная проверка доступа для фоновых/прямых вызовов."""
+    uid = msg_or_cb.from_user.id
+    return uid in ADMIN_IDS or not _subscription_info(uid)["ended"]
 
 # URL-ID маппинг для кнопок
 _id_to_url: dict[str, str] = {}
@@ -11742,7 +11784,12 @@ _registry_new_user = False  # появился НОВЫЙ пользовател
 TRIAL_DAYS = 7
 
 
-def _register_user(uid: int, username: "str | None" = None, is_search: bool = False):
+def _register_user(
+    uid: int,
+    username: "str | None" = None,
+    is_search: bool = False,
+    persist_db: bool = True,
+):
     """Обновляет реестр (в памяти + PG). Вызывается на каждое сообщение."""
     global _registry_dirty, _registry_new_user
     k = str(uid)
@@ -11768,6 +11815,8 @@ def _register_user(uid: int, username: "str | None" = None, is_search: bool = Fa
         _registry_new_user = True  # критично: сохранить нового юзера быстро
     # Зеркалим в PG (если подключён)
     try:
+        if not persist_db:
+            return
         db = _get_db()
         if db:
             with db.cursor() as cur:
@@ -11847,9 +11896,10 @@ def _subscription_badge(uid: int, html: bool = False) -> str:
     b, e = ("<b>", "</b>") if html else ("*", "*")
     if info["ended"]:
         return (
-            "⏳ *Подписка завершена*\n"
-            "Оформите подписку: /subscribe\n"
-            "Или активируйте промокод: /promo КОД"
+            "🔒 *Доступ приостановлен*\n"
+            "Тестовый период или подписка завершились.\n"
+            "Продлите доступ: /subscribe\n"
+            "Есть промокод? Активируйте: /promo КОД"
         )
     total = max(1, info["total_days"])
     left = max(0, info["days_left"])
@@ -13586,7 +13636,9 @@ async def cmd_tips_on(msg: Message):
 
 
 # ── Глобальный монитор — один цикл на всех пользователей ─────────
-GLOBAL_POLL_SEC = 30    # опрос каждые 30 секунд — 1 запрос на круг для всех
+GLOBAL_POLL_MIN_SEC = 25
+GLOBAL_POLL_MAX_SEC = 30
+GLOBAL_POLL_SEC = 30  # совместимость с логами и настройками
 
 async def _send_monitor_item(uid: int, it: dict):
     """Отправляет одно объявление пользователю из монитора."""
@@ -13689,6 +13741,11 @@ def _init_global_seen_db() -> None:
         conn.execute(
             "CREATE TABLE IF NOT EXISTS seen_urls (url TEXT PRIMARY KEY, ts REAL)"
         )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS seen_listings "
+            "(listing_id TEXT PRIMARY KEY, url TEXT NOT NULL, ts REAL NOT NULL)"
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_seen_listing_ts ON seen_listings(ts)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_seen_ts ON seen_urls(ts)")
         conn.commit()
         conn.close()
@@ -13697,7 +13754,7 @@ def _init_global_seen_db() -> None:
 
 
 def _load_global_seen() -> set[str]:
-    """Загружает URLs, виденные монитором за последние 7 дней (SQLite)."""
+    """Загружает ID объявлений, виденные монитором за последние 7 дней."""
     global _global_seen_cache, _global_seen_loaded
     if _global_seen_loaded:
         return _global_seen_cache
@@ -13706,32 +13763,32 @@ def _load_global_seen() -> set[str]:
         import sqlite3
         conn = sqlite3.connect(str(_GLOBAL_SEEN_DB_PATH))
         cur = conn.execute(
-            "SELECT url FROM seen_urls WHERE ts > ?",
+            "SELECT listing_id FROM seen_listings WHERE ts > ?",
             (time.time() - 7 * 24 * 3600,),
         )
         _global_seen_cache = {row[0] for row in cur.fetchall()}
         conn.close()
         _global_seen_loaded = True
-        print(f"  [global_seen] загружено {len(_global_seen_cache)} url")
+        print(f"  [global_seen] загружено {len(_global_seen_cache)} ID")
     except Exception as e:
         print(f"  [global_seen] load error: {e}")
     return _global_seen_cache
 
 
-def _add_global_seen(urls: set[str]) -> None:
-    """Сохраняет новые URL в глобальную дедупликацию."""
-    if not urls:
+def _add_global_seen(listings: dict[str, str]) -> None:
+    """Сохраняет ID и прямые URL новых объявлений в SQLite."""
+    if not listings:
         return
-    _global_seen_cache.update(urls)
+    _global_seen_cache.update(listings)
     try:
         import sqlite3
         conn = sqlite3.connect(str(_GLOBAL_SEEN_DB_PATH))
         now = time.time()
-        for u in urls:
+        for listing_id, url in listings.items():
             try:
                 conn.execute(
-                    "INSERT OR IGNORE INTO seen_urls(url, ts) VALUES(?, ?)",
-                    (u, now),
+                    "INSERT OR IGNORE INTO seen_listings(listing_id, url, ts) VALUES(?, ?, ?)",
+                    (listing_id, url, now),
                 )
             except Exception:
                 pass
@@ -13750,7 +13807,7 @@ async def _global_monitor_loop():
     # Кэш результатов по (регион, источник) чтобы не скрейпить дважды для разных пользователей
     _region_src_cache: dict[str, list[dict]] = {}
     while True:
-        await asyncio.sleep(GLOBAL_POLL_SEC)
+        await asyncio.sleep(random.uniform(GLOBAL_POLL_MIN_SEC, GLOBAL_POLL_MAX_SEC))
         _vk_tg_tick += 1
         do_vk_tg = (_vk_tg_tick % 20 == 0)  # раз в 10 минут
         _region_src_cache.clear()
@@ -13786,9 +13843,13 @@ async def _global_monitor_loop():
                             try:
                                 await bot.send_message(
                                     uid,
-                                    "⏳ Тестовый период или подписка закончилась.\n"
-                                    "Мониторинг новых объявлений приостановлен.\n"
-                                    "Оформите подписку: /subscribe",
+                                    "🔒 <b>Автоматический мониторинг приостановлен</b>\n\n"
+                                    "Ваш тестовый период или подписка завершились. "
+                                    "Новые объявления больше не отслеживаются.\n\n"
+                                    "Продлите доступ, чтобы снова получать выгодные предложения "
+                                    "сразу после их публикации.",
+                                    parse_mode="HTML",
+                                    reply_markup=_subscription_keyboard(),
                                 )
                             except Exception:
                                 pass
@@ -13845,21 +13906,22 @@ async def _global_monitor_loop():
             # Глобальная дедупликация: один URL не рассылается никому дважды
             # и не появляется в следующих кругах.
             global_seen = await loop.run_in_executor(None, _load_global_seen)
-            new_global_urls: set[str] = set()
+            new_global_listings: dict[str, str] = {}
             for key_rs, items in list(_region_src_cache.items()):
                 kept = []
                 for it in items:
                     nu = _norm_url(it.get("url", ""))
                     if not nu:
                         continue
-                    if nu in global_seen:
+                    listing_id = _listing_key(nu) or nu
+                    if listing_id in global_seen:
                         continue
                     kept.append(it)
-                    new_global_urls.add(nu)
+                    new_global_listings[listing_id] = nu
                 _region_src_cache[key_rs] = kept
-            if new_global_urls:
-                await loop.run_in_executor(None, _add_global_seen, new_global_urls)
-                print(f"  [глоб.монитор] новых URL в круге: {len(new_global_urls)}")
+            if new_global_listings:
+                await loop.run_in_executor(None, _add_global_seen, new_global_listings)
+                print(f"  [глоб.монитор] новых объявлений в круге: {len(new_global_listings)}")
 
             # Все исходящие сообщения собираем в один gather для параллельной рассылки.
             _monitor_send_tasks: list = []
