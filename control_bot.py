@@ -24,7 +24,7 @@ import urllib.parse
 from pathlib import Path
 import os
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 load_dotenv()
 
 from aiogram import Bot, Dispatcher, F
@@ -99,7 +99,11 @@ if AVITO_PROXY_PORT_MIN and AVITO_PROXY_PORT_MAX:
 
 # Альтернативный способ задать прокси — одна переменная PROXY_URL
 # Форматы: http://user:pass@host:port  /  socks5://user:pass@host:port  /  host:port
-PROXY_URL = os.getenv("PROXY_URL", "").strip()
+# В production осталась старая переменная PROXY_URL=mproxy.site, хотя актуальный
+# LTEspace уже записан в поставляемый .env. Для этого проекта локальная настройка
+# является источником истины и перекрывает устаревшую переменную контейнера.
+_ENV_FILE_PROXY_URL = str(dotenv_values(".env").get("PROXY_URL") or "").strip()
+PROXY_URL = (_ENV_FILE_PROXY_URL or os.getenv("PROXY_URL", "")).strip()
 _PROXY_URL_RAW = PROXY_URL
 # Не берём Railway-системный прокси (он не является резидентным)
 if _PROXY_URL_RAW and "__agentproxy" in _PROXY_URL_RAW:
@@ -155,30 +159,27 @@ def _mark_proxy_failed(err: str) -> None:
 
 
 def _startup_proxy_check() -> None:
-    """Лёгкая стартап-проверка: один HEAD-запрос через прокси к ipify.
-    Если прокси требует авторизацию (407) или недоступен — отключаем его."""
-    global _proxy_auth_failed
+    """Проверяет прокси через тот же curl_cffi, который используют парсеры.
+
+    Проверка никогда не переключает скрейпинг на IP VPS: краткий сбой во время
+    двухминутной ротации LTE-прокси не означает неверные реквизиты.
+    """
     if not AVITO_PROXIES or _proxy_auth_failed:
         return
     try:
-        import requests as _rq
-        px = _avito_proxies() or {}
-        r = _rq.head("https://api.ipify.org", proxies=px, timeout=8)
-        if r.status_code == 407:
-            print("[прокси-старт] ❌ 407 — отключаем прокси")
-            _proxy_auth_failed = True
-            return
-        if r.status_code in (200, 204, 301, 302):
+        from curl_cffi import requests as _cffi
+        r = _cffi.get(
+            "https://api.ipify.org",
+            proxies=_avito_proxies(),
+            impersonate="chrome120",
+            timeout=10,
+        )
+        if r.status_code == 200:
             print("[прокси-старт] ✅ прокси отвечает")
             return
         print(f"[прокси-старт] ⚠️ неожиданный статус {r.status_code}, но оставляем прокси")
     except Exception as e:
-        err = str(e).lower()
-        if "407" in err or "proxy authentication" in err or "tunnel" in err:
-            print(f"[прокси-старт] ❌ ошибка аутентификации: {str(e)[:80]} — отключаем прокси")
-            _proxy_auth_failed = True
-        else:
-            print(f"[прокси-старт] ⚠️ проверка прокси не удалась: {str(e)[:80]}")
+        print(f"[прокси-старт] ⚠️ проверка не удалась, прокси оставлен включённым: {str(e)[:100]}")
 
 
 def _fetch_with_retry(
@@ -4419,6 +4420,14 @@ _avito_loop: "_aio.AbstractEventLoop | None" = None
 _avito_loop_thread: "_threading.Thread | None" = None
 _avito_loop_lock = _threading.Lock()
 _avito_ready = _threading.Event()
+# LTEspace имеет общий канал: Авито и Auto.ru не должны одновременно открывать
+# тяжёлые страницы из разных executor-потоков.
+_PLATFORM_PROXY_LOCK = _threading.Lock()
+
+
+def _run_platform_scrape(fn):
+    with _PLATFORM_PROXY_LOCK:
+        return fn()
 _avito_async_context = None  # type: ignore
 _avito_async_sem: "_aio.Semaphore | None" = None  # ограничивает кол-во одновр. вкладок
 
@@ -7810,7 +7819,15 @@ def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max
 
     # ── Метод 1: API / мобильный сайт / cloudscraper ─────────────
     print(f"  [Авито] пробуем API-методы для {region}…")
-    api_results = _avito_api_fetch(region, pages, price_min, price_max, today, sort_by_date=sort_by_date, brand=brand)
+    # Мобильные API Авито на LTEspace стабильно отвечают 403/429 и только
+    # расходуют лимит перед HTML-выдачей. Используем их лишь без PROXY_URL.
+    api_results = (
+        _avito_api_fetch(
+            region, pages, price_min, price_max, today,
+            sort_by_date=sort_by_date, brand=brand,
+        )
+        if not PROXY_URL else []
+    )
     if api_results:
         print(f"  [Авито] API-метод дал {len(api_results)} объявлений")
         return api_results
@@ -8087,9 +8104,10 @@ def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max
             print(f"  [Авито] стр.{p}: {e}")
             return []
 
-    # Параллельно запрашиваем все страницы (5 потоков — лимит конкурентности ScraperAPI)
+    # На общем LTE-канале страницы идут строго последовательно. Пять параллельных
+    # запросов с одного IP мгновенно приводили к 429.
     results = []
-    with ThreadPoolExecutor(max_workers=5) as ex:
+    with ThreadPoolExecutor(max_workers=1 if PROXY_URL else 5) as ex:
         futs = {ex.submit(_fetch_page, p): p for p in range(1, pages + 1)}
         for fut in as_completed(futs):
             results.extend(fut.result())
@@ -12426,7 +12444,9 @@ def _scrape_avito_expanded(
     # Не создаём бессмысленно огромные сегменты для настройки «без верхней цены».
     effective_hi = min(hi, max(lo + 400_000, 20_000_000))
     span = effective_hi - lo
-    segment_count = 4 if span >= 100_000 else 2
+    # Один широкий сегмент и три последовательные страницы — безопасный режим
+    # для общего LTE-канала. Параллельные сегменты провоцировали HTTP 429.
+    segment_count = 1
     step = max(1, (span + segment_count - 1) // segment_count)
     segments: list[tuple[int, int]] = []
     start = lo
@@ -12442,7 +12462,7 @@ def _scrape_avito_expanded(
         try:
             batch = scrape_avito(
                 region,
-                pages=5,
+                pages=3,
                 price_min=seg_lo,
                 price_max=seg_hi,
                 sort_by_date=True,
@@ -12498,10 +12518,15 @@ async def do_search_for_user(uid: int, reply_to):
 
     scraper_map = {
         "drom":   lambda: scrape_drom(region, pages=15, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
-        "autoru": lambda: scrape_autoru(region, pages=8, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
-        "avito":  lambda: _scrape_avito_expanded(
-            region, pmin, pmax,
-            brand=(brand if brand and brand != "any" else ""),
+        "autoru": lambda: _run_platform_scrape(
+            lambda: scrape_autoru(region, pages=8, price_min=pmin, price_max=pmax,
+                                  brand=(brand if brand and brand != "any" else ""))
+        ),
+        "avito":  lambda: _run_platform_scrape(
+            lambda: _scrape_avito_expanded(
+                region, pmin, pmax,
+                brand=(brand if brand and brand != "any" else ""),
+            )
         ),
         "youla":  lambda: scrape_youla(region, pages=12, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
@@ -13933,6 +13958,13 @@ async def _global_monitor_loop():
             if not active_users:
                 continue
 
+            # Ручной поиск имеет приоритет над монитором. Иначе монитор по
+            # нескольким регионам занимает общий LTE-канал именно в тот момент,
+            # когда пользователь нажал «Найти авто», и Авито отвечает 429.
+            if any(time.time() - ts < 90 for ts in _last_search_at.values()):
+                print("  [глоб.монитор] ручной поиск активен — сетевой круг пропущен")
+                continue
+
             # Собираем все уникальные пары (регион, источник) нужные хоть одному пользователю
             needed: dict[str, set[str]] = {}  # region → set of sources
             for u in active_users:
@@ -13945,9 +13977,13 @@ async def _global_monitor_loop():
 
             # Скрейпим только нужные (регион, источник) параллельно
             _src_scrapers = {
-                "avito":  lambda r: scrape_avito(r, pages=3, sort_by_date=True),  # ⚡ свежие первыми
+                "avito":  lambda r: _run_platform_scrape(
+                    lambda: scrape_avito(r, pages=3, sort_by_date=True)
+                ),  # ⚡ свежие первыми
                 "drom":   lambda r: scrape_drom(r, pages=3, price_min=0, price_max=99_000_000),
-                "autoru": lambda r: scrape_autoru(r, pages=3, price_min=0, price_max=99_000_000),
+                "autoru": lambda r: _run_platform_scrape(
+                    lambda: scrape_autoru(r, pages=3, price_min=0, price_max=99_000_000)
+                ),
                 "youla":  lambda r: scrape_youla(r, pages=3, price_min=0, price_max=99_000_000),
                 "vk":     lambda r: scrape_vk_groups(r, 0, 99_000_000),
                 "tg":     lambda r: scrape_tg_channels(r, 0, 99_000_000),
@@ -14589,7 +14625,7 @@ async def main():
     dp.callback_query.middleware(SubscriptionMiddleware())
 
     print("✅ Авто-брокер бот запущен!")
-    print("  [ВЕРСИЯ] 2026-06-22-v18 :: subscription middleware")
+    print("  [ВЕРСИЯ] 2026-07-28-avito-lte-fix")
 
     # Лёгкая проверка прокси: если 407/403 — сразу отключаем, чтобы Авито/Auto.ru
     # шли напрямую и не ждали 3 повторных попытки на каждом запросе.
@@ -14661,9 +14697,13 @@ async def main():
         print("  [analytics] автосохранение статистики в PG запущено (раз в 3 мин)")
         loop.create_task(_tg_backup_loop())
         print("  [реестр] Telegram-бэкап статистики запущен (раз в 15 мин)")
-        # Прогрев кеша бесплатных прокси — тестирует их против Авито и кеширует рабочие
-        loop.create_task(_proxy_warmup_loop())
-        print("  [прокси-прогрев] запущен фоновый прогрев кеша прокси")
+        # При настроенном мобильном прокси бесплатные прокси не тестируем:
+        # прогрев создавал десятки параллельных запросов и провоцировал 429 Авито.
+        if not PROXY_URL:
+            loop.create_task(_proxy_warmup_loop())
+            print("  [прокси-прогрев] запущен фоновый прогрев кеша прокси")
+        else:
+            print("  [прокси-прогрев] отключён — используется PROXY_URL")
 
         # Уведомления об окончании тестового периода (за 3 и за 1 день)
         loop.create_task(_trial_notification_loop())
@@ -14689,8 +14729,11 @@ async def main():
         # (не прямой запрос к avito.ru), поэтому риска IP-блокировки нет. Благодаря
         # суточному кэшу один скрейп региона обслуживает всех пользователей — так
         # бот тянет 50-100 человек без вложений.
-        loop.create_task(_warmup_cache())
-        print("  [прогрев] фоновый прогрев кэша Авито запущен")
+        if not PROXY_URL:
+            loop.create_task(_warmup_cache())
+            print("  [прогрев] фоновый прогрев кэша Авито запущен")
+        else:
+            print("  [прогрев] отключён — LTE-канал оставлен для поиска пользователей")
 
         public_commands = [
             BotCommand(command="start",     description="🚀 Главное меню"),
