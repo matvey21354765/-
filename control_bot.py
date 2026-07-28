@@ -74,6 +74,7 @@ _working_free_proxies_time: float = 0.0
 # ── Резидентный прокси для запросов к Авито (опционально) ────────
 # Поддерживает HTTP и SOCKS5. AVITO_PROXY_AUTH=ip — авторизация по IP (без логина).
 # Можно задать через PROXY_URL=http://user:pass@host:port (удобнее для большинства провайдеров)
+# Важно: PROXY_URL имеет приоритет над AVITO_PROXY_* — достаточно задать одну переменную.
 AVITO_PROXY_HOST = os.getenv("AVITO_PROXY_HOST", "")
 AVITO_PROXY_PORT = os.getenv("AVITO_PROXY_PORT", "")
 AVITO_PROXY_USER = os.getenv("AVITO_PROXY_USER", "")
@@ -103,7 +104,8 @@ _PROXY_URL_RAW = (
 if _PROXY_URL_RAW and "__agentproxy" in _PROXY_URL_RAW:
     _PROXY_URL_RAW = ""
 
-if _PROXY_URL_RAW and not AVITO_PROXY_HOST:
+# Если задан PROXY_URL — он имеет приоритет над поштучными AVITO_PROXY_*.
+if _PROXY_URL_RAW:
     import urllib.parse as _up
     try:
         _pu = _up.urlparse(_PROXY_URL_RAW if "://" in _PROXY_URL_RAW else "http://" + _PROXY_URL_RAW)
@@ -115,7 +117,6 @@ if _PROXY_URL_RAW and not AVITO_PROXY_HOST:
             AVITO_PROXY_PROTOCOL = (_pu.scheme or "http").lower()
     except Exception:
         pass
-
 
 # Флаг: прокси вернул 407 (неверная авторизация) — автоматически отключаем
 _proxy_auth_failed: bool = False
@@ -8596,7 +8597,16 @@ async def cmd_start(msg: Message, state: FSMContext):
     s = load_settings(msg.from_user.id)
     name = msg.from_user.first_name or "друг"
     is_new_user = not s.get("region")
-    _subscription_line = _subscription_badge(msg.from_user.id)
+    if is_new_user:
+        # Фиксируем trial_start сразу, чтобы бейдж считал свежие 7 дней
+        _register_user(msg.from_user.id, msg.from_user.username, False)
+        _subscription_line = (
+            "🎁 *Тестовый период активирован*\n"
+            "⏳ Осталось 7 из 7 дней\n"
+            "🟢🟢🟢🟢🟢🟢🟢"
+        )
+    else:
+        _subscription_line = _subscription_badge(msg.from_user.id)
 
     if is_new_user:
         # Новый пользователь — красивое приветствие
@@ -11769,7 +11779,11 @@ def _subscription_badge(uid: int, html: bool = False) -> str:
     info = _subscription_info(uid)
     b, e = ("<b>", "</b>") if html else ("*", "*")
     if info["ended"]:
-        return f"⏳ {b}Подписка завершена{e}\nОформите подписку, чтобы продолжить поиск."
+        return (
+            "⏳ *Подписка завершена*\n"
+            "Оформите подписку: /subscribe\n"
+            "Или активируйте промокод: /promo КОД"
+        )
     total = max(1, info["total_days"])
     left = max(0, info["days_left"])
     # Один сегмент = один день, но не больше 10, чтобы не растягивалась строка

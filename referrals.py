@@ -30,6 +30,12 @@ _DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 _DB_URL = os.getenv("DATABASE_URL", "")
 
+# Нормализация asyncpg/aiosqlite DSN для синхронных драйверов.
+if _DB_URL.startswith("sqlite+aiosqlite://"):
+    _DB_URL = _DB_URL.replace("sqlite+aiosqlite://", "sqlite://", 1)
+elif _DB_URL.startswith("postgresql+asyncpg://"):
+    _DB_URL = _DB_URL.replace("postgresql+asyncpg://", "postgresql://", 1)
+
 # Поддержка SQLite через DATABASE_URL=sqlite://:memory: или sqlite:///path
 # Если DATABASE_URL не задан — используем файл в data/ (fallback, не JSON).
 if _DB_URL.startswith("sqlite://"):
