@@ -139,12 +139,40 @@ def _avito_proxies() -> "dict[str, str] | None":
 
 
 def _mark_proxy_failed(err: str) -> None:
-    """Помечаем прокси как сломанный при ошибке 407."""
+    """Помечаем прокси как сломанный при ошибке 407/403/аутентификации."""
     global _proxy_auth_failed
-    if "407" in err or "Proxy Authentication Required" in err or "Tunnel connection failed" in err:
+    e = str(err).lower()
+    if any(s in e for s in ("407", "proxy authentication required", "proxy authentication", "tunnel connection failed", "forbidden")):
         if not _proxy_auth_failed:
             _proxy_auth_failed = True
-            print("[прокси] ⚠️ Прокси вернул 407 — переключаемся на прямое соединение")
+            print("[прокси] ⚠️ Прокси вернул ошибку аутентификации/доступа — переключаемся на прямое соединение")
+
+
+def _startup_proxy_check() -> None:
+    """Лёгкая стартап-проверка: один HEAD-запрос через прокси к ipify.
+    Если прокси требует авторизацию (407) или недоступен — отключаем его."""
+    global _proxy_auth_failed
+    if not AVITO_PROXIES or _proxy_auth_failed:
+        return
+    try:
+        import requests as _rq
+        px = _avito_proxies() or {}
+        r = _rq.head("https://api.ipify.org", proxies=px, timeout=8)
+        if r.status_code == 407:
+            print("[прокси-старт] ❌ 407 — отключаем прокси")
+            _proxy_auth_failed = True
+            return
+        if r.status_code in (200, 204, 301, 302):
+            print("[прокси-старт] ✅ прокси отвечает")
+            return
+        print(f"[прокси-старт] ⚠️ неожиданный статус {r.status_code}, но оставляем прокси")
+    except Exception as e:
+        err = str(e).lower()
+        if "407" in err or "proxy authentication" in err or "tunnel" in err:
+            print(f"[прокси-старт] ❌ ошибка аутентификации: {str(e)[:80]} — отключаем прокси")
+            _proxy_auth_failed = True
+        else:
+            print(f"[прокси-старт] ⚠️ проверка прокси не удалась: {str(e)[:80]}")
 
 
 def _fetch_with_retry(
@@ -156,25 +184,29 @@ def _fetch_with_retry(
     proxies: dict | None = None,
     timeout: int = 8,
     retries: int = 3,
-    impersonate: str = "chrome120",
+    impersonate: str | None = "chrome120",
 ):
     """Универсальный HTTP-запрос через curl_cffi с retry и TLS-отпечатком."""
     from curl_cffi import requests as _cffi
+    _proxy, _proxy_auth = _prepare_curl_cffi_proxy(proxies or _avito_proxies() or None)
     last_err = None
     for attempt in range(1, retries + 1):
         try:
             if method.upper() == "GET":
-                r = _cffi.get(url, params=params, headers=headers, impersonate=impersonate, timeout=timeout, proxies=proxies)
+                r = _cffi.get(url, params=params, headers=headers, impersonate=impersonate, timeout=timeout, proxy=_proxy.get("all") if _proxy else None, proxy_auth=_proxy_auth)
             else:
-                r = _cffi.post(url, json=json, headers=headers, impersonate=impersonate, timeout=timeout, proxies=proxies)
-            if r.status_code in (429, 439, 503, 502):
+                r = _cffi.post(url, json=json, headers=headers, impersonate=impersonate, timeout=timeout, proxy=_proxy.get("all") if _proxy else None, proxy_auth=_proxy_auth)
+            if r.status_code in (429, 439, 503, 502, 407, 403):
                 last_err = f"HTTP {r.status_code}"
                 print(f"  [fetch] {url[:60]} → {last_err} (попытка {attempt}/{retries})")
+                if r.status_code == 407:
+                    _mark_proxy_failed(last_err)
                 time.sleep(3)
                 continue
             return r
         except Exception as e:
             last_err = str(e)[:120]
+            _mark_proxy_failed(last_err)
             print(f"  [fetch] {url[:60]} → {last_err} (попытка {attempt}/{retries})")
             time.sleep(3)
     raise Exception(f"Failed after {retries} attempts: {last_err}")
@@ -241,7 +273,7 @@ def _rotate_proxy_ip(min_interval: float = 50.0, force: bool = False) -> bool:
     """Меняет IP мобильного прокси через ссылку ротации. Возвращает True при успехе.
     Защита: не чаще раза в min_interval секунд (ротация имеет лимиты у провайдера).
     force=True — игнорирует интервал (для критичного обхода капчи Auto.ru)."""
-    global _last_ip_rotate_ts
+    global _last_ip_rotate_ts, AVITO_PROXY_ROTATE_URL
     if not AVITO_PROXY_ROTATE_URL:
         return False
     import time as _t
@@ -253,7 +285,13 @@ def _rotate_proxy_ip(min_interval: float = 50.0, force: bool = False) -> bool:
         import requests as _rq
         r = _rq.get(AVITO_PROXY_ROTATE_URL, timeout=15)
         ok = r.status_code == 200
+        txt = r.text.lower()
         print(f"[прокси] ротация IP: HTTP {r.status_code} {'✅' if ok else '❌'} {r.text[:80]!r}")
+        # Если провайдер отвечает, что прокси не существует — ссылка невалидна, отключаем.
+        if not ok or "does not exists" in txt or "not exists" in txt or ("error" in txt and "ok" not in txt):
+            AVITO_PROXY_ROTATE_URL = ""
+            print("[прокси] ⚠️ ссылка ротации не рабочая — отключена")
+            return False
         if ok:
             _t.sleep(2)  # даём прокси применить новый IP
         return ok
@@ -262,9 +300,31 @@ def _rotate_proxy_ip(min_interval: float = 50.0, force: bool = False) -> bool:
         return False
 
 
+def _prepare_curl_cffi_proxy(proxies: dict | None) -> tuple[dict | None, tuple[str, str] | None]:
+    """Разбивает requests-стиль {http, https: url} на proxy_url + proxy_auth для curl_cffi."""
+    if not proxies:
+        return None, None
+    proxy_url = proxies.get("https") or proxies.get("http") or proxies.get("all")
+    if not proxy_url:
+        return proxies, None
+    try:
+        import urllib.parse as _up
+        p = _up.urlparse(proxy_url)
+        if p.username and p.password:
+            scheme = p.scheme or "http"
+            host = p.hostname
+            port = p.port
+            netloc = f"{host}:{port}" if port else host
+            clean = f"{scheme}://{netloc}"
+            return {"all": clean}, (p.username, p.password)
+    except Exception:
+        pass
+    return proxies, None
+
+
 def _curl_cffi_get(url: str, params: dict | None = None, headers: dict | None = None,
                    proxies: dict | None = None, timeout: float = 14.0,
-                   retries: int = 3) -> "object | None":
+                   retries: int = 3, impersonate: str = "chrome120") -> "object | None":
     """GET через curl_cffi с имитацией Chrome и повторными попытками.
 
     Повторяет запрос до `retries` раз при HTTP 429/439, таймаутах и сетевых
@@ -276,7 +336,8 @@ def _curl_cffi_get(url: str, params: dict | None = None, headers: dict | None = 
     except ImportError:
         return None
 
-    _proxies = proxies or AVITO_PROXIES or {}
+    _proxy, _proxy_auth = _prepare_curl_cffi_proxy(proxies or _avito_proxies() or None)
+    _proxy_url = _proxy.get("all") if _proxy else None
     _headers = {
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8",
@@ -293,12 +354,13 @@ def _curl_cffi_get(url: str, params: dict | None = None, headers: dict | None = 
     last_exc = None
     for attempt in range(1, retries + 1):
         try:
-            sess = cffi_req.Session(impersonate="chrome120")
-            if _proxies:
-                sess.proxies = _proxies
+            sess = cffi_req.Session(impersonate=impersonate, proxy=_proxy_url, proxy_auth=_proxy_auth)
             r = sess.get(url, params=params, headers=_headers, timeout=timeout)
-            if r.status_code in (429, 439):
+            if r.status_code in (429, 439, 407, 403):
                 print(f"  [curl_cffi] {url}: HTTP {r.status_code} (попытка {attempt}/{retries}), ждём 3с...")
+                if r.status_code == 407:
+                    _mark_proxy_failed("407")
+                    break
                 import time as _t
                 _t.sleep(3)
                 continue
@@ -306,8 +368,11 @@ def _curl_cffi_get(url: str, params: dict | None = None, headers: dict | None = 
         except Exception as e:
             last_exc = e
             err = str(e).lower()
-            if any(x in err for x in ("timeout", "timed out", "429", "439", "connection", "connect")):
+            if any(x in err for x in ("timeout", "timed out", "429", "439", "connection", "connect", "407", "proxy authentication", "tunnel")):
                 print(f"  [curl_cffi] {url}: сетевая ошибка (попытка {attempt}/{retries}): {str(e)[:80]}")
+                if "407" in err or "proxy authentication" in err or "tunnel" in err:
+                    _mark_proxy_failed(str(e))
+                    break
                 import time as _t
                 _t.sleep(3)
                 continue
@@ -5831,6 +5896,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                 "https://m.avito.ru/api/13/items",
                 params=_mob_params, headers=_mob_hdrs, timeout=8,
                 proxies=_avito_proxies(),
+                impersonate=None,
             )
             print(f"  [Авито mobileAPI0 прокси] HTTP {_r_mob.status_code}, {len(_r_mob.text):,}б")
             if _r_mob.status_code == 200:
@@ -5892,6 +5958,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                              "Accept": "application/json", "Accept-Language": "ru-RU,ru;q=0.9"},
                     timeout=8,
                     proxies=_avito_proxies(),
+                    impersonate=None,
                 )
                 print(f"  [Авито {_alt_ver}] HTTP {_alt_r.status_code}, {len(_alt_r.text):,}б")
                 if _alt_r.status_code == 200:
@@ -5953,7 +6020,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         ]
         for url, params in urls_to_try:
             try:
-                r = _fetch_with_retry(url, params=params, headers=mobile_headers, timeout=8, proxies=_avito_proxies())
+                r = _fetch_with_retry(url, params=params, headers=mobile_headers, timeout=8, proxies=_avito_proxies(), impersonate=None)
                 print(f"  [Авито m.] {url} стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
                 if r.status_code == 200 and ('"urlPath"' in r.text or 'data-marker="item"' in r.text or '__NEXT_DATA__' in r.text):
                     result = _parse_avito_html(r.text, slug, today)
@@ -14389,6 +14456,13 @@ async def main():
 
     print("✅ Авто-брокер бот запущен!")
     print("  [ВЕРСИЯ] 2026-06-22-v18 :: subscription middleware")
+
+    # Лёгкая проверка прокси: если 407/403 — сразу отключаем, чтобы Авито/Auto.ru
+    # шли напрямую и не ждали 3 повторных попытки на каждом запросе.
+    try:
+        await loop.run_in_executor(None, _startup_proxy_check)
+    except Exception as e:
+        print(f"  [main] _startup_proxy_check: {e}")
 
     # ── Стартап-тесты (прокси/Авито/поисковики) ──────────────────────────────
     # Тяжёлые сетевые вызовы; при недоступном Railway IP они падают по таймауту
