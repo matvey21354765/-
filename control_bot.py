@@ -2154,6 +2154,35 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
             results.extend(_warm_items)
 
     if results:
+        # Первая HTML-страница Auto.ru содержит около 35 карточек. Раньше здесь
+        # был ранний return, поэтому параметр pages фактически игнорировался.
+        seen_auto = {_listing_key(i.get("url", "")) or i.get("url", "") for i in results}
+        for page_no in range(2, min(max(1, pages), 3) + 1):
+            page_url = _ar_base_url + f"&page={page_no}&sort=fresh_relevance_1-desc"
+            try:
+                page_resp = _curl_cffi_get(
+                    page_url,
+                    impersonate="chrome120",
+                    timeout=10,
+                    headers={
+                        "Accept-Language": "ru-RU,ru;q=0.9",
+                        "Referer": _ar_base_url,
+                    },
+                    proxies=_avito_proxies() or {},
+                )
+                if not page_resp or page_resp.status_code != 200:
+                    continue
+                page_items = _autoru_parse_html(page_resp.text, today)
+                added = 0
+                for item in page_items:
+                    item_id = _listing_key(item.get("url", "")) or item.get("url", "")
+                    if item_id and item_id not in seen_auto:
+                        seen_auto.add(item_id)
+                        results.append(item)
+                        added += 1
+                print(f"  [Auto.ru] стр.{page_no}: +{added}, всего {len(results)}")
+            except Exception as exc:
+                print(f"  [Auto.ru] стр.{page_no}: {str(exc)[:100]}")
         return results
     # ВАЖНО: даже если прогрев поймал капчу — НЕ выходим. AJAX-методы (мобильный
     # API + desktop AJAX через прокси) часто работают, когда HTML-страница
@@ -3577,7 +3606,7 @@ def scrape_youla(region: str, pages: int = 4, price_min: int = 0,
     try:
         import requests as _req
     except ImportError:
-        return []
+        from curl_cffi import requests as _req
     coords = YOULA_COORDS.get(region)
     if not coords:
         return []
@@ -5854,7 +5883,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
     try:
         import requests as _req
     except ImportError:
-        return []
+        from curl_cffi import requests as _req
 
     slug = AVITO_SLUGS.get(region, region)
     location_id = _avito_region_loc(region)
@@ -5901,7 +5930,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
     # ── Метод 0: Официальный мобильный JSON API (m.avito.ru/api/13/items) ──────
     # С российским мобильным IP (Megafone/MTS) работает без авторизации и OAuth.
     # Возвращает структурированный JSON — не нужно парсить HTML.
-    if AVITO_PROXIES:
+    if AVITO_PROXIES and not PROXY_URL:
         _key = "af0deccbgcgidddjgnvljitntccdduijhdinfgjgfjir"
         _mob_params: dict = {
             "key": _key,
@@ -7066,7 +7095,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         try:
             import requests as _rq
         except ImportError:
-            return []
+            from curl_cffi import requests as _rq
 
         slug_ru_name = {
             "ekaterinburg": "Екатеринбург", "moskva": "Москва", "spb": "Санкт-Петербург",
@@ -7100,6 +7129,10 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                 if clean.endswith("&Amp") or clean.endswith("&amp"):
                     clean = clean[:-4].rstrip("/")
                 if slug and f"/{slug}/" not in clean:
+                    return
+                # Ссылки вида model-ASgBAg... — страницы фильтров/категорий,
+                # а не объявления. В выдачу допускаем только URL с ID карточки.
+                if "-ASg" in clean or not re.search(r"\d{6,}$", clean):
                     return
                 if clean not in seen:
                     seen.add(clean)
@@ -7357,8 +7390,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         # curl_cffi с chrome120 — главный рабочий метод: имитирует реальный
         # Chrome/TLS и обходит 429/439 через повторные попытки. HTML/Playwright
         # методы выброшены: они медленные и детектятся Авито как бот.
-        _p1_methods = [_try_cffi_web, _try_avito_web_json, _try_avito_mobile_api,
-                       _try_avito_json_api, _try_avito_xhr]
+        _p1_methods = [_try_cffi_web, _try_web_html, _try_yandex_snippets]
         # Доп. страницы добавим тем же методом что сработал
         tasks = [(m, 1) for m in _p1_methods]
         _cap = 300
@@ -7819,14 +7851,11 @@ def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max
 
     # ── Метод 1: API / мобильный сайт / cloudscraper ─────────────
     print(f"  [Авито] пробуем API-методы для {region}…")
-    # Мобильные API Авито на LTEspace стабильно отвечают 403/429 и только
-    # расходуют лимит перед HTML-выдачей. Используем их лишь без PROXY_URL.
-    api_results = (
-        _avito_api_fetch(
-            region, pages, price_min, price_max, today,
-            sort_by_date=sort_by_date, brand=brand,
-        )
-        if not PROXY_URL else []
+    # Сначала независимый fallback поисковых индексов, затем API/HTML методы.
+    # Это позволяет находить ссылки Авито даже при HTTP 429 на текущем LTE-IP.
+    api_results = _avito_api_fetch(
+        region, pages, price_min, price_max, today,
+        sort_by_date=sort_by_date, brand=brand,
     )
     if api_results:
         print(f"  [Авито] API-метод дал {len(api_results)} объявлений")
@@ -14625,7 +14654,7 @@ async def main():
     dp.callback_query.middleware(SubscriptionMiddleware())
 
     print("✅ Авто-брокер бот запущен!")
-    print("  [ВЕРСИЯ] 2026-07-28-avito-lte-fix")
+    print("  [ВЕРСИЯ] 2026-07-28-avito-autoru-pagination-fix")
 
     # Лёгкая проверка прокси: если 407/403 — сразу отключаем, чтобы Авито/Auto.ru
     # шли напрямую и не ждали 3 повторных попытки на каждом запросе.
