@@ -23,7 +23,7 @@ from pathlib import Path
 import os
 import tempfile
 
-from dotenv import dotenv_values, load_dotenv
+from dotenv import load_dotenv
 load_dotenv()
 
 from aiogram import Bot, Dispatcher, F
@@ -134,11 +134,7 @@ if AVITO_PROXY_PORT_MIN and AVITO_PROXY_PORT_MAX:
 
 # Альтернативный способ задать прокси — одна переменная PROXY_URL
 # Форматы: http://user:pass@host:port  /  socks5://user:pass@host:port  /  host:port
-# В production осталась старая переменная PROXY_URL=mproxy.site, хотя актуальный
-# LTEspace уже записан в поставляемый .env. Для этого проекта локальная настройка
-# является источником истины и перекрывает устаревшую переменную контейнера.
-_ENV_FILE_PROXY_URL = str(dotenv_values(".env").get("PROXY_URL") or "").strip()
-PROXY_URL = (_ENV_FILE_PROXY_URL or os.getenv("PROXY_URL", "")).strip()
+PROXY_URL = os.getenv("PROXY_URL", "").strip()
 PROXY_ROTATE_URL = os.getenv("PROXY_ROTATE_URL", "").strip()
 _PROXY_URL_RAW = PROXY_URL
 # Не берём Railway-системный прокси (он не является резидентным)
@@ -174,7 +170,163 @@ _AVITO_LAST_DIAG: dict = {
 _AVITO_ROTATION_LOCK = asyncio.Lock()
 _AVITO_SEARCH_LOCK = asyncio.Lock()
 _AVITO_LAST_ROTATION_AT = 0.0
-_AVITO_CFFI_SESSION = None
+
+
+class AvitoClient:
+    """Единый сетевой клиент Авито с одной curl_cffi Session и только PROXY_URL."""
+
+    def __init__(self, proxy_url: str, impersonate: str = "chrome120"):
+        self._proxy_url = (proxy_url or "").strip()
+        self._impersonate = impersonate
+        self._session = None
+
+    @property
+    def proxies(self) -> dict[str, str]:
+        if not self._proxy_url:
+            raise RuntimeError("PROXY_URL не задан; прямой запрос Авито запрещён")
+        return {"http": self._proxy_url, "https": self._proxy_url}
+
+    def _get_session(self):
+        from curl_cffi import requests as cffi_requests
+        if self._session is None:
+            self._session = cffi_requests.Session(impersonate=self._impersonate)
+        return self._session
+
+    def reset_session(self) -> None:
+        """Закрывает cookies/соединения старого IP; новая Session создаётся лениво."""
+        session = self._session
+        self._session = None
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
+
+    def request(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: dict | None = None,
+        headers: dict | None = None,
+        json_body: dict | None = None,
+        timeout: float = 15,
+    ):
+        started = time.monotonic()
+        try:
+            session = self._get_session()
+            response = session.request(
+                method.upper(),
+                url,
+                params=params,
+                headers=headers,
+                json=json_body,
+                timeout=timeout,
+                proxies=self.proxies,
+            )
+            elapsed = time.monotonic() - started
+            reason = "ok"
+            if response.status_code == 429:
+                reason = "IP ограничен Авито; дополнительные попытки остановлены"
+            elif response.status_code == 403:
+                reason = "доступ запрещён"
+            elif response.status_code >= 400:
+                reason = f"HTTP {response.status_code}"
+            _avito_diag(
+                "HTTP",
+                response.status_code,
+                время=f"{elapsed:.2f}с",
+                причина=reason,
+            )
+            _AVITO_LAST_DIAG["request_seconds"] = elapsed
+            if _avito_response_is_ip_block(response.status_code, response.text):
+                _AVITO_LAST_DIAG["ip_blocked"] = True
+                _AVITO_LAST_DIAG["reason"] = reason
+            return response
+        except Exception as exc:
+            elapsed = time.monotonic() - started
+            reason = f"{type(exc).__name__}: {str(exc)[:160]}"
+            _AVITO_LAST_DIAG.update({
+                "http": None,
+                "request_seconds": elapsed,
+                "reason": reason,
+            })
+            _avito_diag("HTTP", "ошибка", время=f"{elapsed:.2f}с", причина=reason)
+            raise
+
+    def get(self, url: str, **kwargs):
+        return self.request("GET", url, **kwargs)
+
+
+AVITO_CLIENT = AvitoClient(PROXY_URL)
+
+
+def diagnose_avito_network(
+    region: str = "chelyabinsk",
+    price_max: int = 100_000,
+) -> dict:
+    """Два диагностических GET: внешний IP и одна выдача Авито, без fallback."""
+    AVITO_CLIENT.reset_session()
+    report = {
+        "ip_http": None,
+        "ip_seconds": None,
+        "avito_http": None,
+        "avito_seconds": None,
+        "cards": 0,
+        "reason": "",
+    }
+    try:
+        ip_response = AVITO_CLIENT.get(
+            "https://api.ipify.org?format=json",
+            timeout=15,
+        )
+        report["ip_http"] = ip_response.status_code
+        report["ip_seconds"] = _AVITO_LAST_DIAG.get("request_seconds")
+    except Exception as exc:
+        report["reason"] = f"проверка прокси: {type(exc).__name__}"
+        return report
+
+    slug = AVITO_SLUGS.get(region, region) if "AVITO_SLUGS" in globals() else region
+    avito_url = (
+        f"https://www.avito.ru/{slug}/avtomobili"
+        f"?seller_type=1&pmax={int(price_max)}&s=104"
+    )
+    try:
+        response = AVITO_CLIENT.get(avito_url, timeout=20)
+        report["avito_http"] = response.status_code
+        report["avito_seconds"] = _AVITO_LAST_DIAG.get("request_seconds")
+        if response.status_code == 200:
+            text = response.text or ""
+            report["cards"] = max(
+                text.count('data-marker="item"'),
+                text.count('"urlPath"'),
+            )
+        elif response.status_code == 429:
+            report["reason"] = "IP ограничен Авито"
+        else:
+            report["reason"] = f"HTTP {response.status_code}"
+    except Exception as exc:
+        report["reason"] = f"{type(exc).__name__}: {str(exc)[:120]}"
+    print(
+        "AVITO DIAG: "
+        f"proxy_http={report['ip_http']} "
+        f"proxy_time={report['ip_seconds']:.2f}s "
+        if report["ip_seconds"] is not None else "AVITO DIAG: proxy_time=n/a ",
+        end="",
+        flush=True,
+    )
+    print(
+        f"avito_http={report['avito_http']} "
+        f"avito_time={report['avito_seconds']:.2f}s "
+        if report["avito_seconds"] is not None else "avito_time=n/a ",
+        end="",
+        flush=True,
+    )
+    print(
+        f"cards={report['cards']} reason={report['reason'] or 'ok'}",
+        flush=True,
+    )
+    return report
 
 
 def _avito_diag(stage: str, value, **extra) -> None:
@@ -210,14 +362,7 @@ def _avito_response_is_ip_block(status: int, text: str) -> bool:
 
 def _reset_avito_cffi_session() -> None:
     """Закрывает только curl_cffi-сессию Авито; другие источники не затрагивает."""
-    global _AVITO_CFFI_SESSION
-    old_session = _AVITO_CFFI_SESSION
-    _AVITO_CFFI_SESSION = None
-    if old_session is not None:
-        try:
-            old_session.close()
-        except Exception:
-            pass
+    AVITO_CLIENT.reset_session()
 
 
 def _call_proxy_rotate_url() -> bool:
@@ -323,6 +468,17 @@ def _fetch_with_retry(
     impersonate: str | None = "chrome120",
 ):
     """Универсальный HTTP-запрос через curl_cffi с retry и TLS-отпечатком."""
+    if "avito.ru" in url:
+        # Авито: ровно одна сетевая попытка. При 429 вызывающий код завершает
+        # ветку площадки; другие прокси и прямой IP запрещены.
+        return AVITO_CLIENT.request(
+            method,
+            url,
+            params=params,
+            headers=headers,
+            json_body=json,
+            timeout=timeout,
+        )
     from curl_cffi import requests as _cffi
     request_proxies = proxies or _avito_proxies() or None
     last_err = None
@@ -477,6 +633,13 @@ def _curl_cffi_get(url: str, params: dict | None = None, headers: dict | None = 
     ошибках, делая паузу 3 сек между попытками (время переподключения
     мобильного прокси LTEspace).
     """
+    if "avito.ru" in url:
+        return AVITO_CLIENT.get(
+            url,
+            params=params,
+            headers=headers,
+            timeout=timeout,
+        )
     try:
         from curl_cffi import requests as cffi_req
     except ImportError:
@@ -496,18 +659,12 @@ def _curl_cffi_get(url: str, params: dict | None = None, headers: dict | None = 
     if headers:
         _headers.update(headers)
 
-    global _AVITO_CFFI_SESSION
     last_exc = None
     last_response = None
     is_avito = "avito.ru" in url
     for attempt in range(1, retries + 1):
         try:
-            if is_avito:
-                if _AVITO_CFFI_SESSION is None:
-                    _AVITO_CFFI_SESSION = cffi_req.Session(impersonate=impersonate)
-                sess = _AVITO_CFFI_SESSION
-            else:
-                sess = cffi_req.Session(impersonate=impersonate)
+            sess = cffi_req.Session(impersonate=impersonate)
             r = sess.get(
                 url, params=params, headers=_headers, timeout=timeout,
                 proxies=request_proxies,
@@ -7634,6 +7791,12 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                         merged[u] = it
                 print(f"  [Авито] {_m_seq.__name__} стр.1: {len(_seq_res)} объявлений ✅")
                 break
+            if _AVITO_LAST_DIAG.get("http") == 429:
+                _avito_diag(
+                    "причина",
+                    "HTTP 429: сетевой цикл Авито остановлен без других endpoint",
+                )
+                return []
         # Если нашли рабочий метод — докачиваем стр. 2-4 через него же
         if _working_proxy_method and _working_proxy_method not in (_try_yandex_snippets, _try_free_proxies):
             for _extra_p in [2, 3, 4]:
@@ -8104,6 +8267,12 @@ def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max
     if api_results:
         print(f"  [Авито] API-метод дал {len(api_results)} объявлений")
         return api_results
+    if _AVITO_LAST_DIAG.get("http") == 429:
+        _avito_diag(
+            "причина",
+            "HTTP 429: HTML-страницы и fallback Авито не запускались",
+        )
+        return []
     # API-методы не дали результатов — пробуем прямой HTML-скрейпинг (методы 2-3)
     print(f"  [Авито] API дал 0 — пробуем HTML-скрейпинг…")
 
