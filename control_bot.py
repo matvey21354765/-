@@ -707,6 +707,9 @@ def _get_or_create_referral(uid: int) -> dict:
 
 def _record_referral(new_uid: int, inviter_uid: int) -> dict:
     """Records that new_uid was invited by inviter_uid (wrapper for referrals module)."""
+    # Инициализация идемпотентна и гарантирует, что referral deep-link работает
+    # даже если пользователь пришёл сразу после холодного старта VPS.
+    referrals.init_referrals_db()
     res = referrals.attach_referrer(new_uid, inviter_uid, "ref")
     status = referrals.get_referral_status(inviter_uid)
     return {
@@ -1413,12 +1416,20 @@ def _sort_by_deal(items: list[dict]) -> list[dict]:
       Tier 10 — уже просмотрено
     Внутри Tier 0/1 сначала самые выгодные, затем дольше висящие/срочные.
     """
+    def _age_days(x) -> int:
+        """Возраст объявления; 0 (сегодня) нельзя подменять значением fallback."""
+        raw = x.get("_days_on_site")
+        try:
+            return max(0, int(raw)) if raw is not None else 999
+        except (TypeError, ValueError):
+            return 999
+
     def _tier(x) -> int:
         if x.get("_already_seen"):
             return 10
         pct = x.get("_savings_pct", 0) or 0
         if pct > 0:
-            days = x.get("_days_on_site", 999) or 999
+            days = _age_days(x)
             return 0 if days <= 3 else 1
         if x.get("_price_int", 0) > 0:
             return 2
@@ -1427,7 +1438,7 @@ def _sort_by_deal(items: list[dict]) -> list[dict]:
     def _fresh_tier(x) -> int:
         """Внутри Tier 0 свежие идут первыми: 0 — сегодня/вчера, 1 — до 3 дн,
         2 — до 7 дн, 3 — старше."""
-        days = x.get("_days_on_site", 999) or 999
+        days = _age_days(x)
         if days <= 1:
             return 0
         if days <= 3:
@@ -1463,7 +1474,7 @@ def _sort_by_deal(items: list[dict]) -> list[dict]:
 
     def _secondary(x) -> float:
         """Тайбрейкер при одинаковой скидке: дольше висит + срочность."""
-        days = x.get("_days_on_site", 0) or 0
+        days = _age_days(x)
         pct = x.get("_savings_pct", 0) or 0
         hot = 10.0 if (x.get("_deal_score", 0) - pct * 3) > 10 else 0.0
         return min(days, 90) * 0.5 + hot
@@ -1479,7 +1490,7 @@ def _sort_by_deal(items: list[dict]) -> list[dict]:
         rub_bonus = 0.0
         if market and price and market > price:
             rub_bonus = min((market - price) / 25_000.0, 25.0)
-        days = x.get("_days_on_site", 0) or 0
+        days = _age_days(x)
         fresh_bonus = 20.0 if days <= 1 else (10.0 if days <= 3 else (3.0 if days <= 7 else 0.0))
         if x.get("_is_junk"):
             rub_bonus = fresh_bonus = 0.0
@@ -1498,10 +1509,15 @@ def _sort_by_deal(items: list[dict]) -> list[dict]:
             print(f"  [сортировка] убрано без фото: {_dropped}, осталось {len(_with_photo)}")
         items = _with_photo
 
+    # Главный критерий — свежесть. Пользователь должен успеть связаться с
+    # продавцом раньше остальных; выгода и качество карточки решают только
+    # порядок объявлений одинакового возраста.
     items.sort(key=lambda x: (
+        1 if x.get("_already_seen") else 0,
+        1 if x.get("_is_junk") else 0,
+        _age_days(x),
         _tier(x),
         _no_photo(x),
-        _fresh_tier(x) if _tier(x) in (0, 1) else 0,
         -round(_deal_rank(x), 1),
         -_secondary(x),
     ))
@@ -8693,7 +8709,8 @@ async def cmd_start(msg: Message, state: FSMContext):
                     # пользователей, пришедших по реферальной ссылке.
             except Exception:
                 pass
-    _get_or_create_referral(msg.from_user.id)
+    # Источник истины реферальной системы — referrals.py/БД. Старый JSON-реестр
+    # здесь не создаём: две независимые записи приводили к разным счётчикам.
     s = load_settings(msg.from_user.id)
     name = msg.from_user.first_name or "друг"
     is_new_user = not s.get("region")
@@ -12390,6 +12407,64 @@ async def send_batch(chat_id: int, uid: int, offset: int):
     save_seen(uid, seen)
 
 
+def _scrape_avito_expanded(
+    region: str,
+    price_min: int,
+    price_max: int,
+    brand: str = "",
+) -> list[dict]:
+    """Собирает несколько ценовых сегментов Авито и объединяет их по ID.
+
+    Авито часто ограничивает широкую выдачу одной пачкой примерно из 25 карточек,
+    даже при запросе нескольких страниц. Непересекающиеся ценовые сегменты дают
+    больше реальных объявлений и сохраняют серверную сортировку по свежести.
+    """
+    lo = max(0, int(price_min or 0))
+    hi = int(price_max or 99_000_000)
+    if hi <= lo:
+        hi = lo + 100_000
+    # Не создаём бессмысленно огромные сегменты для настройки «без верхней цены».
+    effective_hi = min(hi, max(lo + 400_000, 20_000_000))
+    span = effective_hi - lo
+    segment_count = 4 if span >= 100_000 else 2
+    step = max(1, (span + segment_count - 1) // segment_count)
+    segments: list[tuple[int, int]] = []
+    start = lo
+    while start < effective_hi:
+        end = min(effective_hi, start + step)
+        segments.append((start, end))
+        start = end + 1
+    if hi > effective_hi:
+        segments.append((effective_hi + 1, hi))
+
+    merged: dict[str, dict] = {}
+    for seg_lo, seg_hi in segments[:5]:
+        try:
+            batch = scrape_avito(
+                region,
+                pages=5,
+                price_min=seg_lo,
+                price_max=seg_hi,
+                sort_by_date=True,
+                brand=brand,
+            )
+            for item in batch:
+                url = _norm_url(item.get("url", ""))
+                listing_id = _listing_key(url) or url
+                if listing_id:
+                    merged.setdefault(listing_id, item)
+        except Exception as exc:
+            print(f"  [Авито-сегмент] {seg_lo}-{seg_hi}: {str(exc)[:100]}")
+
+    result = list(merged.values())
+    result.sort(key=lambda item: (
+        max(0, int(item.get("_days_on_site", 999)))
+        if item.get("_days_on_site") is not None else 999
+    ))
+    print(f"  [Авито] сегментированный поиск: {len(result)} уникальных объявлений")
+    return result
+
+
 async def do_search_for_user(uid: int, reply_to):
     # Обязательная подписка на канал отключена — поиск доступен всем.
     s = load_settings(uid)
@@ -12424,7 +12499,10 @@ async def do_search_for_user(uid: int, reply_to):
     scraper_map = {
         "drom":   lambda: scrape_drom(region, pages=15, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
         "autoru": lambda: scrape_autoru(region, pages=8, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
-        "avito":  lambda: scrape_avito(region, pages=10, price_min=0, price_max=99_000_000, sort_by_date=False, brand=(brand if brand and brand != "any" else "")),
+        "avito":  lambda: _scrape_avito_expanded(
+            region, pmin, pmax,
+            brand=(brand if brand and brand != "any" else ""),
+        ),
         "youla":  lambda: scrape_youla(region, pages=12, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
         "tg":     lambda: scrape_tg_channels(region, pmin, pmax),

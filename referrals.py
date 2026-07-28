@@ -96,7 +96,10 @@ EVENT_TYPES = {
 def _get_conn():
     """Возвращает новое соединение с выбранной БД."""
     if _DB_IS_SQLITE:
-        return _sqlite.connect(_DB_SQLITE_PATH, check_same_thread=False)
+        conn = _sqlite.connect(_DB_SQLITE_PATH, timeout=20, check_same_thread=False)
+        conn.execute("PRAGMA busy_timeout=20000")
+        conn.execute("PRAGMA journal_mode=WAL")
+        return conn
     if _pg is None:
         raise RuntimeError("PostgreSQL недоступен: psycopg2 не установлен")
     conn = _pg.connect(_DB_URL, connect_timeout=5)
