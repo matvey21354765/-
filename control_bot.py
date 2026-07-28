@@ -104,6 +104,7 @@ if AVITO_PROXY_PORT_MIN and AVITO_PROXY_PORT_MAX:
 # является источником истины и перекрывает устаревшую переменную контейнера.
 _ENV_FILE_PROXY_URL = str(dotenv_values(".env").get("PROXY_URL") or "").strip()
 PROXY_URL = (_ENV_FILE_PROXY_URL or os.getenv("PROXY_URL", "")).strip()
+PROXY_ROTATE_URL = os.getenv("PROXY_ROTATE_URL", "").strip()
 _PROXY_URL_RAW = PROXY_URL
 # Не берём Railway-системный прокси (он не является резидентным)
 if _PROXY_URL_RAW and "__agentproxy" in _PROXY_URL_RAW:
@@ -133,7 +134,12 @@ _AVITO_LAST_DIAG: dict = {
     "deduped": 0,
     "filtered": 0,
     "reason": "",
+    "ip_blocked": False,
 }
+_AVITO_ROTATION_LOCK = asyncio.Lock()
+_AVITO_SEARCH_LOCK = asyncio.Lock()
+_AVITO_LAST_ROTATION_AT = 0.0
+_AVITO_CFFI_SESSION = None
 
 
 def _avito_diag(stage: str, value, **extra) -> None:
@@ -152,6 +158,67 @@ def _avito_diag(stage: str, value, **extra) -> None:
         _AVITO_LAST_DIAG[key_map[stage]] = value
     suffix = " ".join(f"{k}={v}" for k, v in extra.items())
     print(f"AVITO: {stage}: {value}" + (f" | {suffix}" if suffix else ""), flush=True)
+
+
+def _avito_response_is_ip_block(status: int, text: str) -> bool:
+    if status not in (403, 429):
+        return False
+    sample = (text or "")[:4000].lower()
+    return any(marker in sample for marker in (
+        "проблема с ip",
+        "доступ ограничен",
+        "access restricted",
+        "ip address",
+        "too many requests",
+    ))
+
+
+def _reset_avito_cffi_session() -> None:
+    """Закрывает только curl_cffi-сессию Авито; другие источники не затрагивает."""
+    global _AVITO_CFFI_SESSION
+    old_session = _AVITO_CFFI_SESSION
+    _AVITO_CFFI_SESSION = None
+    if old_session is not None:
+        try:
+            old_session.close()
+        except Exception:
+            pass
+
+
+def _call_proxy_rotate_url() -> bool:
+    """Один вызов endpoint ротации. URL и тело ответа намеренно не логируются."""
+    if not PROXY_ROTATE_URL:
+        return False
+    try:
+        from curl_cffi import requests as _cffi
+        response = _cffi.get(PROXY_ROTATE_URL, timeout=20)
+        return 200 <= response.status_code < 300
+    except Exception:
+        return False
+
+
+async def _rotate_ltespace_for_avito_once() -> bool:
+    """Сериализует ротацию между всеми пользователями и сбрасывает сессию Авито."""
+    global _AVITO_LAST_ROTATION_AT
+    async with _AVITO_ROTATION_LOCK:
+        # Если другой пользователь только что уже сменил IP, используем результат
+        # этой ротации и не вызываем endpoint повторно.
+        if time.monotonic() - _AVITO_LAST_ROTATION_AT < 30:
+            _avito_diag("ротация", "уже выполнена другим поиском; повтор не вызван")
+            _reset_avito_cffi_session()
+            return True
+        if not PROXY_ROTATE_URL:
+            _avito_diag("причина", "PROXY_ROTATE_URL не задан; смена IP невозможна")
+            return False
+        ok = await asyncio.get_running_loop().run_in_executor(None, _call_proxy_rotate_url)
+        if not ok:
+            _avito_diag("ротация", "не выполнена; endpoint вернул ошибку")
+            return False
+        _AVITO_LAST_ROTATION_AT = time.monotonic()
+        _reset_avito_cffi_session()
+        _avito_diag("ротация", "IP сменён; адрес и endpoint скрыты")
+        await asyncio.sleep(10)
+        return True
 
 
 def _avito_proxies() -> "dict[str, str] | None":
@@ -240,6 +307,8 @@ def _fetch_with_retry(
                 if is_avito:
                     excerpt = re.sub(r"\s+", " ", (r.text or "")[:500]).strip()
                     _avito_diag("причина", f"HTTP {r.status_code}; ответ[0:500]={excerpt!r}")
+                    if _avito_response_is_ip_block(r.status_code, r.text):
+                        _AVITO_LAST_DIAG["ip_blocked"] = True
                 print(f"  [fetch] {url[:60]} → {last_err} (попытка {attempt}/{retries})")
                 if r.status_code == 407:
                     _mark_proxy_failed(last_err)
@@ -392,12 +461,18 @@ def _curl_cffi_get(url: str, params: dict | None = None, headers: dict | None = 
     if headers:
         _headers.update(headers)
 
+    global _AVITO_CFFI_SESSION
     last_exc = None
     last_response = None
     is_avito = "avito.ru" in url
     for attempt in range(1, retries + 1):
         try:
-            sess = cffi_req.Session(impersonate=impersonate)
+            if is_avito:
+                if _AVITO_CFFI_SESSION is None:
+                    _AVITO_CFFI_SESSION = cffi_req.Session(impersonate=impersonate)
+                sess = _AVITO_CFFI_SESSION
+            else:
+                sess = cffi_req.Session(impersonate=impersonate)
             r = sess.get(
                 url, params=params, headers=_headers, timeout=timeout,
                 proxies=request_proxies,
@@ -411,6 +486,8 @@ def _curl_cffi_get(url: str, params: dict | None = None, headers: dict | None = 
                 if is_avito:
                     excerpt = re.sub(r"\s+", " ", (r.text or "")[:500]).strip()
                     _avito_diag("причина", f"HTTP {r.status_code}; ответ[0:500]={excerpt!r}")
+                    if _avito_response_is_ip_block(r.status_code, r.text):
+                        _AVITO_LAST_DIAG["ip_blocked"] = True
                 print(f"  [curl_cffi] {url}: HTTP {r.status_code} (попытка {attempt}/{retries}), ждём 3с...")
                 if r.status_code == 407:
                     _mark_proxy_failed("407")
@@ -4506,6 +4583,46 @@ _PLATFORM_PROXY_LOCK = _threading.Lock()
 def _run_platform_scrape(fn):
     with _PLATFORM_PROXY_LOCK:
         return fn()
+
+
+async def _run_avito_scrape_with_rotation_unlocked(search_fn):
+    """Выполняет один поиск Авито и максимум один повтор после смены LTE-IP."""
+    _AVITO_LAST_DIAG["ip_blocked"] = False
+    loop = asyncio.get_running_loop()
+    first_result = await loop.run_in_executor(
+        None, lambda: _run_platform_scrape(search_fn)
+    )
+    if first_result or not _AVITO_LAST_DIAG.get("ip_blocked"):
+        return first_result
+
+    before_status = _AVITO_LAST_DIAG.get("http")
+    _avito_diag("HTTP до ротации", before_status)
+    rotated = await _rotate_ltespace_for_avito_once()
+    if not rotated:
+        return first_result
+
+    # Флаг относится только ко второй попытке. Новая сессия уже создана лениво
+    # после _reset_avito_cffi_session().
+    _AVITO_LAST_DIAG["ip_blocked"] = False
+    second_result = await loop.run_in_executor(
+        None, lambda: _run_platform_scrape(search_fn)
+    )
+    after_status = _AVITO_LAST_DIAG.get("http")
+    _avito_diag("HTTP после ротации", after_status)
+    if after_status == 429 or _AVITO_LAST_DIAG.get("ip_blocked"):
+        _avito_diag(
+            "причина",
+            "после единственной ротации Авито снова заблокировал IP; поиск остановлен",
+        )
+        return []
+    return second_result
+
+
+async def _run_avito_scrape_with_rotation(search_fn):
+    # Диагностика и cookie-сессия Авито общие, поэтому полный цикл поиска
+    # сериализован. Остальные источники продолжают работать параллельно.
+    async with _AVITO_SEARCH_LOCK:
+        return await _run_avito_scrape_with_rotation_unlocked(search_fn)
 _avito_async_context = None  # type: ignore
 _avito_async_sem: "_aio.Semaphore | None" = None  # ограничивает кол-во одновр. вкладок
 
@@ -12661,11 +12778,9 @@ async def do_search_for_user(uid: int, reply_to):
             lambda: scrape_autoru(region, pages=8, price_min=pmin, price_max=pmax,
                                   brand=(brand if brand and brand != "any" else ""))
         ),
-        "avito":  lambda: _run_platform_scrape(
-            lambda: _scrape_avito_expanded(
-                region, pmin, pmax,
-                brand=(brand if brand and brand != "any" else ""),
-            )
+        "avito":  lambda: _scrape_avito_expanded(
+            region, pmin, pmax,
+            brand=(brand if brand and brand != "any" else ""),
         ),
         "youla":  lambda: scrape_youla(region, pages=12, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
@@ -12675,7 +12790,14 @@ async def do_search_for_user(uid: int, reply_to):
     src_keys = [src for src in enabled_sources if src in scraper_map]
     if not src_keys:
         src_keys = list(scraper_map.keys())  # подстраховка: если выбор пуст — все
-    futures = [loop.run_in_executor(None, scraper_map[src]) for src in src_keys]
+    futures = [
+        (
+            asyncio.create_task(_run_avito_scrape_with_rotation(scraper_map[src]))
+            if src == "avito"
+            else loop.run_in_executor(None, scraper_map[src])
+        )
+        for src in src_keys
+    ]
 
     # Рынок сравниваем с ценами Авито и Юлы. Если площадка не выбрана, её скрейп
     # используется только как эталон и не попадает в пользовательскую выдачу.
@@ -14116,8 +14238,8 @@ async def _global_monitor_loop():
 
             # Скрейпим только нужные (регион, источник) параллельно
             _src_scrapers = {
-                "avito":  lambda r: _run_platform_scrape(
-                    lambda: scrape_avito(r, pages=3, sort_by_date=True)
+                "avito":  lambda r: scrape_avito(
+                    r, pages=3, sort_by_date=True
                 ),  # ⚡ свежие первыми
                 "drom":   lambda r: scrape_drom(r, pages=3, price_min=0, price_max=99_000_000),
                 "autoru": lambda r: _run_platform_scrape(
@@ -14136,7 +14258,16 @@ async def _global_monitor_loop():
                         continue
                     key_rs = f"{reg}:{src}"
                     fn = _src_scrapers[src]
-                    tasks_m[key_rs] = loop.run_in_executor(None, lambda r=reg, f=fn: f(r))
+                    if src == "avito":
+                        tasks_m[key_rs] = asyncio.create_task(
+                            _run_avito_scrape_with_rotation(
+                                lambda r=reg, f=fn: f(r)
+                            )
+                        )
+                    else:
+                        tasks_m[key_rs] = loop.run_in_executor(
+                            None, lambda r=reg, f=fn: f(r)
+                        )
 
             if tasks_m:
                 done_m, _ = await asyncio.wait(list(tasks_m.values()), timeout=70)
