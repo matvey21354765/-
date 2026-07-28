@@ -146,6 +146,39 @@ def _mark_proxy_failed(err: str) -> None:
             print("[прокси] ⚠️ Прокси вернул 407 — переключаемся на прямое соединение")
 
 
+def _fetch_with_retry(
+    url: str,
+    method: str = "GET",
+    params: dict | None = None,
+    headers: dict | None = None,
+    json: dict | None = None,
+    proxies: dict | None = None,
+    timeout: int = 8,
+    retries: int = 3,
+    impersonate: str = "chrome120",
+):
+    """Универсальный HTTP-запрос через curl_cffi с retry и TLS-отпечатком."""
+    from curl_cffi import requests as _cffi
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            if method.upper() == "GET":
+                r = _cffi.get(url, params=params, headers=headers, impersonate=impersonate, timeout=timeout, proxies=proxies)
+            else:
+                r = _cffi.post(url, json=json, headers=headers, impersonate=impersonate, timeout=timeout, proxies=proxies)
+            if r.status_code in (429, 439, 503, 502):
+                last_err = f"HTTP {r.status_code}"
+                print(f"  [fetch] {url[:60]} → {last_err} (попытка {attempt}/{retries})")
+                time.sleep(3)
+                continue
+            return r
+        except Exception as e:
+            last_err = str(e)[:120]
+            print(f"  [fetch] {url[:60]} → {last_err} (попытка {attempt}/{retries})")
+            time.sleep(3)
+    raise Exception(f"Failed after {retries} attempts: {last_err}")
+
+
 AVITO_PROXIES: "dict[str, str] | None" = None
 if AVITO_PROXY_HOST and (AVITO_PROXY_PORT or _AVITO_PROXY_PORTS):
     _use_auth = AVITO_PROXY_AUTH != "ip" and AVITO_PROXY_USER
@@ -153,17 +186,6 @@ if AVITO_PROXY_HOST and (AVITO_PROXY_PORT or _AVITO_PROXY_PORTS):
     _repr_port = AVITO_PROXY_PORT or (str(_AVITO_PROXY_PORTS[0]) if _AVITO_PROXY_PORTS else "")
     _avito_proxy_url = f"{AVITO_PROXY_PROTOCOL}://{_auth}{AVITO_PROXY_HOST}:{_repr_port}"
     AVITO_PROXIES = {"http": _avito_proxy_url, "https": _avito_proxy_url}
-
-# Хардкодный fallback — если env vars не заданы в Railway, используем прокси из кода
-if not AVITO_PROXIES and not _proxy_auth_failed:
-    # Fallback: мобильный прокси mobileproxy.space (huba / EDNyWFYHy228)
-    _HARDCODED_PROXY = "http://huba:EDNyWFYHy228@mproxy.site:16358"
-    AVITO_PROXIES = {"http": _HARDCODED_PROXY, "https": _HARDCODED_PROXY}
-    AVITO_PROXY_HOST = "mproxy.site"
-    AVITO_PROXY_PORT = "16358"
-    AVITO_PROXY_USER = "huba"
-    AVITO_PROXY_PASS = "EDNyWFYHy228"
-    print("[прокси] ⚡ Используем встроенный прокси mproxy.site")
 
 _proxy_display = f"{AVITO_PROXY_PROTOCOL}://{AVITO_PROXY_HOST}:{AVITO_PROXY_PORT}" if AVITO_PROXIES else None
 print(f"[прокси] {'✅ ' + _proxy_display if _proxy_display else '❌ не настроен — Авито/Auto.ru могут не работать'}")
@@ -1999,8 +2021,8 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
     if AVITO_PROXIES or not AUTORU_PROXIES:
         try:
             from curl_cffi import requests as _cffi_ar
-            _rc = _cffi_ar.get(
-                _ar_base_url, impersonate="chrome124", timeout=6,
+            _rc = _curl_cffi_get(
+                _ar_base_url, impersonate="chrome120", timeout=6,
                 headers={"Accept-Language": "ru-RU,ru;q=0.9",
                          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                          "Referer": "https://auto.ru/", "Upgrade-Insecure-Requests": "1"},
@@ -2055,8 +2077,8 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
         if _rotate_proxy_ip():
             try:
                 from curl_cffi import requests as _cffi_ar2
-                _rc2 = _cffi_ar2.get(
-                    _ar_base_url, impersonate="chrome124", timeout=6,
+                _rc2 = _curl_cffi_get(
+                    _ar_base_url, impersonate="chrome120", timeout=6,
                     headers={"Accept-Language": "ru-RU,ru;q=0.9",
                              "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                              "Referer": "https://auto.ru/", "Upgrade-Insecure-Requests": "1"},
@@ -2134,8 +2156,9 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
                     _api_body["price_to"] = price_max
                 if _brand_l and _brand_l != "any":
                     _api_body["catalog_filter"] = [{"mark": _brand_slug.upper()}]
-                _api_r = _req.post(
+                _api_r = _fetch_with_retry(
                     "https://apiauto.ru/1.0/search/cars",
+                    method="POST",
                     params={"context": "listing", "sort": "fresh_relevance_1-desc",
                             "page": p, "page_size": 50},
                     json=_api_body,
@@ -2177,23 +2200,23 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
                 # 1) curl_cffi (браузерный TLS) — основной путь
                 if _cffi_ru is not None:
                     try:
-                        _sess_ru = _cffi_ru.Session()
-                        _gh = _sess_ru.get(
-                            html_url, impersonate="chrome124", timeout=6,
+                        _gh = _curl_cffi_get(
+                            html_url, timeout=6,
                             headers={"Accept-Language": "ru-RU,ru;q=0.9",
                                      "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
                                      "Referer": f"https://auto.ru/{slug}/cars/used/",
                                      "Upgrade-Insecure-Requests": "1"},
                             proxies=_arp,
                         )
-                        print(f"  [Auto.ru] РФ-прокси(cffi) {_phost} стр.{p}: HTTP {_gh.status_code}, {len(_gh.text):,}б")
-                        if _gh.status_code == 200 and not _autoru_is_captcha(_gh.text):
+                        print(f"  [Auto.ru] РФ-прокси(cffi) {_phost} стр.{p}: HTTP {_gh.status_code if _gh else '—'}, {len(_gh.text) if _gh else 0:,}б")
+                        if _gh and _gh.status_code == 200 and not _autoru_is_captcha(_gh.text):
                             batch = _autoru_parse_html(_gh.text, today)
                         # добиваем AJAX-ом через ту же прогретую сессию (если есть время)
-                        if not batch and not _autoru_is_captcha(_gh.text) and time.time() < _ar_deadline:
-                            _aj = _sess_ru.post(
+                        if not batch and _gh and _gh.status_code == 200 and not _autoru_is_captcha(_gh.text) and time.time() < _ar_deadline:
+                            _aj = _fetch_with_retry(
                                 "https://auto.ru/-/ajax/desktop/listing/",
-                                json=body, impersonate="chrome124", timeout=5,
+                                method="POST",
+                                json=body, timeout=5,
                                 headers={**headers_ajax, "x-requested-with": "fetch"},
                                 proxies=_arp,
                             )
@@ -2231,8 +2254,9 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
         # есть выделенный РФ-пул (он уже отработал выше и не ловит капчу).
         if not batch and AVITO_PROXIES and not AUTORU_PROXIES:
             try:
-                r_ajax = _req.post(
+                r_ajax = _fetch_with_retry(
                     "https://auto.ru/-/ajax/desktop/listing/",
+                    method="POST",
                     json=body,
                     headers={**headers_ajax, "x-requested-with": "fetch"},
                     proxies=_avito_proxies(),
@@ -2250,7 +2274,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
         # Метод 0b: Прямой HTML через общий мобильный прокси (пропускаем при РФ-пуле)
         if not batch and AVITO_PROXIES and not AUTORU_PROXIES:
             try:
-                r0 = _req.get(html_url, headers={
+                r0 = _fetch_with_retry(html_url, headers={
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                     "Accept-Language": "ru-RU,ru;q=0.9",
@@ -5802,22 +5826,12 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             "x-avito-app-version": "18.0.0",
         }
         try:
-            # Сначала НАПРЯМУЮ (чистый Railway IP работает), потом через прокси
-            try:
-                _r_mob = session.get(
-                    "https://m.avito.ru/api/13/items",
-                    params=_mob_params, headers=_mob_hdrs, timeout=8,
-                )
-                print(f"  [Авито mobileAPI0 напрямую] HTTP {_r_mob.status_code}, {len(_r_mob.text):,}б")
-                if _r_mob.status_code != 200:
-                    raise ValueError("direct non-200")
-            except Exception:
-                _r_mob = session.get(
-                    "https://m.avito.ru/api/13/items",
-                    params=_mob_params, headers=_mob_hdrs, timeout=8,
-                    proxies=_avito_proxies(),
-                )
-                print(f"  [Авито mobileAPI0 прокси] HTTP {_r_mob.status_code}, {len(_r_mob.text):,}б")
+            _r_mob = _fetch_with_retry(
+                "https://m.avito.ru/api/13/items",
+                params=_mob_params, headers=_mob_hdrs, timeout=8,
+                proxies=_avito_proxies(),
+            )
+            print(f"  [Авито mobileAPI0 прокси] HTTP {_r_mob.status_code}, {len(_r_mob.text):,}б")
             if _r_mob.status_code == 200:
                 try:
                     _mob_data = _r_mob.json()
@@ -5870,7 +5884,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                     _alt_params["priceMin"] = price_min
                 if price_max < 99_000_000:
                     _alt_params["priceMax"] = price_max
-                _alt_r = session.get(
+                _alt_r = _fetch_with_retry(
                     _alt_url,
                     params=_alt_params,
                     headers={"User-Agent": "ru.avito.avitomobile/18.0 (Android 13; ru_RU)",
@@ -5938,7 +5952,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         ]
         for url, params in urls_to_try:
             try:
-                r = session.get(url, params=params, headers=mobile_headers, timeout=8, proxies=_avito_proxies())
+                r = _fetch_with_retry(url, params=params, headers=mobile_headers, timeout=8, proxies=_avito_proxies())
                 print(f"  [Авито m.] {url} стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
                 if r.status_code == 200 and ('"urlPath"' in r.text or 'data-marker="item"' in r.text or '__NEXT_DATA__' in r.text):
                     result = _parse_avito_html(r.text, slug, today)
@@ -6038,7 +6052,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             params["priceMax"] = price_max
 
         try:
-            r = session.get(
+            r = _fetch_with_retry(
                 "https://api.avito.ru/core/v1/items",
                 params=params,
                 headers={
@@ -6109,7 +6123,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                 "Connection": "keep-alive",
             }
             try:
-                r = session.get(url, params=params, headers=_hdrs, timeout=8, proxies=_avito_proxies())
+                r = _fetch_with_retry(url, params=params, headers=_hdrs, timeout=8, proxies=_avito_proxies())
                 print(f"  [Авито webHTML] стр.{p} попытка {attempt+1}: HTTP {r.status_code}, {len(r.text):,}б")
                 _has_listing_data = ('"urlPath"' in r.text or '"canonicalUrl"' in r.text or
                                      'data-marker="item"' in r.text or '"shortUrl"' in r.text)
@@ -7755,7 +7769,7 @@ def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max
             """Пробуем: быстрый прямой запрос → headless-браузер (только без прокси)."""
             # 1. Прямой запрос через прокси (если есть) или напрямую
             try:
-                r2 = _req.get(fetch_url, timeout=8, headers=_HEADERS, proxies=_avito_proxies())
+                r2 = _fetch_with_retry(fetch_url, headers=_HEADERS, proxies=_avito_proxies(), timeout=8)
                 if r2.status_code == 200 and _page_has_listings(r2.text):
                     return r2.text
             except Exception:
@@ -9620,6 +9634,137 @@ async def cmd_stats(msg: Message):
         await msg.answer(f"Не удалось собрать статистику: {e}")
         return
     await msg.answer(text, parse_mode="Markdown")
+
+
+# ── Реферальные админ-команды ─────────────────────────────────────
+def _safe_reduce_subscription_days(uid: int, days: int) -> dict:
+    """Безопасно уменьшает подписку пользователя на days дней."""
+    if days <= 0:
+        return {"ok": True, "reduced_by": 0}
+    try:
+        s = load_settings(uid)
+        now = time.time()
+        current_until = float(s.get("subscription_until", 0) or 0)
+        new_until = max(now, current_until - days * 86400)
+        actually_reduced = (current_until - new_until) / 86400
+        s["subscription_until"] = new_until
+        save_settings(uid, s)
+        return {"ok": True, "reduced_by": actually_reduced, "new_until": new_until}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@dp.message(Command("ref_status"))
+async def cmd_ref_status(msg: Message):
+    if msg.from_user.id not in ADMIN_IDS:
+        return
+    parts = (msg.text or "").split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        await msg.answer("Формат: <code>/ref_status USER_ID</code>", parse_mode="HTML")
+        return
+    uid = int(parts[1])
+    info = referrals.get_admin_status(uid)
+    user = info.get("user", {})
+    events = info.get("events", [])
+    lines = [
+        f"<b>Реферальный статус uid {uid}</b>",
+        f"Реферер: <code>{user.get('referred_by') or '—'}</code>",
+        f"Привязан: {user.get('referral_created_at') or '—'}",
+        f"Скидка использована: {bool(user.get('referral_discount_used'))}",
+        f"Первая оплата: {user.get('first_paid_at') or '—'}",
+        f"Оплачено рефералов: {user.get('paid_referrals_count', 0)}",
+        f"Бонусных дней всего: {user.get('referral_reward_days_total', 0)}",
+        f"Достижений: {user.get('referral_milestones_count', 0)}",
+        "",
+        "<b>Последние события:</b>",
+    ]
+    if not events:
+        lines.append("(нет)")
+    else:
+        for ev in events[:15]:
+            lines.append(
+                f"• {ev.get('event_type')} | {ev.get('tariff_code') or '-'} | "
+                f"{ev.get('status') or '-'} | pay={ev.get('payment_id') or '-'} | "
+                f"days={ev.get('total_reward_days') or 0}"
+            )
+    await msg.answer("\n".join(lines), parse_mode="HTML")
+
+
+@dp.message(Command("ref_recalculate"))
+async def cmd_ref_recalculate(msg: Message):
+    if msg.from_user.id not in ADMIN_IDS:
+        return
+    parts = (msg.text or "").split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        await msg.answer("Формат: <code>/ref_recalculate USER_ID</code>", parse_mode="HTML")
+        return
+    uid = int(parts[1])
+    res = referrals.recalculate_user_stats(uid)
+    await msg.answer(
+        f"✅ Статистика пересчитана для uid <code>{uid}</code>.\n\n"
+        f"Оплачено рефералов: <b>{res['paid_count']}</b>\n"
+        f"Бонусных дней: <b>{res['reward_days_total']}</b>\n"
+        f"Достижений: <b>{res['milestone_count']}</b>",
+        parse_mode="HTML",
+    )
+
+
+@dp.message(Command("ref_reverse"))
+async def cmd_ref_reverse(msg: Message):
+    if msg.from_user.id not in ADMIN_IDS:
+        return
+    parts = (msg.text or "").split()
+    if len(parts) < 2:
+        await msg.answer("Формат: <code>/ref_reverse PAYMENT_ID</code>", parse_mode="HTML")
+        return
+    payment_id = parts[1]
+    res = referrals.reverse_payment(payment_id)
+    if not res.get("ok"):
+        await msg.answer(f"❌ Не удалось отменить награду: <code>{res.get('reason')}</code>", parse_mode="HTML")
+        return
+    reduce_res = _safe_reduce_subscription_days(res["referrer_id"], res.get("total_days_reversed", 0))
+    await msg.answer(
+        f"✅ Награда по платежу <code>{payment_id}</code> отменена.\n\n"
+        f"Реферер: <code>{res['referrer_id']}</code>\n"
+        f"Реферал: <code>{res['referred_user_id']}</code>\n"
+        f"Снято дней: <b>{res['total_days_reversed']}</b>\n"
+        f"Подписка уменьшена: <b>{reduce_res.get('reduced_by', 0):.1f}</b> дн.",
+        parse_mode="HTML",
+    )
+
+
+@dp.message(Command("ref_test"))
+async def cmd_ref_test(msg: Message):
+    if msg.from_user.id not in ADMIN_IDS:
+        return
+    parts = (msg.text or "").split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        await msg.answer("Формат: <code>/ref_test USER_ID [week|month]</code>", parse_mode="HTML")
+        return
+    uid = int(parts[1])
+    plan_key = parts[2] if len(parts) > 2 else "week"
+    if plan_key not in ("week", "month"):
+        await msg.answer("Тариф: <code>week</code> или <code>month</code>", parse_mode="HTML")
+        return
+    res = referrals.dry_run_payment(uid, plan_key)
+    if not res.get("ok"):
+        await msg.answer(
+            f"🧪 Dry-run для uid <code>{uid}</code>, тариф <code>{plan_key}</code>:\n\n"
+            f"Причина: <code>{res.get('reason')}</code>\n"
+            f"Скидка: <b>{res['discount']['final']}</b> ₽ (экономия {res['discount']['discount']} ₽)",
+            parse_mode="HTML",
+        )
+        return
+    await msg.answer(
+        f"🧪 Dry-run для uid <code>{uid}</code>, тариф <code>{plan_key}</code>:\n\n"
+        f"Реферер: <code>{res['referrer_id']}</code>\n"
+        f"Цена для реферала: <b>{res['discount']['final']}</b> ₽ (без скидки {res['discount']['original']} ₽)\n"
+        f"Базовая награда: <b>+{res['base_reward_days']}</b> дн.\n"
+        f"Milestone: <b>+{res['milestone_reward_days']}</b> дн.\n"
+        f"Всего рефереру: <b>+{res['total_reward_days']}</b> дн.\n"
+        f"Оплативших друзей станет: <b>{res['paid_count_after']}</b>",
+        parse_mode="HTML",
+    )
 
 
 @dp.message(Command("dashboard"))
@@ -13544,7 +13689,30 @@ async def _global_monitor_loop():
                     sf_text = await loop.run_in_executor(None, sf.read_text, "utf-8")
                     s = json.loads(sf_text)
                     if s.get("monitor_enabled") and s.get("region"):
-                        active_users.append({"uid": int(user_path.name), **s})
+                        uid = int(user_path.name)
+                        # Приостанавливаем мониторинг, если подписка/триал истёк
+                        if _subscription_info(uid)["ended"]:
+                            s["monitor_enabled"] = False
+                            s["monitor_ended_notified"] = True
+                            try:
+                                await loop.run_in_executor(
+                                    None,
+                                    lambda _sf=sf, _s=s: _sf.write_text(json.dumps(_s, ensure_ascii=False), encoding="utf-8"),
+                                )
+                            except Exception:
+                                pass
+                            _set_user_monitoring(uid, False)
+                            try:
+                                await bot.send_message(
+                                    uid,
+                                    "⏳ Тестовый период или подписка закончилась.\n"
+                                    "Мониторинг новых объявлений приостановлен.\n"
+                                    "Оформите подписку: /subscribe",
+                                )
+                            except Exception:
+                                pass
+                            continue
+                        active_users.append({"uid": uid, **s})
                 except Exception:
                     pass
 
