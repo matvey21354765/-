@@ -2055,7 +2055,9 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
     try:
         import requests as _req
     except ImportError:
-        return []
+        # Основной путь Auto.ru работает на curl_cffi. Отсутствие обычного
+        # requests не должно отключать площадку целиком.
+        _req = None
 
     results = []
     today = datetime.date.today()
@@ -2073,7 +2075,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
 
     # Создаём сессию и прогреваем куки через GET запрос страницы листинга
     # Auto.ru требует куки сессии для AJAX — без них возвращает пустой ответ
-    _ar_session = _req.Session()
+    _ar_session = _req.Session() if _req else None
     _ar_ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     _ar_base_url = f"https://auto.ru/{slug}/cars/{_brand_path}used/?seller_group=PRIVATE"
     if price_min > 0:
@@ -2109,7 +2111,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
         except Exception as _ec:
             print(f"  [Auto.ru] curl_cffi прогрев: {str(_ec)[:60]}")
         # 2) обычный requests — запасной, если curl_cffi не дал страницу
-        if len(_warm_html) < 5_000:
+        if len(_warm_html) < 5_000 and _ar_session is not None:
             try:
                 _warm = _ar_session.get(_ar_base_url, headers={
                     "User-Agent": _ar_ua,
@@ -8687,19 +8689,8 @@ async def cmd_start(msg: Message, state: FSMContext):
                             await bot.send_message(inviter_uid, _txt, parse_mode="Markdown")
                         except Exception:
                             pass
-                    await msg.answer(
-                        "👋 *Добро пожаловать в PerekupDrive!*\n\n"
-                        "Ты получил *7 дней полного доступа*.\n"
-                        "Всё бесплатно, без ограничений.\n\n"
-                        "🎯 *Что сделать прямо сейчас:*\n\n"
-                        "1️⃣ Настроить поиск по всем площадкам (Авито, Дром, Авто.ру, ВК, Telegram) под свои параметры.\n\n"
-                        "2️⃣ Сохранить 3 интересных авто в Избранное.\n\n"
-                        "3️⃣ Включить поискового агента — бот сам пришлёт новые объявления.",
-                        parse_mode="Markdown",
-                        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                            [InlineKeyboardButton(text="▶️ Начать поиск", callback_data="open_settings")],
-                        ]),
-                    )
+                    # Единое приветствие отправляется ниже. Не дублируем его для
+                    # пользователей, пришедших по реферальной ссылке.
             except Exception:
                 pass
     _get_or_create_referral(msg.from_user.id)
@@ -8721,14 +8712,16 @@ async def cmd_start(msg: Message, state: FSMContext):
         # Новый пользователь — красивое приветствие
         await msg.answer(
             f"{_subscription_line}\n\n"
-            f"👋 *Добро пожаловать в PerekupDrive, {name}!*\n\n"
-            f"Ты получил *7 дней полного доступа*.\n"
-            f"Всё бесплатно, без ограничений.\n\n"
-            f"🎯 *Что сделать прямо сейчас:*\n\n"
-            f"1️⃣ Настроить поиск по всем площадкам (Авито, Дром, Авто.ру, ВК, Telegram) под свои параметры.\n\n"
-            f"2️⃣ Сохранить интересные авто в Избранное.\n\n"
-            f"3️⃣ Включить поискового агента — бот сам пришлёт новые объявления.\n\n"
-            f"👇 Начнём с настройки поиска:",
+            f"👋 *{name}, добро пожаловать в PerekupDrive!*\n\n"
+            f"Пока другие обновляют сайты вручную, бот круглосуточно проверяет "
+            f"*Авито, Дром, Auto.ru, ВК и Telegram* и поднимает самые выгодные варианты наверх.\n\n"
+            f"⚡ *Что вы получите:*\n"
+            f"• свежие объявления в одном месте;\n"
+            f"• сравнение цены с рынком;\n"
+            f"• быстрые уведомления о подходящих авто;\n"
+            f"• прямую ссылку на продавца без лишних шагов.\n\n"
+            f"Настройка займёт меньше минуты. Укажите, что ищете — "
+            f"и я сразу покажу первые варианты 👇",
             parse_mode="Markdown",
             reply_markup=kb_for(msg.from_user.id),
         )
@@ -13031,7 +13024,6 @@ async def do_search_for_user(uid: int, reply_to):
     src_found = list(dict.fromkeys(i.get("source","") for i in suitable if i.get("source")))
     src_icons = {"avito":"🟠","drom":"🔵","autoru":"🔴","vk":"💙","tg":"✈️"}
     src_str = " ".join(src_icons.get(s,"") for s in src_found if s)
-    _badge = _subscription_badge(uid)
     if _avito_available:
         _extra = len(suitable) - _below_count
         _msg = f"✅ {src_str} Найдено {_below_count} объявлений ниже рынка!"
@@ -13042,7 +13034,9 @@ async def do_search_for_user(uid: int, reply_to):
     if _seen_cnt:
         _msg += f"\n♻️ {_seen_cnt} уже видел — они в конце."
 
-    await reply_to.answer(f"{_badge}\n\n{_msg}", parse_mode="Markdown")
+    # Статус trial показывается в приветствии и разделе подписки, а не
+    # дублируется перед каждой поисковой выдачей.
+    await reply_to.answer(_msg, parse_mode="Markdown")
     await send_batch(reply_to.chat.id, uid, 0)
 
 
