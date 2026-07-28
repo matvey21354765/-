@@ -8,8 +8,6 @@ try:
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 except (AttributeError, OSError):
     pass
-print(">>> PROCESS STARTED: control_bot.py запущен, Python", sys.version.split()[0], flush=True)
-
 import asyncio
 import json
 import logging
@@ -23,6 +21,7 @@ import hmac
 import urllib.parse
 from pathlib import Path
 import os
+import tempfile
 
 from dotenv import dotenv_values, load_dotenv
 load_dotenv()
@@ -42,6 +41,42 @@ from aiogram.fsm.storage.memory import MemoryStorage
 import analytics
 import crm
 import referrals
+
+_INSTANCE_LOCK_HANDLE = None
+
+
+def _acquire_single_instance_lock() -> bool:
+    """Не допускает второй процесс polling на одном сервере/контейнере."""
+    global _INSTANCE_LOCK_HANDLE
+    lock_path = Path(tempfile.gettempdir()) / "perekupdrive-control-bot.lock"
+    handle = open(lock_path, "a+b")
+    try:
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        handle.seek(0)
+        handle.truncate()
+        handle.write(str(os.getpid()).encode("ascii"))
+        handle.flush()
+        _INSTANCE_LOCK_HANDLE = handle  # держим lock до завершения процесса
+        return True
+    except (BlockingIOError, OSError):
+        handle.close()
+        print(
+            "[startup] Второй экземпляр control_bot.py обнаружен; "
+            "polling не запущен.",
+            flush=True,
+        )
+        return False
 
 # ── Админы (для /stats) ─────────────────────────────────────────
 def _parse_admin_ids() -> set[int]:
@@ -12790,14 +12825,29 @@ async def do_search_for_user(uid: int, reply_to):
     src_keys = [src for src in enabled_sources if src in scraper_map]
     if not src_keys:
         src_keys = list(scraper_map.keys())  # подстраховка: если выбор пуст — все
-    futures = [
-        (
-            asyncio.create_task(_run_avito_scrape_with_rotation(scraper_map[src]))
-            if src == "avito"
-            else loop.run_in_executor(None, scraper_map[src])
-        )
-        for src in src_keys
-    ]
+    source_timeouts = {
+        "drom": 25,
+        "autoru": 20,
+        "avito": 35,  # включает максимум одну LTE-ротацию и паузу 10с
+        "youla": 15,
+        "vk": 15,
+        "tg": 15,
+    }
+
+    async def _run_source(src: str):
+        if src == "avito":
+            awaitable = _run_avito_scrape_with_rotation(scraper_map[src])
+        else:
+            awaitable = loop.run_in_executor(None, scraper_map[src])
+        try:
+            return await asyncio.wait_for(
+                awaitable, timeout=source_timeouts.get(src, 25)
+            )
+        except asyncio.TimeoutError:
+            print(f"  [поиск] {src}: timeout {source_timeouts.get(src, 25)}с")
+            return []
+
+    source_tasks = [asyncio.create_task(_run_source(src)) for src in src_keys]
 
     # Рынок сравниваем с ценами Авито и Юлы. Если площадка не выбрана, её скрейп
     # используется только как эталон и не попадает в пользовательскую выдачу.
@@ -12805,32 +12855,42 @@ async def do_search_for_user(uid: int, reply_to):
     # «рынок» занижен и скидки не видно. price_max большой → полный рынок модели.
     _avito_ref_fut = None
     if "avito" not in src_keys:
-        _avito_ref_fut = loop.run_in_executor(
-            None, lambda: scrape_avito(region, pages=3, price_min=0, price_max=99_000_000)
+        _avito_ref_fut = asyncio.create_task(
+            asyncio.wait_for(
+                _run_avito_scrape_with_rotation(
+                    lambda: scrape_avito(
+                        region, pages=3, price_min=0, price_max=99_000_000
+                    )
+                ),
+                timeout=35,
+            )
         )
     # Запрашиваем полный ценовой диапазон отдельно даже когда Юла выбрана:
     # основная выдача ограничена бюджетом и сама по себе занизила бы медиану.
-    _youla_ref_fut = loop.run_in_executor(
-        None, lambda: scrape_youla(region, pages=8, price_min=0,
-                                   price_max=99_000_000,
-                                   brand=(brand if brand and brand != "any" else ""))
+    _youla_ref_fut = asyncio.create_task(
+        asyncio.wait_for(
+            loop.run_in_executor(
+                None, lambda: scrape_youla(
+                    region, pages=8, price_min=0,
+                    price_max=99_000_000,
+                    brand=(brand if brand and brand != "any" else ""),
+                )
+            ),
+            timeout=15,
+        )
     )
-    all_futs = futures + ([_avito_ref_fut] if _avito_ref_fut else []) + ([_youla_ref_fut] if _youla_ref_fut else [])
-    done, pending = await asyncio.wait(all_futs, timeout=60)
-    if pending:
-        for f in pending:
-            f.cancel()
-        await reply_to.answer("⏱ Поиск занял слишком долго, показываю что успели найти...")
+    all_tasks = source_tasks + ([_avito_ref_fut] if _avito_ref_fut else []) + [_youla_ref_fut]
+    gathered = await asyncio.gather(*all_tasks, return_exceptions=True)
+    _avito_ref_value = (
+        gathered[len(source_tasks)] if _avito_ref_fut is not None else None
+    )
     results = []
-    for f in futures:
-        if f in done:
-            try:
-                results.append(f.result())
-            except Exception as e:
-                print(f"  [скрапер] ошибка: {e}")
-                results.append([])
-        else:
+    for src, value in zip(src_keys, gathered[:len(source_tasks)]):
+        if isinstance(value, BaseException):
+            print(f"  [скрапер] {src}: {type(value).__name__}: {str(value)[:120]}")
             results.append([])
+        else:
+            results.append(value if isinstance(value, list) else [])
 
     items = []
     stat_parts = []
@@ -12842,9 +12902,11 @@ async def do_search_for_user(uid: int, reply_to):
     # Полный набор Юлы нужен для анализа цены даже при узком бюджете 0–100 тыс.
     # Объявления-аналоги не показываются: ниже они помечаются market_ref_only.
     _youla_ref_items = [i for i in items if i.get("source") == "youla"]
-    if _youla_ref_fut is not None and _youla_ref_fut in done:
+    if _youla_ref_fut is not None:
         try:
-            _youla_ref_items.extend(_youla_ref_fut.result() or [])
+            _youla_value = gathered[-1]
+            if not isinstance(_youla_value, BaseException):
+                _youla_ref_items.extend(_youla_value or [])
         except Exception as _e:
             print(f"  [рынок] Юла-эталон ошибка: {_e}")
 
@@ -13047,9 +13109,13 @@ async def do_search_for_user(uid: int, reply_to):
     # группирует по марке+модели+году → медиана корректна даже в пределах бюджета.
     import copy as _copy
     _avito_ref_items = [i for i in items if i.get("source") == "avito"]
-    if not _avito_ref_items and _avito_ref_fut is not None and _avito_ref_fut in done:
+    if (
+        not _avito_ref_items
+        and _avito_ref_fut is not None
+        and not isinstance(_avito_ref_value, BaseException)
+    ):
         try:
-            _avito_ref_items = _avito_ref_fut.result() or []
+            _avito_ref_items = _avito_ref_value or []
         except Exception as _e:
             print(f"  [рынок] Авито-эталон ошибка: {_e}")
             _avito_ref_items = []
@@ -15114,6 +15180,14 @@ async def main():
 if __name__ == "__main__":
     import sys as _sys
     import traceback as _tb
+
+    if not _acquire_single_instance_lock():
+        raise SystemExit(0)
+    print(
+        ">>> PROCESS STARTED: control_bot.py запущен, Python",
+        sys.version.split()[0],
+        flush=True,
+    )
 
     async def _alert_admin(text: str):
         # Дублируем критические ошибки прямо в Telegram (минуя логи Railway)
