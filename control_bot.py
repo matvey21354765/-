@@ -125,6 +125,33 @@ if _PROXY_URL_RAW:
 
 # Флаг: прокси вернул 407 (неверная авторизация) — автоматически отключаем
 _proxy_auth_failed: bool = False
+_AVITO_LAST_DIAG: dict = {
+    "http": None,
+    "page": None,
+    "cards": 0,
+    "parsed": 0,
+    "deduped": 0,
+    "filtered": 0,
+    "reason": "",
+}
+
+
+def _avito_diag(stage: str, value, **extra) -> None:
+    """Единый диагностический формат Авито без логина/пароля прокси."""
+    key_map = {
+        "HTTP": "http",
+        "страница": "page",
+        "найдено карточек": "cards",
+        "после парсинга": "parsed",
+        "после дедупликации": "deduped",
+        "после фильтрации": "filtered",
+        "отправлено пользователю": "sent",
+        "причина": "reason",
+    }
+    if stage in key_map:
+        _AVITO_LAST_DIAG[key_map[stage]] = value
+    suffix = " ".join(f"{k}={v}" for k, v in extra.items())
+    print(f"AVITO: {stage}: {value}" + (f" | {suffix}" if suffix else ""), flush=True)
 
 
 def _avito_proxies() -> "dict[str, str] | None":
@@ -197,14 +224,22 @@ def _fetch_with_retry(
     from curl_cffi import requests as _cffi
     request_proxies = proxies or _avito_proxies() or None
     last_err = None
+    is_avito = "avito.ru" in url
     for attempt in range(1, retries + 1):
         try:
             if method.upper() == "GET":
                 r = _cffi.get(url, params=params, headers=headers, impersonate=impersonate, timeout=timeout, proxies=request_proxies)
             else:
                 r = _cffi.post(url, json=json, headers=headers, impersonate=impersonate, timeout=timeout, proxies=request_proxies)
+            if is_avito:
+                page_no = (params or {}).get("page") or (params or {}).get("p") or 1
+                _avito_diag("HTTP", r.status_code, attempt=f"{attempt}/{retries}")
+                _avito_diag("страница", page_no, url=r.url)
             if r.status_code in (429, 439, 503, 502, 407, 403):
                 last_err = f"HTTP {r.status_code}"
+                if is_avito:
+                    excerpt = re.sub(r"\s+", " ", (r.text or "")[:500]).strip()
+                    _avito_diag("причина", f"HTTP {r.status_code}; ответ[0:500]={excerpt!r}")
                 print(f"  [fetch] {url[:60]} → {last_err} (попытка {attempt}/{retries})")
                 if r.status_code == 407:
                     _mark_proxy_failed(last_err)
@@ -216,6 +251,8 @@ def _fetch_with_retry(
             _mark_proxy_failed(last_err)
             print(f"  [fetch] {url[:60]} → {last_err} (попытка {attempt}/{retries})")
             time.sleep(3)
+    if is_avito:
+        _avito_diag("причина", f"retry исчерпан: {last_err}")
     raise Exception(f"Failed after {retries} attempts: {last_err}")
 
 
@@ -356,6 +393,8 @@ def _curl_cffi_get(url: str, params: dict | None = None, headers: dict | None = 
         _headers.update(headers)
 
     last_exc = None
+    last_response = None
+    is_avito = "avito.ru" in url
     for attempt in range(1, retries + 1):
         try:
             sess = cffi_req.Session(impersonate=impersonate)
@@ -363,7 +402,15 @@ def _curl_cffi_get(url: str, params: dict | None = None, headers: dict | None = 
                 url, params=params, headers=_headers, timeout=timeout,
                 proxies=request_proxies,
             )
+            last_response = r
+            if is_avito:
+                page_m = re.search(r"(?:[?&](?:p|page)=)(\d+)", str(r.url))
+                _avito_diag("HTTP", r.status_code, attempt=f"{attempt}/{retries}")
+                _avito_diag("страница", int(page_m.group(1)) if page_m else 1, url=r.url)
             if r.status_code in (429, 439, 407, 403):
+                if is_avito:
+                    excerpt = re.sub(r"\s+", " ", (r.text or "")[:500]).strip()
+                    _avito_diag("причина", f"HTTP {r.status_code}; ответ[0:500]={excerpt!r}")
                 print(f"  [curl_cffi] {url}: HTTP {r.status_code} (попытка {attempt}/{retries}), ждём 3с...")
                 if r.status_code == 407:
                     _mark_proxy_failed("407")
@@ -383,7 +430,9 @@ def _curl_cffi_get(url: str, params: dict | None = None, headers: dict | None = 
                 continue
             break
     print(f"  [curl_cffi] {url}: исчерпаны попытки: {last_exc}")
-    return None
+    if is_avito:
+        _avito_diag("причина", f"retry исчерпан; последний HTTP={getattr(last_response, 'status_code', None)}")
+    return last_response
 
 
 # ── Регионы ─────────────────────────────────────────────────────
@@ -7492,7 +7541,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
     # Если JSON-методы через него не дали результата — пробуем бесплатные
     # прокси и поисковики (DDG/Mojeek/Brave), которые работают даже с
     # датацентровых Railway-IP. Даём на fallback до 30 секунд.
-    if not results and _use_proxy and not os.getenv("SKIP_AVITO_FALLBACK"):
+    if False and not results and _use_proxy:
         print(f"  [Авито] платный прокси не дал объявлений — fallback на бесплатные прокси и поисковики")
         _fb_soft_deadline = time.time() + 30
         _fb_tasks = [(m, 1) for m in (_try_yandex_snippets, _try_free_proxies)]
@@ -7525,7 +7574,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         results = list(merged.values())
 
     # Если прокси сломан (407) и ничего не нашли — перезапускаем без прокси
-    if not results and _proxy_auth_failed and _use_proxy:
+    if False and not results and _proxy_auth_failed and _use_proxy:
         print(f"  [Авито] прокси не работает (407) — повтор без прокси")
         fallback_tasks = [(m, 1) for m in _no_proxy_methods]
         _ex2 = _TPE(max_workers=min(8, len(fallback_tasks)))
@@ -7552,8 +7601,11 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         results = list(merged.values())
 
     if not results:
-        print(f"  [Авито API] стр.1: 0 объявлений")
+        _avito_diag("после парсинга", 0)
+        _avito_diag("причина", "прямые ответы Авито не содержат карточек")
         return results
+    _avito_diag("после парсинга", len(results), источник="API/HTML")
+    _avito_diag("после дедупликации", len(results), источник="API/HTML")
     print(f"  [Авито API] объединено {len(results)} объявлений из всех методов")
     return results
 
@@ -7653,6 +7705,18 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
     успешный скрейп покрывал все ценовые диапазоны и не вызывал повторных блокировок.
     """
     now = time.time()
+    _AVITO_LAST_DIAG.update({
+        "http": None, "page": None, "cards": 0, "parsed": 0,
+        "deduped": 0, "filtered": 0, "sent": 0, "reason": "",
+    })
+    _avito_diag(
+        "конфигурация",
+        "curl_cffi",
+        proxy=bool(PROXY_URL and _avito_proxies()),
+        impersonate="chrome120",
+        region=region,
+        pages=pages,
+    )
     # С рабочим прокси скрейпим С ФИЛЬТРОМ бюджета в URL (Авито сам отдаёт
     # релевантные объявления нужной цены, а не рекламные новинки дилеров без
     # цены). Кэш — по бюджет-слоту. 1000 IP делают частый скрейп безопасным.
@@ -7693,7 +7757,12 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
         # При прокси, если бюджет-скрейп не дал результатов из-за блокировки,
         # пробуем полный диапазон — кэш полного диапазона надежнее и используется
         # всеми пользователями региона.
-        if not items and AVITO_PROXIES and (_scrape_pmin != 0 or _scrape_pmax != 99_000_000):
+        if (
+            not items
+            and AVITO_PROXIES
+            and _AVITO_LAST_DIAG.get("http") not in (403, 429)
+            and (_scrape_pmin != 0 or _scrape_pmax != 99_000_000)
+        ):
             print(f"  [Авито] бюджет-скрейп пуст — пробуем полный диапазон")
             items = _scrape_avito_raw(region, pages=pages, price_min=0, price_max=99_000_000, sort_by_date=sort_by_date, brand=brand)
             if items:
@@ -7734,8 +7803,23 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
                 print(f"  [Авито] пусто → устаревший кэш: {len(items)} шт")
         print(f"  [Авито debug] после fallback-кэша: {len(items)} items")
 
+    # Явная дедупликация до пользовательских фильтров с диагностикой.
+    before_dedup = len(items)
+    deduped_items: dict[str, dict] = {}
+    for item in items:
+        url = _norm_url(item.get("url", ""))
+        listing_id = _listing_key(url) or url
+        if listing_id:
+            deduped_items.setdefault(listing_id, item)
+    items = list(deduped_items.values())
+    _avito_diag(
+        "после дедупликации",
+        len(items),
+        удалено=max(0, before_dedup - len(items)),
+    )
+
     # Последний резерв: headless Playwright + stealth
-    if not items:
+    if not items and not PROXY_URL:
         try:
             import playwright_avito_scraper as _pws
             print(f"  [Авито] пробуем Playwright + stealth...")
@@ -7787,7 +7871,14 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
             it for it in items
             if (not it.get("_price_int")) or (price_min <= it["_price_int"] <= price_max)
         ]
-    print(f"  [Авито debug] после фильтра по цене: {len(out)} out (pmin={price_min}, pmax={price_max})")
+    _avito_diag(
+        "после фильтрации",
+        len(out),
+        этап="цена",
+        вход=len(items),
+        pmin=price_min,
+        pmax=price_max,
+    )
 
     # Fix A: Hard post-merge year/budget filter — eliminates DDG results with
     # price_int=0 that are obviously wrong year/budget combos (e.g. 2025 EXEED
@@ -7817,6 +7908,7 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
         return True
 
     out = [it for it in out if it.get("_price_int", 0) > 0 or _year_budget_ok(it, price_max)]
+    _avito_diag("после фильтрации", len(out), этап="год/бюджет")
     print(f"  [Авито debug] после _year_budget_ok: {len(out)} out")
     for _dbg_i, _dbg_it in enumerate(out[:5]):
         print(f"  [Авито debug] item {_dbg_i}: price={_dbg_it.get('_price_int')}, year={_dbg_it.get('_year') or _dbg_it.get('year')}, title={_dbg_it.get('title','')[:60]}")
@@ -7878,6 +7970,7 @@ def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max
         u = f"https://www.avito.ru/{slug}/avtomobili"
         if qs_parts:
             u += "?" + "&".join(qs_parts)
+        _avito_diag("страница", p, url=u, params="&".join(qs_parts))
         return u
 
     _HEADERS = {
@@ -7927,6 +8020,7 @@ def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max
                 fallback_url = f"https://www.avito.ru/{slug}/avtomobili?seller_type=1" + (f"&p={p}" if p > 1 else "")
                 text = _try_fetch(fallback_url)
                 if not text:
+                    _avito_diag("причина", f"страница {p}: после retry нет HTML с карточками")
                     print(f"  [Авито] стр.{p}: нет данных")
                     return []
                 from_fallback = True
@@ -7934,7 +8028,13 @@ def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max
                 print(f"  [Авито] стр.{p}: fallback URL, {len(text):,}б")
             else:
                 print(f"  [Авито] стр.{p}: {len(text):,}б")
+            marker_count = max(
+                text.count('data-marker="item"'),
+                text.count('"urlPath"'),
+            )
+            _avito_diag("найдено карточек", marker_count, page=p)
             batch = _parse_avito_html(text, slug, today)
+            _avito_diag("после парсинга", len(batch), page=p)
 
             # Если price-filtered URL вернул страницу но 0 items (CAPTCHA/пустая) — пробуем fallback
             if not batch and not from_fallback:
@@ -8164,7 +8264,7 @@ def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max
                         fb_text = r_direct.text
                 except Exception:
                     pass
-                if not fb_text:
+                if not fb_text and not PROXY_URL:
                     html = _avito_fetch_html(fallback_url)
                     if html and ('"urlPath"' in html or 'data-marker="item"' in html):
                         fb_text = html
@@ -8217,7 +8317,7 @@ def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max
                 print(f"  [Авито] fallback стр.{fb_page} ошибка: {e}")
                 return []
 
-        with ThreadPoolExecutor(max_workers=5) as ex:
+        with ThreadPoolExecutor(max_workers=1 if PROXY_URL else 5) as ex:
             futs = [ex.submit(_fetch_fallback_page, p) for p in range(1, 4)]
             for fut in as_completed(futs):
                 fb_results.extend(fut.result())
@@ -12363,10 +12463,20 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         if photo_url:
             try:
                 await bot.send_photo(chat_id, photo=photo_url, caption=caption, reply_markup=kb)
+                if source == "avito":
+                    _avito_diag(
+                        "отправлено пользователю",
+                        int(_AVITO_LAST_DIAG.get("sent", 0) or 0) + 1,
+                    )
                 return True
             except Exception:
                 pass
         await bot.send_message(chat_id, caption, reply_markup=kb)
+        if source == "avito":
+            _avito_diag(
+                "отправлено пользователю",
+                int(_AVITO_LAST_DIAG.get("sent", 0) or 0) + 1,
+            )
         return True
 
     # Отбираем кандидатов и дозагружаем фото/описание только для них (см. ниже).
