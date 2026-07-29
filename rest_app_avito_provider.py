@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import logging
 import os
 import re
 import sqlite3
@@ -66,6 +67,7 @@ class RestAppAvitoProvider:
     """Thread-safe provider with request coalescing and a 120-second cache."""
 
     _cache: dict[tuple, tuple[float, list[dict]]] = {}
+    _raw_cache: tuple[float, list[dict]] | None = None
     _cache_lock = threading.Lock()
     _key_locks: dict[tuple, threading.Lock] = {}
     _cooldown_until = 0.0
@@ -332,6 +334,7 @@ class RestAppAvitoProvider:
                 str(ad.get("region") or "").strip(),
                 str(ad.get("city") or "").strip(),
                 str(ad.get("district") or "").strip(),
+                str(ad.get("address") or "").strip(),
             )
             if value
         )
@@ -363,10 +366,14 @@ class RestAppAvitoProvider:
             "seller": str(ad.get("name") or ""),
             "seller_type": seller_type,
             "description": str(ad.get("description") or ""),
+            "marka": str(ad.get("marka") or ""),
+            "model": str(ad.get("model") or ""),
             "params": ad.get("params") if isinstance(ad.get("params"), list) else [],
             "specs": specs,
             "year": int(year_match.group(1)) if year_match else 0,
             "demo_url_hidden": raw_url == "hidden_in_demo",
+            "demo_mode": raw_url == "hidden_in_demo" or avito_id == "hidden_in_demo",
+            "demo_price_unreliable": raw_url == "hidden_in_demo" or avito_id == "hidden_in_demo",
         }
 
     @staticmethod
@@ -378,6 +385,62 @@ class RestAppAvitoProvider:
             if isinstance(param, dict)
         ).casefold()
         return not any(mark in values for mark in ("компания", "дилер", "магазин"))
+
+    @classmethod
+    def _filter_items(
+        cls, items: list[dict], *, region_name: str, city_name: str,
+        price_min: int, price_max: int, brand: str, model: str, year: int,
+        private_only: bool,
+    ) -> tuple[list[dict], dict[str, Any]]:
+        diagnostics: dict[str, Any] = {}
+        location_terms = [
+            value.strip().casefold() for value in (region_name, city_name)
+            if value and value.strip()
+        ]
+        filtered = [
+            item for item in items
+            if not location_terms or any(
+                term in str(item.get("location") or "").casefold()
+                for term in location_terms
+            )
+        ]
+        diagnostics["after_location"] = len(filtered)
+        filtered = [
+            item for item in filtered
+            if item.get("demo_price_unreliable")
+            or (
+                item.get("price") is not None
+                and int(price_min) <= int(item["price"]) <= int(price_max)
+            )
+        ]
+        diagnostics["after_price"] = len(filtered)
+        terms = [value.strip().casefold() for value in (brand, model) if value.strip()]
+        filtered = [
+            item for item in filtered
+            if not terms or all(
+                term in " ".join(str(item.get(field) or "") for field in (
+                    "title", "marka", "model", "description"
+                )).casefold()
+                for term in terms
+            )
+        ]
+        diagnostics["after_brand"] = len(filtered)
+        filtered = [
+            item for item in filtered
+            if not year or int(item.get("year") or 0) == int(year)
+        ]
+        diagnostics["after_year"] = len(filtered)
+        without_private = list(filtered)
+        if private_only:
+            filtered = [item for item in filtered if cls._is_private(item)]
+        relaxed = bool(private_only and not filtered and without_private)
+        if relaxed:
+            filtered = without_private
+            for item in filtered:
+                item["private_filter_relaxed"] = True
+        diagnostics["private_filter_relaxed"] = relaxed
+        diagnostics["after_private"] = len(filtered)
+        return filtered, diagnostics
 
     def search(
         self,
@@ -401,68 +464,72 @@ class RestAppAvitoProvider:
         now = time.time()
         if now < type(self)._cooldown_until:
             raise RestAppRateLimitedError("Rest-App cooldown is active", 429)
-        with self._cache_lock:
-            cached = self._cache.get(key)
-            if cached and now - cached[0] < self.cache_ttl:
-                self.last_diagnostics = {
-                    "http": 200, "status": "success", "cache_hit": True,
-                    "items": len(cached[1]),
-                }
-                return list(cached[1])
-            db_cached = self._load_db(
-                region_name=region_name,
-                city_name=city_name,
-                price_min=price_min,
-                price_max=price_max,
-                query=" ".join(part for part in (brand, model) if part),
-                year=int(year or 0),
-                max_age=self.cache_ttl,
+
+        def finish(source_items: list[dict], *, cache_hit: bool, db_hit: bool = False,
+                   extra: dict[str, Any] | None = None) -> list[dict]:
+            filtered, stages = self._filter_items(
+                source_items, region_name=region_name, city_name=city_name,
+                price_min=price_min, price_max=price_max, brand=brand, model=model,
+                year=int(year or 0), private_only=private_only,
             )
-            if db_cached:
-                self._cache[key] = (now, db_cached)
-                self.last_diagnostics = {
-                    "http": 200, "status": "success", "cache_hit": True,
-                    "db_hit": True, "items": len(db_cached),
-                }
-                return db_cached
-            key_lock = self._key_locks.setdefault(key, threading.Lock())
+            filtered = filtered[:max(1, int(limit))]
+            diagnostics = {
+                "http": 200, "status": "success" if filtered else "empty",
+                "cache_hit": cache_hit, "db_hit": db_hit,
+                "raw_items": len(source_items), "normalized_items": len(source_items),
+                "items": len(filtered), **stages,
+                "demo_mode": any(item.get("demo_mode") for item in source_items),
+                "demo_price_unreliable": any(
+                    item.get("demo_price_unreliable") for item in source_items
+                ),
+                "demo_url_hidden": any(
+                    item.get("demo_url_hidden") for item in source_items
+                ),
+            }
+            if extra:
+                diagnostics.update(extra)
+            self.last_diagnostics = diagnostics
+            logging.getLogger(__name__).info(
+                "[Rest-App Avito] raw=%d normalized=%d after_location=%d "
+                "after_price=%d after_brand=%d after_year=%d after_private=%d "
+                "cache_hit=%s db_hit=%s",
+                len(source_items), len(source_items), stages["after_location"],
+                stages["after_price"], stages["after_brand"], stages["after_year"],
+                stages["after_private"], str(cache_hit).lower(), str(db_hit).lower(),
+            )
+            with self._cache_lock:
+                self._cache[key] = (time.time(), list(filtered))
+            return list(filtered)
+
+        with self._cache_lock:
+            raw_cached = type(self)._raw_cache
+        if raw_cached and now - raw_cached[0] < self.cache_ttl:
+            return finish(list(raw_cached[1]), cache_hit=True)
+
+        db_cached = self._load_db(
+            region_name="", city_name="", price_min=0, price_max=99_000_000,
+            query="", year=0, max_age=self.cache_ttl,
+        )
+        if db_cached:
+            with self._cache_lock:
+                type(self)._raw_cache = (now, list(db_cached))
+            return finish(db_cached, cache_hit=True, db_hit=True)
+
+        with self._cache_lock:
+            key_lock = self._key_locks.setdefault(("rest_app_ads",), threading.Lock())
         with key_lock:
             with self._cache_lock:
-                cached = self._cache.get(key)
-                if cached and time.time() - cached[0] < self.cache_ttl:
-                    return list(cached[1])
-            regions = self.regions()
-            region_id = self._find_id(regions, region_name)
-            if not region_id:
-                raise RestAppResponseError(f"Rest-App region not found: {region_name}")
-            cities = self.cities(region_id)
-            city_id = self._find_id(cities, city_name)
+                raw_cached = type(self)._raw_cache
+            if raw_cached and time.time() - raw_cached[0] < self.cache_ttl:
+                return finish(list(raw_cached[1]), cache_hit=True)
             params: dict[str, Any] = {
-                "category_id": "1",
-                "subcategory_id": CAR_CATEGORY_ID,
-                "region_id": region_id,
-                "price1": max(0, int(price_min)),
-                "price2": max(0, int(price_max)),
+                "category_id": CAR_CATEGORY_ID,
                 "sort": "desc",
-                "limit": min(1000, max(1, int(limit))),
+                "limit": 50,
             }
-            if lookback_minutes <= 30:
-                params["last_m"] = max(1, int(lookback_minutes))
-            else:
-                params.update(self._date_range(1))
-            if city_id:
-                params["city_id"] = city_id
-            query = " ".join(part.strip() for part in (brand, model) if part.strip())
-            if query:
-                params["q"] = query
-                params["in"] = "title"
+            params.update(self._date_range(1))
             payload = self._post("ads", params)
             raw_items, raw_data_type = self._extract_raw_items(payload)
-            if not raw_items and lookback_minutes > 30:
-                fallback_params = dict(params)
-                fallback_params.update(self._date_range(7))
-                payload = self._post("ads", fallback_params)
-                raw_items, raw_data_type = self._extract_raw_items(payload)
             unique: dict[str, dict] = {}
             rejection_reasons: list[str] = []
             for raw in raw_items:
@@ -475,45 +542,19 @@ class RestAppAvitoProvider:
                     if len(rejection_reasons) < 5:
                         rejection_reasons.append("missing source identity")
                     continue
-                if year and item["year"] != int(year):
-                    if len(rejection_reasons) < 5:
-                        rejection_reasons.append(
-                            f"id={item['id']}: year does not match"
-                        )
-                    continue
-                if private_only and not self._is_private(item):
-                    if len(rejection_reasons) < 5:
-                        rejection_reasons.append(
-                            f"id={item['id']}: company/dealer"
-                        )
-                    continue
                 unique[item["id"]] = item
-            items = sorted(
+            normalized = sorted(
                 unique.values(),
                 key=lambda item: item.get("published_at") or "",
                 reverse=True,
             )
-            self._save_db(items)
-            if not items:
-                items = self._load_db(
-                    region_name=region_name,
-                    city_name=city_name,
-                    price_min=price_min,
-                    price_max=price_max,
-                    query=query,
-                    year=int(year or 0),
-                )
+            self._save_db(normalized)
             with self._cache_lock:
-                self._cache[key] = (time.time(), items)
-            self.last_diagnostics.update({
-                "status": "success" if items else "empty",
+                type(self)._raw_cache = (time.time(), list(normalized))
+            return finish(normalized, cache_hit=False, extra={
                 "api_status": payload.get("status"),
-                "cache_hit": False,
                 "raw_items": len(raw_items),
+                "normalized_items": len(normalized),
                 "raw_data_type": raw_data_type,
-                "items": len(items),
                 "rejection_reasons": rejection_reasons,
-                "region_id": region_id,
-                "city_id": city_id,
             })
-            return list(items)

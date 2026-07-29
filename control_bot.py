@@ -1306,6 +1306,8 @@ def _seller_type(item: dict, phone_counts: dict | None = None) -> str:
 
 
 def in_price_range(item: dict, price_min: int, price_max: int) -> bool:
+    if item.get("_demo_price_unreliable"):
+        return True
     p = item.get("_price_int") or parse_price(item.get("price", ""))
     if p:
         return price_min <= p <= price_max
@@ -8341,12 +8343,16 @@ def _adapt_duff_listing(item: dict, today: datetime.date) -> dict:
         "source_id": str(item.get("source_id") or item.get("id") or ""),
         "_source_id": str(item.get("source_id") or item.get("id") or ""),
         "_demo_url_hidden": bool(item.get("demo_url_hidden")),
+        "_demo_price_unreliable": bool(item.get("demo_price_unreliable")),
+        "_demo_mode": bool(item.get("demo_mode")),
+        "_private_filter_relaxed": bool(item.get("private_filter_relaxed")),
         "_photo_url": photo_url,
         "_photos": 1 if photo_url else 0,
         "_price_int": price_int,
         "_days_on_site": days,
         "_date_known": date_known,
         "_duff_id": str(item.get("id") or ""),
+        "year": int(item.get("year") or 0),
     }
     result["_hot_score"] = hot_score(result)
     return result
@@ -13330,7 +13336,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                     item["_photo_url"] = details["_photo_url"]
             except Exception:
                 pass
-        sid = url_to_id(url)
+        sid = url_to_id(url or _item_identity(item))
         days = item.get("_days_on_site", 0)
         _date_known = item.get("_date_known", False) or item.get("date", "") == str(datetime.date.today())
         if days == 0 and not _date_known:
@@ -13425,6 +13431,8 @@ async def send_batch(chat_id: int, uid: int, offset: int):
             caption += f"\n\n📝 {_desc}"
 
         if item.get("source") == "avito":
+            if item.get("seller"):
+                caption += f"\n👤 Продавец: {item['seller']}"
             if item.get("location"):
                 caption += f"\n📍 {item['location']}"
             if item.get("published_at"):
@@ -14024,7 +14032,6 @@ async def do_search_for_user(uid: int, reply_to):
         and in_price_range(i, pmin, pmax)
         and _item_identity(i)
         and _item_identity(i) not in skipped_norm
-        and _item_identity(i) not in seen_norm
     ]
     print(f"  [фильтр] после in_price_range+skipped: {len(suitable)}/{_before} (бюджет {pmin}-{pmax})")
     _bad_price = [
@@ -14051,7 +14058,12 @@ async def do_search_for_user(uid: int, reply_to):
             if ph:
                 _phone_counts[ph] = _phone_counts.get(ph, 0) + 1
         _before_priv = len(suitable)
-        suitable = [it for it in suitable if _seller_type(it, _phone_counts) in _allowed_types]
+        suitable = [
+            it for it in suitable
+            if (
+                it.get("source") == "avito" and it.get("_private_filter_relaxed")
+            ) or _seller_type(it, _phone_counts) in _allowed_types
+        ]
         print(f"  [фильтр] тип продавца {sorted(_allowed_types)}: {len(suitable)}/{_before_priv}")
 
     # Финальная дедупликация suitable (могут быть дубли если разные источники нашли одно).
