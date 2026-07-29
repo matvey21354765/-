@@ -8,6 +8,7 @@ import os
 import sys
 
 from dotenv import load_dotenv
+from autoru_transport import autoru_proxies, get_autoru_transport
 
 load_dotenv()
 
@@ -16,37 +17,31 @@ def main() -> int:
     import control_bot
     from curl_cffi import requests as cffi_requests
 
-    proxy_url = (
-        os.getenv("AUTORU_PROXY_URL", "").strip()
-        or os.getenv("PROXY_URL", "").strip()
-    )
+    transport = get_autoru_transport()
+    proxies = autoru_proxies()
     result = {
+        "transport": transport["mode"],
+        "AUTORU_PROXY_URL_present": bool(
+            os.getenv("AUTORU_PROXY_URL", "").strip()
+        ),
+        "PROXY_URL_ignored": True,
         "http_status": None,
         "final_url": "",
         "raw_items_count": 0,
         "normalized_items_count": 0,
         "filtered_items_count": 0,
-        "proxy_configured": bool(proxy_url),
-        "AUTORU_PROXY_URL_present": bool(
-            os.getenv("AUTORU_PROXY_URL", "").strip()
-        ),
-        "PROXY_URL_present": bool(os.getenv("PROXY_URL", "").strip()),
         "error_type": "",
         "error": "",
     }
-    if not proxy_url:
-        result.update({
-            "error_type": "network",
-            "error": "Auto.ru proxy is not configured; direct access is disabled",
-        })
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 2
 
     url = (
         "https://auto.ru/krasnodar/cars/used/"
         "?seller_group=PRIVATE&price_to=100000&sort=fresh_relevance_1-desc"
     )
-    session = cffi_requests.Session(impersonate="chrome120")
+    session = cffi_requests.Session(
+        impersonate="chrome120",
+        trust_env=False,
+    )
     try:
         response = session.get(
             url,
@@ -56,7 +51,7 @@ def main() -> int:
                 "Referer": "https://auto.ru/",
                 "Upgrade-Insecure-Requests": "1",
             },
-            proxies={"http": proxy_url, "https": proxy_url},
+            proxies=proxies,
             timeout=30,
             allow_redirects=True,
         )

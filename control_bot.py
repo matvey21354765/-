@@ -537,15 +537,27 @@ def _fetch_with_retry(
             timeout=timeout,
         )
     from curl_cffi import requests as _cffi
-    request_proxies = proxies or _avito_proxies() or None
+    is_autoru = "auto.ru" in url or "apiauto.ru" in url
+    request_proxies = (
+        _autoru_proxy_dict()
+        if is_autoru
+        else (proxies or _avito_proxies() or None)
+    )
     last_err = None
     is_avito = "avito.ru" in url
     for attempt in range(1, retries + 1):
         try:
-            if method.upper() == "GET":
-                r = _cffi.get(url, params=params, headers=headers, impersonate=impersonate, timeout=timeout, proxies=request_proxies)
-            else:
-                r = _cffi.post(url, json=json, headers=headers, impersonate=impersonate, timeout=timeout, proxies=request_proxies)
+            session = _cffi.Session(
+                impersonate=impersonate,
+                trust_env=False if is_autoru else True,
+            )
+            try:
+                if method.upper() == "GET":
+                    r = session.get(url, params=params, headers=headers, timeout=timeout, proxies=request_proxies)
+                else:
+                    r = session.post(url, json=json, headers=headers, timeout=timeout, proxies=request_proxies)
+            finally:
+                session.close()
             if is_avito:
                 page_no = (params or {}).get("page") or (params or {}).get("p") or 1
                 _avito_diag("HTTP", r.status_code, attempt=f"{attempt}/{retries}")
@@ -599,6 +611,7 @@ AVITO_PROXY_ROTATE_URL = os.getenv("AVITO_PROXY_ROTATE_URL", "").strip()
 # бот ходит через официальный API вместо капча-стены desktop-версии.
 AUTORU_API_TOKEN = os.getenv("AUTORU_API_TOKEN", "")
 AUTORU_PROXY_URL = os.getenv("AUTORU_PROXY_URL", "").strip()
+from autoru_transport import autoru_proxies, get_autoru_transport
 _AUTORU_LAST_DIAG: dict = {
     "request_url": "",
     "proxy_enabled": False,
@@ -619,10 +632,9 @@ _last_ip_rotate_ts = 0.0
 #   socks5://user:pass@host:port  (или http://...). Список через запятую в
 #   переменной AUTORU_PROXIES; ниже — дефолтные РФ-прокси пользователя.
 _AUTORU_PROXIES_DEFAULT: list[str] = []
-AUTORU_PROXIES = [
-    p.strip() for p in os.getenv("AUTORU_PROXIES", ",".join(_AUTORU_PROXIES_DEFAULT)).split(",")
-    if p.strip()
-]
+# Legacy pools are intentionally disabled. Auto.ru has exactly two routes:
+# explicit AUTORU_PROXY_URL or a direct connection.
+AUTORU_PROXIES: list[str] = []
 
 def _autoru_proxy_dicts() -> "list[dict]":
     """Список proxy-словарей для requests/curl_cffi из пула Auto.ru.
@@ -633,11 +645,8 @@ def _autoru_proxy_dicts() -> "list[dict]":
 
 
 def _autoru_proxy_dict() -> dict | None:
-    """Dedicated Auto.ru route; never falls back to the VPS public IP."""
-    proxy_url = AUTORU_PROXY_URL or os.getenv("PROXY_URL", "").strip()
-    if not proxy_url:
-        return None
-    return {"http": proxy_url, "https": proxy_url}
+    """Return only an explicitly configured Auto.ru proxy."""
+    return autoru_proxies()
 
 
 def _autoru_user_error(diag: dict | None = None) -> str:
@@ -653,14 +662,7 @@ def _autoru_user_error(diag: dict | None = None) -> str:
 # Диагностика готовности Auto.ru: Яндекс режет капчей любой «грязный» IP.
 if AUTORU_API_TOKEN:
     print("[Auto.ru] ✅ токен apiauto.ru задан — чистый JSON без капчи")
-elif AUTORU_PROXIES:
-    print(f"[Auto.ru] ✅ пул РФ-прокси: {len(AUTORU_PROXIES)} шт. — обход капчи через чистые РФ IP")
-elif PROXY_URL:
-    print("[Auto.ru] ✅ используется единый LTE-прокси из PROXY_URL")
-elif AVITO_PROXY_ROTATE_URL:
-    print("[Auto.ru] ✅ ротация IP настроена — капча будет обходиться сменой IP")
-else:
-    print("[Auto.ru] ⚠️ нет ни токена, ни РФ-прокси, ни ротации — Auto.ru поймает капчу")
+print(f"[Auto.ru] transport={get_autoru_transport()['mode']}")
 
 def _rotate_proxy_ip(min_interval: float = 50.0, force: bool = False) -> bool:
     """Меняет IP мобильного прокси через ссылку ротации. Возвращает True при успехе.
@@ -735,17 +737,15 @@ def _curl_cffi_get(url: str, params: dict | None = None, headers: dict | None = 
     if is_marketplace:
         retries = 1
         proxies = _autoru_proxy_dict()
-        if not proxies:
-            raise RuntimeError(
-                "Auto.ru proxy is unavailable; direct access is disabled"
-            )
     try:
         from curl_cffi import requests as cffi_req
     except ImportError:
         return None
 
-    request_proxies = proxies or (
-        _autoru_proxy_dict() if is_marketplace else _avito_proxies()
+    request_proxies = (
+        _autoru_proxy_dict()
+        if is_marketplace
+        else (proxies or _avito_proxies())
     )
     _headers = {
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -765,11 +765,17 @@ def _curl_cffi_get(url: str, params: dict | None = None, headers: dict | None = 
     is_avito = "avito.ru" in url
     for attempt in range(1, retries + 1):
         try:
-            sess = cffi_req.Session(impersonate=impersonate)
-            r = sess.get(
-                url, params=params, headers=_headers, timeout=timeout,
-                proxies=request_proxies,
+            sess = cffi_req.Session(
+                impersonate=impersonate,
+                trust_env=False if is_marketplace else True,
             )
+            try:
+                r = sess.get(
+                    url, params=params, headers=_headers, timeout=timeout,
+                    proxies=request_proxies,
+                )
+            finally:
+                sess.close()
             last_response = r
             if is_avito:
                 page_m = re.search(r"(?:[?&](?:p|page)=)(\d+)", str(r.url))
@@ -2527,6 +2533,8 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
     # Создаём сессию и прогреваем куки через GET запрос страницы листинга
     # Auto.ru требует куки сессии для AJAX — без них возвращает пустой ответ
     _ar_session = _req.Session() if _req else None
+    if _ar_session is not None:
+        _ar_session.trust_env = False
     _ar_ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     _ar_base_url = f"https://auto.ru/{slug}/cars/{_brand_path}used/?seller_group=PRIVATE"
     if price_min > 0:
@@ -2535,7 +2543,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
         _ar_base_url += f"&price_to={price_max}"
     _AUTORU_LAST_DIAG.update({
         "request_url": _ar_base_url,
-        "proxy_enabled": bool(_autoru_proxy_dict()),
+        "proxy_enabled": get_autoru_transport()["mode"] == "proxy",
         "http_status": None,
         "raw": 0,
         "normalized": 0,
@@ -2565,7 +2573,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
         print(
             "[Auto.ru] "
             f"request_url={_ar_base_url} "
-            f"proxy_enabled={str(bool(_autoru_proxy_dict())).lower()} "
+            f"transport={get_autoru_transport()['mode']} "
             f"http_status={_AUTORU_LAST_DIAG.get('http_status')} "
             f"raw={len(found)} normalized={len(output)} "
             f"after_location={_AUTORU_LAST_DIAG['after_location']} "
@@ -2581,7 +2589,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
     # 1) curl_cffi (Chrome TLS-отпечаток) через прокси — ЛУЧШИЙ обход анти-бота
     #    Яндекса, который проверяет TLS-fingerprint. Обычный requests почти всегда
     #    ловит капчу, а curl_cffi проходит чаще.
-    if AVITO_PROXIES or not AUTORU_PROXIES:
+    if not AUTORU_PROXIES:
         try:
             from curl_cffi import requests as _cffi_ar
             _rc = _curl_cffi_get(
@@ -2919,7 +2927,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
         # Метод 0d: бесплатные РФ-прокси — не требует настроек. Часть РФ ISP-IP
         # Яндекс НЕ режет капчей (в отличие от дата-центра). Пробуем AJAX (JSON)
         # через несколько таких прокси. Работает даже без мобильного прокси.
-        if not batch and _working_free_proxies and time.time() < _ar_deadline:
+        if False and not batch and _working_free_proxies and time.time() < _ar_deadline:
             for _fp in list(_working_free_proxies)[:2]:
                 if time.time() > _ar_deadline:
                     break
@@ -2943,7 +2951,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
                     continue
 
         # Метод 1: ScraperAPI render=true — JS выполняется, __INITIAL_STATE__ заполняется
-        if not batch and SCRAPER_API_KEY:
+        if False and not batch and SCRAPER_API_KEY:
             try:
                 r3 = _req.get("http://api.scraperapi.com", params={
                     "api_key": SCRAPER_API_KEY, "url": html_url,
@@ -2956,7 +2964,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
                 print(f"  [Auto.ru] ScraperAPI render: {e}")
 
         # Метод 2: ScraperAPI без render (быстрее)
-        if not batch and SCRAPER_API_KEY:
+        if False and not batch and SCRAPER_API_KEY:
             try:
                 r4 = _req.get("http://api.scraperapi.com", params={
                     "api_key": SCRAPER_API_KEY, "url": html_url,
@@ -2969,7 +2977,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
                 print(f"  [Auto.ru] ScraperAPI HTML: {e}")
 
         # Метод 3: ScraperAPI → AJAX POST
-        if not batch and SCRAPER_API_KEY:
+        if False and not batch and SCRAPER_API_KEY:
             try:
                 r = _req.post(
                     "http://api.scraperapi.com/",
@@ -12818,8 +12826,19 @@ async def _ensure_photo(item: dict) -> None:
                 # Пробуем через прокси (РФ IP) — Auto.ru блокирует зарубежные серверы
                 try:
                     from curl_cffi import requests as _cffi
-                    r = _cffi.get(url, impersonate="chrome124", timeout=15,
-                                  headers=_autoru_hdr, proxies=_avito_proxies())
+                    _detail_session = _cffi.Session(
+                        impersonate="chrome124",
+                        trust_env=False,
+                    )
+                    try:
+                        r = _detail_session.get(
+                            url,
+                            timeout=15,
+                            headers=_autoru_hdr,
+                            proxies=_autoru_proxy_dict(),
+                        )
+                    finally:
+                        _detail_session.close()
                     if r.status_code == 200 and len(r.text) > 5000:
                         p, d, pi = _extract_from_page(r.text)
                         if p: photo = p
@@ -12829,8 +12848,17 @@ async def _ensure_photo(item: dict) -> None:
                     pass
                 if not photo and not desc:
                     try:
-                        r = _req.get(url, timeout=10, headers=_autoru_hdr,
-                                     proxies=_avito_proxies())
+                        _detail_requests = _req.Session()
+                        _detail_requests.trust_env = False
+                        try:
+                            r = _detail_requests.get(
+                                url,
+                                timeout=10,
+                                headers=_autoru_hdr,
+                                proxies=_autoru_proxy_dict(),
+                            )
+                        finally:
+                            _detail_requests.close()
                         if r.status_code == 200:
                             p, d, pi = _extract_from_page(r.text)
                             if p: photo = p

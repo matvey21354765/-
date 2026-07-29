@@ -11,9 +11,9 @@ import control_bot as cb
 
 class ProxyHelpersTestCase(unittest.TestCase):
     def test_autoru_proxy_has_dedicated_priority(self):
-        before = cb.AUTORU_PROXY_URL
+        old_autoru = os.environ.get("AUTORU_PROXY_URL")
         old_env = os.environ.get("PROXY_URL")
-        cb.AUTORU_PROXY_URL = "http://dedicated.example:8080"
+        os.environ["AUTORU_PROXY_URL"] = "http://dedicated.example:8080"
         os.environ["PROXY_URL"] = "http://fallback.example:8080"
         try:
             proxy = cb._autoru_proxy_dict()
@@ -21,21 +21,27 @@ class ProxyHelpersTestCase(unittest.TestCase):
                 proxy["https"], "http://dedicated.example:8080"
             )
         finally:
-            cb.AUTORU_PROXY_URL = before
+            if old_autoru is None:
+                os.environ.pop("AUTORU_PROXY_URL", None)
+            else:
+                os.environ["AUTORU_PROXY_URL"] = old_autoru
             if old_env is None:
                 os.environ.pop("PROXY_URL", None)
             else:
                 os.environ["PROXY_URL"] = old_env
 
-    def test_autoru_proxy_has_no_direct_fallback(self):
-        before = cb.AUTORU_PROXY_URL
-        old_env = os.environ.pop("PROXY_URL", None)
-        cb.AUTORU_PROXY_URL = ""
+    def test_autoru_proxy_ignores_proxy_url_and_uses_direct(self):
+        old_autoru = os.environ.pop("AUTORU_PROXY_URL", None)
+        old_env = os.environ.get("PROXY_URL")
+        os.environ["PROXY_URL"] = "http://fallback.example:8080"
         try:
             self.assertIsNone(cb._autoru_proxy_dict())
         finally:
-            cb.AUTORU_PROXY_URL = before
-            if old_env is not None:
+            if old_autoru is not None:
+                os.environ["AUTORU_PROXY_URL"] = old_autoru
+            if old_env is None:
+                os.environ.pop("PROXY_URL", None)
+            else:
                 os.environ["PROXY_URL"] = old_env
 
     def test_autoru_user_error_classification(self):
