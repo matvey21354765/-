@@ -41,6 +41,13 @@ from aiogram.fsm.storage.memory import MemoryStorage
 import analytics
 import crm
 import referrals
+from avito_duff_provider import (
+    AvitoBlockedError,
+    AvitoDuffProvider,
+    AvitoParseError,
+    AvitoRedirectLoopError,
+    AvitoVpnUnavailable,
+)
 
 _INSTANCE_LOCK_HANDLE = None
 
@@ -136,6 +143,31 @@ if AVITO_PROXY_PORT_MIN and AVITO_PROXY_PORT_MAX:
 # Форматы: http://user:pass@host:port  /  socks5://user:pass@host:port  /  host:port
 PROXY_URL = os.getenv("PROXY_URL", "").strip()
 PROXY_ROTATE_URL = os.getenv("PROXY_ROTATE_URL", "").strip()
+AVITO_ENABLED = os.getenv("AVITO_ENABLED", "true").strip().lower() in {
+    "1", "true", "yes", "on",
+}
+AVITO_PROVIDER = os.getenv("AVITO_PROVIDER", "duff_vless").strip().lower()
+AVITO_SOCKS_PROXY = os.getenv(
+    "AVITO_SOCKS_PROXY", "socks5h://127.0.0.1:10808"
+).strip()
+try:
+    AVITO_MIN_INTERVAL_SECONDS = max(
+        420, int(os.getenv("AVITO_MIN_INTERVAL_SECONDS", "420"))
+    )
+except (TypeError, ValueError):
+    AVITO_MIN_INTERVAL_SECONDS = 420
+try:
+    AVITO_BLOCK_COOLDOWN_SECONDS = max(
+        3600, int(os.getenv("AVITO_BLOCK_COOLDOWN_SECONDS", "3600"))
+    )
+except (TypeError, ValueError):
+    AVITO_BLOCK_COOLDOWN_SECONDS = 3600
+try:
+    AVITO_MAX_INTERNAL_REDIRECTS = max(
+        0, min(1, int(os.getenv("AVITO_MAX_INTERNAL_REDIRECTS", "1")))
+    )
+except (TypeError, ValueError):
+    AVITO_MAX_INTERNAL_REDIRECTS = 1
 _PROXY_URL_RAW = PROXY_URL
 # Не берём Railway-системный прокси (он не является резидентным)
 if _PROXY_URL_RAW and "__agentproxy" in _PROXY_URL_RAW:
@@ -7991,10 +8023,13 @@ def _avito_price_bucket(price_min: int, price_max: int) -> str:
 
 # Единый планировщик сетевых запросов Авито. HTML-парсер ниже не меняется:
 # планировщик передаёт ему HTML ровно одного ответа и одной страницы.
-_AVITO_MIN_INTERVAL_SEC = 7 * 60
-_AVITO_BLOCK_COOLDOWN_SEC = 45 * 60
+_AVITO_MIN_INTERVAL_SEC = AVITO_MIN_INTERVAL_SECONDS
+_AVITO_BLOCK_COOLDOWN_SEC = AVITO_BLOCK_COOLDOWN_SECONDS
 _AVITO_MAX_STATE_PAGE = 20
 _AVITO_SCHEDULE_LOCK = _threading.Lock()
+_AVITO_PROVIDER_LOCK = _threading.Lock()
+_AVITO_SCHEDULER_RUNNING = False
+_AVITO_GLOBAL_NEXT_ATTEMPT_AT = 0.0
 _AVITO_SCHEDULE: dict[tuple, dict] = {}
 _AVITO_STATUS: dict[str, object] = {
     "status": "blocked",
@@ -8030,6 +8065,8 @@ def _avito_schedule_entry(key: tuple) -> dict:
             "items": [],
             "updated_at": 0.0,
             "in_flight": False,
+            "priority": 0,
+            "ready_event": _threading.Event(),
         })
 
 
@@ -8061,24 +8098,114 @@ def _avito_cached_result(
     sort_by_date: bool = False,
     brand: str = "",
 ) -> list[dict]:
-    """Регистрирует уникальный поиск и отдаёт общий кэш без сетевого запроса."""
+    """Регистрирует поиск, при cache miss приоритизирует scheduler и ждёт кэш."""
+    if not AVITO_ENABLED:
+        return []
     key = _avito_schedule_key(region, price_min, price_max, sort_by_date, brand)
     entry = _avito_schedule_entry(key)
+    with _AVITO_SCHEDULE_LOCK:
+        cached = list(entry.get("items", []))
+        if cached:
+            return cached
+        entry["priority"] = 1
+        ready_event = entry.get("ready_event")
+        in_flight = bool(entry.get("in_flight"))
+        can_wait = _AVITO_SCHEDULER_RUNNING and (
+            in_flight
+            or (
+                time.time() >= float(entry.get("next_attempt_at", 0.0))
+                and time.time() >= _AVITO_GLOBAL_NEXT_ATTEMPT_AT
+            )
+        )
+        if can_wait and not in_flight and hasattr(ready_event, "clear"):
+            ready_event.clear()
+    if can_wait and hasattr(ready_event, "wait"):
+        ready_event.wait(timeout=20)
     with _AVITO_SCHEDULE_LOCK:
         return list(entry.get("items", []))
 
 
+def _adapt_duff_listing(item: dict, today: datetime.date) -> dict:
+    """Приводит публичный формат provider к внутреннему формату бота."""
+    price_int = max(0, int(item.get("price") or 0))
+    published_at = item.get("published_at")
+    posted_date = today
+    date_known = False
+    if isinstance(published_at, str) and published_at:
+        try:
+            posted_date = datetime.datetime.fromisoformat(
+                published_at.replace("Z", "+00:00")
+            ).date()
+            date_known = True
+        except (TypeError, ValueError):
+            pass
+    days = max(0, (today - posted_date).days)
+    photo_url = item.get("image") or ""
+    result = {
+        "source": "avito",
+        "title": str(item.get("title") or ""),
+        "price": (
+            f"{price_int:,} ₽".replace(",", " ") if price_int else ""
+        ),
+        "url": str(item.get("url") or ""),
+        "date": str(posted_date),
+        "location": str(item.get("location") or ""),
+        "seller": item.get("seller") or "",
+        "published_at": published_at,
+        "description": "",
+        "_photo_url": photo_url,
+        "_photos": 1 if photo_url else 0,
+        "_price_int": price_int,
+        "_days_on_site": days,
+        "_date_known": date_known,
+        "_duff_id": str(item.get("id") or ""),
+    }
+    result["_hot_score"] = hot_score(result)
+    return result
+
+
 def _avito_scheduled_fetch(key: tuple, now: float | None = None) -> list[dict]:
-    """Один цикл планировщика: максимум один HTTP-запрос, без retry/rotation/Playwright."""
+    """Сериализует все логические проходы Авито единым глобальным lock."""
+    entry = _avito_schedule_entry(key)
+    if not _AVITO_PROVIDER_LOCK.acquire(blocking=False):
+        return list(entry.get("items", []))
+    try:
+        ready_event = entry.get("ready_event")
+        if hasattr(ready_event, "clear"):
+            ready_event.clear()
+        return _avito_scheduled_fetch_unlocked(key, now=now)
+    finally:
+        with _AVITO_SCHEDULE_LOCK:
+            entry["priority"] = 0
+            ready_event = entry.get("ready_event")
+            if hasattr(ready_event, "set"):
+                ready_event.set()
+        _AVITO_PROVIDER_LOCK.release()
+
+
+def _avito_scheduled_fetch_unlocked(
+    key: tuple, now: float | None = None
+) -> list[dict]:
+    """Один проход: исходный GET и максимум один внутренний canonical GET."""
+    global _AVITO_GLOBAL_NEXT_ATTEMPT_AT
     now = time.time() if now is None else float(now)
     entry = _avito_schedule_entry(key)
+    if not AVITO_ENABLED:
+        with _AVITO_SCHEDULE_LOCK:
+            entry.update({"status": "blocked", "in_flight": False})
+        return []
     with _AVITO_SCHEDULE_LOCK:
-        if entry.get("in_flight") or now < float(entry.get("next_attempt_at", 0.0)):
+        if (
+            entry.get("in_flight")
+            or now < float(entry.get("next_attempt_at", 0.0))
+            or now < _AVITO_GLOBAL_NEXT_ATTEMPT_AT
+        ):
             return list(entry.get("items", []))
         entry["in_flight"] = True
         entry["last_attempt_at"] = now
         # Резервируем следующий слот до HTTP, чтобы параллельный вызов не прошёл.
         entry["next_attempt_at"] = now + _AVITO_MIN_INTERVAL_SEC
+        _AVITO_GLOBAL_NEXT_ATTEMPT_AT = now + _AVITO_MIN_INTERVAL_SEC
         page = max(1, int(entry.get("page", 1)))
 
     region, price_min, price_max, sort_by_date, brand = key
@@ -8093,7 +8220,7 @@ def _avito_scheduled_fetch(key: tuple, now: float | None = None) -> list[dict]:
     if sort_by_date:
         params.append("s=104")
     if brand:
-        params.append("q=" + _up.quote(brand))
+        params.append("q=" + urllib.parse.quote(brand))
     url = f"https://www.avito.ru/{slug}/avtomobili?" + "&".join(params)
     headers = {
         "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
@@ -8102,11 +8229,57 @@ def _avito_scheduled_fetch(key: tuple, now: float | None = None) -> list[dict]:
     }
 
     try:
-        # AvitoClient выполняет ровно один curl_cffi request через PROXY_URL.
-        # Сохраняем существующую сериализацию общего proxy-канала с Auto.ru.
-        with _PLATFORM_PROXY_LOCK:
-            response = AVITO_CLIENT.get(url, headers=headers, timeout=25)
-        http = int(response.status_code)
+        if AVITO_PROVIDER == "duff_vless":
+            provider = AvitoDuffProvider(
+                socks_proxy=AVITO_SOCKS_PROXY,
+                timeout=20,
+                max_internal_redirects=AVITO_MAX_INTERNAL_REDIRECTS,
+            )
+            provider_items = provider.search(url)
+            http = int(provider.last_diagnostics.get("http") or 200)
+            parsed = [
+                _adapt_duff_listing(item, datetime.date.today())
+                for item in provider_items
+            ]
+            # Защита от расхождений параметров URL и ответа: фильтруем цену
+            # повторно в памяти, не создавая дополнительных запросов.
+            parsed = [
+                item for item in parsed
+                if (
+                    int(item.get("_price_int", 0) or 0) >= price_min
+                    and int(item.get("_price_int", 0) or 0) <= price_max
+                )
+            ]
+            _avito_diag(
+                "HTTP",
+                http,
+                provider="duff_vless",
+                запросов=provider.last_diagnostics.get("requests", 0),
+                internal_redirect=provider.last_diagnostics.get(
+                    "internal_redirect", False
+                ),
+            )
+            _avito_diag(
+                "найдено карточек",
+                provider.last_diagnostics.get("catalog_items", 0),
+                страница=page,
+            )
+            _avito_diag("после парсинга", len(provider_items))
+            _avito_diag("после фильтрации", len(parsed))
+        elif AVITO_PROVIDER == "legacy":
+            # Отключённый по умолчанию старый путь. Он включается только
+            # явной переменной AVITO_PROVIDER=legacy.
+            with _PLATFORM_PROXY_LOCK:
+                response = AVITO_CLIENT.get(url, headers=headers, timeout=20)
+            http = int(response.status_code)
+            parsed = _parse_avito_html(
+                response.text, slug, datetime.date.today()
+            )
+        else:
+            raise AvitoParseError(
+                f"Неизвестный AVITO_PROVIDER={AVITO_PROVIDER!r}"
+            )
+
         _AVITO_LAST_DIAG["http"] = http
         if http in (403, 429):
             next_at = now + _AVITO_BLOCK_COOLDOWN_SEC
@@ -8124,7 +8297,7 @@ def _avito_scheduled_fetch(key: tuple, now: float | None = None) -> list[dict]:
                 })
             _avito_diag(
                 "причина",
-                f"HTTP {http}: cooldown 45 минут; retry, ротация и Playwright отключены",
+                f"HTTP {http}: cooldown 60 минут; retry и fallback отключены",
             )
             return list(entry.get("items", []))
 
@@ -8142,8 +8315,6 @@ def _avito_scheduled_fetch(key: tuple, now: float | None = None) -> list[dict]:
                 })
             return list(entry.get("items", []))
 
-        # Существующий HTML-парсер вызывается без изменений.
-        parsed = _parse_avito_html(response.text, slug, datetime.date.today())
         merged: dict[str, dict] = {}
         for item in list(entry.get("items", [])) + list(parsed):
             item_url = _norm_url(item.get("url", ""))
@@ -8152,6 +8323,7 @@ def _avito_scheduled_fetch(key: tuple, now: float | None = None) -> list[dict]:
                 item["url"] = item_url
                 merged[listing_id] = item
         items = list(merged.values())
+        _avito_diag("после дедупликации", len(items))
         items.sort(key=lambda item: (
             max(0, int(item.get("_days_on_site", 999)))
             if item.get("_days_on_site") is not None else 999,
@@ -8174,6 +8346,49 @@ def _avito_scheduled_fetch(key: tuple, now: float | None = None) -> list[dict]:
             })
         _avito_diag("найдено карточек", len(parsed), страница=page)
         return list(entry["items"])
+    except AvitoBlockedError as exc:
+        http = int(exc.status_code or 429)
+        next_at = now + _AVITO_BLOCK_COOLDOWN_SEC
+        with _AVITO_SCHEDULE_LOCK:
+            entry.update({
+                "status": "cooldown",
+                "last_http": http,
+                "next_attempt_at": next_at,
+                "in_flight": False,
+            })
+            _AVITO_STATUS.update({
+                "status": "cooldown",
+                "last_http": http,
+                "next_attempt_at": next_at,
+            })
+        _avito_diag(
+            "причина",
+            f"HTTP {http}: cooldown 60 минут; retry и fallback отключены",
+        )
+        return list(entry.get("items", []))
+    except AvitoVpnUnavailable as exc:
+        with _AVITO_SCHEDULE_LOCK:
+            entry.update({
+                "status": "blocked",
+                "last_http": None,
+                "in_flight": False,
+            })
+            _AVITO_STATUS.update({
+                "status": "blocked",
+                "last_http": None,
+                "next_attempt_at": entry["next_attempt_at"],
+            })
+        _avito_diag("причина", f"VLESS недоступен; без retry: {exc}")
+        return list(entry.get("items", []))
+    except (AvitoParseError, AvitoRedirectLoopError) as exc:
+        with _AVITO_SCHEDULE_LOCK:
+            entry.update({
+                "status": "blocked",
+                "last_http": _AVITO_LAST_DIAG.get("http"),
+                "in_flight": False,
+            })
+        _avito_diag("причина", f"{type(exc).__name__}: {exc}")
+        return list(entry.get("items", []))
     except Exception as exc:
         with _AVITO_SCHEDULE_LOCK:
             entry.update({
@@ -14547,26 +14762,44 @@ def _add_global_seen(listings: dict[str, str]) -> None:
 
 async def _avito_scheduler_loop():
     """Отдельный планировщик Авито: один due-запрос за цикл, все остальные читают кэш."""
-    print("  [Авито-планировщик] запущен: 1 страница, интервал пары ≥7 мин, cooldown 45 мин")
+    global _AVITO_SCHEDULER_RUNNING
+    _AVITO_SCHEDULER_RUNNING = True
+    print(
+        "  [Авито-планировщик] запущен: один ключ за проход, "
+        f"интервал ≥{_AVITO_MIN_INTERVAL_SEC}с, "
+        f"cooldown {_AVITO_BLOCK_COOLDOWN_SEC}с"
+    )
     loop = asyncio.get_running_loop()
-    while True:
-        try:
-            now = time.time()
-            with _AVITO_SCHEDULE_LOCK:
-                due_keys = [
-                    key for key, entry in _AVITO_SCHEDULE.items()
-                    if not entry.get("in_flight")
-                    and now >= float(entry.get("next_attempt_at", 0.0))
-                ]
-                due_keys.sort(
-                    key=lambda key: float(_AVITO_SCHEDULE[key].get("last_attempt_at", 0.0))
+    try:
+        while True:
+            try:
+                now = time.time()
+                with _AVITO_SCHEDULE_LOCK:
+                    due_keys = [
+                        key for key, entry in _AVITO_SCHEDULE.items()
+                        if not entry.get("in_flight")
+                        and now >= _AVITO_GLOBAL_NEXT_ATTEMPT_AT
+                        and now >= float(entry.get("next_attempt_at", 0.0))
+                    ]
+                    due_keys.sort(key=lambda key: (
+                        -int(_AVITO_SCHEDULE[key].get("priority", 0)),
+                        float(
+                            _AVITO_SCHEDULE[key].get("last_attempt_at", 0.0)
+                        ),
+                    ))
+                if due_keys:
+                    # Один логический проход: initial + максимум canonical GET.
+                    await loop.run_in_executor(
+                        None, _avito_scheduled_fetch, due_keys[0]
+                    )
+            except Exception as exc:
+                print(
+                    "  [Авито-планировщик] ошибка без retry: "
+                    f"{type(exc).__name__}: {str(exc)[:160]}"
                 )
-            if due_keys:
-                # Строго один ключ и, следовательно, максимум один HTTP за цикл.
-                await loop.run_in_executor(None, _avito_scheduled_fetch, due_keys[0])
-        except Exception as exc:
-            print(f"  [Авито-планировщик] ошибка без retry: {type(exc).__name__}: {str(exc)[:160]}")
-        await asyncio.sleep(10)
+            await asyncio.sleep(1)
+    finally:
+        _AVITO_SCHEDULER_RUNNING = False
 
 
 async def _global_monitor_loop():
