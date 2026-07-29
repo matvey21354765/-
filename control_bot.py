@@ -22,6 +22,7 @@ import urllib.parse
 from pathlib import Path
 import os
 import tempfile
+import socket
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -34,6 +35,7 @@ from aiogram.types import (
     BotCommand,
 )
 from aiogram.filters import Command
+from aiogram.exceptions import TelegramConflictError
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -49,6 +51,11 @@ from avito_duff_provider import (
     AvitoVpnUnavailable,
 )
 from avito_production_state import AvitoProductionState, normalize_search_key
+from avito_proxy_config import (
+    AvitoProxyConfigError,
+    build_mobile_proxy_config,
+)
+from marketplace_result import MarketplaceResult, STATUS_TEXT, classify_network_error
 
 _INSTANCE_LOCK_HANDLE = None
 
@@ -106,8 +113,8 @@ SUBSCRIPTION_PLANS = {
 }
 
 # ── Токен ───────────────────────────────────────────────────────
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8923014188:AAHvNW2B5fin2XCmbVhlaLNjWhLwI3JhZ90")
-SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY", "b317ae63b4d847805e2f91a1dc073b40")
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY", "")
 # Официальный API Авито (бесплатно): зарегистрируй приложение на https://developers.avito.ru/
 # и добавь переменные окружения AVITO_CLIENT_ID и AVITO_CLIENT_SECRET в Railway
 AVITO_CLIENT_ID     = os.getenv("AVITO_CLIENT_ID", "")
@@ -147,10 +154,7 @@ PROXY_ROTATE_URL = os.getenv("PROXY_ROTATE_URL", "").strip()
 AVITO_ENABLED = os.getenv("AVITO_ENABLED", "true").strip().lower() in {
     "1", "true", "yes", "on",
 }
-AVITO_PROVIDER = os.getenv("AVITO_PROVIDER", "duff_vless").strip().lower()
-AVITO_SOCKS_PROXY = os.getenv(
-    "AVITO_SOCKS_PROXY", "socks5h://127.0.0.1:10808"
-).strip()
+AVITO_PROVIDER = os.getenv("AVITO_PROVIDER", "duff_proxy").strip().lower()
 try:
     AVITO_MIN_INTERVAL_SECONDS = max(
         900, int(os.getenv("AVITO_MIN_INTERVAL_SECONDS", "900"))
@@ -457,15 +461,10 @@ def _avito_proxies() -> "dict[str, str] | None":
     """Возвращает прокси-словарь со СЛУЧАЙНЫМ портом из пула (ротация IP).
     Если пул портов не задан — возвращает статический AVITO_PROXIES.
     Если прокси вернул 407 — возвращает None (работаем напрямую)."""
-    global _proxy_auth_failed
     if _proxy_auth_failed:
         return None
-    if AVITO_PROXY_HOST and _AVITO_PROXY_PORTS:
-        port = random.choice(_AVITO_PROXY_PORTS)
-        use_auth = AVITO_PROXY_AUTH != "ip" and AVITO_PROXY_USER
-        auth = f"{AVITO_PROXY_USER}:{AVITO_PROXY_PASS}@" if use_auth else ""
-        url = f"{AVITO_PROXY_PROTOCOL}://{auth}{AVITO_PROXY_HOST}:{port}"
-        return {"http": url, "https": url}
+    # Marketplace callers treat None as a terminal configuration error, never
+    # as permission to use the direct VPS route.
     return AVITO_PROXIES
 
 
@@ -569,18 +568,23 @@ def _fetch_with_retry(
 
 
 AVITO_PROXIES: "dict[str, str] | None" = None
-if AVITO_PROXY_HOST and (AVITO_PROXY_PORT or _AVITO_PROXY_PORTS):
-    _use_auth = AVITO_PROXY_AUTH != "ip" and AVITO_PROXY_USER
-    _auth = f"{AVITO_PROXY_USER}:{AVITO_PROXY_PASS}@" if _use_auth else ""
-    _repr_port = AVITO_PROXY_PORT or (str(_AVITO_PROXY_PORTS[0]) if _AVITO_PROXY_PORTS else "")
-    _avito_proxy_url = f"{AVITO_PROXY_PROTOCOL}://{_auth}{AVITO_PROXY_HOST}:{_repr_port}"
-    AVITO_PROXIES = {"http": _avito_proxy_url, "https": _avito_proxy_url}
-
-_proxy_display = f"{AVITO_PROXY_PROTOCOL}://{AVITO_PROXY_HOST}:{AVITO_PROXY_PORT}" if AVITO_PROXIES else None
-print(f"[прокси] {'✅ ' + _proxy_display if _proxy_display else '❌ не настроен — Авито/Auto.ru могут не работать'}")
 
 # Ссылка ротации IP мобильного прокси (mobileproxy.space «Ссылка для смены IP»).
 # Если задана — бот сам меняет IP перед скрейпом Авито, обходя rate-limit (429).
+try:
+    MOBILE_PROXY_CONFIG = build_mobile_proxy_config()
+    AVITO_PROXIES = MOBILE_PROXY_CONFIG.proxies
+    for _key, _value in MOBILE_PROXY_CONFIG.safe_summary().items():
+        _safe = str(_value).lower() if isinstance(_value, bool) else _value
+        print(f"[MOBILE PROXY] {_key}={_safe}")
+    print("[AVITO] transport=mobile_proxy")
+    print("[AUTO.RU] transport=mobile_proxy")
+except AvitoProxyConfigError as _proxy_config_error:
+    MOBILE_PROXY_CONFIG = None
+    AVITO_PROXIES = None
+    print("[MOBILE PROXY] enabled=false")
+    print(f"[MOBILE PROXY] configuration_error={type(_proxy_config_error).__name__}")
+
 AVITO_PROXY_ROTATE_URL = os.getenv("AVITO_PROXY_ROTATE_URL", "").strip()
 
 # Токен приложения Auto.ru (заголовок x-authorization для apiauto.ru).
@@ -604,12 +608,7 @@ def _autoru_proxy_dicts() -> "list[dict]":
     """Список proxy-словарей для requests/curl_cffi из пула Auto.ru.
     socks5:// → socks5h:// — DNS резолвится НА СТОРОНЕ прокси (РФ), иначе
     Яндекс видит иностранный DNS-резолвинг и чаще отдаёт капчу."""
-    out = []
-    for p in AUTORU_PROXIES:
-        if p.startswith("socks5://"):
-            p = "socks5h://" + p[len("socks5://"):]
-        out.append({"http": p, "https": p})
-    return out or ([_avito_proxies()] if _avito_proxies() else [])
+    return [_avito_proxies()] if _avito_proxies() else []
 
 # Диагностика готовности Auto.ru: Яндекс режет капчей любой «грязный» IP.
 if AUTORU_API_TOKEN:
@@ -692,12 +691,20 @@ def _curl_cffi_get(url: str, params: dict | None = None, headers: dict | None = 
             headers=headers,
             timeout=timeout,
         )
+    is_marketplace = "auto.ru" in url or "apiauto.ru" in url
+    if is_marketplace:
+        retries = 1
+        proxies = _avito_proxies()
+        if not proxies:
+            raise RuntimeError(
+                "Mobile proxy is unavailable; direct Auto.ru access is disabled"
+            )
     try:
         from curl_cffi import requests as cffi_req
     except ImportError:
         return None
 
-    request_proxies = proxies or _avito_proxies() or None
+    request_proxies = proxies or _avito_proxies()
     _headers = {
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8",
@@ -727,6 +734,8 @@ def _curl_cffi_get(url: str, params: dict | None = None, headers: dict | None = 
                 _avito_diag("HTTP", r.status_code, attempt=f"{attempt}/{retries}")
                 _avito_diag("страница", int(page_m.group(1)) if page_m else 1, url=r.url)
             if r.status_code in (429, 439, 407, 403):
+                if is_marketplace:
+                    return r
                 if is_avito:
                     excerpt = re.sub(r"\s+", " ", (r.text or "")[:500]).strip()
                     _avito_diag("причина", f"HTTP {r.status_code}; ответ[0:500]={excerpt!r}")
@@ -2487,7 +2496,9 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
                          "Referer": "https://auto.ru/", "Upgrade-Insecure-Requests": "1"},
                 proxies=_avito_proxies() or {},
             )
-            _warm_html, _warm_status = _rc.text, _rc.status_code
+            if _rc is None:
+                raise RuntimeError("Auto.ru transport returned no response")
+            _warm_html, _warm_status = _rc.text or "", _rc.status_code
             # Переносим куки (spravka и т.п.) в requests-сессию для AJAX-фолбэка
             try:
                 for _k, _v in _rc.cookies.get_dict().items():
@@ -2497,6 +2508,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
             print(f"  [Auto.ru] curl_cffi прогрев: HTTP {_warm_status}, {len(_warm_html):,}б")
         except Exception as _ec:
             print(f"  [Auto.ru] curl_cffi прогрев: {str(_ec)[:60]}")
+            return results
         # 2) обычный requests — запасной, если curl_cffi не дал страницу
         if len(_warm_html) < 5_000 and _ar_session is not None:
             try:
@@ -2561,7 +2573,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
     # как крайняя мера меняем IP общего мобильного прокси. ВАЖНО: не форсируем и
     # только при отсутствии AUTORU_PROXIES, иначе ротация общего IP ломает Авито
     # (спам «Already change IP» и смена IP у Авито в середине поиска).
-    if _warm_blocked and AVITO_PROXIES and not AUTORU_PROXIES:
+    if False and _warm_blocked and AVITO_PROXIES and not AUTORU_PROXIES:
         if _rotate_proxy_ip():
             try:
                 from curl_cffi import requests as _cffi_ar2
@@ -4835,6 +4847,10 @@ async def _run_avito_scrape_with_rotation_unlocked(search_fn):
     return await loop.run_in_executor(
         None, lambda: _run_platform_scrape(search_fn)
     )
+    if _warm_status in (403, 407, 429):
+        # Proxy/site refusal is terminal for this logical search: no fallback,
+        # rotation, retry, or direct request is allowed.
+        return results
 
 
 async def _run_avito_scrape_with_rotation(search_fn):
@@ -8153,7 +8169,10 @@ def check_avito_transport_health() -> dict:
             report["socks_available"] = True
         for field, proxy in (
             ("direct_ip", None),
-            ("vpn_ip", AVITO_SOCKS_PROXY),
+            (
+                "vpn_ip",
+                MOBILE_PROXY_CONFIG.proxy_url if MOBILE_PROXY_CONFIG else "",
+            ),
         ):
             session = cffi_requests.Session(trust_env=False)
             try:
@@ -8386,10 +8405,12 @@ def _avito_scheduled_fetch_unlocked(
     }
 
     try:
-        if AVITO_PROVIDER == "duff_vless":
+        if AVITO_PROVIDER in {"duff_vless", "duff_proxy"}:
+            if MOBILE_PROXY_CONFIG is None:
+                raise AvitoVpnUnavailable("Мобильный прокси Авито недоступен")
             provider = AvitoDuffProvider(
-                socks_proxy=AVITO_SOCKS_PROXY,
-                timeout=20,
+                socks_proxy=MOBILE_PROXY_CONFIG.proxy_url,
+                timeout=MOBILE_PROXY_CONFIG.timeout,
                 max_internal_redirects=AVITO_MAX_INTERNAL_REDIRECTS,
             )
             provider_items = provider.search(url)
@@ -8410,7 +8431,7 @@ def _avito_scheduled_fetch_unlocked(
             _avito_diag(
                 "HTTP",
                 http,
-                provider="duff_vless",
+                provider="duff_proxy",
                 запросов=provider.last_diagnostics.get("requests", 0),
                 internal_redirect=provider.last_diagnostics.get(
                     "internal_redirect", False
@@ -8567,7 +8588,7 @@ def _avito_scheduled_fetch_unlocked(
                 "last_http": None,
                 "next_attempt_at": entry["next_attempt_at"],
             })
-        _avito_diag("причина", f"VLESS недоступен; без retry: {exc}")
+        _avito_diag("причина", f"Мобильный прокси Авито недоступен; без retry: {exc}")
         return list(entry.get("items", []))
     except (AvitoParseError, AvitoRedirectLoopError) as exc:
         with _AVITO_SCHEDULE_LOCK:
@@ -15942,7 +15963,20 @@ async def main():
     # Бот начинает отвечать на /start НЕМЕДЛЕННО, даже если сетап (циклы/дашборд/команды)
     # зависнет или упадёт. Это устраняет симптом «бот не реагирует».
     print(">>> main(): start_polling запускается немедленно — бот уже принимает сообщения", flush=True)
-    await dp.start_polling(bot)
+    print(
+        f"[TELEGRAM] polling instance={socket.gethostname()}:{os.getpid()}",
+        flush=True,
+    )
+    await bot.delete_webhook(drop_pending_updates=False)
+    try:
+        await dp.start_polling(bot)
+    except TelegramConflictError as exc:
+        print(
+            f"[TELEGRAM] polling conflict; instance exits: {type(exc).__name__}",
+            file=sys.stderr,
+            flush=True,
+        )
+        raise SystemExit(2) from exc
     print(">>> main(): start_polling завершён (бот остановлен)", flush=True)
     return
 

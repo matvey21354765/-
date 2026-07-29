@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from urllib.parse import quote, urlunsplit
+from urllib.parse import quote, unquote, urlparse, urlunsplit
 
 
 class AvitoProxyConfigError(RuntimeError):
@@ -96,3 +96,44 @@ class AvitoProxyConfig:
             f"protocol={self.protocol!r}, "
             f"credentials_present={self.credentials_present!r})"
         )
+
+
+def build_mobile_proxy_config() -> AvitoProxyConfig:
+    """Build the single marketplace proxy without ever allowing direct access.
+
+    A complete AVITO_PROXY_* set is authoritative.  PROXY_URL is accepted only
+    as a compatibility fallback for older deployments.
+    """
+    host = os.getenv("AVITO_PROXY_HOST", "").strip()
+    port = os.getenv("AVITO_PROXY_PORT", "").strip()
+    protocol = os.getenv("AVITO_PROXY_PROTOCOL", "").strip()
+    user = os.getenv("AVITO_PROXY_USER", "")
+    password = os.getenv("AVITO_PROXY_PASS", "")
+    if host and port and protocol and user and password:
+        return AvitoProxyConfig.from_env()
+
+    raw = os.getenv("PROXY_URL", "").strip()
+    if not raw:
+        raise AvitoProxyConfigError(
+            "Mobile proxy is not configured; direct marketplace access is disabled"
+        )
+    parsed = urlparse(raw)
+    if not parsed.hostname or parsed.port is None:
+        raise AvitoProxyConfigError("PROXY_URL is invalid")
+    scheme = parsed.scheme.lower()
+    if scheme == "socks5":
+        scheme = "socks5h"
+    if scheme not in {"http", "socks5h"}:
+        raise AvitoProxyConfigError("Unsupported mobile proxy protocol")
+    try:
+        timeout = float(os.getenv("AVITO_PROXY_TIMEOUT", "30"))
+    except ValueError:
+        timeout = 30.0
+    return AvitoProxyConfig(
+        host=parsed.hostname,
+        port=parsed.port,
+        protocol=scheme,
+        user=unquote(parsed.username or ""),
+        password=unquote(parsed.password or ""),
+        timeout=max(1.0, min(30.0, timeout)),
+    )

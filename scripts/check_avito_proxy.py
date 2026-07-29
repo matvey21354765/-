@@ -22,7 +22,11 @@ from avito_duff_provider import (
     AvitoRateLimitedError,
 )
 from avito_production_state import AvitoProductionState
-from avito_proxy_config import AvitoProxyConfig, AvitoProxyConfigError
+from avito_proxy_config import (
+    AvitoProxyConfig,
+    AvitoProxyConfigError,
+    build_mobile_proxy_config,
+)
 
 
 IPIFY_URL = "https://api.ipify.org?format=json"
@@ -192,7 +196,7 @@ def run_diagnostic(
 
 def main() -> int:
     try:
-        config = AvitoProxyConfig.from_env()
+        config = build_mobile_proxy_config()
     except AvitoProxyConfigError as exc:
         print(json.dumps({
             "proxy_enabled": False,

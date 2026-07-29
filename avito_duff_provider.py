@@ -1,4 +1,4 @@
-"""Изолированный провайдер выдачи Авито через локальный VLESS SOCKS.
+"""Изолированный провайдер выдачи Авито через обязательный mobile proxy.
 
 Провайдер выполняет один исходный GET и допускает ровно один внутренний
 канонический переход, описанный в loaderData.data. Retry и fallback отсутствуют.
@@ -19,7 +19,7 @@ from curl_cffi import requests
 
 
 class AvitoVpnUnavailable(RuntimeError):
-    """Локальный SOCKS/VLESS недоступен или запрос завершился timeout."""
+    """Настроенный mobile proxy недоступен или запрос завершился timeout."""
 
 
 class AvitoProxyConnectionError(AvitoVpnUnavailable):
