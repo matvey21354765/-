@@ -22,12 +22,24 @@ class AvitoVpnUnavailable(RuntimeError):
     """Локальный SOCKS/VLESS недоступен или запрос завершился timeout."""
 
 
+class AvitoProxyConnectionError(AvitoVpnUnavailable):
+    """Настроенный proxy недоступен; прямой fallback запрещён."""
+
+
+class AvitoProxyAuthenticationError(RuntimeError):
+    """Proxy отклонил credentials (HTTP 407)."""
+
+
 class AvitoBlockedError(RuntimeError):
     """Авито ограничил текущий выходной IP."""
 
     def __init__(self, message: str, status_code: int | None = None):
         super().__init__(message)
         self.status_code = status_code
+
+
+class AvitoRateLimitedError(AvitoBlockedError):
+    """Авито вернул HTTP 429."""
 
 
 class AvitoParseError(RuntimeError):
@@ -223,9 +235,14 @@ class AvitoDuffProvider:
 
     @property
     def proxies(self) -> dict[str, str]:
-        if self.socks_proxy != "socks5h://127.0.0.1:10808":
-            raise AvitoVpnUnavailable(
-                "Авито разрешён только через локальный VLESS SOCKS5H"
+        parsed = urlparse(self.socks_proxy)
+        if (
+            parsed.scheme not in {"http", "socks5h"}
+            or not parsed.hostname
+            or parsed.port is None
+        ):
+            raise AvitoProxyConnectionError(
+                "Корректный обязательный HTTP/SOCKS5H proxy не настроен"
             )
         return {"http": self.socks_proxy, "https": self.socks_proxy}
 
@@ -279,10 +296,10 @@ class AvitoDuffProvider:
             self.last_diagnostics.update({
                 "http": None,
                 "seconds": elapsed,
-                "error": f"{type(exc).__name__}: {str(exc)[:200]}",
+                "error": type(exc).__name__,
             })
-            raise AvitoVpnUnavailable(
-                f"VLESS SOCKS недоступен: {type(exc).__name__}"
+            raise AvitoProxyConnectionError(
+                f"Proxy недоступен: {type(exc).__name__}"
             ) from exc
         self.last_diagnostics.update({
             "http": int(response.status_code),
@@ -298,7 +315,16 @@ class AvitoDuffProvider:
         parser = _StateParser()
         parser.feed(document)
         title = parser.title
-        if response.status_code in (403, 429) or "доступ ограничен" in title.lower():
+        if response.status_code == 407:
+            raise AvitoProxyAuthenticationError(
+                "Proxy authentication failed: HTTP 407"
+            )
+        if response.status_code == 429:
+            raise AvitoRateLimitedError(
+                "Авито временно ограничил текущий IP: HTTP 429",
+                429,
+            )
+        if response.status_code == 403 or "доступ ограничен" in title.lower():
             raise AvitoBlockedError(
                 f"Авито ограничил доступ: HTTP {response.status_code}",
                 int(response.status_code),

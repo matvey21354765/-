@@ -31,14 +31,29 @@ class ProxyHelpersTestCase(unittest.TestCase):
         self.assertEqual(cb._prepare_curl_cffi_proxy(None), (None, None))
         self.assertEqual(cb._prepare_curl_cffi_proxy({}), (None, None))
 
-    def test_mark_proxy_failed_detects_407(self):
+    def test_mark_proxy_failed_keeps_mandatory_proxy_on_407(self):
         before = cb._proxy_auth_failed
+        before_url = cb.PROXY_URL
         cb._proxy_auth_failed = False
+        cb.PROXY_URL = "http://user:pass@example.com:8080"
+        try:
+            cb._mark_proxy_failed("CONNECT tunnel failed, response 407")
+            self.assertFalse(cb._proxy_auth_failed)
+        finally:
+            cb._proxy_auth_failed = before
+            cb.PROXY_URL = before_url
+
+    def test_mark_proxy_failed_detects_407_without_mandatory_proxy(self):
+        before = cb._proxy_auth_failed
+        before_url = cb.PROXY_URL
+        cb._proxy_auth_failed = False
+        cb.PROXY_URL = ""
         try:
             cb._mark_proxy_failed("CONNECT tunnel failed, response 407")
             self.assertTrue(cb._proxy_auth_failed)
         finally:
             cb._proxy_auth_failed = before
+            cb.PROXY_URL = before_url
 
     def test_avito_proxies_disabled_after_auth_fail(self):
         before = cb._proxy_auth_failed

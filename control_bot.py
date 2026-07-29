@@ -48,6 +48,7 @@ from avito_duff_provider import (
     AvitoRedirectLoopError,
     AvitoVpnUnavailable,
 )
+from avito_production_state import AvitoProductionState, normalize_search_key
 
 _INSTANCE_LOCK_HANDLE = None
 
@@ -152,22 +153,41 @@ AVITO_SOCKS_PROXY = os.getenv(
 ).strip()
 try:
     AVITO_MIN_INTERVAL_SECONDS = max(
-        420, int(os.getenv("AVITO_MIN_INTERVAL_SECONDS", "420"))
+        900, int(os.getenv("AVITO_MIN_INTERVAL_SECONDS", "900"))
     )
 except (TypeError, ValueError):
-    AVITO_MIN_INTERVAL_SECONDS = 420
+    AVITO_MIN_INTERVAL_SECONDS = 900
 try:
     AVITO_BLOCK_COOLDOWN_SECONDS = max(
-        3600, int(os.getenv("AVITO_BLOCK_COOLDOWN_SECONDS", "3600"))
+        7200, int(os.getenv("AVITO_BLOCK_COOLDOWN_SECONDS", "7200"))
     )
 except (TypeError, ValueError):
-    AVITO_BLOCK_COOLDOWN_SECONDS = 3600
+    AVITO_BLOCK_COOLDOWN_SECONDS = 7200
 try:
     AVITO_MAX_INTERNAL_REDIRECTS = max(
         0, min(1, int(os.getenv("AVITO_MAX_INTERNAL_REDIRECTS", "1")))
     )
 except (TypeError, ValueError):
     AVITO_MAX_INTERNAL_REDIRECTS = 1
+try:
+    AVITO_CACHE_TTL_SECONDS = max(
+        60, int(os.getenv("AVITO_CACHE_TTL_SECONDS", "1800"))
+    )
+except (TypeError, ValueError):
+    AVITO_CACHE_TTL_SECONDS = 1800
+try:
+    AVITO_STALE_CACHE_TTL_SECONDS = max(
+        AVITO_CACHE_TTL_SECONDS,
+        int(os.getenv("AVITO_STALE_CACHE_TTL_SECONDS", "86400")),
+    )
+except (TypeError, ValueError):
+    AVITO_STALE_CACHE_TTL_SECONDS = 86400
+try:
+    AVITO_MANUAL_WAIT_SECONDS = max(
+        1, min(20, int(os.getenv("AVITO_MANUAL_WAIT_SECONDS", "20")))
+    )
+except (TypeError, ValueError):
+    AVITO_MANUAL_WAIT_SECONDS = 20
 _PROXY_URL_RAW = PROXY_URL
 # Не берём Railway-системный прокси (он не является резидентным)
 if _PROXY_URL_RAW and "__agentproxy" in _PROXY_URL_RAW:
@@ -8030,12 +8050,31 @@ _AVITO_SCHEDULE_LOCK = _threading.Lock()
 _AVITO_PROVIDER_LOCK = _threading.Lock()
 _AVITO_SCHEDULER_RUNNING = False
 _AVITO_GLOBAL_NEXT_ATTEMPT_AT = 0.0
+_AVITO_PRODUCTION_STATE = AvitoProductionState(
+    cache_ttl=AVITO_CACHE_TTL_SECONDS,
+    stale_cache_ttl=AVITO_STALE_CACHE_TTL_SECONDS,
+)
 _AVITO_SCHEDULE: dict[tuple, dict] = {}
 _AVITO_STATUS: dict[str, object] = {
     "status": "blocked",
     "last_http": None,
     "next_attempt_at": 0.0,
 }
+
+
+def _avito_persistent_key(key: tuple) -> str:
+    region, price_min, price_max, sort_by_date, brand = key
+    return normalize_search_key({
+        "region": region,
+        "category": "cars",
+        "price_min": price_min,
+        "price_max": price_max,
+        "brand": brand,
+        "model": "",
+        "year": 0,
+        "radius": 0,
+        "sort": "date" if sort_by_date else "default",
+    })
 
 
 def _avito_schedule_key(
@@ -8091,6 +8130,64 @@ def _avito_status_for_key(key: tuple, now: float | None = None) -> dict:
         }
 
 
+def check_avito_transport_health() -> dict:
+    """Проверяет transport и cooldown без единого запроса к avito.ru."""
+    import socket
+    from curl_cffi import requests as cffi_requests
+
+    report = {
+        "provider": AVITO_PROVIDER,
+        "socks_available": False,
+        "direct_ip": "",
+        "vpn_ip": "",
+        "ips_differ": False,
+        "blocked_until": None,
+        "last_success_at": None,
+        "cache_age_seconds": None,
+        "consecutive_blocks": 0,
+        "scheduler_running": _AVITO_SCHEDULER_RUNNING,
+        "error": "",
+    }
+    try:
+        with socket.create_connection(("127.0.0.1", 10808), timeout=3):
+            report["socks_available"] = True
+        for field, proxy in (
+            ("direct_ip", None),
+            ("vpn_ip", AVITO_SOCKS_PROXY),
+        ):
+            session = cffi_requests.Session(trust_env=False)
+            try:
+                kwargs = {"timeout": 20}
+                if proxy:
+                    kwargs["proxies"] = {"http": proxy, "https": proxy}
+                response = session.get(
+                    "https://api.ipify.org?format=json", **kwargs
+                )
+                if response.status_code == 200:
+                    report[field] = str(response.json().get("ip", ""))
+            finally:
+                session.close()
+        report["ips_differ"] = bool(
+            report["direct_ip"]
+            and report["vpn_ip"]
+            and report["direct_ip"] != report["vpn_ip"]
+        )
+    except Exception as exc:
+        report["error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
+    state = _AVITO_PRODUCTION_STATE.load_state()
+    report.update({
+        "blocked_until": state.get("blocked_until"),
+        "last_success_at": state.get("last_success_at"),
+        "cache_age_seconds": _AVITO_PRODUCTION_STATE.latest_cache_age(),
+        "consecutive_blocks": int(state.get("consecutive_blocks") or 0),
+    })
+    # Сохраняем только публичный выходной IP, без данных VLESS.
+    if report["vpn_ip"] and report["ips_differ"]:
+        state["last_exit_ip"] = report["vpn_ip"]
+        _AVITO_PRODUCTION_STATE.save_state(state)
+    return report
+
+
 def _avito_cached_result(
     region: str,
     price_min: int = 0,
@@ -8103,10 +8200,31 @@ def _avito_cached_result(
         return []
     key = _avito_schedule_key(region, price_min, price_max, sort_by_date, brand)
     entry = _avito_schedule_entry(key)
+    blocked = _AVITO_PRODUCTION_STATE.is_blocked()
+    persisted, cache_meta = _AVITO_PRODUCTION_STATE.cached(
+        _avito_persistent_key(key),
+        allow_stale=blocked,
+    )
     with _AVITO_SCHEDULE_LOCK:
         cached = list(entry.get("items", []))
         if cached:
             return cached
+        if persisted:
+            entry["items"] = list(persisted)
+            entry["updated_at"] = float(cache_meta.get("cached_at") or 0)
+            entry["cache_meta"] = dict(cache_meta)
+            if blocked:
+                state = _AVITO_PRODUCTION_STATE.load_state()
+                entry["status"] = "cooldown"
+                entry["next_attempt_at"] = float(
+                    state.get("blocked_until") or 0
+                )
+            _AVITO_STATUS.update({
+                "stale": bool(cache_meta.get("stale")),
+                "blocked": blocked,
+                "last_http": cache_meta.get("last_error_http"),
+            })
+            return list(persisted)
         entry["priority"] = 1
         ready_event = entry.get("ready_event")
         in_flight = bool(entry.get("in_flight"))
@@ -8120,9 +8238,20 @@ def _avito_cached_result(
         if can_wait and not in_flight and hasattr(ready_event, "clear"):
             ready_event.clear()
     if can_wait and hasattr(ready_event, "wait"):
-        ready_event.wait(timeout=20)
+        ready_event.wait(timeout=AVITO_MANUAL_WAIT_SECONDS)
     with _AVITO_SCHEDULE_LOCK:
-        return list(entry.get("items", []))
+        cached = list(entry.get("items", []))
+    if cached:
+        return cached
+    persisted, cache_meta = _AVITO_PRODUCTION_STATE.cached(
+        _avito_persistent_key(key),
+        allow_stale=_AVITO_PRODUCTION_STATE.is_blocked(),
+    )
+    if persisted:
+        with _AVITO_SCHEDULE_LOCK:
+            entry["items"] = list(persisted)
+            entry["cache_meta"] = dict(cache_meta)
+    return list(persisted)
 
 
 def _adapt_duff_listing(item: dict, today: datetime.date) -> dict:
@@ -8194,6 +8323,34 @@ def _avito_scheduled_fetch_unlocked(
         with _AVITO_SCHEDULE_LOCK:
             entry.update({"status": "blocked", "in_flight": False})
         return []
+    provider_state = _AVITO_PRODUCTION_STATE.load_state()
+    blocked_until = provider_state.get("blocked_until")
+    if (
+        isinstance(blocked_until, (int, float))
+        and now < float(blocked_until)
+    ):
+        cached, cache_meta = _AVITO_PRODUCTION_STATE.cached(
+            _avito_persistent_key(key),
+            allow_stale=True,
+            now=now,
+        )
+        with _AVITO_SCHEDULE_LOCK:
+            entry.update({
+                "status": "cooldown",
+                "last_http": provider_state.get("last_http"),
+                "next_attempt_at": float(blocked_until),
+                "items": list(cached) or list(entry.get("items", [])),
+                "cache_meta": cache_meta,
+                "in_flight": False,
+            })
+            _AVITO_STATUS.update({
+                "status": "cooldown",
+                "last_http": provider_state.get("last_http"),
+                "next_attempt_at": float(blocked_until),
+                "stale": bool(cache_meta.get("stale")),
+                "blocked": True,
+            })
+        return list(entry.get("items", []))
     with _AVITO_SCHEDULE_LOCK:
         if (
             entry.get("in_flight")
@@ -8282,22 +8439,30 @@ def _avito_scheduled_fetch_unlocked(
 
         _AVITO_LAST_DIAG["http"] = http
         if http in (403, 429):
-            next_at = now + _AVITO_BLOCK_COOLDOWN_SEC
+            state = _AVITO_PRODUCTION_STATE.record_block(http, now=now)
+            next_at = float(state["blocked_until"])
+            cached, cache_meta = _AVITO_PRODUCTION_STATE.cached(
+                _avito_persistent_key(key), allow_stale=True, now=now
+            )
             with _AVITO_SCHEDULE_LOCK:
                 entry.update({
                     "status": "cooldown",
                     "last_http": http,
                     "next_attempt_at": next_at,
+                    "items": list(cached) or list(entry.get("items", [])),
+                    "cache_meta": cache_meta,
                     "in_flight": False,
                 })
                 _AVITO_STATUS.update({
                     "status": "cooldown",
                     "last_http": http,
                     "next_attempt_at": next_at,
+                    "stale": bool(cache_meta.get("stale")),
+                    "blocked": True,
                 })
             _avito_diag(
                 "причина",
-                f"HTTP {http}: cooldown 60 минут; retry и fallback отключены",
+                f"HTTP {http}: adaptive cooldown; retry и fallback отключены",
             )
             return list(entry.get("items", []))
 
@@ -8329,6 +8494,15 @@ def _avito_scheduled_fetch_unlocked(
             if item.get("_days_on_site") is not None else 999,
             -int(item.get("_price_int", 0) or 0),
         ))
+        if items:
+            current_state = _AVITO_PRODUCTION_STATE.load_state()
+            _AVITO_PRODUCTION_STATE.record_success(
+                _avito_persistent_key(key),
+                items[:500],
+                provider=AVITO_PROVIDER,
+                exit_ip=current_state.get("last_exit_ip"),
+                now=now,
+            )
         with _AVITO_SCHEDULE_LOCK:
             entry.update({
                 "status": "active",
@@ -8343,34 +8517,49 @@ def _avito_scheduled_fetch_unlocked(
                 "status": "active",
                 "last_http": 200,
                 "next_attempt_at": entry["next_attempt_at"],
+                "stale": False,
+                "blocked": False,
             })
         _avito_diag("найдено карточек", len(parsed), страница=page)
         return list(entry["items"])
     except AvitoBlockedError as exc:
         http = int(exc.status_code or 429)
-        next_at = now + _AVITO_BLOCK_COOLDOWN_SEC
+        state = _AVITO_PRODUCTION_STATE.record_block(http, now=now)
+        next_at = float(state["blocked_until"])
+        cached, cache_meta = _AVITO_PRODUCTION_STATE.cached(
+            _avito_persistent_key(key), allow_stale=True, now=now
+        )
         with _AVITO_SCHEDULE_LOCK:
             entry.update({
                 "status": "cooldown",
                 "last_http": http,
                 "next_attempt_at": next_at,
+                "items": list(cached) or list(entry.get("items", [])),
+                "cache_meta": cache_meta,
                 "in_flight": False,
             })
             _AVITO_STATUS.update({
                 "status": "cooldown",
                 "last_http": http,
                 "next_attempt_at": next_at,
+                "stale": bool(cache_meta.get("stale")),
+                "blocked": True,
             })
         _avito_diag(
             "причина",
-            f"HTTP {http}: cooldown 60 минут; retry и fallback отключены",
+            f"HTTP {http}: adaptive cooldown; retry и fallback отключены",
         )
         return list(entry.get("items", []))
     except AvitoVpnUnavailable as exc:
+        cached, cache_meta = _AVITO_PRODUCTION_STATE.cached(
+            _avito_persistent_key(key), allow_stale=True, now=now
+        )
         with _AVITO_SCHEDULE_LOCK:
             entry.update({
                 "status": "blocked",
                 "last_http": None,
+                "items": list(cached) or list(entry.get("items", [])),
+                "cache_meta": cache_meta,
                 "in_flight": False,
             })
             _AVITO_STATUS.update({

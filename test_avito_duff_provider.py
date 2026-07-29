@@ -14,6 +14,7 @@ from avito_duff_provider import (
     AvitoDuffProvider,
     AvitoParseError,
     AvitoRedirectLoopError,
+    AvitoVpnUnavailable,
     normalize_item,
 )
 
@@ -131,6 +132,15 @@ def test_missing_loader_data():
     )
     FakeSession.responses = [FakeResponse(200, body)]
     with pytest.raises(AvitoParseError, match="loaderData.data"):
+        AvitoDuffProvider().search("https://www.avito.ru/x")
+
+
+def test_missing_socks_raises_vpn_unavailable(monkeypatch):
+    def fail_get(self, url, **kwargs):
+        raise TimeoutError("SOCKS connect timeout")
+
+    monkeypatch.setattr(FakeSession, "get", fail_get)
+    with pytest.raises(AvitoVpnUnavailable):
         AvitoDuffProvider().search("https://www.avito.ru/x")
 
 
