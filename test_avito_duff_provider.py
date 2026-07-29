@@ -215,6 +215,48 @@ def test_scheduler_does_not_run_provider_in_parallel(monkeypatch):
     assert len(calls) == 1
 
 
+def test_rest_app_scheduler_ignores_legacy_proxy_cooldown(monkeypatch):
+    import control_bot
+
+    calls = []
+
+    class RestProvider:
+        def __init__(self, **kwargs):
+            self.last_diagnostics = {
+                "http": 200, "raw_items": 1, "after_private": 1,
+            }
+
+        def search(self, **kwargs):
+            calls.append(kwargs)
+            return [{
+                "id": "42", "source_id": "42", "source": "avito",
+                "title": "Lada", "price": 100000, "url": None,
+                "location": "Челябинск", "demo_url_hidden": True,
+                "demo_mode": True, "demo_price_unreliable": True,
+            }]
+
+    class LegacyBlockedState:
+        def load_state(self):
+            return {"blocked_until": 999999, "last_http": 429}
+
+        def record_success(self, *_args, **_kwargs):
+            return None
+
+    monkeypatch.setattr(control_bot, "RestAppAvitoProvider", RestProvider)
+    monkeypatch.setattr(control_bot, "_AVITO_PRODUCTION_STATE", LegacyBlockedState())
+    monkeypatch.setattr(control_bot, "AVITO_PROVIDER", "rest_app")
+    monkeypatch.setattr(control_bot, "AVITO_ENABLED", True)
+    control_bot._AVITO_SCHEDULE.clear()
+    control_bot._AVITO_GLOBAL_NEXT_ATTEMPT_AT = 0
+    key = control_bot._avito_schedule_key(
+        "chelyabinsk", 0, 100000, True, ""
+    )
+    result = control_bot._avito_scheduled_fetch(key, now=1000)
+    assert calls
+    assert len(result) == 1
+    assert result[0]["_source_id"] == "42"
+
+
 def test_manual_search_registers_priority_and_reuses_cache(monkeypatch):
     import control_bot
 

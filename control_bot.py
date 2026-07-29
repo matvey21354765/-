@@ -8391,6 +8391,8 @@ def _avito_scheduled_fetch_unlocked(
     provider_state = _AVITO_PRODUCTION_STATE.load_state()
     blocked_until = provider_state.get("blocked_until")
     if (
+        AVITO_PROVIDER != "rest_app"
+        and
         isinstance(blocked_until, (int, float))
         and now < float(blocked_until)
     ):
@@ -8444,6 +8446,11 @@ def _avito_scheduled_fetch_unlocked(
                 brand=brand if brand != "any" else "",
                 private_only=True,
             )
+            print(f"[Avito RestApp] provider_returned={len(provider_items)}")
+            print(
+                "[Avito RestApp] after_user_filters="
+                f"{provider.last_diagnostics.get('after_private', len(provider_items))}"
+            )
             http = int(provider.last_diagnostics.get("http") or 200)
             parsed = [
                 _adapt_duff_listing(item, datetime.date.today())
@@ -8453,10 +8460,7 @@ def _avito_scheduled_fetch_unlocked(
             # повторно в памяти, не создавая дополнительных запросов.
             parsed = [
                 item for item in parsed
-                if (
-                    int(item.get("_price_int", 0) or 0) >= price_min
-                    and int(item.get("_price_int", 0) or 0) <= price_max
-                )
+                if in_price_range(item, price_min, price_max)
             ]
             _avito_diag(
                 "HTTP",
@@ -13541,6 +13545,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
     _pf_tasks = [asyncio.ensure_future(_prefetch(it)) for it in batch]
     _deferred_junk = []
     sent_count = 0
+    avito_sent_count = 0
     for i, item in enumerate(batch):
         try:
             await _pf_tasks[i]   # ждём фото ТОЛЬКО этого объявления
@@ -13555,12 +13560,17 @@ async def send_batch(chat_id: int, uid: int, offset: int):
             continue
         if await _send_item(item):
             sent_count += 1
+            if item.get("source") == "avito":
+                avito_sent_count += 1
         await asyncio.sleep(0.01)
     for item in _deferred_junk:   # битые — в самом конце
         if await _send_item(item):
             sent_count += 1
+            if item.get("source") == "avito":
+                avito_sent_count += 1
         await asyncio.sleep(0.01)
 
+    print(f"[Avito RestApp] telegram_cards={avito_sent_count}")
     next_offset = offset + len(batch)
     shown_str = f"{sent_count} на этой странице · обработано {next_offset}/{total}"
     if next_offset < total:
@@ -14088,7 +14098,11 @@ async def do_search_for_user(uid: int, reply_to):
         _u = _item_identity(_it)
         if not _u or _u in _seen_final:
             continue
-        _sig = _content_sig(_it)
+        # Demo responses can redact multiple records to identical text. Their
+        # Rest-App Id remains stable, so content-based deduplication is unsafe.
+        _sig = "" if (
+            _it.get("source") == "avito" and _it.get("_demo_mode")
+        ) else _content_sig(_it)
         if _sig and _sig in _seen_sig:
             continue  # дубль по содержимому (репост в другой группе)
         _seen_final.add(_u)
@@ -14232,6 +14246,8 @@ async def do_search_for_user(uid: int, reply_to):
         VK и TG — не проверяем (требуют авторизацию), только обогащаем если есть описание.
         """
         source = it.get("source", "")
+        if source == "avito" and it.get("_demo_url_hidden"):
+            return it
         # VK и TG нельзя проверить без авторизации — оставляем как есть
         if source in ("vk", "tg", "tg_channel"):
             return it
@@ -14297,6 +14313,10 @@ async def do_search_for_user(uid: int, reply_to):
 
     _search_cache[uid] = suitable
     _save_cache(uid, suitable)
+    print(
+        "[Avito RestApp] after_pipeline="
+        f"{sum(1 for item in suitable if item.get('source') == 'avito')}"
+    )
     analytics.track(
         "search", uid=uid, region=region, price_min=pmin, price_max=pmax,
         source=",".join(enabled_sources), results=len(suitable),

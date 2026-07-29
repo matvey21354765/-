@@ -128,6 +128,7 @@ def test_blocked_until_skips_provider_network(monkeypatch, tmp_path):
 
     monkeypatch.setattr(control_bot, "_AVITO_PRODUCTION_STATE", store)
     monkeypatch.setattr(control_bot, "AvitoDuffProvider", ForbiddenProvider)
+    monkeypatch.setattr(control_bot, "AVITO_PROVIDER", "duff_vless")
     monkeypatch.setattr(control_bot, "AVITO_ENABLED", True)
     control_bot._AVITO_SCHEDULE.clear()
     control_bot._AVITO_GLOBAL_NEXT_ATTEMPT_AT = 0

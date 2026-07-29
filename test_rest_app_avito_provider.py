@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 
 import pytest
@@ -149,6 +150,22 @@ def test_private_filter_relaxes_for_demo_classification(monkeypatch):
     assert client.last_diagnostics["private_filter_relaxed"] is True
 
 
+def test_location_filter_relaxes_instead_of_erasing_demo_results(monkeypatch):
+    client = provider()
+    monkeypatch.setattr(client, "_post", lambda *_args, **_kwargs: {
+        "status": "ok", "data": [{
+            "Id": "1", "title": "Lada", "city": "Москва",
+            "price": "1", "url": "hidden_in_demo",
+            "avito_id": "hidden_in_demo",
+        }],
+    })
+    items = client.search(
+        region_name="Челябинская область", city_name="Челябинск",
+    )
+    assert len(items) == 1
+    assert client.last_diagnostics["location_filter_relaxed"] is True
+
+
 def test_demo_hidden_url_survives_bot_adapter_and_price_filter():
     from control_bot import _adapt_duff_listing, _item_identity, in_price_range
     import datetime
@@ -163,6 +180,41 @@ def test_demo_hidden_url_survives_bot_adapter_and_price_filter():
     assert adapted["_demo_url_hidden"] is True
     assert _item_identity(adapted) == "avito:demo-42"
     assert in_price_range(adapted, 100000, 300000) is True
+
+
+def test_demo_card_reaches_telegram_sender(monkeypatch, capsys):
+    import control_bot
+
+    sent_photos = []
+    sent_messages = []
+
+    class FakeBot:
+        async def send_photo(self, chat_id, photo, caption, reply_markup=None):
+            sent_photos.append((chat_id, photo, caption))
+
+        async def send_message(self, chat_id, text, reply_markup=None):
+            sent_messages.append((chat_id, text))
+
+    normalized = provider()._normalize({
+        "Id": "demo-send-1", "title": "Lada Granta",
+        "price": "250000", "city": "Челябинск",
+        "images": ["https://example.com/car.jpg"],
+        "description": "Исправный автомобиль в хорошем состоянии",
+        "url": "hidden_in_demo", "avito_id": "hidden_in_demo",
+    })
+    item = control_bot._adapt_duff_listing(
+        normalized, __import__("datetime").date.today()
+    )
+    monkeypatch.setattr(control_bot, "bot", FakeBot())
+    monkeypatch.setattr(control_bot, "load_settings", lambda _uid: {
+        "price_min": 100000, "price_max": 300000,
+    })
+    control_bot._search_cache[123] = [item]
+    asyncio.run(control_bot.send_batch(123, 123, 0))
+    output = capsys.readouterr().out
+    assert sent_photos
+    assert "Ссылка скрыта тестовым тарифом Rest-App" in sent_photos[0][2]
+    assert "[Avito RestApp] telegram_cards=1" in output
 
 
 def test_deduplicates_by_avito_id(monkeypatch):

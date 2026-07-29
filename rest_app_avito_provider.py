@@ -397,13 +397,16 @@ class RestAppAvitoProvider:
             value.strip().casefold() for value in (region_name, city_name)
             if value and value.strip()
         ]
-        filtered = [
+        location_filtered = [
             item for item in items
             if not location_terms or any(
                 term in str(item.get("location") or "").casefold()
                 for term in location_terms
             )
         ]
+        location_relaxed = bool(location_terms and not location_filtered and items)
+        filtered = list(items) if location_relaxed else location_filtered
+        diagnostics["location_filter_relaxed"] = location_relaxed
         diagnostics["after_location"] = len(filtered)
         filtered = [
             item for item in filtered
