@@ -34,6 +34,10 @@ def main() -> int:
         "cities": 0,
         "city_id": "",
         "items_count": 0,
+        "raw_data_type": "",
+        "raw_items_count": 0,
+        "normalized_items_count": 0,
+        "rejection_reasons": [],
         "first_five": [],
         "error": "",
     }
@@ -89,6 +93,17 @@ def main() -> int:
             provider.last_diagnostics.get("api_status") or report["api_status"]
         )
         report["items_count"] = len(items)
+        report["raw_data_type"] = str(
+            provider.last_diagnostics.get("raw_data_type") or ""
+        )
+        report["raw_items_count"] = int(
+            provider.last_diagnostics.get("raw_items") or 0
+        )
+        report["normalized_items_count"] = len(items)
+        if report["raw_items_count"] and not items:
+            report["rejection_reasons"] = list(
+                provider.last_diagnostics.get("rejection_reasons") or []
+            )[:5]
         report["first_five"] = items[:5]
     except RestAppError as exc:
         report["http"] = exc.status_code
@@ -97,7 +112,8 @@ def main() -> int:
         report["error"] = f"{type(exc).__name__}: {exc}"
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0 if (
-        report["api_status"] == "ok" and report["items_count"] > 0
+        report["api_status"] == "ok"
+        and report["normalized_items_count"] > 0
     ) else 1
 
 

@@ -965,6 +965,17 @@ def _norm_url(u: str) -> str:
     return u
 
 
+def _item_identity(item: dict) -> str:
+    """Stable per-source identity, including Rest-App demo records without URL."""
+    source_id = str(
+        item.get("source_id") or item.get("_source_id") or ""
+    ).strip()
+    source = str(item.get("source") or "").strip()
+    if source_id:
+        return f"{source}:{source_id}"
+    return _norm_url(item.get("url") or "")
+
+
 def _listing_key(u: str) -> str:
     """Канонический ID объявления — числовой ID в конце urlPath.
     Авито и другие площадки иногда дублируют одно объявление с разными
@@ -8319,12 +8330,17 @@ def _adapt_duff_listing(item: dict, today: datetime.date) -> dict:
         "price": (
             f"{price_int:,} ₽".replace(",", " ") if price_int else ""
         ),
-        "url": str(item.get("url") or ""),
+        "url": item.get("url"),
         "date": str(posted_date),
         "location": str(item.get("location") or ""),
         "seller": item.get("seller") or "",
+        "seller_type": item.get("seller_type") or "unknown",
         "published_at": published_at,
-        "description": "",
+        "description": item.get("description") or "",
+        "specs": item.get("specs") or {},
+        "source_id": str(item.get("source_id") or item.get("id") or ""),
+        "_source_id": str(item.get("source_id") or item.get("id") or ""),
+        "_demo_url_hidden": bool(item.get("demo_url_hidden")),
         "_photo_url": photo_url,
         "_photos": 1 if photo_url else 0,
         "_price_int": price_int,
@@ -8501,7 +8517,11 @@ def _avito_scheduled_fetch_unlocked(
         merged: dict[str, dict] = {}
         for item in list(entry.get("items", [])) + list(parsed):
             item_url = _norm_url(item.get("url", ""))
-            listing_id = _listing_key(item_url) or item_url
+            listing_id = (
+                str(item.get("_source_id") or item.get("source_id") or "")
+                or _listing_key(item_url)
+                or item_url
+            )
             if listing_id:
                 item["url"] = item_url
                 merged[listing_id] = item
@@ -11337,7 +11357,10 @@ async def cb_notify_favs(cb: CallbackQuery):
     await cb.message.answer(f"⭐ Избранное ({len(favs)} шт.):")
     for it in favs[-10:]:
         url = it.get("url", "")
-        sid = url_to_id(url)
+        sid = (
+            str(item.get("_source_id") or item.get("source_id") or "")[:40]
+            or url_to_id(url)
+        )
         kb = InlineKeyboardMarkup(inline_keyboard=[r for r in [
             [InlineKeyboardButton(text="🔗 Открыть", url=url)] if url else [],
             [InlineKeyboardButton(text="🔍 Пробить машину (штрафы, аресты)", callback_data=f"check|{sid}|{uid}")],
@@ -13401,6 +13424,27 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                 _desc += "…"
             caption += f"\n\n📝 {_desc}"
 
+        if item.get("source") == "avito":
+            if item.get("location"):
+                caption += f"\n📍 {item['location']}"
+            if item.get("published_at"):
+                caption += f"\n🕒 {item['published_at']}"
+            specs = item.get("specs") or {}
+            labels = (
+                ("year", "Год"), ("mileage", "Пробег"),
+                ("transmission", "Коробка"), ("engine", "Двигатель"),
+                ("drive", "Привод"), ("power", "Мощность"),
+                ("body", "Кузов"), ("steering", "Руль"),
+            )
+            spec_text = [
+                f"{label}: {specs[key]}"
+                for key, label in labels if specs.get(key)
+            ]
+            if spec_text:
+                caption += "\n🚘 " + " · ".join(spec_text)
+            if item.get("_demo_url_hidden"):
+                caption += "\n🔒 Ссылка скрыта тестовым тарифом Rest-App"
+
         source = item.get("source", "")
         seller = item.get("seller", "")
         if source == "vk":
@@ -13420,10 +13464,14 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                 InlineKeyboardButton(text="⭐ Сохранить", callback_data=f"fav|{sid}|{uid}"),
             ]
         else:
-            row1 = [
-                InlineKeyboardButton(text="🔗 Открыть", url=url),
-                InlineKeyboardButton(text="⭐ Сохранить", callback_data=f"fav|{sid}|{uid}"),
-            ]
+            row1 = []
+            if url:
+                row1.append(InlineKeyboardButton(text="🔗 Открыть", url=url))
+            row1.append(
+                InlineKeyboardButton(
+                    text="⭐ Сохранить", callback_data=f"fav|{sid}|{uid}"
+                )
+            )
         row2 = [
             InlineKeyboardButton(text="❌ Скрыть", callback_data=f"hide|{sid}|{uid}"),
             InlineKeyboardButton(text="📋 Похожие", callback_data=f"sim|{sid}|{uid}"),
@@ -13531,9 +13579,9 @@ async def send_batch(chat_id: int, uid: int, offset: int):
     # Сохраняем показанные в seen (нормализуем URL, кап 2000)
     seen = load_seen(uid)
     for item in batch:
-        u = item.get("url", "")
-        if u:
-            seen.add(_norm_url(u))
+        identity = _item_identity(item)
+        if identity:
+            seen.add(identity)
     if len(seen) > 2000:
         seen = set(list(seen)[-1500:])
     save_seen(uid, seen)
@@ -13769,8 +13817,8 @@ async def do_search_for_user(uid: int, reply_to):
         avito_now = sum(
             1 for i in items
             if i.get("source") == "avito" and not is_dealer(i)
-            and in_price_range(i, pmin, pmax) and i.get("url")
-            and i["url"] not in skipped
+            and in_price_range(i, pmin, pmax)
+            and _item_identity(i) not in skipped
         )
         if avito_now == 0:
             print(f"  [fallback] в бюджете {pmin}-{pmax}₽ на Авито пусто — добавляем Дром")
@@ -13801,10 +13849,11 @@ async def do_search_for_user(uid: int, reply_to):
     seen_domain_ids: set[str] = set()
     deduped: list[dict] = []
     for i in items:
-        u = i.get("url", "")
-        if not u:
+        u = i.get("url") or ""
+        stable_identity = _item_identity(i)
+        if not stable_identity:
             continue
-        u_norm = _norm_url(u)
+        u_norm = _norm_url(u) if u else stable_identity
         if u_norm in seen_u:
             continue
         _dm = _URL_DOMAIN_RE.match(u_norm)
@@ -13815,7 +13864,8 @@ async def do_search_for_user(uid: int, reply_to):
         if _domain_id_key and _domain_id_key in seen_domain_ids:
             continue
         seen_u.add(u_norm)
-        i["url"] = u_norm  # нормализуем URL в объявлении
+        if u:
+            i["url"] = u_norm  # нормализуем только реальный URL
         if _domain_id_key:
             seen_domain_ids.add(_domain_id_key)
         deduped.append(i)
@@ -13972,11 +14022,18 @@ async def do_search_for_user(uid: int, reply_to):
         i for i in items
         if not i.get("_market_ref_only")
         and in_price_range(i, pmin, pmax)
-        and i.get("url")
-        and i["url"] not in skipped_norm
+        and _item_identity(i)
+        and _item_identity(i) not in skipped_norm
+        and _item_identity(i) not in seen_norm
     ]
     print(f"  [фильтр] после in_price_range+skipped: {len(suitable)}/{_before} (бюджет {pmin}-{pmax})")
-    _bad_price = [i for i in items if not i.get("_market_ref_only") and i.get("url") and i["url"] not in skipped and not in_price_range(i, pmin, pmax)]
+    _bad_price = [
+        i for i in items
+        if not i.get("_market_ref_only")
+        and _item_identity(i)
+        and _item_identity(i) not in skipped
+        and not in_price_range(i, pmin, pmax)
+    ]
     if _bad_price:
         _sample = [(i.get("title","")[:30], i.get("price",""), i.get("_price_int",0)) for i in _bad_price[:5]]
         print(f"  [фильтр] вне бюджета примеры: {_sample}")
@@ -14016,7 +14073,7 @@ async def do_search_for_user(uid: int, reply_to):
     _seen_sig: set[str] = set()
     _deduped_suitable: list[dict] = []
     for _it in suitable:
-        _u = _norm_url(_it.get("url", ""))
+        _u = _item_identity(_it)
         if not _u or _u in _seen_final:
             continue
         _sig = _content_sig(_it)
@@ -14961,6 +15018,11 @@ def _init_global_seen_db() -> None:
             "CREATE TABLE IF NOT EXISTS seen_listings "
             "(listing_id TEXT PRIMARY KEY, url TEXT NOT NULL, ts REAL NOT NULL)"
         )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS marketplace_listings ("
+            "source TEXT NOT NULL, source_id TEXT NOT NULL, url TEXT, "
+            "ts REAL NOT NULL, UNIQUE(source, source_id))"
+        )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_seen_listing_ts ON seen_listings(ts)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_seen_ts ON seen_urls(ts)")
         conn.commit()
@@ -15006,6 +15068,13 @@ def _add_global_seen(listings: dict[str, str]) -> None:
                     "INSERT OR IGNORE INTO seen_listings(listing_id, url, ts) VALUES(?, ?, ?)",
                     (listing_id, url, now),
                 )
+                if ":" in listing_id:
+                    source, source_id = listing_id.split(":", 1)
+                    conn.execute(
+                        "INSERT OR IGNORE INTO marketplace_listings"
+                        "(source, source_id, url, ts) VALUES(?, ?, ?, ?)",
+                        (source, source_id, url or None, now),
+                    )
             except Exception:
                 pass
         conn.commit()
@@ -15185,14 +15254,14 @@ async def _global_monitor_loop():
             for key_rs, items in list(_region_src_cache.items()):
                 kept = []
                 for it in items:
-                    nu = _norm_url(it.get("url", ""))
-                    if not nu:
+                    nu = _norm_url(it.get("url") or "")
+                    listing_id = _item_identity(it)
+                    if not listing_id:
                         continue
-                    listing_id = _listing_key(nu) or nu
                     if listing_id in global_seen:
                         continue
                     kept.append(it)
-                    new_global_listings[listing_id] = nu
+                    new_global_listings[listing_id] = nu or ""
                 _region_src_cache[key_rs] = kept
             if new_global_listings:
                 await loop.run_in_executor(None, _add_global_seen, new_global_listings)

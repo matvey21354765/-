@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import threading
@@ -177,7 +178,31 @@ class RestAppAvitoProvider:
         return ""
 
     @staticmethod
-    def _normalize(ad: dict) -> dict:
+    def _extract_raw_items(payload: dict) -> tuple[list, str]:
+        data = payload.get("data")
+        if isinstance(data, list):
+            return data, "list"
+        if isinstance(data, dict) and isinstance(data.get("items"), list):
+            return data["items"], "dict.items"
+        for key in ("items", "results"):
+            if isinstance(payload.get(key), list):
+                return payload[key], key
+        return [], type(data).__name__
+
+    @staticmethod
+    def _param_map(ad: dict) -> dict[str, str]:
+        result: dict[str, str] = {}
+        for param in ad.get("params") or []:
+            if not isinstance(param, dict):
+                continue
+            name = str(param.get("name") or "").strip()
+            value = str(param.get("value") or "").strip()
+            if name:
+                result[name.casefold()] = value
+        return result
+
+    @classmethod
+    def _normalize(cls, ad: dict) -> dict:
         images = ad.get("images")
         if isinstance(images, str):
             image = next((part.strip() for part in images.split(",") if part.strip()), "")
@@ -189,25 +214,72 @@ class RestAppAvitoProvider:
         digits = re.sub(r"\D", "", raw_price)
         price = int(digits) if digits else None
         title = str(ad.get("title") or "").strip()
-        year_match = re.search(r"\b(19[5-9]\d|20[0-3]\d)\b", title)
-        ad_id = ad.get("avito_id") or ad.get("id") or ad.get("Id") or ""
+        params = cls._param_map(ad)
+        def param_value(*needles: str) -> str:
+            for key, value in params.items():
+                if any(needle in key for needle in needles):
+                    return value
+            return ""
+
+        year_text = param_value("год выпуска")
+        year_match = re.search(r"\b(19[5-9]\d|20[0-3]\d)\b", year_text)
+        source_id = str(ad.get("Id") or "").strip()
+        avito_id = str(ad.get("avito_id") or "").strip()
+        if not source_id and avito_id and avito_id != "hidden_in_demo":
+            source_id = avito_id
+        if not source_id:
+            identity = "|".join(str(ad.get(key) or "") for key in (
+                "title", "time", "city", "price"
+            ))
+            source_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        raw_url = str(ad.get("url") or "").strip()
+        url = None if raw_url == "hidden_in_demo" else (raw_url or None)
+        location = ", ".join(
+            value for value in (
+                str(ad.get("region") or "").strip(),
+                str(ad.get("city") or "").strip(),
+                str(ad.get("district") or "").strip(),
+            )
+            if value
+        )
+        specs = {
+            "year": param_value("год выпуска"),
+            "mileage": param_value("пробег"),
+            "transmission": param_value("коробка передач"),
+            "engine": param_value("тип двигателя"),
+            "drive": param_value("привод"),
+            "power": param_value("мощность"),
+            "body": param_value("тип кузова"),
+            "steering": param_value("руль"),
+        }
+        seller_type = (
+            "dealer"
+            if str(ad.get("postfix") or "").strip().casefold() == "компания"
+            else "private"
+        )
         return {
-            "id": str(ad_id),
+            "id": source_id,
+            "source_id": source_id,
             "title": title,
             "price": price,
-            "url": str(ad.get("url") or ""),
+            "url": url,
             "image": image or None,
-            "location": str(ad.get("city") or ad.get("region") or ""),
+            "location": location,
             "published_at": str(ad.get("time") or "") or None,
             "source": "avito",
             "seller": str(ad.get("name") or ""),
+            "seller_type": seller_type,
             "description": str(ad.get("description") or ""),
             "params": ad.get("params") if isinstance(ad.get("params"), list) else [],
+            "specs": specs,
             "year": int(year_match.group(1)) if year_match else 0,
+            "demo_url_hidden": raw_url == "hidden_in_demo",
         }
 
     @staticmethod
     def _is_private(item: dict) -> bool:
+        if item.get("seller_type") == "dealer":
+            return False
         values = " ".join(
             str(param.get("value") or "") for param in item.get("params", [])
             if isinstance(param, dict)
@@ -270,19 +342,30 @@ class RestAppAvitoProvider:
                 params["q"] = query
                 params["in"] = "title"
             payload = self._post("ads", params)
-            raw_items = payload.get("data")
-            if not isinstance(raw_items, list):
-                raise RestAppResponseError("Rest-App data is not a list")
+            raw_items, raw_data_type = self._extract_raw_items(payload)
             unique: dict[str, dict] = {}
+            rejection_reasons: list[str] = []
             for raw in raw_items:
                 if not isinstance(raw, dict):
+                    if len(rejection_reasons) < 5:
+                        rejection_reasons.append("element is not an object")
                     continue
                 item = self._normalize(raw)
                 if not item["id"]:
+                    if len(rejection_reasons) < 5:
+                        rejection_reasons.append("missing source identity")
                     continue
                 if year and item["year"] != int(year):
+                    if len(rejection_reasons) < 5:
+                        rejection_reasons.append(
+                            f"id={item['id']}: year does not match"
+                        )
                     continue
                 if private_only and not self._is_private(item):
+                    if len(rejection_reasons) < 5:
+                        rejection_reasons.append(
+                            f"id={item['id']}: company/dealer"
+                        )
                     continue
                 unique[item["id"]] = item
             items = sorted(
@@ -297,7 +380,9 @@ class RestAppAvitoProvider:
                 "api_status": payload.get("status"),
                 "cache_hit": False,
                 "raw_items": len(raw_items),
+                "raw_data_type": raw_data_type,
                 "items": len(items),
+                "rejection_reasons": rejection_reasons,
                 "region_id": region_id,
                 "city_id": city_id,
             })

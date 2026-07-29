@@ -33,6 +33,7 @@ def test_normalize_required_fields():
         "images": "https://img/1.jpg,https://img/2.jpg",
         "city": "Новосибирск",
         "time": "2026-07-29 10:00:00",
+        "params": [{"name": "Год выпуска", "value": "2020"}],
     })
     assert item["id"] == "123"
     assert item["price"] == 750000
@@ -92,3 +93,46 @@ def test_active_cooldown_makes_no_request(monkeypatch):
     )
     with pytest.raises(RestAppRateLimitedError):
         client.search(region_name="Область", city_name="Город")
+
+
+@pytest.mark.parametrize(
+    ("payload", "kind"),
+    [
+        ({"data": [{"Id": "1"}]}, "list"),
+        ({"data": {"items": [{"Id": "1"}]}}, "dict.items"),
+        ({"items": [{"Id": "1"}]}, "items"),
+        ({"results": [{"Id": "1"}]}, "results"),
+    ],
+)
+def test_extracts_actual_response_variants(payload, kind):
+    rows, raw_type = RestAppAvitoProvider._extract_raw_items(payload)
+    assert rows[0]["Id"] == "1"
+    assert raw_type == kind
+
+
+def test_demo_record_keeps_source_id_and_hidden_url():
+    item = provider()._normalize({
+        "Id": "777",
+        "avito_id": "hidden_in_demo",
+        "url": "hidden_in_demo",
+        "title": "Toyota Camry",
+        "price": "900000",
+        "time": "2026-07-29 12:00:00",
+        "region": "Новосибирская область",
+        "city": "Новосибирск",
+        "district": "Центральный",
+        "images": ["https://img/first.jpg", "https://img/second.jpg"],
+        "params": [
+            {"name": "Год выпуска", "value": "2014"},
+            {"name": "Пробег, км", "value": "120000"},
+            {"name": "Мощность двигателя, л.с.", "value": "181"},
+        ],
+    })
+    assert item["id"] == "777"
+    assert item["source_id"] == "777"
+    assert item["url"] is None
+    assert item["demo_url_hidden"] is True
+    assert item["location"] == "Новосибирская область, Новосибирск, Центральный"
+    assert item["image"] == "https://img/first.jpg"
+    assert item["specs"]["mileage"] == "120000"
+    assert item["specs"]["power"] == "181"
