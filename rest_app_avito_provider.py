@@ -22,6 +22,22 @@ BASE_URL = "https://rest-app.net/api"
 CAR_CATEGORY_ID = "9"
 
 
+def _env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError:
+        value = default
+    return max(minimum, min(maximum, value))
+
+
+REST_APP_MAX_TIME_WINDOWS = _env_int("REST_APP_MAX_TIME_WINDOWS", 6, 1, 6)
+REST_APP_CACHE_TTL = _env_int("REST_APP_CACHE_TTL", 300, 30, 3600)
+REST_APP_RESULT_LIMIT = _env_int("REST_APP_RESULT_LIMIT", 50, 1, 50)
+REST_APP_DB_MAX_AGE_HOURS = _env_int(
+    "REST_APP_DB_MAX_AGE_HOURS", 24, 1, 168
+)
+
+
 class RestAppError(RuntimeError):
     status_code: int | None = None
 
@@ -75,7 +91,10 @@ class RestAppAvitoProvider:
     _regions_cache: list[dict] | None = None
     _cities_cache: dict[str, list[dict]] = {}
 
-    def __init__(self, config: RestAppConfig | None = None, cache_ttl: int = 120):
+    def __init__(
+        self, config: RestAppConfig | None = None,
+        cache_ttl: int = REST_APP_CACHE_TTL,
+    ):
         self.config = config or RestAppConfig.from_env()
         self.cache_ttl = max(1, int(cache_ttl))
         self.last_diagnostics: dict[str, Any] = {}
@@ -158,6 +177,18 @@ class RestAppAvitoProvider:
             "date1": (now - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S"),
             "date2": now.strftime("%Y-%m-%d %H:%M:%S"),
         }
+
+    @staticmethod
+    def _time_windows(max_windows: int = REST_APP_MAX_TIME_WINDOWS) -> list[dict[str, str]]:
+        now = datetime.now(timezone(timedelta(hours=3))).replace(tzinfo=None)
+        intervals = ((0, 30), (30, 60), (60, 180), (180, 360), (360, 720), (720, 1440))
+        return [
+            {
+                "date1": (now - timedelta(minutes=older)).strftime("%Y-%m-%d %H:%M:%S"),
+                "date2": (now - timedelta(minutes=newer)).strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            for newer, older in intervals[:max_windows]
+        ]
 
     @staticmethod
     def _db_path() -> str:
@@ -408,9 +439,12 @@ class RestAppAvitoProvider:
         filtered = list(items) if location_relaxed else location_filtered
         diagnostics["location_filter_relaxed"] = location_relaxed
         diagnostics["after_location"] = len(filtered)
+        demo_relax_price = os.getenv(
+            "REST_APP_DEMO_RELAX_PRICE", "true"
+        ).strip().lower() in {"1", "true", "yes", "on"}
         filtered = [
             item for item in filtered
-            if item.get("demo_price_unreliable")
+            if (demo_relax_price and item.get("demo_price_unreliable"))
             or (
                 item.get("price") is not None
                 and int(price_min) <= int(item["price"]) <= int(price_max)
@@ -488,6 +522,7 @@ class RestAppAvitoProvider:
                 "demo_url_hidden": any(
                     item.get("demo_url_hidden") for item in source_items
                 ),
+                "requests": 0,
             }
             if extra:
                 diagnostics.update(extra)
@@ -499,6 +534,14 @@ class RestAppAvitoProvider:
                 len(source_items), len(source_items), stages["after_location"],
                 stages["after_price"], stages["after_brand"], stages["after_year"],
                 stages["after_private"], str(cache_hit).lower(), str(db_hit).lower(),
+            )
+            logging.getLogger(__name__).info(
+                "[Avito RestApp] requests=%d raw_total=%d unique_total=%d "
+                "after_location=%d after_price=%d returned=%d",
+                int(diagnostics.get("requests") or 0),
+                int(diagnostics.get("raw_items") or len(source_items)),
+                len(source_items), stages["after_location"],
+                stages["after_price"], len(filtered),
             )
             with self._cache_lock:
                 self._cache[key] = (time.time(), list(filtered))
@@ -528,11 +571,18 @@ class RestAppAvitoProvider:
             params: dict[str, Any] = {
                 "category_id": CAR_CATEGORY_ID,
                 "sort": "desc",
-                "limit": 50,
+                "limit": REST_APP_RESULT_LIMIT,
             }
-            params.update(self._date_range(1))
-            payload = self._post("ads", params)
-            raw_items, raw_data_type = self._extract_raw_items(payload)
+            raw_items: list = []
+            raw_data_type = "list"
+            payload: dict = {"status": "ok"}
+            request_count = 0
+            for window in self._time_windows():
+                window_params = {**params, **window}
+                payload = self._post("ads", window_params)
+                request_count += 1
+                window_items, raw_data_type = self._extract_raw_items(payload)
+                raw_items.extend(window_items)
             unique: dict[str, dict] = {}
             rejection_reasons: list[str] = []
             for raw in raw_items:
@@ -552,12 +602,21 @@ class RestAppAvitoProvider:
                 reverse=True,
             )
             self._save_db(normalized)
+            db_hit = False
+            if not normalized:
+                normalized = self._load_db(
+                    region_name="", city_name="", price_min=0,
+                    price_max=99_000_000, query="", year=0,
+                    max_age=REST_APP_DB_MAX_AGE_HOURS * 3600,
+                )
+                db_hit = bool(normalized)
             with self._cache_lock:
                 type(self)._raw_cache = (time.time(), list(normalized))
-            return finish(normalized, cache_hit=False, extra={
+            return finish(normalized, cache_hit=False, db_hit=db_hit, extra={
                 "api_status": payload.get("status"),
                 "raw_items": len(raw_items),
                 "normalized_items": len(normalized),
                 "raw_data_type": raw_data_type,
                 "rejection_reasons": rejection_reasons,
+                "requests": request_count,
             })

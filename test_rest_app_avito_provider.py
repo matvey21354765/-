@@ -68,7 +68,7 @@ def test_identical_search_uses_cache(monkeypatch):
     first = client.search(**kwargs)
     second = client.search(**kwargs)
     assert first == second
-    assert len(calls) == 1
+    assert len(calls) == 6
     assert client.last_diagnostics["cache_hit"] is True
 
 
@@ -97,11 +97,12 @@ def test_production_payload_and_local_filters(monkeypatch):
         price_min=100000, price_max=300000, brand="Lada", year=2014,
     )
     assert len(items) == 50
-    assert len(calls) == 1
-    payload = calls[0][1]
-    assert set(payload) == {"category_id", "sort", "limit", "date1", "date2"}
-    assert payload["category_id"] == "9"
-    assert payload["limit"] == 50
+    assert len(calls) == 6
+    for _, payload in calls:
+        assert set(payload) == {"category_id", "sort", "limit", "date1", "date2"}
+        assert payload["category_id"] == "9"
+        assert payload["limit"] == 50
+    assert len({(payload["date1"], payload["date2"]) for _, payload in calls}) == 6
     assert client.last_diagnostics["after_location"] == 50
     assert client.last_diagnostics["after_private"] == 50
 
@@ -130,7 +131,7 @@ def test_different_user_filters_reuse_raw_cache(monkeypatch):
         price_min=800000, price_max=1000000,
     )
     assert first and second
-    assert calls == 1
+    assert calls == 6
     assert client.last_diagnostics["cache_hit"] is True
 
 

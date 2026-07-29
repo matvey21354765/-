@@ -598,6 +598,20 @@ AVITO_PROXY_ROTATE_URL = os.getenv("AVITO_PROXY_ROTATE_URL", "").strip()
 # путь для Auto.ru. Токен зашит в мобильное приложение ru.auto.ara; если задан,
 # бот ходит через официальный API вместо капча-стены desktop-версии.
 AUTORU_API_TOKEN = os.getenv("AUTORU_API_TOKEN", "")
+AUTORU_PROXY_URL = os.getenv("AUTORU_PROXY_URL", "").strip()
+_AUTORU_LAST_DIAG: dict = {
+    "request_url": "",
+    "proxy_enabled": False,
+    "http_status": None,
+    "raw": 0,
+    "normalized": 0,
+    "after_location": 0,
+    "after_price": 0,
+    "after_pipeline": 0,
+    "telegram_cards": 0,
+    "error_type": "",
+    "error_message_safe": "",
+}
 _last_ip_rotate_ts = 0.0
 
 # Отдельный пул РФ-прокси для Auto.ru. Яндекс режет капчей дата-центр/мобильный
@@ -614,7 +628,27 @@ def _autoru_proxy_dicts() -> "list[dict]":
     """Список proxy-словарей для requests/curl_cffi из пула Auto.ru.
     socks5:// → socks5h:// — DNS резолвится НА СТОРОНЕ прокси (РФ), иначе
     Яндекс видит иностранный DNS-резолвинг и чаще отдаёт капчу."""
-    return [_avito_proxies()] if _avito_proxies() else []
+    proxy = _autoru_proxy_dict()
+    return [proxy] if proxy else []
+
+
+def _autoru_proxy_dict() -> dict | None:
+    """Dedicated Auto.ru route; never falls back to the VPS public IP."""
+    proxy_url = AUTORU_PROXY_URL or os.getenv("PROXY_URL", "").strip()
+    if not proxy_url:
+        return None
+    return {"http": proxy_url, "https": proxy_url}
+
+
+def _autoru_user_error(diag: dict | None = None) -> str:
+    error_type = str((diag or _AUTORU_LAST_DIAG).get("error_type") or "")
+    return {
+        "network": "Auto.ru: источник временно недоступен",
+        "proxy_auth": "Auto.ru: ошибка авторизации proxy",
+        "http_403": "Auto.ru: доступ ограничен",
+        "http_429": "Auto.ru: источник временно ограничил доступ",
+        "parse_error": "Auto.ru: ошибка формата ответа",
+    }.get(error_type, "")
 
 # Диагностика готовности Auto.ru: Яндекс режет капчей любой «грязный» IP.
 if AUTORU_API_TOKEN:
@@ -700,17 +734,19 @@ def _curl_cffi_get(url: str, params: dict | None = None, headers: dict | None = 
     is_marketplace = "auto.ru" in url or "apiauto.ru" in url
     if is_marketplace:
         retries = 1
-        proxies = _avito_proxies()
+        proxies = _autoru_proxy_dict()
         if not proxies:
             raise RuntimeError(
-                "Mobile proxy is unavailable; direct Auto.ru access is disabled"
+                "Auto.ru proxy is unavailable; direct access is disabled"
             )
     try:
         from curl_cffi import requests as cffi_req
     except ImportError:
         return None
 
-    request_proxies = proxies or _avito_proxies()
+    request_proxies = proxies or (
+        _autoru_proxy_dict() if is_marketplace else _avito_proxies()
+    )
     _headers = {
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8",
@@ -2497,6 +2533,46 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
         _ar_base_url += f"&price_from={price_min}"
     if price_max < 99_000_000:
         _ar_base_url += f"&price_to={price_max}"
+    _AUTORU_LAST_DIAG.update({
+        "request_url": _ar_base_url,
+        "proxy_enabled": bool(_autoru_proxy_dict()),
+        "http_status": None,
+        "raw": 0,
+        "normalized": 0,
+        "after_location": 0,
+        "after_price": 0,
+        "after_pipeline": 0,
+        "telegram_cards": 0,
+        "error_type": "",
+        "error_message_safe": "",
+    })
+
+    def _autoru_finish(found: list[dict]) -> list[dict]:
+        unique: dict[str, dict] = {}
+        for item in found:
+            identity = _item_identity(item)
+            if identity:
+                unique[identity] = item
+        output = list(unique.values())
+        _AUTORU_LAST_DIAG.update({
+            "raw": len(found),
+            "normalized": len(output),
+            "after_location": len(output),
+            "after_price": sum(
+                1 for item in output if in_price_range(item, price_min, price_max)
+            ),
+        })
+        print(
+            "[Auto.ru] "
+            f"request_url={_ar_base_url} "
+            f"proxy_enabled={str(bool(_autoru_proxy_dict())).lower()} "
+            f"http_status={_AUTORU_LAST_DIAG.get('http_status')} "
+            f"raw={len(found)} normalized={len(output)} "
+            f"after_location={_AUTORU_LAST_DIAG['after_location']} "
+            f"after_price={_AUTORU_LAST_DIAG['after_price']} "
+            f"error_type={_AUTORU_LAST_DIAG.get('error_type') or 'none'}"
+        )
+        return output
     _warm_html = ""
     _warm_status = 0
     # Прогреваем сессию через доступный прокси. Если задан РФ-пул — попробуем
@@ -2513,11 +2589,12 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
                 headers={"Accept-Language": "ru-RU,ru;q=0.9",
                          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                          "Referer": "https://auto.ru/", "Upgrade-Insecure-Requests": "1"},
-                proxies=_avito_proxies() or {},
+                proxies=_autoru_proxy_dict() or {},
             )
             if _rc is None:
                 raise RuntimeError("Auto.ru transport returned no response")
             _warm_html, _warm_status = _rc.text or "", _rc.status_code
+            _AUTORU_LAST_DIAG["http_status"] = _warm_status
             # Переносим куки (spravka и т.п.) в requests-сессию для AJAX-фолбэка
             try:
                 for _k, _v in _rc.cookies.get_dict().items():
@@ -2527,7 +2604,16 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
             print(f"  [Auto.ru] curl_cffi прогрев: HTTP {_warm_status}, {len(_warm_html):,}б")
         except Exception as _ec:
             print(f"  [Auto.ru] curl_cffi прогрев: {str(_ec)[:60]}")
-            return results
+            message = str(_ec).lower()
+            _AUTORU_LAST_DIAG.update({
+                "error_type": (
+                    "proxy_auth"
+                    if "407" in message or "proxy authentication" in message
+                    else "network"
+                ),
+                "error_message_safe": type(_ec).__name__,
+            })
+            return _autoru_finish(results)
         # 2) обычный requests — запасной, если curl_cffi не дал страницу
         if len(_warm_html) < 5_000 and _ar_session is not None:
             try:
@@ -2535,7 +2621,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
                     "User-Agent": _ar_ua,
                     "Accept": "text/html,application/xhtml+xml,*/*;q=0.9",
                     "Accept-Language": "ru-RU,ru;q=0.9",
-                }, proxies=_avito_proxies(), timeout=5)
+                }, proxies=_autoru_proxy_dict(), timeout=5)
                 _warm_html, _warm_status = _warm.text, _warm.status_code
             except Exception as _e:
                 print(f"  [Auto.ru] requests прогрев: {str(_e)[:60]}")
@@ -2547,6 +2633,13 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
         or "too-many-requests" in _wl or "доступ ограничен" in _wl
         or _warm_status in (429, 403)
     )
+    if _warm_status in (403, 407, 429):
+        _AUTORU_LAST_DIAG.update({
+            "error_type": (
+                "proxy_auth" if _warm_status == 407 else f"http_{_warm_status}"
+            ),
+            "error_message_safe": f"HTTP {_warm_status}",
+        })
     # Парсим прогрев, если это не капча (мобильная страница бывает и <50К)
     if not _warm_blocked and len(_warm_html) > 3_000:
         _warm_items = _autoru_parse_html(_warm_html, today)
@@ -2569,7 +2662,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
                         "Accept-Language": "ru-RU,ru;q=0.9",
                         "Referer": _ar_base_url,
                     },
-                    proxies=_avito_proxies() or {},
+                    proxies=_autoru_proxy_dict() or {},
                 )
                 if not page_resp or page_resp.status_code != 200:
                     continue
@@ -2584,7 +2677,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
                 print(f"  [Auto.ru] стр.{page_no}: +{added}, всего {len(results)}")
             except Exception as exc:
                 print(f"  [Auto.ru] стр.{page_no}: {str(exc)[:100]}")
-        return results
+        return _autoru_finish(results)
     # ВАЖНО: даже если прогрев поймал капчу — НЕ выходим. AJAX-методы (мобильный
     # API + desktop AJAX через прокси) часто работают, когда HTML-страница
     # отдаёт капчу. Раньше ранний return убивал их — Auto.ru искал мало.
@@ -2601,7 +2694,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
                     headers={"Accept-Language": "ru-RU,ru;q=0.9",
                              "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                              "Referer": "https://auto.ru/", "Upgrade-Insecure-Requests": "1"},
-                    proxies=_avito_proxies() or {},
+                    proxies=_autoru_proxy_dict() or {},
                 )
                 _warm_html, _warm_status = _rc2.text, _rc2.status_code
                 try:
@@ -2615,7 +2708,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
                     if _warm_items2:
                         print(f"  [Auto.ru] прогрев (ротация) дал {len(_warm_items2)} объявлений")
                         results.extend(_warm_items2)
-                        return results
+                        return _autoru_finish(results)
             except Exception as _ec2:
                 print(f"  [Auto.ru] прогрев после ротации: {str(_ec2)[:60]}")
 
@@ -2688,7 +2781,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
                         "Content-Type": "application/json",
                         "x-client-app": "ru.auto.ara",
                     },
-                    proxies=_avito_proxies(),
+                    proxies=_autoru_proxy_dict(),
                     timeout=8,
                 )
                 print(f"  [Auto.ru] apiauto стр.{p}: HTTP {_api_r.status_code}, {len(_api_r.text):,}б")
@@ -2771,14 +2864,14 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
 
         # Метод 0а: Прямой AJAX API с общим мобильным прокси. Пропускаем, если
         # есть выделенный РФ-пул (он уже отработал выше и не ловит капчу).
-        if not batch and AVITO_PROXIES and not AUTORU_PROXIES:
+        if not batch and _autoru_proxy_dict() and not AUTORU_PROXIES:
             try:
                 r_ajax = _fetch_with_retry(
                     "https://auto.ru/-/ajax/desktop/listing/",
                     method="POST",
                     json=body,
                     headers={**headers_ajax, "x-requested-with": "fetch"},
-                    proxies=_avito_proxies(),
+                    proxies=_autoru_proxy_dict(),
                     timeout=4,
                 )
                 print(f"  [Auto.ru] прокси AJAX стр.{p}: HTTP {r_ajax.status_code}, {len(r_ajax.text):,}б")
@@ -2791,14 +2884,14 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
                 print(f"  [Auto.ru] прокси AJAX: {str(e)[:80]}")
 
         # Метод 0b: Прямой HTML через общий мобильный прокси (пропускаем при РФ-пуле)
-        if not batch and AVITO_PROXIES and not AUTORU_PROXIES:
+        if not batch and _autoru_proxy_dict() and not AUTORU_PROXIES:
             try:
                 r0 = _fetch_with_retry(html_url, headers={
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                     "Accept-Language": "ru-RU,ru;q=0.9",
                     "Referer": f"https://auto.ru/{slug}/cars/used/",
-                }, timeout=4, proxies=_avito_proxies())
+                }, timeout=4, proxies=_autoru_proxy_dict())
                 print(f"  [Auto.ru] прокси HTML стр.{p}: HTTP {r0.status_code}, {len(r0.text):,}б")
                 # Парсим любой не-капча ответ (мобильная страница может быть <50К)
                 if r0.status_code == 200 and not _autoru_is_captcha(r0.text):
@@ -2807,7 +2900,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
                 print(f"  [Auto.ru] прокси HTML: {str(e)[:50]}")
 
         # Метод 0c: curl_cffi через мобильный прокси (пропускаем при РФ-пуле)
-        if not batch and not AUTORU_PROXIES:
+        if not batch and not AUTORU_PROXIES and _autoru_proxy_dict():
             try:
                 from curl_cffi import requests as _cffi
                 _cffi_hdrs0 = {
@@ -2816,7 +2909,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
                     "Referer": f"https://auto.ru/{slug}/cars/used/",
                 }
                 rc0 = _cffi.get(html_url, impersonate="chrome124", timeout=4, headers=_cffi_hdrs0,
-                                proxies=_avito_proxies())
+                                proxies=_autoru_proxy_dict())
                 print(f"  [Auto.ru] curl_cffi стр.{p}: HTTP {rc0.status_code}, {len(rc0.text):,}б")
                 if rc0.status_code == 200 and not _autoru_is_captcha(rc0.text):
                     batch = _autoru_parse_html(rc0.text, today)
@@ -2907,7 +3000,17 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
         time.sleep(0.05)
 
     print(f"  [Auto.ru] итого {len(results)} объявлений")
-    return results
+    if (
+        not results
+        and _warm_status == 200
+        and len(_warm_html) > 3_000
+        and not _warm_blocked
+    ):
+        _AUTORU_LAST_DIAG.update({
+            "error_type": "parse_error",
+            "error_message_safe": "HTTP 200 response contained no recognized listings",
+        })
+    return _autoru_finish(results)
 
 
 # ── Парсер Kolesa.ru ────────────────────────────────────────────
@@ -8435,7 +8538,7 @@ def _avito_scheduled_fetch_unlocked(
     region, price_min, price_max, sort_by_date, brand = key
     try:
         if AVITO_PROVIDER == "rest_app":
-            provider = RestAppAvitoProvider(cache_ttl=120)
+            provider = RestAppAvitoProvider()
             provider_items = provider.search(
                 region_name=REST_APP_REGION_NAMES.get(
                     region, REGIONS.get(region, region)
@@ -13456,6 +13559,11 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                 caption += "\n🚘 " + " · ".join(spec_text)
             if item.get("_demo_url_hidden"):
                 caption += "\n🔒 Ссылка скрыта тестовым тарифом Rest-App"
+            if item.get("_demo_price_unreliable"):
+                caption += (
+                    "\n⚠️ Цена предоставлена тестовым API "
+                    "и может быть неточной"
+                )
 
         source = item.get("source", "")
         seller = item.get("seller", "")
@@ -13546,6 +13654,7 @@ async def send_batch(chat_id: int, uid: int, offset: int):
     _deferred_junk = []
     sent_count = 0
     avito_sent_count = 0
+    autoru_sent_count = 0
     for i, item in enumerate(batch):
         try:
             await _pf_tasks[i]   # ждём фото ТОЛЬКО этого объявления
@@ -13562,15 +13671,21 @@ async def send_batch(chat_id: int, uid: int, offset: int):
             sent_count += 1
             if item.get("source") == "avito":
                 avito_sent_count += 1
+            elif item.get("source") == "autoru":
+                autoru_sent_count += 1
         await asyncio.sleep(0.01)
     for item in _deferred_junk:   # битые — в самом конце
         if await _send_item(item):
             sent_count += 1
             if item.get("source") == "avito":
                 avito_sent_count += 1
+            elif item.get("source") == "autoru":
+                autoru_sent_count += 1
         await asyncio.sleep(0.01)
 
     print(f"[Avito RestApp] telegram_cards={avito_sent_count}")
+    _AUTORU_LAST_DIAG["telegram_cards"] = autoru_sent_count
+    print(f"[Auto.ru] telegram_cards={autoru_sent_count}")
     next_offset = offset + len(batch)
     shown_str = f"{sent_count} на этой странице · обработано {next_offset}/{total}"
     if next_offset < total:
@@ -13754,6 +13869,8 @@ async def do_search_for_user(uid: int, reply_to):
                 )
             else:
                 stat_parts.append(f"{tag}: {len(batch)}")
+        elif src == "autoru" and _autoru_user_error():
+            stat_parts.append(_autoru_user_error())
         else:
             stat_parts.append(f"{tag}: {len(batch)}")
 
@@ -14317,6 +14434,10 @@ async def do_search_for_user(uid: int, reply_to):
         "[Avito RestApp] after_pipeline="
         f"{sum(1 for item in suitable if item.get('source') == 'avito')}"
     )
+    _AUTORU_LAST_DIAG["after_pipeline"] = sum(
+        1 for item in suitable if item.get("source") == "autoru"
+    )
+    print(f"[Auto.ru] after_pipeline={_AUTORU_LAST_DIAG['after_pipeline']}")
     analytics.track(
         "search", uid=uid, region=region, price_min=pmin, price_max=pmax,
         source=",".join(enabled_sources), results=len(suitable),

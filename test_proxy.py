@@ -1,6 +1,7 @@
 """Тесты для прокси-хелперов control_bot.py."""
 import os
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("BOT_TOKEN", "8923014188:AAHvNW2B5fin2XCmbVhlaLNjWhLwI3JhZ90")
 os.environ.setdefault("PROXY_URL", "http://user:pass@example.com:8080")
@@ -9,6 +10,71 @@ import control_bot as cb
 
 
 class ProxyHelpersTestCase(unittest.TestCase):
+    def test_autoru_proxy_has_dedicated_priority(self):
+        before = cb.AUTORU_PROXY_URL
+        old_env = os.environ.get("PROXY_URL")
+        cb.AUTORU_PROXY_URL = "http://dedicated.example:8080"
+        os.environ["PROXY_URL"] = "http://fallback.example:8080"
+        try:
+            proxy = cb._autoru_proxy_dict()
+            self.assertEqual(
+                proxy["https"], "http://dedicated.example:8080"
+            )
+        finally:
+            cb.AUTORU_PROXY_URL = before
+            if old_env is None:
+                os.environ.pop("PROXY_URL", None)
+            else:
+                os.environ["PROXY_URL"] = old_env
+
+    def test_autoru_proxy_has_no_direct_fallback(self):
+        before = cb.AUTORU_PROXY_URL
+        old_env = os.environ.pop("PROXY_URL", None)
+        cb.AUTORU_PROXY_URL = ""
+        try:
+            self.assertIsNone(cb._autoru_proxy_dict())
+        finally:
+            cb.AUTORU_PROXY_URL = before
+            if old_env is not None:
+                os.environ["PROXY_URL"] = old_env
+
+    def test_autoru_user_error_classification(self):
+        self.assertIn(
+            "авторизации proxy",
+            cb._autoru_user_error({"error_type": "proxy_auth"}),
+        )
+        self.assertIn(
+            "доступ ограничен",
+            cb._autoru_user_error({"error_type": "http_403"}),
+        )
+        self.assertIn(
+            "формата ответа",
+            cb._autoru_user_error({"error_type": "parse_error"}),
+        )
+
+    def test_autoru_network_error_is_not_plain_zero(self):
+        with (
+            patch.object(
+                cb, "_autoru_proxy_dict",
+                return_value={
+                    "http": "http://proxy.example:8080",
+                    "https": "http://proxy.example:8080",
+                },
+            ),
+            patch.object(
+                cb, "_curl_cffi_get",
+                side_effect=TimeoutError("connection timed out"),
+            ),
+        ):
+            self.assertEqual(
+                cb.scrape_autoru(
+                    "krasnodar", pages=1, price_min=0, price_max=100000
+                ),
+                [],
+            )
+        self.assertEqual(cb._AUTORU_LAST_DIAG["error_type"], "network")
+        self.assertTrue(cb._autoru_user_error())
+
     def test_prepare_curl_cffi_proxy_parses_auth(self):
         px = {"http": "http://u:p@host:80", "https": "http://u:p@host:80"}
         proxy_cfg, auth = cb._prepare_curl_cffi_proxy(px)

@@ -25,32 +25,18 @@ def _range(days: int) -> dict[str, str]:
     }
 
 
-def _stages() -> list[tuple[str, dict]]:
+def _stages(region_id: str, city_id: str) -> list[tuple[str, dict]]:
     day = _range(1)
-    week = _range(7)
     return [
-        ("A", {"category_id": "9", **day}),
-        ("B", {"category_id": "1", "subcategory_id": "9", **day}),
-        ("C", {"subcategory_id": "9", **day}),
-        ("D", {
-            "category_id": "1", "subcategory_id": "9",
-            "region_id": "641470", **day,
+        ("A", {
+            "category_id": "9", "region_id": region_id, **day,
         }),
-        ("E", {
-            "category_id": "1", "subcategory_id": "9",
-            "city_id": "641780", **day,
+        ("B", {
+            "category_id": "9", "city_id": city_id, **day,
         }),
-        ("F", {
-            "category_id": "1", "subcategory_id": "9",
-            "region_id": "641470", "city_id": "641780", **day,
-        }),
-        ("G", {
-            "category_id": "1", "subcategory_id": "9",
-            "city_id": "641780", "price1": 100000, "price2": 300000,
-            **day,
-        }),
-        ("H", {
-            "category_id": "1", "subcategory_id": "9", **week,
+        ("C", {
+            "category_id": "9", "region_id": region_id,
+            "price1": 0, "price2": 100000, **day,
         }),
     ]
 
@@ -64,8 +50,16 @@ def _safe_filters(filters: dict) -> dict:
 
 def main() -> int:
     try:
-        provider = RestAppAvitoProvider(cache_ttl=120)
+        provider = RestAppAvitoProvider()
         info = provider.info()
+        regions = provider.regions()
+        region_id = provider._find_id(regions, "Краснодарский край")
+        if not region_id:
+            raise RuntimeError("Краснодарский край is absent from /api/region")
+        cities = provider.cities(region_id)
+        city_id = provider._find_id(cities, "Краснодар")
+        if not city_id:
+            raise RuntimeError("Краснодар is absent from /api/city")
     except Exception as exc:
         print(json.dumps({
             "api_status": "",
@@ -83,7 +77,7 @@ def main() -> int:
         "first_five": [],
     }
     last_safe_payload: dict = {}
-    stages = _stages()
+    stages = _stages(region_id, city_id)
     for index, (name, filters) in enumerate(stages):
         payload: dict = {}
         error = ""
