@@ -28,29 +28,57 @@ from typing import Any, Optional
 _DATA_DIR = Path("data")
 _DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-_DB_URL = os.getenv("DATABASE_URL", "")
+def select_database_backend(database_url: str) -> tuple[str, str, Optional[str]]:
+    """Возвращает (backend, normalized_dsn, sqlite_path), не смешивая драйверы."""
+    raw = (database_url or "").strip()
+    low = raw.lower()
+    if not raw:
+        path = str(_DATA_DIR / "referrals.db")
+        return "sqlite", f"sqlite:///{path}", path
+    if low.startswith(("sqlite+aiosqlite://", "sqlite://")):
+        normalized = re.sub(
+            r"^sqlite\+aiosqlite://", "sqlite://", raw, count=1, flags=re.I
+        )
+        if normalized == "sqlite:///:memory:":
+            path = ":memory:"
+        elif normalized.startswith("sqlite:////"):
+            path = normalized[len("sqlite:///"):]  # сохраняем ведущий / abs path
+        elif normalized.startswith("sqlite:///"):
+            path = normalized[len("sqlite:///"):]  # относительный файл
+        else:
+            path = normalized[len("sqlite://"):] or str(_DATA_DIR / "referrals.db")
+        return "sqlite", normalized, path
+    if low.startswith(("postgresql://", "postgres://", "postgresql+asyncpg://")):
+        normalized = re.sub(
+            r"^postgresql\+asyncpg://", "postgresql://", raw, count=1, flags=re.I
+        )
+        if normalized.lower().startswith("postgres://"):
+            normalized = "postgresql://" + normalized[len("postgres://"):]
+        return "postgresql", normalized, None
+    raise ValueError(
+        "DATABASE_URL должен начинаться с sqlite:// или postgresql://"
+    )
 
-# Поддержка SQLite через DATABASE_URL=sqlite://:memory: или sqlite:///path
-# Если DATABASE_URL не задан — используем файл в data/ (fallback, не JSON).
-if _DB_URL.startswith("sqlite://"):
-    _DB_SQLITE_PATH = _DB_URL[9:] if len(_DB_URL) > 9 else ":memory:"
-    _DB_IS_SQLITE = True
-elif _DB_URL:
-    _DB_SQLITE_PATH = None
-    _DB_IS_SQLITE = False
-else:
-    _DB_SQLITE_PATH = str(_DATA_DIR / "referrals.db")
-    _DB_IS_SQLITE = True
+
+_DB_BACKEND, _DB_URL, _DB_SQLITE_PATH = select_database_backend(
+    os.getenv("DATABASE_URL", "")
+)
+_DB_IS_SQLITE = _DB_BACKEND == "sqlite"
 
 # Импортируем драйверы по необходимости
 _pg = None
 if not _DB_IS_SQLITE:
     try:
         import psycopg2 as _pg
-    except Exception:
+    except Exception as exc:
+        print(
+            f"[referrals] PostgreSQL driver unavailable: {type(exc).__name__}; "
+            "включён SQLite fallback"
+        )
         _pg = None
         _DB_IS_SQLITE = True
         _DB_SQLITE_PATH = str(_DATA_DIR / "referrals.db")
+        _DB_BACKEND = "sqlite"
 
 import sqlite3 as _sqlite
 
@@ -89,13 +117,28 @@ EVENT_TYPES = {
 # ──────────────────────────────────────────────────────────────────────
 def _get_conn():
     """Возвращает новое соединение с выбранной БД."""
+    global _DB_IS_SQLITE, _DB_BACKEND, _DB_SQLITE_PATH
     if _DB_IS_SQLITE:
-        return _sqlite.connect(_DB_SQLITE_PATH, check_same_thread=False)
+        conn = _sqlite.connect(_DB_SQLITE_PATH, timeout=20, check_same_thread=False)
+        conn.execute("PRAGMA busy_timeout=20000")
+        conn.execute("PRAGMA journal_mode=WAL")
+        return conn
     if _pg is None:
         raise RuntimeError("PostgreSQL недоступен: psycopg2 не установлен")
-    conn = _pg.connect(_DB_URL, connect_timeout=5)
-    conn.autocommit = True
-    return conn
+    try:
+        conn = _pg.connect(_DB_URL, connect_timeout=5)
+        conn.autocommit = True
+        return conn
+    except Exception as exc:
+        # Только после реальной и явно залогированной ошибки соединения.
+        print(
+            f"[referrals] PostgreSQL connection failed: {type(exc).__name__}: "
+            f"{str(exc)[:160]}; включён SQLite fallback"
+        )
+        _DB_IS_SQLITE = True
+        _DB_BACKEND = "sqlite"
+        _DB_SQLITE_PATH = str(_DATA_DIR / "referrals.db")
+        return _get_conn()
 
 
 @contextlib.contextmanager

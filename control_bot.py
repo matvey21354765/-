@@ -3,8 +3,11 @@
 Каждый пользователь выбирает регион и бюджет, бот ищет частников ниже рынка.
 """
 import sys
-print(">>> PROCESS STARTED: control_bot.py запущен, Python", sys.version.split()[0], flush=True)
-
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except (AttributeError, OSError):
+    pass
 import asyncio
 import json
 import logging
@@ -18,6 +21,7 @@ import hmac
 import urllib.parse
 from pathlib import Path
 import os
+import tempfile
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -37,6 +41,50 @@ from aiogram.fsm.storage.memory import MemoryStorage
 import analytics
 import crm
 import referrals
+from avito_duff_provider import (
+    AvitoBlockedError,
+    AvitoDuffProvider,
+    AvitoParseError,
+    AvitoRedirectLoopError,
+    AvitoVpnUnavailable,
+)
+from avito_production_state import AvitoProductionState, normalize_search_key
+
+_INSTANCE_LOCK_HANDLE = None
+
+
+def _acquire_single_instance_lock() -> bool:
+    """Не допускает второй процесс polling на одном сервере/контейнере."""
+    global _INSTANCE_LOCK_HANDLE
+    lock_path = Path(tempfile.gettempdir()) / "perekupdrive-control-bot.lock"
+    handle = open(lock_path, "a+b")
+    try:
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        handle.seek(0)
+        handle.truncate()
+        handle.write(str(os.getpid()).encode("ascii"))
+        handle.flush()
+        _INSTANCE_LOCK_HANDLE = handle  # держим lock до завершения процесса
+        return True
+    except (BlockingIOError, OSError):
+        handle.close()
+        print(
+            "[startup] Второй экземпляр control_bot.py обнаружен; "
+            "polling не запущен.",
+            flush=True,
+        )
+        return False
 
 # ── Админы (для /stats) ─────────────────────────────────────────
 def _parse_admin_ids() -> set[int]:
@@ -74,6 +122,7 @@ _working_free_proxies_time: float = 0.0
 # ── Резидентный прокси для запросов к Авито (опционально) ────────
 # Поддерживает HTTP и SOCKS5. AVITO_PROXY_AUTH=ip — авторизация по IP (без логина).
 # Можно задать через PROXY_URL=http://user:pass@host:port (удобнее для большинства провайдеров)
+# Важно: PROXY_URL имеет приоритет над AVITO_PROXY_* — достаточно задать одну переменную.
 AVITO_PROXY_HOST = os.getenv("AVITO_PROXY_HOST", "")
 AVITO_PROXY_PORT = os.getenv("AVITO_PROXY_PORT", "")
 AVITO_PROXY_USER = os.getenv("AVITO_PROXY_USER", "")
@@ -93,17 +142,59 @@ if AVITO_PROXY_PORT_MIN and AVITO_PROXY_PORT_MAX:
 
 # Альтернативный способ задать прокси — одна переменная PROXY_URL
 # Форматы: http://user:pass@host:port  /  socks5://user:pass@host:port  /  host:port
-_PROXY_URL_RAW = (
-    os.getenv("PROXY_URL", "") or
-    os.getenv("HTTPS_PROXY", "") or
-    os.getenv("HTTP_PROXY", "") or
-    ""
-)
+PROXY_URL = os.getenv("PROXY_URL", "").strip()
+PROXY_ROTATE_URL = os.getenv("PROXY_ROTATE_URL", "").strip()
+AVITO_ENABLED = os.getenv("AVITO_ENABLED", "true").strip().lower() in {
+    "1", "true", "yes", "on",
+}
+AVITO_PROVIDER = os.getenv("AVITO_PROVIDER", "duff_vless").strip().lower()
+AVITO_SOCKS_PROXY = os.getenv(
+    "AVITO_SOCKS_PROXY", "socks5h://127.0.0.1:10808"
+).strip()
+try:
+    AVITO_MIN_INTERVAL_SECONDS = max(
+        900, int(os.getenv("AVITO_MIN_INTERVAL_SECONDS", "900"))
+    )
+except (TypeError, ValueError):
+    AVITO_MIN_INTERVAL_SECONDS = 900
+try:
+    AVITO_BLOCK_COOLDOWN_SECONDS = max(
+        7200, int(os.getenv("AVITO_BLOCK_COOLDOWN_SECONDS", "7200"))
+    )
+except (TypeError, ValueError):
+    AVITO_BLOCK_COOLDOWN_SECONDS = 7200
+try:
+    AVITO_MAX_INTERNAL_REDIRECTS = max(
+        0, min(1, int(os.getenv("AVITO_MAX_INTERNAL_REDIRECTS", "1")))
+    )
+except (TypeError, ValueError):
+    AVITO_MAX_INTERNAL_REDIRECTS = 1
+try:
+    AVITO_CACHE_TTL_SECONDS = max(
+        60, int(os.getenv("AVITO_CACHE_TTL_SECONDS", "1800"))
+    )
+except (TypeError, ValueError):
+    AVITO_CACHE_TTL_SECONDS = 1800
+try:
+    AVITO_STALE_CACHE_TTL_SECONDS = max(
+        AVITO_CACHE_TTL_SECONDS,
+        int(os.getenv("AVITO_STALE_CACHE_TTL_SECONDS", "86400")),
+    )
+except (TypeError, ValueError):
+    AVITO_STALE_CACHE_TTL_SECONDS = 86400
+try:
+    AVITO_MANUAL_WAIT_SECONDS = max(
+        1, min(20, int(os.getenv("AVITO_MANUAL_WAIT_SECONDS", "20")))
+    )
+except (TypeError, ValueError):
+    AVITO_MANUAL_WAIT_SECONDS = 20
+_PROXY_URL_RAW = PROXY_URL
 # Не берём Railway-системный прокси (он не является резидентным)
 if _PROXY_URL_RAW and "__agentproxy" in _PROXY_URL_RAW:
     _PROXY_URL_RAW = ""
 
-if _PROXY_URL_RAW and not AVITO_PROXY_HOST:
+# Если задан PROXY_URL — он имеет приоритет над поштучными AVITO_PROXY_*.
+if _PROXY_URL_RAW:
     import urllib.parse as _up
     try:
         _pu = _up.urlparse(_PROXY_URL_RAW if "://" in _PROXY_URL_RAW else "http://" + _PROXY_URL_RAW)
@@ -116,9 +207,250 @@ if _PROXY_URL_RAW and not AVITO_PROXY_HOST:
     except Exception:
         pass
 
-
 # Флаг: прокси вернул 407 (неверная авторизация) — автоматически отключаем
 _proxy_auth_failed: bool = False
+_AVITO_LAST_DIAG: dict = {
+    "http": None,
+    "page": None,
+    "cards": 0,
+    "parsed": 0,
+    "deduped": 0,
+    "filtered": 0,
+    "reason": "",
+    "ip_blocked": False,
+}
+_AVITO_ROTATION_LOCK = asyncio.Lock()
+_AVITO_SEARCH_LOCK = asyncio.Lock()
+_AVITO_LAST_ROTATION_AT = 0.0
+
+
+class AvitoClient:
+    """Единый сетевой клиент Авито с одной curl_cffi Session и только PROXY_URL."""
+
+    def __init__(self, proxy_url: str, impersonate: str = "chrome120"):
+        self._proxy_url = (proxy_url or "").strip()
+        self._impersonate = impersonate
+        self._session = None
+
+    @property
+    def proxies(self) -> dict[str, str]:
+        if not self._proxy_url:
+            raise RuntimeError("PROXY_URL не задан; прямой запрос Авито запрещён")
+        return {"http": self._proxy_url, "https": self._proxy_url}
+
+    def _get_session(self):
+        from curl_cffi import requests as cffi_requests
+        if self._session is None:
+            self._session = cffi_requests.Session(impersonate=self._impersonate)
+        return self._session
+
+    def reset_session(self) -> None:
+        """Закрывает cookies/соединения старого IP; новая Session создаётся лениво."""
+        session = self._session
+        self._session = None
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
+
+    def request(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: dict | None = None,
+        headers: dict | None = None,
+        json_body: dict | None = None,
+        timeout: float = 15,
+    ):
+        started = time.monotonic()
+        try:
+            session = self._get_session()
+            response = session.request(
+                method.upper(),
+                url,
+                params=params,
+                headers=headers,
+                json=json_body,
+                timeout=timeout,
+                proxies=self.proxies,
+            )
+            elapsed = time.monotonic() - started
+            reason = "ok"
+            if response.status_code == 429:
+                reason = "IP ограничен Авито; дополнительные попытки остановлены"
+            elif response.status_code == 403:
+                reason = "доступ запрещён"
+            elif response.status_code >= 400:
+                reason = f"HTTP {response.status_code}"
+            _avito_diag(
+                "HTTP",
+                response.status_code,
+                время=f"{elapsed:.2f}с",
+                причина=reason,
+            )
+            _AVITO_LAST_DIAG["request_seconds"] = elapsed
+            if _avito_response_is_ip_block(response.status_code, response.text):
+                _AVITO_LAST_DIAG["ip_blocked"] = True
+                _AVITO_LAST_DIAG["reason"] = reason
+            return response
+        except Exception as exc:
+            elapsed = time.monotonic() - started
+            reason = f"{type(exc).__name__}: {str(exc)[:160]}"
+            _AVITO_LAST_DIAG.update({
+                "http": None,
+                "request_seconds": elapsed,
+                "reason": reason,
+            })
+            _avito_diag("HTTP", "ошибка", время=f"{elapsed:.2f}с", причина=reason)
+            raise
+
+    def get(self, url: str, **kwargs):
+        return self.request("GET", url, **kwargs)
+
+
+AVITO_CLIENT = AvitoClient(PROXY_URL)
+
+
+def diagnose_avito_network(
+    region: str = "chelyabinsk",
+    price_max: int = 100_000,
+) -> dict:
+    """Два диагностических GET: внешний IP и одна выдача Авито, без fallback."""
+    AVITO_CLIENT.reset_session()
+    report = {
+        "ip_http": None,
+        "ip_seconds": None,
+        "avito_http": None,
+        "avito_seconds": None,
+        "cards": 0,
+        "reason": "",
+    }
+    try:
+        ip_response = AVITO_CLIENT.get(
+            "https://api.ipify.org?format=json",
+            timeout=15,
+        )
+        report["ip_http"] = ip_response.status_code
+        report["ip_seconds"] = _AVITO_LAST_DIAG.get("request_seconds")
+    except Exception as exc:
+        report["reason"] = f"проверка прокси: {type(exc).__name__}"
+        return report
+
+    slug = AVITO_SLUGS.get(region, region) if "AVITO_SLUGS" in globals() else region
+    avito_url = (
+        f"https://www.avito.ru/{slug}/avtomobili"
+        f"?seller_type=1&pmax={int(price_max)}&s=104"
+    )
+    try:
+        response = AVITO_CLIENT.get(avito_url, timeout=20)
+        report["avito_http"] = response.status_code
+        report["avito_seconds"] = _AVITO_LAST_DIAG.get("request_seconds")
+        if response.status_code == 200:
+            text = response.text or ""
+            report["cards"] = max(
+                text.count('data-marker="item"'),
+                text.count('"urlPath"'),
+            )
+        elif response.status_code == 429:
+            report["reason"] = "IP ограничен Авито"
+        else:
+            report["reason"] = f"HTTP {response.status_code}"
+    except Exception as exc:
+        report["reason"] = f"{type(exc).__name__}: {str(exc)[:120]}"
+    print(
+        "AVITO DIAG: "
+        f"proxy_http={report['ip_http']} "
+        f"proxy_time={report['ip_seconds']:.2f}s "
+        if report["ip_seconds"] is not None else "AVITO DIAG: proxy_time=n/a ",
+        end="",
+        flush=True,
+    )
+    print(
+        f"avito_http={report['avito_http']} "
+        f"avito_time={report['avito_seconds']:.2f}s "
+        if report["avito_seconds"] is not None else "avito_time=n/a ",
+        end="",
+        flush=True,
+    )
+    print(
+        f"cards={report['cards']} reason={report['reason'] or 'ok'}",
+        flush=True,
+    )
+    return report
+
+
+def _avito_diag(stage: str, value, **extra) -> None:
+    """Единый диагностический формат Авито без логина/пароля прокси."""
+    key_map = {
+        "HTTP": "http",
+        "страница": "page",
+        "найдено карточек": "cards",
+        "после парсинга": "parsed",
+        "после дедупликации": "deduped",
+        "после фильтрации": "filtered",
+        "отправлено пользователю": "sent",
+        "причина": "reason",
+    }
+    if stage in key_map:
+        _AVITO_LAST_DIAG[key_map[stage]] = value
+    suffix = " ".join(f"{k}={v}" for k, v in extra.items())
+    print(f"AVITO: {stage}: {value}" + (f" | {suffix}" if suffix else ""), flush=True)
+
+
+def _avito_response_is_ip_block(status: int, text: str) -> bool:
+    if status not in (403, 429):
+        return False
+    sample = (text or "")[:4000].lower()
+    return any(marker in sample for marker in (
+        "проблема с ip",
+        "доступ ограничен",
+        "access restricted",
+        "ip address",
+        "too many requests",
+    ))
+
+
+def _reset_avito_cffi_session() -> None:
+    """Закрывает только curl_cffi-сессию Авито; другие источники не затрагивает."""
+    AVITO_CLIENT.reset_session()
+
+
+def _call_proxy_rotate_url() -> bool:
+    """Один вызов endpoint ротации. URL и тело ответа намеренно не логируются."""
+    if not PROXY_ROTATE_URL:
+        return False
+    try:
+        from curl_cffi import requests as _cffi
+        response = _cffi.get(PROXY_ROTATE_URL, timeout=20)
+        return 200 <= response.status_code < 300
+    except Exception:
+        return False
+
+
+async def _rotate_ltespace_for_avito_once() -> bool:
+    """Сериализует ротацию между всеми пользователями и сбрасывает сессию Авито."""
+    global _AVITO_LAST_ROTATION_AT
+    async with _AVITO_ROTATION_LOCK:
+        # Если другой пользователь только что уже сменил IP, используем результат
+        # этой ротации и не вызываем endpoint повторно.
+        if time.monotonic() - _AVITO_LAST_ROTATION_AT < 30:
+            _avito_diag("ротация", "уже выполнена другим поиском; повтор не вызван")
+            _reset_avito_cffi_session()
+            return True
+        if not PROXY_ROTATE_URL:
+            _avito_diag("причина", "PROXY_ROTATE_URL не задан; смена IP невозможна")
+            return False
+        ok = await asyncio.get_running_loop().run_in_executor(None, _call_proxy_rotate_url)
+        if not ok:
+            _avito_diag("ротация", "не выполнена; endpoint вернул ошибку")
+            return False
+        _AVITO_LAST_ROTATION_AT = time.monotonic()
+        _reset_avito_cffi_session()
+        _avito_diag("ротация", "IP сменён; адрес и endpoint скрыты")
+        await asyncio.sleep(10)
+        return True
 
 
 def _avito_proxies() -> "dict[str, str] | None":
@@ -138,12 +470,102 @@ def _avito_proxies() -> "dict[str, str] | None":
 
 
 def _mark_proxy_failed(err: str) -> None:
-    """Помечаем прокси как сломанный при ошибке 407."""
+    """Помечаем прокси как сломанный при ошибке 407/403/аутентификации."""
     global _proxy_auth_failed
-    if "407" in err or "Proxy Authentication Required" in err or "Tunnel connection failed" in err:
+    # Явно заданный PROXY_URL — обязательный маршрут скрейпинга. Краткий 403/407
+    # во время ротации не должен незаметно переключать запросы на IP сервера.
+    if PROXY_URL:
+        print(f"[прокси] временная ошибка LTE-прокси, прямое соединение запрещено: {str(err)[:80]}")
+        return
+    e = str(err).lower()
+    if any(s in e for s in ("407", "proxy authentication required", "proxy authentication", "tunnel connection failed", "forbidden")):
         if not _proxy_auth_failed:
             _proxy_auth_failed = True
-            print("[прокси] ⚠️ Прокси вернул 407 — переключаемся на прямое соединение")
+            print("[прокси] ⚠️ Прокси вернул ошибку аутентификации/доступа — переключаемся на прямое соединение")
+
+
+def _startup_proxy_check() -> None:
+    """Проверяет прокси через тот же curl_cffi, который используют парсеры.
+
+    Проверка никогда не переключает скрейпинг на IP VPS: краткий сбой во время
+    двухминутной ротации LTE-прокси не означает неверные реквизиты.
+    """
+    if not AVITO_PROXIES or _proxy_auth_failed:
+        return
+    try:
+        from curl_cffi import requests as _cffi
+        r = _cffi.get(
+            "https://api.ipify.org",
+            proxies=_avito_proxies(),
+            impersonate="chrome120",
+            timeout=10,
+        )
+        if r.status_code == 200:
+            print("[прокси-старт] ✅ прокси отвечает")
+            return
+        print(f"[прокси-старт] ⚠️ неожиданный статус {r.status_code}, но оставляем прокси")
+    except Exception as e:
+        print(f"[прокси-старт] ⚠️ проверка не удалась, прокси оставлен включённым: {str(e)[:100]}")
+
+
+def _fetch_with_retry(
+    url: str,
+    method: str = "GET",
+    params: dict | None = None,
+    headers: dict | None = None,
+    json: dict | None = None,
+    proxies: dict | None = None,
+    timeout: int = 8,
+    retries: int = 3,
+    impersonate: str | None = "chrome120",
+):
+    """Универсальный HTTP-запрос через curl_cffi с retry и TLS-отпечатком."""
+    if "avito.ru" in url:
+        # Авито: ровно одна сетевая попытка. При 429 вызывающий код завершает
+        # ветку площадки; другие прокси и прямой IP запрещены.
+        return AVITO_CLIENT.request(
+            method,
+            url,
+            params=params,
+            headers=headers,
+            json_body=json,
+            timeout=timeout,
+        )
+    from curl_cffi import requests as _cffi
+    request_proxies = proxies or _avito_proxies() or None
+    last_err = None
+    is_avito = "avito.ru" in url
+    for attempt in range(1, retries + 1):
+        try:
+            if method.upper() == "GET":
+                r = _cffi.get(url, params=params, headers=headers, impersonate=impersonate, timeout=timeout, proxies=request_proxies)
+            else:
+                r = _cffi.post(url, json=json, headers=headers, impersonate=impersonate, timeout=timeout, proxies=request_proxies)
+            if is_avito:
+                page_no = (params or {}).get("page") or (params or {}).get("p") or 1
+                _avito_diag("HTTP", r.status_code, attempt=f"{attempt}/{retries}")
+                _avito_diag("страница", page_no, url=r.url)
+            if r.status_code in (429, 439, 503, 502, 407, 403):
+                last_err = f"HTTP {r.status_code}"
+                if is_avito:
+                    excerpt = re.sub(r"\s+", " ", (r.text or "")[:500]).strip()
+                    _avito_diag("причина", f"HTTP {r.status_code}; ответ[0:500]={excerpt!r}")
+                    if _avito_response_is_ip_block(r.status_code, r.text):
+                        _AVITO_LAST_DIAG["ip_blocked"] = True
+                print(f"  [fetch] {url[:60]} → {last_err} (попытка {attempt}/{retries})")
+                if r.status_code == 407:
+                    _mark_proxy_failed(last_err)
+                time.sleep(3)
+                continue
+            return r
+        except Exception as e:
+            last_err = str(e)[:120]
+            _mark_proxy_failed(last_err)
+            print(f"  [fetch] {url[:60]} → {last_err} (попытка {attempt}/{retries})")
+            time.sleep(3)
+    if is_avito:
+        _avito_diag("причина", f"retry исчерпан: {last_err}")
+    raise Exception(f"Failed after {retries} attempts: {last_err}")
 
 
 AVITO_PROXIES: "dict[str, str] | None" = None
@@ -154,23 +576,12 @@ if AVITO_PROXY_HOST and (AVITO_PROXY_PORT or _AVITO_PROXY_PORTS):
     _avito_proxy_url = f"{AVITO_PROXY_PROTOCOL}://{_auth}{AVITO_PROXY_HOST}:{_repr_port}"
     AVITO_PROXIES = {"http": _avito_proxy_url, "https": _avito_proxy_url}
 
-# Хардкодный fallback — если env vars не заданы в Railway, используем прокси из кода
-if not AVITO_PROXIES and not _proxy_auth_failed:
-    # Fallback: мобильный прокси mobileproxy.space (huba / EDNyWFYHy228)
-    _HARDCODED_PROXY = "http://huba:EDNyWFYHy228@mproxy.site:16358"
-    AVITO_PROXIES = {"http": _HARDCODED_PROXY, "https": _HARDCODED_PROXY}
-    AVITO_PROXY_HOST = "mproxy.site"
-    AVITO_PROXY_PORT = "16358"
-    AVITO_PROXY_USER = "huba"
-    AVITO_PROXY_PASS = "EDNyWFYHy228"
-    print("[прокси] ⚡ Используем встроенный прокси mproxy.site")
-
 _proxy_display = f"{AVITO_PROXY_PROTOCOL}://{AVITO_PROXY_HOST}:{AVITO_PROXY_PORT}" if AVITO_PROXIES else None
 print(f"[прокси] {'✅ ' + _proxy_display if _proxy_display else '❌ не настроен — Авито/Auto.ru могут не работать'}")
 
 # Ссылка ротации IP мобильного прокси (mobileproxy.space «Ссылка для смены IP»).
 # Если задана — бот сам меняет IP перед скрейпом Авито, обходя rate-limit (429).
-AVITO_PROXY_ROTATE_URL = os.getenv("AVITO_PROXY_ROTATE_URL", "https://changeip.mobileproxy.space/?proxy_key=cc1eb5e0f15ebd98b63a7ae2a08b4f24")
+AVITO_PROXY_ROTATE_URL = os.getenv("AVITO_PROXY_ROTATE_URL", "").strip()
 
 # Токен приложения Auto.ru (заголовок x-authorization для apiauto.ru).
 # Эндпоинт apiauto.ru отдаёт чистый JSON без капчи Яндекса — самый надёжный
@@ -183,11 +594,7 @@ _last_ip_rotate_ts = 0.0
 # IP, но чистые РФ SOCKS5/резидентные IP обычно пропускает. Формат каждого:
 #   socks5://user:pass@host:port  (или http://...). Список через запятую в
 #   переменной AUTORU_PROXIES; ниже — дефолтные РФ-прокси пользователя.
-_AUTORU_PROXIES_DEFAULT = [
-    "socks5://hZoswb:f3dQZ6@193.187.144.4:8000",
-    "socks5://GPL5xs:mM4GHB@193.31.101.131:9928",
-    "socks5://xZ6MTF:9XEWJd@217.29.53.106:10248",
-]
+_AUTORU_PROXIES_DEFAULT: list[str] = []
 AUTORU_PROXIES = [
     p.strip() for p in os.getenv("AUTORU_PROXIES", ",".join(_AUTORU_PROXIES_DEFAULT)).split(",")
     if p.strip()
@@ -202,13 +609,15 @@ def _autoru_proxy_dicts() -> "list[dict]":
         if p.startswith("socks5://"):
             p = "socks5h://" + p[len("socks5://"):]
         out.append({"http": p, "https": p})
-    return out
+    return out or ([_avito_proxies()] if _avito_proxies() else [])
 
 # Диагностика готовности Auto.ru: Яндекс режет капчей любой «грязный» IP.
 if AUTORU_API_TOKEN:
     print("[Auto.ru] ✅ токен apiauto.ru задан — чистый JSON без капчи")
 elif AUTORU_PROXIES:
     print(f"[Auto.ru] ✅ пул РФ-прокси: {len(AUTORU_PROXIES)} шт. — обход капчи через чистые РФ IP")
+elif PROXY_URL:
+    print("[Auto.ru] ✅ используется единый LTE-прокси из PROXY_URL")
 elif AVITO_PROXY_ROTATE_URL:
     print("[Auto.ru] ✅ ротация IP настроена — капча будет обходиться сменой IP")
 else:
@@ -218,7 +627,7 @@ def _rotate_proxy_ip(min_interval: float = 50.0, force: bool = False) -> bool:
     """Меняет IP мобильного прокси через ссылку ротации. Возвращает True при успехе.
     Защита: не чаще раза в min_interval секунд (ротация имеет лимиты у провайдера).
     force=True — игнорирует интервал (для критичного обхода капчи Auto.ru)."""
-    global _last_ip_rotate_ts
+    global _last_ip_rotate_ts, AVITO_PROXY_ROTATE_URL
     if not AVITO_PROXY_ROTATE_URL:
         return False
     import time as _t
@@ -230,7 +639,13 @@ def _rotate_proxy_ip(min_interval: float = 50.0, force: bool = False) -> bool:
         import requests as _rq
         r = _rq.get(AVITO_PROXY_ROTATE_URL, timeout=15)
         ok = r.status_code == 200
+        txt = r.text.lower()
         print(f"[прокси] ротация IP: HTTP {r.status_code} {'✅' if ok else '❌'} {r.text[:80]!r}")
+        # Если провайдер отвечает, что прокси не существует — ссылка невалидна, отключаем.
+        if not ok or "does not exists" in txt or "not exists" in txt or ("error" in txt and "ok" not in txt):
+            AVITO_PROXY_ROTATE_URL = ""
+            print("[прокси] ⚠️ ссылка ротации не рабочая — отключена")
+            return False
         if ok:
             _t.sleep(2)  # даём прокси применить новый IP
         return ok
@@ -239,21 +654,50 @@ def _rotate_proxy_ip(min_interval: float = 50.0, force: bool = False) -> bool:
         return False
 
 
+def _prepare_curl_cffi_proxy(proxies: dict | None) -> tuple[dict | None, tuple[str, str] | None]:
+    """Разбивает requests-стиль {http, https: url} на proxy_url + proxy_auth для curl_cffi."""
+    if not proxies:
+        return None, None
+    proxy_url = proxies.get("https") or proxies.get("http") or proxies.get("all")
+    if not proxy_url:
+        return proxies, None
+    try:
+        import urllib.parse as _up
+        p = _up.urlparse(proxy_url)
+        if p.username and p.password:
+            scheme = p.scheme or "http"
+            host = p.hostname
+            port = p.port
+            netloc = f"{host}:{port}" if port else host
+            clean = f"{scheme}://{netloc}"
+            return {"all": clean}, (p.username, p.password)
+    except Exception:
+        pass
+    return proxies, None
+
+
 def _curl_cffi_get(url: str, params: dict | None = None, headers: dict | None = None,
                    proxies: dict | None = None, timeout: float = 14.0,
-                   retries: int = 3) -> "object | None":
+                   retries: int = 3, impersonate: str = "chrome120") -> "object | None":
     """GET через curl_cffi с имитацией Chrome и повторными попытками.
 
     Повторяет запрос до `retries` раз при HTTP 429/439, таймаутах и сетевых
     ошибках, делая паузу 3 сек между попытками (время переподключения
     мобильного прокси LTEspace).
     """
+    if "avito.ru" in url:
+        return AVITO_CLIENT.get(
+            url,
+            params=params,
+            headers=headers,
+            timeout=timeout,
+        )
     try:
         from curl_cffi import requests as cffi_req
     except ImportError:
         return None
 
-    _proxies = proxies or AVITO_PROXIES or {}
+    request_proxies = proxies or _avito_proxies() or None
     _headers = {
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8",
@@ -268,14 +712,29 @@ def _curl_cffi_get(url: str, params: dict | None = None, headers: dict | None = 
         _headers.update(headers)
 
     last_exc = None
+    last_response = None
+    is_avito = "avito.ru" in url
     for attempt in range(1, retries + 1):
         try:
-            sess = cffi_req.Session(impersonate="chrome120")
-            if _proxies:
-                sess.proxies = _proxies
-            r = sess.get(url, params=params, headers=_headers, timeout=timeout)
-            if r.status_code in (429, 439):
+            sess = cffi_req.Session(impersonate=impersonate)
+            r = sess.get(
+                url, params=params, headers=_headers, timeout=timeout,
+                proxies=request_proxies,
+            )
+            last_response = r
+            if is_avito:
+                page_m = re.search(r"(?:[?&](?:p|page)=)(\d+)", str(r.url))
+                _avito_diag("HTTP", r.status_code, attempt=f"{attempt}/{retries}")
+                _avito_diag("страница", int(page_m.group(1)) if page_m else 1, url=r.url)
+            if r.status_code in (429, 439, 407, 403):
+                if is_avito:
+                    excerpt = re.sub(r"\s+", " ", (r.text or "")[:500]).strip()
+                    _avito_diag("причина", f"HTTP {r.status_code}; ответ[0:500]={excerpt!r}")
+                    if _avito_response_is_ip_block(r.status_code, r.text):
+                        _AVITO_LAST_DIAG["ip_blocked"] = True
                 print(f"  [curl_cffi] {url}: HTTP {r.status_code} (попытка {attempt}/{retries}), ждём 3с...")
+                if r.status_code == 407:
+                    _mark_proxy_failed("407")
                 import time as _t
                 _t.sleep(3)
                 continue
@@ -283,14 +742,18 @@ def _curl_cffi_get(url: str, params: dict | None = None, headers: dict | None = 
         except Exception as e:
             last_exc = e
             err = str(e).lower()
-            if any(x in err for x in ("timeout", "timed out", "429", "439", "connection", "connect")):
+            if any(x in err for x in ("timeout", "timed out", "429", "439", "connection", "connect", "407", "proxy authentication", "tunnel")):
                 print(f"  [curl_cffi] {url}: сетевая ошибка (попытка {attempt}/{retries}): {str(e)[:80]}")
+                if "407" in err or "proxy authentication" in err or "tunnel" in err:
+                    _mark_proxy_failed(str(e))
                 import time as _t
                 _t.sleep(3)
                 continue
             break
     print(f"  [curl_cffi] {url}: исчерпаны попытки: {last_exc}")
-    return None
+    if is_avito:
+        _avito_diag("причина", f"retry исчерпан; последний HTTP={getattr(last_response, 'status_code', None)}")
+    return last_response
 
 
 # ── Регионы ─────────────────────────────────────────────────────
@@ -615,6 +1078,9 @@ def _get_or_create_referral(uid: int) -> dict:
 
 def _record_referral(new_uid: int, inviter_uid: int) -> dict:
     """Records that new_uid was invited by inviter_uid (wrapper for referrals module)."""
+    # Инициализация идемпотентна и гарантирует, что referral deep-link работает
+    # даже если пользователь пришёл сразу после холодного старта VPS.
+    referrals.init_referrals_db()
     res = referrals.attach_referrer(new_uid, inviter_uid, "ref")
     status = referrals.get_referral_status(inviter_uid)
     return {
@@ -1321,12 +1787,20 @@ def _sort_by_deal(items: list[dict]) -> list[dict]:
       Tier 10 — уже просмотрено
     Внутри Tier 0/1 сначала самые выгодные, затем дольше висящие/срочные.
     """
+    def _age_days(x) -> int:
+        """Возраст объявления; 0 (сегодня) нельзя подменять значением fallback."""
+        raw = x.get("_days_on_site")
+        try:
+            return max(0, int(raw)) if raw is not None else 999
+        except (TypeError, ValueError):
+            return 999
+
     def _tier(x) -> int:
         if x.get("_already_seen"):
             return 10
         pct = x.get("_savings_pct", 0) or 0
         if pct > 0:
-            days = x.get("_days_on_site", 999) or 999
+            days = _age_days(x)
             return 0 if days <= 3 else 1
         if x.get("_price_int", 0) > 0:
             return 2
@@ -1335,7 +1809,7 @@ def _sort_by_deal(items: list[dict]) -> list[dict]:
     def _fresh_tier(x) -> int:
         """Внутри Tier 0 свежие идут первыми: 0 — сегодня/вчера, 1 — до 3 дн,
         2 — до 7 дн, 3 — старше."""
-        days = x.get("_days_on_site", 999) or 999
+        days = _age_days(x)
         if days <= 1:
             return 0
         if days <= 3:
@@ -1371,7 +1845,7 @@ def _sort_by_deal(items: list[dict]) -> list[dict]:
 
     def _secondary(x) -> float:
         """Тайбрейкер при одинаковой скидке: дольше висит + срочность."""
-        days = x.get("_days_on_site", 0) or 0
+        days = _age_days(x)
         pct = x.get("_savings_pct", 0) or 0
         hot = 10.0 if (x.get("_deal_score", 0) - pct * 3) > 10 else 0.0
         return min(days, 90) * 0.5 + hot
@@ -1387,7 +1861,7 @@ def _sort_by_deal(items: list[dict]) -> list[dict]:
         rub_bonus = 0.0
         if market and price and market > price:
             rub_bonus = min((market - price) / 25_000.0, 25.0)
-        days = x.get("_days_on_site", 0) or 0
+        days = _age_days(x)
         fresh_bonus = 20.0 if days <= 1 else (10.0 if days <= 3 else (3.0 if days <= 7 else 0.0))
         if x.get("_is_junk"):
             rub_bonus = fresh_bonus = 0.0
@@ -1406,10 +1880,15 @@ def _sort_by_deal(items: list[dict]) -> list[dict]:
             print(f"  [сортировка] убрано без фото: {_dropped}, осталось {len(_with_photo)}")
         items = _with_photo
 
+    # Главный критерий — свежесть. Пользователь должен успеть связаться с
+    # продавцом раньше остальных; выгода и качество карточки решают только
+    # порядок объявлений одинакового возраста.
     items.sort(key=lambda x: (
+        1 if x.get("_already_seen") else 0,
+        1 if x.get("_is_junk") else 0,
+        _age_days(x),
         _tier(x),
         _no_photo(x),
-        _fresh_tier(x) if _tier(x) in (0, 1) else 0,
         -round(_deal_rank(x), 1),
         -_secondary(x),
     ))
@@ -1963,7 +2442,9 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
     try:
         import requests as _req
     except ImportError:
-        return []
+        # Основной путь Auto.ru работает на curl_cffi. Отсутствие обычного
+        # requests не должно отключать площадку целиком.
+        _req = None
 
     results = []
     today = datetime.date.today()
@@ -1981,7 +2462,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
 
     # Создаём сессию и прогреваем куки через GET запрос страницы листинга
     # Auto.ru требует куки сессии для AJAX — без них возвращает пустой ответ
-    _ar_session = _req.Session()
+    _ar_session = _req.Session() if _req else None
     _ar_ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     _ar_base_url = f"https://auto.ru/{slug}/cars/{_brand_path}used/?seller_group=PRIVATE"
     if price_min > 0:
@@ -1999,8 +2480,8 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
     if AVITO_PROXIES or not AUTORU_PROXIES:
         try:
             from curl_cffi import requests as _cffi_ar
-            _rc = _cffi_ar.get(
-                _ar_base_url, impersonate="chrome124", timeout=6,
+            _rc = _curl_cffi_get(
+                _ar_base_url, impersonate="chrome120", timeout=6,
                 headers={"Accept-Language": "ru-RU,ru;q=0.9",
                          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                          "Referer": "https://auto.ru/", "Upgrade-Insecure-Requests": "1"},
@@ -2017,7 +2498,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
         except Exception as _ec:
             print(f"  [Auto.ru] curl_cffi прогрев: {str(_ec)[:60]}")
         # 2) обычный requests — запасной, если curl_cffi не дал страницу
-        if len(_warm_html) < 5_000:
+        if len(_warm_html) < 5_000 and _ar_session is not None:
             try:
                 _warm = _ar_session.get(_ar_base_url, headers={
                     "User-Agent": _ar_ua,
@@ -2043,6 +2524,35 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
             results.extend(_warm_items)
 
     if results:
+        # Первая HTML-страница Auto.ru содержит около 35 карточек. Раньше здесь
+        # был ранний return, поэтому параметр pages фактически игнорировался.
+        seen_auto = {_listing_key(i.get("url", "")) or i.get("url", "") for i in results}
+        for page_no in range(2, min(max(1, pages), 3) + 1):
+            page_url = _ar_base_url + f"&page={page_no}&sort=fresh_relevance_1-desc"
+            try:
+                page_resp = _curl_cffi_get(
+                    page_url,
+                    impersonate="chrome120",
+                    timeout=10,
+                    headers={
+                        "Accept-Language": "ru-RU,ru;q=0.9",
+                        "Referer": _ar_base_url,
+                    },
+                    proxies=_avito_proxies() or {},
+                )
+                if not page_resp or page_resp.status_code != 200:
+                    continue
+                page_items = _autoru_parse_html(page_resp.text, today)
+                added = 0
+                for item in page_items:
+                    item_id = _listing_key(item.get("url", "")) or item.get("url", "")
+                    if item_id and item_id not in seen_auto:
+                        seen_auto.add(item_id)
+                        results.append(item)
+                        added += 1
+                print(f"  [Auto.ru] стр.{page_no}: +{added}, всего {len(results)}")
+            except Exception as exc:
+                print(f"  [Auto.ru] стр.{page_no}: {str(exc)[:100]}")
         return results
     # ВАЖНО: даже если прогрев поймал капчу — НЕ выходим. AJAX-методы (мобильный
     # API + desktop AJAX через прокси) часто работают, когда HTML-страница
@@ -2055,8 +2565,8 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
         if _rotate_proxy_ip():
             try:
                 from curl_cffi import requests as _cffi_ar2
-                _rc2 = _cffi_ar2.get(
-                    _ar_base_url, impersonate="chrome124", timeout=6,
+                _rc2 = _curl_cffi_get(
+                    _ar_base_url, impersonate="chrome120", timeout=6,
                     headers={"Accept-Language": "ru-RU,ru;q=0.9",
                              "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                              "Referer": "https://auto.ru/", "Upgrade-Insecure-Requests": "1"},
@@ -2134,8 +2644,9 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
                     _api_body["price_to"] = price_max
                 if _brand_l and _brand_l != "any":
                     _api_body["catalog_filter"] = [{"mark": _brand_slug.upper()}]
-                _api_r = _req.post(
+                _api_r = _fetch_with_retry(
                     "https://apiauto.ru/1.0/search/cars",
+                    method="POST",
                     params={"context": "listing", "sort": "fresh_relevance_1-desc",
                             "page": p, "page_size": 50},
                     json=_api_body,
@@ -2177,23 +2688,23 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
                 # 1) curl_cffi (браузерный TLS) — основной путь
                 if _cffi_ru is not None:
                     try:
-                        _sess_ru = _cffi_ru.Session()
-                        _gh = _sess_ru.get(
-                            html_url, impersonate="chrome124", timeout=6,
+                        _gh = _curl_cffi_get(
+                            html_url, timeout=6,
                             headers={"Accept-Language": "ru-RU,ru;q=0.9",
                                      "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
                                      "Referer": f"https://auto.ru/{slug}/cars/used/",
                                      "Upgrade-Insecure-Requests": "1"},
                             proxies=_arp,
                         )
-                        print(f"  [Auto.ru] РФ-прокси(cffi) {_phost} стр.{p}: HTTP {_gh.status_code}, {len(_gh.text):,}б")
-                        if _gh.status_code == 200 and not _autoru_is_captcha(_gh.text):
+                        print(f"  [Auto.ru] РФ-прокси(cffi) {_phost} стр.{p}: HTTP {_gh.status_code if _gh else '—'}, {len(_gh.text) if _gh else 0:,}б")
+                        if _gh and _gh.status_code == 200 and not _autoru_is_captcha(_gh.text):
                             batch = _autoru_parse_html(_gh.text, today)
                         # добиваем AJAX-ом через ту же прогретую сессию (если есть время)
-                        if not batch and not _autoru_is_captcha(_gh.text) and time.time() < _ar_deadline:
-                            _aj = _sess_ru.post(
+                        if not batch and _gh and _gh.status_code == 200 and not _autoru_is_captcha(_gh.text) and time.time() < _ar_deadline:
+                            _aj = _fetch_with_retry(
                                 "https://auto.ru/-/ajax/desktop/listing/",
-                                json=body, impersonate="chrome124", timeout=5,
+                                method="POST",
+                                json=body, timeout=5,
                                 headers={**headers_ajax, "x-requested-with": "fetch"},
                                 proxies=_arp,
                             )
@@ -2231,8 +2742,9 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
         # есть выделенный РФ-пул (он уже отработал выше и не ловит капчу).
         if not batch and AVITO_PROXIES and not AUTORU_PROXIES:
             try:
-                r_ajax = _req.post(
+                r_ajax = _fetch_with_retry(
                     "https://auto.ru/-/ajax/desktop/listing/",
+                    method="POST",
                     json=body,
                     headers={**headers_ajax, "x-requested-with": "fetch"},
                     proxies=_avito_proxies(),
@@ -2250,7 +2762,7 @@ def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: i
         # Метод 0b: Прямой HTML через общий мобильный прокси (пропускаем при РФ-пуле)
         if not batch and AVITO_PROXIES and not AUTORU_PROXIES:
             try:
-                r0 = _req.get(html_url, headers={
+                r0 = _fetch_with_retry(html_url, headers={
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                     "Accept-Language": "ru-RU,ru;q=0.9",
@@ -3080,7 +3592,7 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Accept-Language": "ru-RU,ru;q=0.9",
     })
-    _TG_FALLBACK_PROXY = "http://huba:EDNyWFYHy228@mproxy.site:16358"
+    _TG_FALLBACK_PROXY = ""
     _tg_proxy_url = (
         os.getenv("PROXY_URL") or
         os.getenv("AVITO_PROXY_URL") or
@@ -3464,7 +3976,7 @@ def scrape_youla(region: str, pages: int = 4, price_min: int = 0,
     try:
         import requests as _req
     except ImportError:
-        return []
+        from curl_cffi import requests as _req
     coords = YOULA_COORDS.get(region)
     if not coords:
         return []
@@ -3763,7 +4275,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
     })
     # Русский резидентный прокси — обходит блокировки VK API / Yandex / DDG
     # Хардкодим как абсолютный fallback чтобы работало даже без Railway env vars
-    _VK_FALLBACK_PROXY = "http://huba:EDNyWFYHy228@mproxy.site:16358"
+    _VK_FALLBACK_PROXY = ""
     _vk_proxy_url = (
         os.getenv("PROXY_URL") or
         os.getenv("AVITO_PROXY_URL") or
@@ -4307,6 +4819,29 @@ _avito_loop: "_aio.AbstractEventLoop | None" = None
 _avito_loop_thread: "_threading.Thread | None" = None
 _avito_loop_lock = _threading.Lock()
 _avito_ready = _threading.Event()
+# LTEspace имеет общий канал: Авито и Auto.ru не должны одновременно открывать
+# тяжёлые страницы из разных executor-потоков.
+_PLATFORM_PROXY_LOCK = _threading.Lock()
+
+
+def _run_platform_scrape(fn):
+    with _PLATFORM_PROXY_LOCK:
+        return fn()
+
+
+async def _run_avito_scrape_with_rotation_unlocked(search_fn):
+    """Совместимый вход: без ротации и retry, фактически читает кэш планировщика."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None, lambda: _run_platform_scrape(search_fn)
+    )
+
+
+async def _run_avito_scrape_with_rotation(search_fn):
+    # Диагностика и cookie-сессия Авито общие, поэтому полный цикл поиска
+    # сериализован. Остальные источники продолжают работать параллельно.
+    async with _AVITO_SEARCH_LOCK:
+        return await _run_avito_scrape_with_rotation_unlocked(search_fn)
 _avito_async_context = None  # type: ignore
 _avito_async_sem: "_aio.Semaphore | None" = None  # ограничивает кол-во одновр. вкладок
 
@@ -5733,7 +6268,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
     try:
         import requests as _req
     except ImportError:
-        return []
+        from curl_cffi import requests as _req
 
     slug = AVITO_SLUGS.get(region, region)
     location_id = _avito_region_loc(region)
@@ -5780,7 +6315,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
     # ── Метод 0: Официальный мобильный JSON API (m.avito.ru/api/13/items) ──────
     # С российским мобильным IP (Megafone/MTS) работает без авторизации и OAuth.
     # Возвращает структурированный JSON — не нужно парсить HTML.
-    if AVITO_PROXIES:
+    if AVITO_PROXIES and not PROXY_URL:
         _key = "af0deccbgcgidddjgnvljitntccdduijhdinfgjgfjir"
         _mob_params: dict = {
             "key": _key,
@@ -5802,22 +6337,13 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             "x-avito-app-version": "18.0.0",
         }
         try:
-            # Сначала НАПРЯМУЮ (чистый Railway IP работает), потом через прокси
-            try:
-                _r_mob = session.get(
-                    "https://m.avito.ru/api/13/items",
-                    params=_mob_params, headers=_mob_hdrs, timeout=8,
-                )
-                print(f"  [Авито mobileAPI0 напрямую] HTTP {_r_mob.status_code}, {len(_r_mob.text):,}б")
-                if _r_mob.status_code != 200:
-                    raise ValueError("direct non-200")
-            except Exception:
-                _r_mob = session.get(
-                    "https://m.avito.ru/api/13/items",
-                    params=_mob_params, headers=_mob_hdrs, timeout=8,
-                    proxies=_avito_proxies(),
-                )
-                print(f"  [Авито mobileAPI0 прокси] HTTP {_r_mob.status_code}, {len(_r_mob.text):,}б")
+            _r_mob = _fetch_with_retry(
+                "https://m.avito.ru/api/13/items",
+                params=_mob_params, headers=_mob_hdrs, timeout=8,
+                proxies=_avito_proxies(),
+                impersonate=None,
+            )
+            print(f"  [Авито mobileAPI0 прокси] HTTP {_r_mob.status_code}, {len(_r_mob.text):,}б")
             if _r_mob.status_code == 200:
                 try:
                     _mob_data = _r_mob.json()
@@ -5870,13 +6396,14 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                     _alt_params["priceMin"] = price_min
                 if price_max < 99_000_000:
                     _alt_params["priceMax"] = price_max
-                _alt_r = session.get(
+                _alt_r = _fetch_with_retry(
                     _alt_url,
                     params=_alt_params,
                     headers={"User-Agent": "ru.avito.avitomobile/18.0 (Android 13; ru_RU)",
                              "Accept": "application/json", "Accept-Language": "ru-RU,ru;q=0.9"},
                     timeout=8,
                     proxies=_avito_proxies(),
+                    impersonate=None,
                 )
                 print(f"  [Авито {_alt_ver}] HTTP {_alt_r.status_code}, {len(_alt_r.text):,}б")
                 if _alt_r.status_code == 200:
@@ -5938,7 +6465,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         ]
         for url, params in urls_to_try:
             try:
-                r = session.get(url, params=params, headers=mobile_headers, timeout=8, proxies=_avito_proxies())
+                r = _fetch_with_retry(url, params=params, headers=mobile_headers, timeout=8, proxies=_avito_proxies(), impersonate=None)
                 print(f"  [Авито m.] {url} стр.{p}: HTTP {r.status_code}, {len(r.text):,}б")
                 if r.status_code == 200 and ('"urlPath"' in r.text or 'data-marker="item"' in r.text or '__NEXT_DATA__' in r.text):
                     result = _parse_avito_html(r.text, slug, today)
@@ -6038,7 +6565,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             params["priceMax"] = price_max
 
         try:
-            r = session.get(
+            r = _fetch_with_retry(
                 "https://api.avito.ru/core/v1/items",
                 params=params,
                 headers={
@@ -6109,7 +6636,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                 "Connection": "keep-alive",
             }
             try:
-                r = session.get(url, params=params, headers=_hdrs, timeout=8, proxies=_avito_proxies())
+                r = _fetch_with_retry(url, params=params, headers=_hdrs, timeout=8, proxies=_avito_proxies())
                 print(f"  [Авито webHTML] стр.{p} попытка {attempt+1}: HTTP {r.status_code}, {len(r.text):,}б")
                 _has_listing_data = ('"urlPath"' in r.text or '"canonicalUrl"' in r.text or
                                      'data-marker="item"' in r.text or '"shortUrl"' in r.text)
@@ -6953,7 +7480,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         try:
             import requests as _rq
         except ImportError:
-            return []
+            from curl_cffi import requests as _rq
 
         slug_ru_name = {
             "ekaterinburg": "Екатеринбург", "moskva": "Москва", "spb": "Санкт-Петербург",
@@ -6987,6 +7514,10 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                 if clean.endswith("&Amp") or clean.endswith("&amp"):
                     clean = clean[:-4].rstrip("/")
                 if slug and f"/{slug}/" not in clean:
+                    return
+                # Ссылки вида model-ASgBAg... — страницы фильтров/категорий,
+                # а не объявления. В выдачу допускаем только URL с ID карточки.
+                if "-ASg" in clean or not re.search(r"\d{6,}$", clean):
                     return
                 if clean not in seen:
                     seen.add(clean)
@@ -7244,8 +7775,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         # curl_cffi с chrome120 — главный рабочий метод: имитирует реальный
         # Chrome/TLS и обходит 429/439 через повторные попытки. HTML/Playwright
         # методы выброшены: они медленные и детектятся Авито как бот.
-        _p1_methods = [_try_cffi_web, _try_avito_web_json, _try_avito_mobile_api,
-                       _try_avito_json_api, _try_avito_xhr]
+        _p1_methods = [_try_cffi_web, _try_web_html, _try_yandex_snippets]
         # Доп. страницы добавим тем же методом что сработал
         tasks = [(m, 1) for m in _p1_methods]
         _cap = 300
@@ -7288,6 +7818,12 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                         merged[u] = it
                 print(f"  [Авито] {_m_seq.__name__} стр.1: {len(_seq_res)} объявлений ✅")
                 break
+            if _AVITO_LAST_DIAG.get("http") == 429:
+                _avito_diag(
+                    "причина",
+                    "HTTP 429: сетевой цикл Авито остановлен без других endpoint",
+                )
+                return []
         # Если нашли рабочий метод — докачиваем стр. 2-4 через него же
         if _working_proxy_method and _working_proxy_method not in (_try_yandex_snippets, _try_free_proxies):
             for _extra_p in [2, 3, 4]:
@@ -7347,7 +7883,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
     # Если JSON-методы через него не дали результата — пробуем бесплатные
     # прокси и поисковики (DDG/Mojeek/Brave), которые работают даже с
     # датацентровых Railway-IP. Даём на fallback до 30 секунд.
-    if not results and _use_proxy and not os.getenv("SKIP_AVITO_FALLBACK"):
+    if False and not results and _use_proxy:
         print(f"  [Авито] платный прокси не дал объявлений — fallback на бесплатные прокси и поисковики")
         _fb_soft_deadline = time.time() + 30
         _fb_tasks = [(m, 1) for m in (_try_yandex_snippets, _try_free_proxies)]
@@ -7380,7 +7916,7 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         results = list(merged.values())
 
     # Если прокси сломан (407) и ничего не нашли — перезапускаем без прокси
-    if not results and _proxy_auth_failed and _use_proxy:
+    if False and not results and _proxy_auth_failed and _use_proxy:
         print(f"  [Авито] прокси не работает (407) — повтор без прокси")
         fallback_tasks = [(m, 1) for m in _no_proxy_methods]
         _ex2 = _TPE(max_workers=min(8, len(fallback_tasks)))
@@ -7407,8 +7943,11 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
         results = list(merged.values())
 
     if not results:
-        print(f"  [Авито API] стр.1: 0 объявлений")
+        _avito_diag("после парсинга", 0)
+        _avito_diag("причина", "прямые ответы Авито не содержат карточек")
         return results
+    _avito_diag("после парсинга", len(results), источник="API/HTML")
+    _avito_diag("после дедупликации", len(results), источник="API/HTML")
     print(f"  [Авито API] объединено {len(results)} объявлений из всех методов")
     return results
 
@@ -7502,12 +8041,586 @@ def _avito_price_bucket(price_min: int, price_max: int) -> str:
     return f"{lo}_{hi}"
 
 
+# Единый планировщик сетевых запросов Авито. HTML-парсер ниже не меняется:
+# планировщик передаёт ему HTML ровно одного ответа и одной страницы.
+_AVITO_MIN_INTERVAL_SEC = AVITO_MIN_INTERVAL_SECONDS
+_AVITO_BLOCK_COOLDOWN_SEC = AVITO_BLOCK_COOLDOWN_SECONDS
+_AVITO_MAX_STATE_PAGE = 20
+_AVITO_SCHEDULE_LOCK = _threading.Lock()
+_AVITO_PROVIDER_LOCK = _threading.Lock()
+_AVITO_SCHEDULER_RUNNING = False
+_AVITO_GLOBAL_NEXT_ATTEMPT_AT = 0.0
+_AVITO_PRODUCTION_STATE = AvitoProductionState(
+    cache_ttl=AVITO_CACHE_TTL_SECONDS,
+    stale_cache_ttl=AVITO_STALE_CACHE_TTL_SECONDS,
+)
+_AVITO_SCHEDULE: dict[tuple, dict] = {}
+_AVITO_STATUS: dict[str, object] = {
+    "status": "blocked",
+    "last_http": None,
+    "next_attempt_at": 0.0,
+}
+
+
+def _avito_persistent_key(key: tuple) -> str:
+    region, price_min, price_max, sort_by_date, brand = key
+    return normalize_search_key({
+        "region": region,
+        "category": "cars",
+        "price_min": price_min,
+        "price_max": price_max,
+        "brand": brand,
+        "model": "",
+        "year": 0,
+        "radius": 0,
+        "sort": "date" if sort_by_date else "default",
+    })
+
+
+def _avito_schedule_key(
+    region: str,
+    price_min: int,
+    price_max: int,
+    sort_by_date: bool,
+    brand: str,
+) -> tuple:
+    return (
+        str(region or "").strip().lower(),
+        max(0, int(price_min or 0)),
+        max(0, int(price_max or 99_000_000)),
+        bool(sort_by_date),
+        str(brand or "").strip().lower(),
+    )
+
+
+def _avito_schedule_entry(key: tuple) -> dict:
+    with _AVITO_SCHEDULE_LOCK:
+        return _AVITO_SCHEDULE.setdefault(key, {
+            "status": "blocked",
+            "last_http": None,
+            "next_attempt_at": 0.0,
+            "last_attempt_at": 0.0,
+            "page": 1,
+            "items": [],
+            "updated_at": 0.0,
+            "in_flight": False,
+            "priority": 0,
+            "ready_event": _threading.Event(),
+        })
+
+
+def _avito_status_for_key(key: tuple, now: float | None = None) -> dict:
+    """Возвращает публичный статус: active/cooldown/blocked и сроки."""
+    now = time.time() if now is None else float(now)
+    with _AVITO_SCHEDULE_LOCK:
+        entry = _AVITO_SCHEDULE.get(key)
+        if not entry:
+            return {
+                "status": "blocked",
+                "last_http": None,
+                "next_attempt_at": 0.0,
+            }
+        status = str(entry.get("status", "blocked"))
+        if status == "cooldown" and now >= float(entry.get("next_attempt_at", 0.0)):
+            status = "blocked"
+        return {
+            "status": status,
+            "last_http": entry.get("last_http"),
+            "next_attempt_at": float(entry.get("next_attempt_at", 0.0)),
+        }
+
+
+def check_avito_transport_health() -> dict:
+    """Проверяет transport и cooldown без единого запроса к avito.ru."""
+    import socket
+    from curl_cffi import requests as cffi_requests
+
+    report = {
+        "provider": AVITO_PROVIDER,
+        "socks_available": False,
+        "direct_ip": "",
+        "vpn_ip": "",
+        "ips_differ": False,
+        "blocked_until": None,
+        "last_success_at": None,
+        "cache_age_seconds": None,
+        "consecutive_blocks": 0,
+        "scheduler_running": _AVITO_SCHEDULER_RUNNING,
+        "error": "",
+    }
+    try:
+        with socket.create_connection(("127.0.0.1", 10808), timeout=3):
+            report["socks_available"] = True
+        for field, proxy in (
+            ("direct_ip", None),
+            ("vpn_ip", AVITO_SOCKS_PROXY),
+        ):
+            session = cffi_requests.Session(trust_env=False)
+            try:
+                kwargs = {"timeout": 20}
+                if proxy:
+                    kwargs["proxies"] = {"http": proxy, "https": proxy}
+                response = session.get(
+                    "https://api.ipify.org?format=json", **kwargs
+                )
+                if response.status_code == 200:
+                    report[field] = str(response.json().get("ip", ""))
+            finally:
+                session.close()
+        report["ips_differ"] = bool(
+            report["direct_ip"]
+            and report["vpn_ip"]
+            and report["direct_ip"] != report["vpn_ip"]
+        )
+    except Exception as exc:
+        report["error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
+    state = _AVITO_PRODUCTION_STATE.load_state()
+    report.update({
+        "blocked_until": state.get("blocked_until"),
+        "last_success_at": state.get("last_success_at"),
+        "cache_age_seconds": _AVITO_PRODUCTION_STATE.latest_cache_age(),
+        "consecutive_blocks": int(state.get("consecutive_blocks") or 0),
+    })
+    # Сохраняем только публичный выходной IP, без данных VLESS.
+    if report["vpn_ip"] and report["ips_differ"]:
+        state["last_exit_ip"] = report["vpn_ip"]
+        _AVITO_PRODUCTION_STATE.save_state(state)
+    return report
+
+
+def _avito_cached_result(
+    region: str,
+    price_min: int = 0,
+    price_max: int = 99_000_000,
+    sort_by_date: bool = False,
+    brand: str = "",
+) -> list[dict]:
+    """Регистрирует поиск, при cache miss приоритизирует scheduler и ждёт кэш."""
+    if not AVITO_ENABLED:
+        return []
+    key = _avito_schedule_key(region, price_min, price_max, sort_by_date, brand)
+    entry = _avito_schedule_entry(key)
+    blocked = _AVITO_PRODUCTION_STATE.is_blocked()
+    persisted, cache_meta = _AVITO_PRODUCTION_STATE.cached(
+        _avito_persistent_key(key),
+        allow_stale=blocked,
+    )
+    with _AVITO_SCHEDULE_LOCK:
+        cached = list(entry.get("items", []))
+        if cached:
+            return cached
+        if persisted:
+            entry["items"] = list(persisted)
+            entry["updated_at"] = float(cache_meta.get("cached_at") or 0)
+            entry["cache_meta"] = dict(cache_meta)
+            if blocked:
+                state = _AVITO_PRODUCTION_STATE.load_state()
+                entry["status"] = "cooldown"
+                entry["next_attempt_at"] = float(
+                    state.get("blocked_until") or 0
+                )
+            _AVITO_STATUS.update({
+                "stale": bool(cache_meta.get("stale")),
+                "blocked": blocked,
+                "last_http": cache_meta.get("last_error_http"),
+            })
+            return list(persisted)
+        entry["priority"] = 1
+        ready_event = entry.get("ready_event")
+        in_flight = bool(entry.get("in_flight"))
+        can_wait = _AVITO_SCHEDULER_RUNNING and (
+            in_flight
+            or (
+                time.time() >= float(entry.get("next_attempt_at", 0.0))
+                and time.time() >= _AVITO_GLOBAL_NEXT_ATTEMPT_AT
+            )
+        )
+        if can_wait and not in_flight and hasattr(ready_event, "clear"):
+            ready_event.clear()
+    if can_wait and hasattr(ready_event, "wait"):
+        ready_event.wait(timeout=AVITO_MANUAL_WAIT_SECONDS)
+    with _AVITO_SCHEDULE_LOCK:
+        cached = list(entry.get("items", []))
+    if cached:
+        return cached
+    persisted, cache_meta = _AVITO_PRODUCTION_STATE.cached(
+        _avito_persistent_key(key),
+        allow_stale=_AVITO_PRODUCTION_STATE.is_blocked(),
+    )
+    if persisted:
+        with _AVITO_SCHEDULE_LOCK:
+            entry["items"] = list(persisted)
+            entry["cache_meta"] = dict(cache_meta)
+    return list(persisted)
+
+
+def _adapt_duff_listing(item: dict, today: datetime.date) -> dict:
+    """Приводит публичный формат provider к внутреннему формату бота."""
+    price_int = max(0, int(item.get("price") or 0))
+    published_at = item.get("published_at")
+    posted_date = today
+    date_known = False
+    if isinstance(published_at, str) and published_at:
+        try:
+            posted_date = datetime.datetime.fromisoformat(
+                published_at.replace("Z", "+00:00")
+            ).date()
+            date_known = True
+        except (TypeError, ValueError):
+            pass
+    days = max(0, (today - posted_date).days)
+    photo_url = item.get("image") or ""
+    result = {
+        "source": "avito",
+        "title": str(item.get("title") or ""),
+        "price": (
+            f"{price_int:,} ₽".replace(",", " ") if price_int else ""
+        ),
+        "url": str(item.get("url") or ""),
+        "date": str(posted_date),
+        "location": str(item.get("location") or ""),
+        "seller": item.get("seller") or "",
+        "published_at": published_at,
+        "description": "",
+        "_photo_url": photo_url,
+        "_photos": 1 if photo_url else 0,
+        "_price_int": price_int,
+        "_days_on_site": days,
+        "_date_known": date_known,
+        "_duff_id": str(item.get("id") or ""),
+    }
+    result["_hot_score"] = hot_score(result)
+    return result
+
+
+def _avito_scheduled_fetch(key: tuple, now: float | None = None) -> list[dict]:
+    """Сериализует все логические проходы Авито единым глобальным lock."""
+    entry = _avito_schedule_entry(key)
+    if not _AVITO_PROVIDER_LOCK.acquire(blocking=False):
+        return list(entry.get("items", []))
+    try:
+        ready_event = entry.get("ready_event")
+        if hasattr(ready_event, "clear"):
+            ready_event.clear()
+        return _avito_scheduled_fetch_unlocked(key, now=now)
+    finally:
+        with _AVITO_SCHEDULE_LOCK:
+            entry["priority"] = 0
+            ready_event = entry.get("ready_event")
+            if hasattr(ready_event, "set"):
+                ready_event.set()
+        _AVITO_PROVIDER_LOCK.release()
+
+
+def _avito_scheduled_fetch_unlocked(
+    key: tuple, now: float | None = None
+) -> list[dict]:
+    """Один проход: исходный GET и максимум один внутренний canonical GET."""
+    global _AVITO_GLOBAL_NEXT_ATTEMPT_AT
+    now = time.time() if now is None else float(now)
+    entry = _avito_schedule_entry(key)
+    if not AVITO_ENABLED:
+        with _AVITO_SCHEDULE_LOCK:
+            entry.update({"status": "blocked", "in_flight": False})
+        return []
+    provider_state = _AVITO_PRODUCTION_STATE.load_state()
+    blocked_until = provider_state.get("blocked_until")
+    if (
+        isinstance(blocked_until, (int, float))
+        and now < float(blocked_until)
+    ):
+        cached, cache_meta = _AVITO_PRODUCTION_STATE.cached(
+            _avito_persistent_key(key),
+            allow_stale=True,
+            now=now,
+        )
+        with _AVITO_SCHEDULE_LOCK:
+            entry.update({
+                "status": "cooldown",
+                "last_http": provider_state.get("last_http"),
+                "next_attempt_at": float(blocked_until),
+                "items": list(cached) or list(entry.get("items", [])),
+                "cache_meta": cache_meta,
+                "in_flight": False,
+            })
+            _AVITO_STATUS.update({
+                "status": "cooldown",
+                "last_http": provider_state.get("last_http"),
+                "next_attempt_at": float(blocked_until),
+                "stale": bool(cache_meta.get("stale")),
+                "blocked": True,
+            })
+        return list(entry.get("items", []))
+    with _AVITO_SCHEDULE_LOCK:
+        if (
+            entry.get("in_flight")
+            or now < float(entry.get("next_attempt_at", 0.0))
+            or now < _AVITO_GLOBAL_NEXT_ATTEMPT_AT
+        ):
+            return list(entry.get("items", []))
+        entry["in_flight"] = True
+        entry["last_attempt_at"] = now
+        # Резервируем следующий слот до HTTP, чтобы параллельный вызов не прошёл.
+        entry["next_attempt_at"] = now + _AVITO_MIN_INTERVAL_SEC
+        _AVITO_GLOBAL_NEXT_ATTEMPT_AT = now + _AVITO_MIN_INTERVAL_SEC
+        page = max(1, int(entry.get("page", 1)))
+
+    region, price_min, price_max, sort_by_date, brand = key
+    slug = AVITO_SLUGS.get(region, region)
+    params = ["seller_type=1"]
+    if page > 1:
+        params.append(f"p={page}")
+    if price_min > 0:
+        params.append(f"pmin={price_min}")
+    if price_max < 99_000_000:
+        params.append(f"pmax={price_max}")
+    if sort_by_date:
+        params.append("s=104")
+    if brand:
+        params.append("q=" + urllib.parse.quote(brand))
+    url = f"https://www.avito.ru/{slug}/avtomobili?" + "&".join(params)
+    headers = {
+        "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+        "Accept-Language": "ru-RU,ru;q=0.9",
+        "Referer": "https://www.avito.ru/",
+    }
+
+    try:
+        if AVITO_PROVIDER == "duff_vless":
+            provider = AvitoDuffProvider(
+                socks_proxy=AVITO_SOCKS_PROXY,
+                timeout=20,
+                max_internal_redirects=AVITO_MAX_INTERNAL_REDIRECTS,
+            )
+            provider_items = provider.search(url)
+            http = int(provider.last_diagnostics.get("http") or 200)
+            parsed = [
+                _adapt_duff_listing(item, datetime.date.today())
+                for item in provider_items
+            ]
+            # Защита от расхождений параметров URL и ответа: фильтруем цену
+            # повторно в памяти, не создавая дополнительных запросов.
+            parsed = [
+                item for item in parsed
+                if (
+                    int(item.get("_price_int", 0) or 0) >= price_min
+                    and int(item.get("_price_int", 0) or 0) <= price_max
+                )
+            ]
+            _avito_diag(
+                "HTTP",
+                http,
+                provider="duff_vless",
+                запросов=provider.last_diagnostics.get("requests", 0),
+                internal_redirect=provider.last_diagnostics.get(
+                    "internal_redirect", False
+                ),
+            )
+            _avito_diag(
+                "найдено карточек",
+                provider.last_diagnostics.get("catalog_items", 0),
+                страница=page,
+            )
+            _avito_diag("после парсинга", len(provider_items))
+            _avito_diag("после фильтрации", len(parsed))
+        elif AVITO_PROVIDER == "legacy":
+            # Отключённый по умолчанию старый путь. Он включается только
+            # явной переменной AVITO_PROVIDER=legacy.
+            with _PLATFORM_PROXY_LOCK:
+                response = AVITO_CLIENT.get(url, headers=headers, timeout=20)
+            http = int(response.status_code)
+            parsed = _parse_avito_html(
+                response.text, slug, datetime.date.today()
+            )
+        else:
+            raise AvitoParseError(
+                f"Неизвестный AVITO_PROVIDER={AVITO_PROVIDER!r}"
+            )
+
+        _AVITO_LAST_DIAG["http"] = http
+        if http in (403, 429):
+            state = _AVITO_PRODUCTION_STATE.record_block(http, now=now)
+            next_at = float(state["blocked_until"])
+            cached, cache_meta = _AVITO_PRODUCTION_STATE.cached(
+                _avito_persistent_key(key), allow_stale=True, now=now
+            )
+            with _AVITO_SCHEDULE_LOCK:
+                entry.update({
+                    "status": "cooldown",
+                    "last_http": http,
+                    "next_attempt_at": next_at,
+                    "items": list(cached) or list(entry.get("items", [])),
+                    "cache_meta": cache_meta,
+                    "in_flight": False,
+                })
+                _AVITO_STATUS.update({
+                    "status": "cooldown",
+                    "last_http": http,
+                    "next_attempt_at": next_at,
+                    "stale": bool(cache_meta.get("stale")),
+                    "blocked": True,
+                })
+            _avito_diag(
+                "причина",
+                f"HTTP {http}: adaptive cooldown; retry и fallback отключены",
+            )
+            return list(entry.get("items", []))
+
+        if http != 200:
+            with _AVITO_SCHEDULE_LOCK:
+                entry.update({
+                    "status": "blocked",
+                    "last_http": http,
+                    "in_flight": False,
+                })
+                _AVITO_STATUS.update({
+                    "status": "blocked",
+                    "last_http": http,
+                    "next_attempt_at": entry["next_attempt_at"],
+                })
+            return list(entry.get("items", []))
+
+        merged: dict[str, dict] = {}
+        for item in list(entry.get("items", [])) + list(parsed):
+            item_url = _norm_url(item.get("url", ""))
+            listing_id = _listing_key(item_url) or item_url
+            if listing_id:
+                item["url"] = item_url
+                merged[listing_id] = item
+        items = list(merged.values())
+        _avito_diag("после дедупликации", len(items))
+        items.sort(key=lambda item: (
+            max(0, int(item.get("_days_on_site", 999)))
+            if item.get("_days_on_site") is not None else 999,
+            -int(item.get("_price_int", 0) or 0),
+        ))
+        if items:
+            current_state = _AVITO_PRODUCTION_STATE.load_state()
+            _AVITO_PRODUCTION_STATE.record_success(
+                _avito_persistent_key(key),
+                items[:500],
+                provider=AVITO_PROVIDER,
+                exit_ip=current_state.get("last_exit_ip"),
+                now=now,
+            )
+        with _AVITO_SCHEDULE_LOCK:
+            entry.update({
+                "status": "active",
+                "last_http": 200,
+                "next_attempt_at": now + _AVITO_MIN_INTERVAL_SEC,
+                "page": 1 if page >= _AVITO_MAX_STATE_PAGE else page + 1,
+                "items": items[:500],
+                "updated_at": now,
+                "in_flight": False,
+            })
+            _AVITO_STATUS.update({
+                "status": "active",
+                "last_http": 200,
+                "next_attempt_at": entry["next_attempt_at"],
+                "stale": False,
+                "blocked": False,
+            })
+        _avito_diag("найдено карточек", len(parsed), страница=page)
+        return list(entry["items"])
+    except AvitoBlockedError as exc:
+        http = int(exc.status_code or 429)
+        state = _AVITO_PRODUCTION_STATE.record_block(http, now=now)
+        next_at = float(state["blocked_until"])
+        cached, cache_meta = _AVITO_PRODUCTION_STATE.cached(
+            _avito_persistent_key(key), allow_stale=True, now=now
+        )
+        with _AVITO_SCHEDULE_LOCK:
+            entry.update({
+                "status": "cooldown",
+                "last_http": http,
+                "next_attempt_at": next_at,
+                "items": list(cached) or list(entry.get("items", [])),
+                "cache_meta": cache_meta,
+                "in_flight": False,
+            })
+            _AVITO_STATUS.update({
+                "status": "cooldown",
+                "last_http": http,
+                "next_attempt_at": next_at,
+                "stale": bool(cache_meta.get("stale")),
+                "blocked": True,
+            })
+        _avito_diag(
+            "причина",
+            f"HTTP {http}: adaptive cooldown; retry и fallback отключены",
+        )
+        return list(entry.get("items", []))
+    except AvitoVpnUnavailable as exc:
+        cached, cache_meta = _AVITO_PRODUCTION_STATE.cached(
+            _avito_persistent_key(key), allow_stale=True, now=now
+        )
+        with _AVITO_SCHEDULE_LOCK:
+            entry.update({
+                "status": "blocked",
+                "last_http": None,
+                "items": list(cached) or list(entry.get("items", [])),
+                "cache_meta": cache_meta,
+                "in_flight": False,
+            })
+            _AVITO_STATUS.update({
+                "status": "blocked",
+                "last_http": None,
+                "next_attempt_at": entry["next_attempt_at"],
+            })
+        _avito_diag("причина", f"VLESS недоступен; без retry: {exc}")
+        return list(entry.get("items", []))
+    except (AvitoParseError, AvitoRedirectLoopError) as exc:
+        with _AVITO_SCHEDULE_LOCK:
+            entry.update({
+                "status": "blocked",
+                "last_http": _AVITO_LAST_DIAG.get("http"),
+                "in_flight": False,
+            })
+        _avito_diag("причина", f"{type(exc).__name__}: {exc}")
+        return list(entry.get("items", []))
+    except Exception as exc:
+        with _AVITO_SCHEDULE_LOCK:
+            entry.update({
+                "status": "blocked",
+                "last_http": None,
+                "in_flight": False,
+            })
+            _AVITO_STATUS.update({
+                "status": "blocked",
+                "last_http": None,
+                "next_attempt_at": entry["next_attempt_at"],
+            })
+        _avito_diag("причина", f"сетевая ошибка без retry: {type(exc).__name__}: {str(exc)[:160]}")
+        return list(entry.get("items", []))
+
+
 def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int = 99_000_000, sort_by_date: bool = False, brand: str = "") -> list[dict]:
     """
     Парсер Авито. Кэш хранится по РЕГИОНУ (без разбивки по цене), чтобы один
     успешный скрейп покрывал все ценовые диапазоны и не вызывал повторных блокировок.
     """
+    # Сетевые запросы выполняет только _avito_scheduler_loop. Параметр pages
+    # сохранён для совместимости, но один цикл всегда обрабатывает одну страницу.
+    return _avito_cached_result(
+        region, price_min=price_min, price_max=price_max,
+        sort_by_date=sort_by_date, brand=brand,
+    )
+
+    # Legacy-код ниже оставлен как реализация парсинга, но сетевой вход к нему
+    # закрыт единым планировщиком выше.
     now = time.time()
+    _AVITO_LAST_DIAG.update({
+        "http": None, "page": None, "cards": 0, "parsed": 0,
+        "deduped": 0, "filtered": 0, "sent": 0, "reason": "",
+    })
+    _avito_diag(
+        "конфигурация",
+        "curl_cffi",
+        proxy=bool(PROXY_URL and _avito_proxies()),
+        impersonate="chrome120",
+        region=region,
+        pages=pages,
+    )
     # С рабочим прокси скрейпим С ФИЛЬТРОМ бюджета в URL (Авито сам отдаёт
     # релевантные объявления нужной цены, а не рекламные новинки дилеров без
     # цены). Кэш — по бюджет-слоту. 1000 IP делают частый скрейп безопасным.
@@ -7548,7 +8661,12 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
         # При прокси, если бюджет-скрейп не дал результатов из-за блокировки,
         # пробуем полный диапазон — кэш полного диапазона надежнее и используется
         # всеми пользователями региона.
-        if not items and AVITO_PROXIES and (_scrape_pmin != 0 or _scrape_pmax != 99_000_000):
+        if (
+            not items
+            and AVITO_PROXIES
+            and _AVITO_LAST_DIAG.get("http") not in (403, 429)
+            and (_scrape_pmin != 0 or _scrape_pmax != 99_000_000)
+        ):
             print(f"  [Авито] бюджет-скрейп пуст — пробуем полный диапазон")
             items = _scrape_avito_raw(region, pages=pages, price_min=0, price_max=99_000_000, sort_by_date=sort_by_date, brand=brand)
             if items:
@@ -7589,8 +8707,23 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
                 print(f"  [Авито] пусто → устаревший кэш: {len(items)} шт")
         print(f"  [Авито debug] после fallback-кэша: {len(items)} items")
 
+    # Явная дедупликация до пользовательских фильтров с диагностикой.
+    before_dedup = len(items)
+    deduped_items: dict[str, dict] = {}
+    for item in items:
+        url = _norm_url(item.get("url", ""))
+        listing_id = _listing_key(url) or url
+        if listing_id:
+            deduped_items.setdefault(listing_id, item)
+    items = list(deduped_items.values())
+    _avito_diag(
+        "после дедупликации",
+        len(items),
+        удалено=max(0, before_dedup - len(items)),
+    )
+
     # Последний резерв: headless Playwright + stealth
-    if not items:
+    if not items and not PROXY_URL:
         try:
             import playwright_avito_scraper as _pws
             print(f"  [Авито] пробуем Playwright + stealth...")
@@ -7642,7 +8775,14 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
             it for it in items
             if (not it.get("_price_int")) or (price_min <= it["_price_int"] <= price_max)
         ]
-    print(f"  [Авито debug] после фильтра по цене: {len(out)} out (pmin={price_min}, pmax={price_max})")
+    _avito_diag(
+        "после фильтрации",
+        len(out),
+        этап="цена",
+        вход=len(items),
+        pmin=price_min,
+        pmax=price_max,
+    )
 
     # Fix A: Hard post-merge year/budget filter — eliminates DDG results with
     # price_int=0 that are obviously wrong year/budget combos (e.g. 2025 EXEED
@@ -7672,6 +8812,7 @@ def scrape_avito(region: str, pages: int = 5, price_min: int = 0, price_max: int
         return True
 
     out = [it for it in out if it.get("_price_int", 0) > 0 or _year_budget_ok(it, price_max)]
+    _avito_diag("после фильтрации", len(out), этап="год/бюджет")
     print(f"  [Авито debug] после _year_budget_ok: {len(out)} out")
     for _dbg_i, _dbg_it in enumerate(out[:5]):
         print(f"  [Авито debug] item {_dbg_i}: price={_dbg_it.get('_price_int')}, year={_dbg_it.get('_year') or _dbg_it.get('year')}, title={_dbg_it.get('title','')[:60]}")
@@ -7706,10 +8847,21 @@ def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max
 
     # ── Метод 1: API / мобильный сайт / cloudscraper ─────────────
     print(f"  [Авито] пробуем API-методы для {region}…")
-    api_results = _avito_api_fetch(region, pages, price_min, price_max, today, sort_by_date=sort_by_date, brand=brand)
+    # Сначала независимый fallback поисковых индексов, затем API/HTML методы.
+    # Это позволяет находить ссылки Авито даже при HTTP 429 на текущем LTE-IP.
+    api_results = _avito_api_fetch(
+        region, pages, price_min, price_max, today,
+        sort_by_date=sort_by_date, brand=brand,
+    )
     if api_results:
         print(f"  [Авито] API-метод дал {len(api_results)} объявлений")
         return api_results
+    if _AVITO_LAST_DIAG.get("http") == 429:
+        _avito_diag(
+            "причина",
+            "HTTP 429: HTML-страницы и fallback Авито не запускались",
+        )
+        return []
     # API-методы не дали результатов — пробуем прямой HTML-скрейпинг (методы 2-3)
     print(f"  [Авито] API дал 0 — пробуем HTML-скрейпинг…")
 
@@ -7728,6 +8880,7 @@ def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max
         u = f"https://www.avito.ru/{slug}/avtomobili"
         if qs_parts:
             u += "?" + "&".join(qs_parts)
+        _avito_diag("страница", p, url=u, params="&".join(qs_parts))
         return u
 
     _HEADERS = {
@@ -7755,7 +8908,7 @@ def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max
             """Пробуем: быстрый прямой запрос → headless-браузер (только без прокси)."""
             # 1. Прямой запрос через прокси (если есть) или напрямую
             try:
-                r2 = _req.get(fetch_url, timeout=8, headers=_HEADERS, proxies=_avito_proxies())
+                r2 = _fetch_with_retry(fetch_url, headers=_HEADERS, proxies=_avito_proxies(), timeout=8)
                 if r2.status_code == 200 and _page_has_listings(r2.text):
                     return r2.text
             except Exception:
@@ -7777,6 +8930,7 @@ def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max
                 fallback_url = f"https://www.avito.ru/{slug}/avtomobili?seller_type=1" + (f"&p={p}" if p > 1 else "")
                 text = _try_fetch(fallback_url)
                 if not text:
+                    _avito_diag("причина", f"страница {p}: после retry нет HTML с карточками")
                     print(f"  [Авито] стр.{p}: нет данных")
                     return []
                 from_fallback = True
@@ -7784,7 +8938,13 @@ def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max
                 print(f"  [Авито] стр.{p}: fallback URL, {len(text):,}б")
             else:
                 print(f"  [Авито] стр.{p}: {len(text):,}б")
+            marker_count = max(
+                text.count('data-marker="item"'),
+                text.count('"urlPath"'),
+            )
+            _avito_diag("найдено карточек", marker_count, page=p)
             batch = _parse_avito_html(text, slug, today)
+            _avito_diag("после парсинга", len(batch), page=p)
 
             # Если price-filtered URL вернул страницу но 0 items (CAPTCHA/пустая) — пробуем fallback
             if not batch and not from_fallback:
@@ -7983,9 +9143,10 @@ def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max
             print(f"  [Авито] стр.{p}: {e}")
             return []
 
-    # Параллельно запрашиваем все страницы (5 потоков — лимит конкурентности ScraperAPI)
+    # На общем LTE-канале страницы идут строго последовательно. Пять параллельных
+    # запросов с одного IP мгновенно приводили к 429.
     results = []
-    with ThreadPoolExecutor(max_workers=5) as ex:
+    with ThreadPoolExecutor(max_workers=1 if PROXY_URL else 5) as ex:
         futs = {ex.submit(_fetch_page, p): p for p in range(1, pages + 1)}
         for fut in as_completed(futs):
             results.extend(fut.result())
@@ -8013,7 +9174,7 @@ def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max
                         fb_text = r_direct.text
                 except Exception:
                     pass
-                if not fb_text:
+                if not fb_text and not PROXY_URL:
                     html = _avito_fetch_html(fallback_url)
                     if html and ('"urlPath"' in html or 'data-marker="item"' in html):
                         fb_text = html
@@ -8066,7 +9227,7 @@ def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max
                 print(f"  [Авито] fallback стр.{fb_page} ошибка: {e}")
                 return []
 
-        with ThreadPoolExecutor(max_workers=5) as ex:
+        with ThreadPoolExecutor(max_workers=1 if PROXY_URL else 5) as ex:
             futs = [ex.submit(_fetch_fallback_page, p) for p in range(1, 4)]
             for fut in as_completed(futs):
                 fb_results.extend(fut.result())
@@ -8194,28 +9355,66 @@ from aiogram import BaseMiddleware
 from aiogram.types import TelegramObject, Update
 
 class SubscriptionMiddleware(BaseMiddleware):
-    """Подписка отключена — пропускаем всех. Заодно регистрируем пользователя
-    в надёжном реестре PG (счётчик статистики, переживает деплой)."""
+    """Регистрирует пользователя и закрывает функции бота после окончания доступа."""
     async def __call__(self, handler, event: TelegramObject, data: dict):
+        user = getattr(event, "from_user", None)
         try:
-            u = getattr(event, "from_user", None)
-            if u and u.id:
-                # Только регистрация/last_seen; поиск считается в do_search.
-                # ВАЖНО: НЕ ждём завершения (без await) — иначе каждое сообщение
-                # блокируется на connect_timeout БД (~5с при недоступном PG) и
-                # бот «очень долго реагирует» на /start. Запускаем «огнём и забыть».
+            if user and user.id:
+                # Память обновляем сразу: иначе первое сообщение нового пользователя
+                # могло провериться раньше, чем фоновая регистрация успеет создать trial.
+                _register_user(user.id, user.username, False, persist_db=False)
                 loop = asyncio.get_running_loop()
                 loop.run_in_executor(
-                    None, lambda: _register_user(u.id, u.username, False)
+                    None,
+                    lambda: _register_user(user.id, user.username, False, persist_db=True),
                 )
-                loop.run_in_executor(None, crm.update_last_seen, u.id)
+                loop.run_in_executor(None, crm.update_last_seen, user.id)
         except Exception:
             pass
+
+        if not user or user.id in ADMIN_IDS:
+            return await handler(event, data)
+
+        # Команды и кнопки, необходимые для входа и покупки, доступны всегда.
+        text = (getattr(event, "text", None) or "").strip()
+        callback_data = (getattr(event, "data", None) or "").strip()
+        allowed_commands = ("/start", "/subscribe", "/promo")
+        allowed_callbacks = (
+            "sub_plan|", "pay|", "check_payment|", "promo|", "promo_help",
+            "yoomoney|", "subscription", "open_subscription", "open_subscribe",
+        )
+        if text.startswith(allowed_commands) or text in {"💎 Подписка", "💎 Купить подписку", "💎 Выбрать тариф"}:
+            return await handler(event, data)
+        if callback_data.startswith(allowed_callbacks):
+            return await handler(event, data)
+
+        if _subscription_info(user.id)["ended"]:
+            message = getattr(event, "message", None)
+            target = message if message is not None else event
+            offer = (
+                "🔒 <b>Доступ к PerekupDrive приостановлен</b>\n\n"
+                "Ваш 7-дневный тестовый период или оплаченная подписка завершились. "
+                "Поиск, мониторинг и инструменты анализа временно недоступны.\n\n"
+                "Продлите доступ — и бот снова будет круглосуточно отслеживать новые "
+                "объявления и сразу сообщать о выгодных автомобилях."
+            )
+            try:
+                if isinstance(event, CallbackQuery):
+                    await event.answer("Для продолжения работы продлите подписку", show_alert=True)
+                await target.answer(
+                    offer,
+                    parse_mode="HTML",
+                    reply_markup=_subscription_keyboard(),
+                )
+            except Exception:
+                pass
+            return None
         return await handler(event, data)
 
 async def _check_and_gate(msg_or_cb) -> bool:
-    """Оставлен для совместимости, основная проверка теперь в middleware."""
-    return True
+    """Совместимая ручная проверка доступа для фоновых/прямых вызовов."""
+    uid = msg_or_cb.from_user.id
+    return uid in ADMIN_IDS or not _subscription_info(uid)["ended"]
 
 # URL-ID маппинг для кнопок
 _id_to_url: dict[str, str] = {}
@@ -8563,39 +9762,40 @@ async def cmd_start(msg: Message, state: FSMContext):
                             await bot.send_message(inviter_uid, _txt, parse_mode="Markdown")
                         except Exception:
                             pass
-                    await msg.answer(
-                        "👋 *Добро пожаловать в PerekupDrive!*\n\n"
-                        "Ты получил *7 дней полного доступа*.\n"
-                        "Всё бесплатно, без ограничений.\n\n"
-                        "🎯 *Что сделать прямо сейчас:*\n\n"
-                        "1️⃣ Настроить поиск по всем площадкам (Авито, Дром, Авто.ру, ВК, Telegram) под свои параметры.\n\n"
-                        "2️⃣ Сохранить 3 интересных авто в Избранное.\n\n"
-                        "3️⃣ Включить поискового агента — бот сам пришлёт новые объявления.",
-                        parse_mode="Markdown",
-                        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                            [InlineKeyboardButton(text="▶️ Начать поиск", callback_data="open_settings")],
-                        ]),
-                    )
+                    # Единое приветствие отправляется ниже. Не дублируем его для
+                    # пользователей, пришедших по реферальной ссылке.
             except Exception:
                 pass
-    _get_or_create_referral(msg.from_user.id)
+    # Источник истины реферальной системы — referrals.py/БД. Старый JSON-реестр
+    # здесь не создаём: две независимые записи приводили к разным счётчикам.
     s = load_settings(msg.from_user.id)
     name = msg.from_user.first_name or "друг"
     is_new_user = not s.get("region")
-    _subscription_line = _subscription_badge(msg.from_user.id)
+    if is_new_user:
+        # Фиксируем trial_start сразу, чтобы бейдж считал свежие 7 дней
+        _register_user(msg.from_user.id, msg.from_user.username, False)
+        _subscription_line = (
+            "🎁 *Тестовый период активирован*\n"
+            "⏳ Осталось 7 из 7 дней\n"
+            "🟢🟢🟢🟢🟢🟢🟢"
+        )
+    else:
+        _subscription_line = _subscription_badge(msg.from_user.id)
 
     if is_new_user:
         # Новый пользователь — красивое приветствие
         await msg.answer(
             f"{_subscription_line}\n\n"
-            f"👋 *Добро пожаловать в PerekupDrive, {name}!*\n\n"
-            f"Ты получил *7 дней полного доступа*.\n"
-            f"Всё бесплатно, без ограничений.\n\n"
-            f"🎯 *Что сделать прямо сейчас:*\n\n"
-            f"1️⃣ Настроить поиск по всем площадкам (Авито, Дром, Авто.ру, ВК, Telegram) под свои параметры.\n\n"
-            f"2️⃣ Сохранить интересные авто в Избранное.\n\n"
-            f"3️⃣ Включить поискового агента — бот сам пришлёт новые объявления.\n\n"
-            f"👇 Начнём с настройки поиска:",
+            f"👋 *{name}, добро пожаловать в PerekupDrive!*\n\n"
+            f"Пока другие обновляют сайты вручную, бот круглосуточно проверяет "
+            f"*Авито, Дром, Auto.ru, ВК и Telegram* и поднимает самые выгодные варианты наверх.\n\n"
+            f"⚡ *Что вы получите:*\n"
+            f"• свежие объявления в одном месте;\n"
+            f"• сравнение цены с рынком;\n"
+            f"• быстрые уведомления о подходящих авто;\n"
+            f"• прямую ссылку на продавца без лишних шагов.\n\n"
+            f"Настройка займёт меньше минуты. Укажите, что ищете — "
+            f"и я сразу покажу первые варианты 👇",
             parse_mode="Markdown",
             reply_markup=kb_for(msg.from_user.id),
         )
@@ -9620,6 +10820,137 @@ async def cmd_stats(msg: Message):
         await msg.answer(f"Не удалось собрать статистику: {e}")
         return
     await msg.answer(text, parse_mode="Markdown")
+
+
+# ── Реферальные админ-команды ─────────────────────────────────────
+def _safe_reduce_subscription_days(uid: int, days: int) -> dict:
+    """Безопасно уменьшает подписку пользователя на days дней."""
+    if days <= 0:
+        return {"ok": True, "reduced_by": 0}
+    try:
+        s = load_settings(uid)
+        now = time.time()
+        current_until = float(s.get("subscription_until", 0) or 0)
+        new_until = max(now, current_until - days * 86400)
+        actually_reduced = (current_until - new_until) / 86400
+        s["subscription_until"] = new_until
+        save_settings(uid, s)
+        return {"ok": True, "reduced_by": actually_reduced, "new_until": new_until}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@dp.message(Command("ref_status"))
+async def cmd_ref_status(msg: Message):
+    if msg.from_user.id not in ADMIN_IDS:
+        return
+    parts = (msg.text or "").split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        await msg.answer("Формат: <code>/ref_status USER_ID</code>", parse_mode="HTML")
+        return
+    uid = int(parts[1])
+    info = referrals.get_admin_status(uid)
+    user = info.get("user", {})
+    events = info.get("events", [])
+    lines = [
+        f"<b>Реферальный статус uid {uid}</b>",
+        f"Реферер: <code>{user.get('referred_by') or '—'}</code>",
+        f"Привязан: {user.get('referral_created_at') or '—'}",
+        f"Скидка использована: {bool(user.get('referral_discount_used'))}",
+        f"Первая оплата: {user.get('first_paid_at') or '—'}",
+        f"Оплачено рефералов: {user.get('paid_referrals_count', 0)}",
+        f"Бонусных дней всего: {user.get('referral_reward_days_total', 0)}",
+        f"Достижений: {user.get('referral_milestones_count', 0)}",
+        "",
+        "<b>Последние события:</b>",
+    ]
+    if not events:
+        lines.append("(нет)")
+    else:
+        for ev in events[:15]:
+            lines.append(
+                f"• {ev.get('event_type')} | {ev.get('tariff_code') or '-'} | "
+                f"{ev.get('status') or '-'} | pay={ev.get('payment_id') or '-'} | "
+                f"days={ev.get('total_reward_days') or 0}"
+            )
+    await msg.answer("\n".join(lines), parse_mode="HTML")
+
+
+@dp.message(Command("ref_recalculate"))
+async def cmd_ref_recalculate(msg: Message):
+    if msg.from_user.id not in ADMIN_IDS:
+        return
+    parts = (msg.text or "").split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        await msg.answer("Формат: <code>/ref_recalculate USER_ID</code>", parse_mode="HTML")
+        return
+    uid = int(parts[1])
+    res = referrals.recalculate_user_stats(uid)
+    await msg.answer(
+        f"✅ Статистика пересчитана для uid <code>{uid}</code>.\n\n"
+        f"Оплачено рефералов: <b>{res['paid_count']}</b>\n"
+        f"Бонусных дней: <b>{res['reward_days_total']}</b>\n"
+        f"Достижений: <b>{res['milestone_count']}</b>",
+        parse_mode="HTML",
+    )
+
+
+@dp.message(Command("ref_reverse"))
+async def cmd_ref_reverse(msg: Message):
+    if msg.from_user.id not in ADMIN_IDS:
+        return
+    parts = (msg.text or "").split()
+    if len(parts) < 2:
+        await msg.answer("Формат: <code>/ref_reverse PAYMENT_ID</code>", parse_mode="HTML")
+        return
+    payment_id = parts[1]
+    res = referrals.reverse_payment(payment_id)
+    if not res.get("ok"):
+        await msg.answer(f"❌ Не удалось отменить награду: <code>{res.get('reason')}</code>", parse_mode="HTML")
+        return
+    reduce_res = _safe_reduce_subscription_days(res["referrer_id"], res.get("total_days_reversed", 0))
+    await msg.answer(
+        f"✅ Награда по платежу <code>{payment_id}</code> отменена.\n\n"
+        f"Реферер: <code>{res['referrer_id']}</code>\n"
+        f"Реферал: <code>{res['referred_user_id']}</code>\n"
+        f"Снято дней: <b>{res['total_days_reversed']}</b>\n"
+        f"Подписка уменьшена: <b>{reduce_res.get('reduced_by', 0):.1f}</b> дн.",
+        parse_mode="HTML",
+    )
+
+
+@dp.message(Command("ref_test"))
+async def cmd_ref_test(msg: Message):
+    if msg.from_user.id not in ADMIN_IDS:
+        return
+    parts = (msg.text or "").split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        await msg.answer("Формат: <code>/ref_test USER_ID [week|month]</code>", parse_mode="HTML")
+        return
+    uid = int(parts[1])
+    plan_key = parts[2] if len(parts) > 2 else "week"
+    if plan_key not in ("week", "month"):
+        await msg.answer("Тариф: <code>week</code> или <code>month</code>", parse_mode="HTML")
+        return
+    res = referrals.dry_run_payment(uid, plan_key)
+    if not res.get("ok"):
+        await msg.answer(
+            f"🧪 Dry-run для uid <code>{uid}</code>, тариф <code>{plan_key}</code>:\n\n"
+            f"Причина: <code>{res.get('reason')}</code>\n"
+            f"Скидка: <b>{res['discount']['final']}</b> ₽ (экономия {res['discount']['discount']} ₽)",
+            parse_mode="HTML",
+        )
+        return
+    await msg.answer(
+        f"🧪 Dry-run для uid <code>{uid}</code>, тариф <code>{plan_key}</code>:\n\n"
+        f"Реферер: <code>{res['referrer_id']}</code>\n"
+        f"Цена для реферала: <b>{res['discount']['final']}</b> ₽ (без скидки {res['discount']['original']} ₽)\n"
+        f"Базовая награда: <b>+{res['base_reward_days']}</b> дн.\n"
+        f"Milestone: <b>+{res['milestone_reward_days']}</b> дн.\n"
+        f"Всего рефереру: <b>+{res['total_reward_days']}</b> дн.\n"
+        f"Оплативших друзей станет: <b>{res['paid_count_after']}</b>",
+        parse_mode="HTML",
+    )
 
 
 @dp.message(Command("dashboard"))
@@ -11520,7 +12851,12 @@ _registry_new_user = False  # появился НОВЫЙ пользовател
 TRIAL_DAYS = 7
 
 
-def _register_user(uid: int, username: "str | None" = None, is_search: bool = False):
+def _register_user(
+    uid: int,
+    username: "str | None" = None,
+    is_search: bool = False,
+    persist_db: bool = True,
+):
     """Обновляет реестр (в памяти + PG). Вызывается на каждое сообщение."""
     global _registry_dirty, _registry_new_user
     k = str(uid)
@@ -11546,6 +12882,8 @@ def _register_user(uid: int, username: "str | None" = None, is_search: bool = Fa
         _registry_new_user = True  # критично: сохранить нового юзера быстро
     # Зеркалим в PG (если подключён)
     try:
+        if not persist_db:
+            return
         db = _get_db()
         if db:
             with db.cursor() as cur:
@@ -11624,7 +12962,12 @@ def _subscription_badge(uid: int, html: bool = False) -> str:
     info = _subscription_info(uid)
     b, e = ("<b>", "</b>") if html else ("*", "*")
     if info["ended"]:
-        return f"⏳ {b}Подписка завершена{e}\nОформите подписку, чтобы продолжить поиск."
+        return (
+            "🔒 *Доступ приостановлен*\n"
+            "Тестовый период или подписка завершились.\n"
+            "Продлите доступ: /subscribe\n"
+            "Есть промокод? Активируйте: /promo КОД"
+        )
     total = max(1, info["total_days"])
     left = max(0, info["days_left"])
     # Один сегмент = один день, но не больше 10, чтобы не растягивалась строка
@@ -12030,10 +13373,20 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         if photo_url:
             try:
                 await bot.send_photo(chat_id, photo=photo_url, caption=caption, reply_markup=kb)
+                if source == "avito":
+                    _avito_diag(
+                        "отправлено пользователю",
+                        int(_AVITO_LAST_DIAG.get("sent", 0) or 0) + 1,
+                    )
                 return True
             except Exception:
                 pass
         await bot.send_message(chat_id, caption, reply_markup=kb)
+        if source == "avito":
+            _avito_diag(
+                "отправлено пользователю",
+                int(_AVITO_LAST_DIAG.get("sent", 0) or 0) + 1,
+            )
         return True
 
     # Отбираем кандидатов и дозагружаем фото/описание только для них (см. ниже).
@@ -12121,6 +13474,23 @@ async def send_batch(chat_id: int, uid: int, offset: int):
     save_seen(uid, seen)
 
 
+def _scrape_avito_expanded(
+    region: str,
+    price_min: int,
+    price_max: int,
+    brand: str = "",
+) -> list[dict]:
+    """Возвращает общий кэш одной точной пары регион + параметры поиска."""
+    return scrape_avito(
+        region,
+        pages=1,
+        price_min=price_min,
+        price_max=price_max,
+        sort_by_date=True,
+        brand=brand,
+    )
+
+
 async def do_search_for_user(uid: int, reply_to):
     # Обязательная подписка на канал отключена — поиск доступен всем.
     s = load_settings(uid)
@@ -12154,8 +13524,14 @@ async def do_search_for_user(uid: int, reply_to):
 
     scraper_map = {
         "drom":   lambda: scrape_drom(region, pages=15, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
-        "autoru": lambda: scrape_autoru(region, pages=8, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
-        "avito":  lambda: scrape_avito(region, pages=10, price_min=0, price_max=99_000_000, sort_by_date=False, brand=(brand if brand and brand != "any" else "")),
+        "autoru": lambda: _run_platform_scrape(
+            lambda: scrape_autoru(region, pages=8, price_min=pmin, price_max=pmax,
+                                  brand=(brand if brand and brand != "any" else ""))
+        ),
+        "avito":  lambda: _scrape_avito_expanded(
+            region, pmin, pmax,
+            brand=(brand if brand and brand != "any" else ""),
+        ),
         "youla":  lambda: scrape_youla(region, pages=12, price_min=pmin, price_max=pmax, brand=(brand if brand and brand != "any" else "")),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
         "tg":     lambda: scrape_tg_channels(region, pmin, pmax),
@@ -12164,7 +13540,28 @@ async def do_search_for_user(uid: int, reply_to):
     src_keys = [src for src in enabled_sources if src in scraper_map]
     if not src_keys:
         src_keys = list(scraper_map.keys())  # подстраховка: если выбор пуст — все
-    futures = [loop.run_in_executor(None, scraper_map[src]) for src in src_keys]
+    source_timeouts = {
+        "drom": 25,
+        "autoru": 20,
+        "avito": 35,  # включает максимум одну LTE-ротацию и паузу 10с
+        "youla": 15,
+        "vk": 15,
+        "tg": 15,
+    }
+
+    async def _run_source(src: str):
+        # Авито здесь только читает общий кэш и регистрирует параметры.
+        # Сеть Авито принадлежит исключительно _avito_scheduler_loop.
+        awaitable = loop.run_in_executor(None, scraper_map[src])
+        try:
+            return await asyncio.wait_for(
+                awaitable, timeout=source_timeouts.get(src, 25)
+            )
+        except asyncio.TimeoutError:
+            print(f"  [поиск] {src}: timeout {source_timeouts.get(src, 25)}с")
+            return []
+
+    source_tasks = [asyncio.create_task(_run_source(src)) for src in src_keys]
 
     # Рынок сравниваем с ценами Авито и Юлы. Если площадка не выбрана, её скрейп
     # используется только как эталон и не попадает в пользовательскую выдачу.
@@ -12172,46 +13569,71 @@ async def do_search_for_user(uid: int, reply_to):
     # «рынок» занижен и скидки не видно. price_max большой → полный рынок модели.
     _avito_ref_fut = None
     if "avito" not in src_keys:
-        _avito_ref_fut = loop.run_in_executor(
-            None, lambda: scrape_avito(region, pages=3, price_min=0, price_max=99_000_000)
+        _avito_ref_fut = asyncio.create_task(
+            asyncio.wait_for(
+                loop.run_in_executor(
+                    None, lambda: scrape_avito(
+                        region, pages=3, price_min=0, price_max=99_000_000
+                    )
+                ),
+                timeout=35,
+            )
         )
     # Запрашиваем полный ценовой диапазон отдельно даже когда Юла выбрана:
     # основная выдача ограничена бюджетом и сама по себе занизила бы медиану.
-    _youla_ref_fut = loop.run_in_executor(
-        None, lambda: scrape_youla(region, pages=8, price_min=0,
-                                   price_max=99_000_000,
-                                   brand=(brand if brand and brand != "any" else ""))
+    _youla_ref_fut = asyncio.create_task(
+        asyncio.wait_for(
+            loop.run_in_executor(
+                None, lambda: scrape_youla(
+                    region, pages=8, price_min=0,
+                    price_max=99_000_000,
+                    brand=(brand if brand and brand != "any" else ""),
+                )
+            ),
+            timeout=15,
+        )
     )
-    all_futs = futures + ([_avito_ref_fut] if _avito_ref_fut else []) + ([_youla_ref_fut] if _youla_ref_fut else [])
-    done, pending = await asyncio.wait(all_futs, timeout=60)
-    if pending:
-        for f in pending:
-            f.cancel()
-        await reply_to.answer("⏱ Поиск занял слишком долго, показываю что успели найти...")
+    all_tasks = source_tasks + ([_avito_ref_fut] if _avito_ref_fut else []) + [_youla_ref_fut]
+    gathered = await asyncio.gather(*all_tasks, return_exceptions=True)
+    _avito_ref_value = (
+        gathered[len(source_tasks)] if _avito_ref_fut is not None else None
+    )
     results = []
-    for f in futures:
-        if f in done:
-            try:
-                results.append(f.result())
-            except Exception as e:
-                print(f"  [скрапер] ошибка: {e}")
-                results.append([])
-        else:
+    for src, value in zip(src_keys, gathered[:len(source_tasks)]):
+        if isinstance(value, BaseException):
+            print(f"  [скрапер] {src}: {type(value).__name__}: {str(value)[:120]}")
             results.append([])
+        else:
+            results.append(value if isinstance(value, list) else [])
 
     items = []
     stat_parts = []
     for src, batch in zip(src_keys, results):
         items.extend(batch)
         tag = SOURCE_TAGS.get(src, src)
-        stat_parts.append(f"{tag}: {len(batch)}")
+        if src == "avito":
+            avito_key = _avito_schedule_key(
+                region, pmin, pmax, True,
+                brand if brand and brand != "any" else "",
+            )
+            avito_status = _avito_status_for_key(avito_key)
+            if avito_status["last_http"] in (403, 429):
+                stat_parts.append(
+                    "🔴 Авито временно ограничил доступ. Остальные площадки работают."
+                )
+            else:
+                stat_parts.append(f"{tag}: {len(batch)}")
+        else:
+            stat_parts.append(f"{tag}: {len(batch)}")
 
     # Полный набор Юлы нужен для анализа цены даже при узком бюджете 0–100 тыс.
     # Объявления-аналоги не показываются: ниже они помечаются market_ref_only.
     _youla_ref_items = [i for i in items if i.get("source") == "youla"]
-    if _youla_ref_fut is not None and _youla_ref_fut in done:
+    if _youla_ref_fut is not None:
         try:
-            _youla_ref_items.extend(_youla_ref_fut.result() or [])
+            _youla_value = gathered[-1]
+            if not isinstance(_youla_value, BaseException):
+                _youla_ref_items.extend(_youla_value or [])
         except Exception as _e:
             print(f"  [рынок] Юла-эталон ошибка: {_e}")
 
@@ -12414,9 +13836,13 @@ async def do_search_for_user(uid: int, reply_to):
     # группирует по марке+модели+году → медиана корректна даже в пределах бюджета.
     import copy as _copy
     _avito_ref_items = [i for i in items if i.get("source") == "avito"]
-    if not _avito_ref_items and _avito_ref_fut is not None and _avito_ref_fut in done:
+    if (
+        not _avito_ref_items
+        and _avito_ref_fut is not None
+        and not isinstance(_avito_ref_value, BaseException)
+    ):
         try:
-            _avito_ref_items = _avito_ref_fut.result() or []
+            _avito_ref_items = _avito_ref_value or []
         except Exception as _e:
             print(f"  [рынок] Авито-эталон ошибка: {_e}")
             _avito_ref_items = []
@@ -12755,7 +14181,6 @@ async def do_search_for_user(uid: int, reply_to):
     src_found = list(dict.fromkeys(i.get("source","") for i in suitable if i.get("source")))
     src_icons = {"avito":"🟠","drom":"🔵","autoru":"🔴","vk":"💙","tg":"✈️"}
     src_str = " ".join(src_icons.get(s,"") for s in src_found if s)
-    _badge = _subscription_badge(uid)
     if _avito_available:
         _extra = len(suitable) - _below_count
         _msg = f"✅ {src_str} Найдено {_below_count} объявлений ниже рынка!"
@@ -12766,7 +14191,9 @@ async def do_search_for_user(uid: int, reply_to):
     if _seen_cnt:
         _msg += f"\n♻️ {_seen_cnt} уже видел — они в конце."
 
-    await reply_to.answer(f"{_badge}\n\n{_msg}", parse_mode="Markdown")
+    # Статус trial показывается в приветствии и разделе подписки, а не
+    # дублируется перед каждой поисковой выдачей.
+    await reply_to.answer(_msg, parse_mode="Markdown")
     await send_batch(reply_to.chat.id, uid, 0)
 
 
@@ -13360,7 +14787,9 @@ async def cmd_tips_on(msg: Message):
 
 
 # ── Глобальный монитор — один цикл на всех пользователей ─────────
-GLOBAL_POLL_SEC = 30    # опрос каждые 30 секунд — 1 запрос на круг для всех
+GLOBAL_POLL_MIN_SEC = 25
+GLOBAL_POLL_MAX_SEC = 30
+GLOBAL_POLL_SEC = 30  # совместимость с логами и настройками
 
 async def _send_monitor_item(uid: int, it: dict):
     """Отправляет одно объявление пользователю из монитора."""
@@ -13463,6 +14892,11 @@ def _init_global_seen_db() -> None:
         conn.execute(
             "CREATE TABLE IF NOT EXISTS seen_urls (url TEXT PRIMARY KEY, ts REAL)"
         )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS seen_listings "
+            "(listing_id TEXT PRIMARY KEY, url TEXT NOT NULL, ts REAL NOT NULL)"
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_seen_listing_ts ON seen_listings(ts)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_seen_ts ON seen_urls(ts)")
         conn.commit()
         conn.close()
@@ -13471,7 +14905,7 @@ def _init_global_seen_db() -> None:
 
 
 def _load_global_seen() -> set[str]:
-    """Загружает URLs, виденные монитором за последние 7 дней (SQLite)."""
+    """Загружает ID объявлений, виденные монитором за последние 7 дней."""
     global _global_seen_cache, _global_seen_loaded
     if _global_seen_loaded:
         return _global_seen_cache
@@ -13480,32 +14914,32 @@ def _load_global_seen() -> set[str]:
         import sqlite3
         conn = sqlite3.connect(str(_GLOBAL_SEEN_DB_PATH))
         cur = conn.execute(
-            "SELECT url FROM seen_urls WHERE ts > ?",
+            "SELECT listing_id FROM seen_listings WHERE ts > ?",
             (time.time() - 7 * 24 * 3600,),
         )
         _global_seen_cache = {row[0] for row in cur.fetchall()}
         conn.close()
         _global_seen_loaded = True
-        print(f"  [global_seen] загружено {len(_global_seen_cache)} url")
+        print(f"  [global_seen] загружено {len(_global_seen_cache)} ID")
     except Exception as e:
         print(f"  [global_seen] load error: {e}")
     return _global_seen_cache
 
 
-def _add_global_seen(urls: set[str]) -> None:
-    """Сохраняет новые URL в глобальную дедупликацию."""
-    if not urls:
+def _add_global_seen(listings: dict[str, str]) -> None:
+    """Сохраняет ID и прямые URL новых объявлений в SQLite."""
+    if not listings:
         return
-    _global_seen_cache.update(urls)
+    _global_seen_cache.update(listings)
     try:
         import sqlite3
         conn = sqlite3.connect(str(_GLOBAL_SEEN_DB_PATH))
         now = time.time()
-        for u in urls:
+        for listing_id, url in listings.items():
             try:
                 conn.execute(
-                    "INSERT OR IGNORE INTO seen_urls(url, ts) VALUES(?, ?)",
-                    (u, now),
+                    "INSERT OR IGNORE INTO seen_listings(listing_id, url, ts) VALUES(?, ?, ?)",
+                    (listing_id, url, now),
                 )
             except Exception:
                 pass
@@ -13513,6 +14947,48 @@ def _add_global_seen(urls: set[str]) -> None:
         conn.close()
     except Exception as e:
         print(f"  [global_seen] save error: {e}")
+
+
+async def _avito_scheduler_loop():
+    """Отдельный планировщик Авито: один due-запрос за цикл, все остальные читают кэш."""
+    global _AVITO_SCHEDULER_RUNNING
+    _AVITO_SCHEDULER_RUNNING = True
+    print(
+        "  [Авито-планировщик] запущен: один ключ за проход, "
+        f"интервал ≥{_AVITO_MIN_INTERVAL_SEC}с, "
+        f"cooldown {_AVITO_BLOCK_COOLDOWN_SEC}с"
+    )
+    loop = asyncio.get_running_loop()
+    try:
+        while True:
+            try:
+                now = time.time()
+                with _AVITO_SCHEDULE_LOCK:
+                    due_keys = [
+                        key for key, entry in _AVITO_SCHEDULE.items()
+                        if not entry.get("in_flight")
+                        and now >= _AVITO_GLOBAL_NEXT_ATTEMPT_AT
+                        and now >= float(entry.get("next_attempt_at", 0.0))
+                    ]
+                    due_keys.sort(key=lambda key: (
+                        -int(_AVITO_SCHEDULE[key].get("priority", 0)),
+                        float(
+                            _AVITO_SCHEDULE[key].get("last_attempt_at", 0.0)
+                        ),
+                    ))
+                if due_keys:
+                    # Один логический проход: initial + максимум canonical GET.
+                    await loop.run_in_executor(
+                        None, _avito_scheduled_fetch, due_keys[0]
+                    )
+            except Exception as exc:
+                print(
+                    "  [Авито-планировщик] ошибка без retry: "
+                    f"{type(exc).__name__}: {str(exc)[:160]}"
+                )
+            await asyncio.sleep(1)
+    finally:
+        _AVITO_SCHEDULER_RUNNING = False
 
 
 async def _global_monitor_loop():
@@ -13524,7 +15000,7 @@ async def _global_monitor_loop():
     # Кэш результатов по (регион, источник) чтобы не скрейпить дважды для разных пользователей
     _region_src_cache: dict[str, list[dict]] = {}
     while True:
-        await asyncio.sleep(GLOBAL_POLL_SEC)
+        await asyncio.sleep(random.uniform(GLOBAL_POLL_MIN_SEC, GLOBAL_POLL_MAX_SEC))
         _vk_tg_tick += 1
         do_vk_tg = (_vk_tg_tick % 20 == 0)  # раз в 10 минут
         _region_src_cache.clear()
@@ -13544,11 +15020,45 @@ async def _global_monitor_loop():
                     sf_text = await loop.run_in_executor(None, sf.read_text, "utf-8")
                     s = json.loads(sf_text)
                     if s.get("monitor_enabled") and s.get("region"):
-                        active_users.append({"uid": int(user_path.name), **s})
+                        uid = int(user_path.name)
+                        # Приостанавливаем мониторинг, если подписка/триал истёк
+                        if _subscription_info(uid)["ended"]:
+                            s["monitor_enabled"] = False
+                            s["monitor_ended_notified"] = True
+                            try:
+                                await loop.run_in_executor(
+                                    None,
+                                    lambda _sf=sf, _s=s: _sf.write_text(json.dumps(_s, ensure_ascii=False), encoding="utf-8"),
+                                )
+                            except Exception:
+                                pass
+                            _set_user_monitoring(uid, False)
+                            try:
+                                await bot.send_message(
+                                    uid,
+                                    "🔒 <b>Автоматический мониторинг приостановлен</b>\n\n"
+                                    "Ваш тестовый период или подписка завершились. "
+                                    "Новые объявления больше не отслеживаются.\n\n"
+                                    "Продлите доступ, чтобы снова получать выгодные предложения "
+                                    "сразу после их публикации.",
+                                    parse_mode="HTML",
+                                    reply_markup=_subscription_keyboard(),
+                                )
+                            except Exception:
+                                pass
+                            continue
+                        active_users.append({"uid": uid, **s})
                 except Exception:
                     pass
 
             if not active_users:
+                continue
+
+            # Ручной поиск имеет приоритет над монитором. Иначе монитор по
+            # нескольким регионам занимает общий LTE-канал именно в тот момент,
+            # когда пользователь нажал «Найти авто», и Авито отвечает 429.
+            if any(time.time() - ts < 90 for ts in _last_search_at.values()):
+                print("  [глоб.монитор] ручной поиск активен — сетевой круг пропущен")
                 continue
 
             # Собираем все уникальные пары (регион, источник) нужные хоть одному пользователю
@@ -13558,14 +15068,22 @@ async def _global_monitor_loop():
                 all_regions = [u["region"]] + list(u.get("monitor_regions", []))
                 for reg in all_regions:
                     needed.setdefault(reg, set()).update(user_srcs)
-                    # Всегда скрейпим Авито для рыночной цены — даже если пользователь его не выбрал
-                    needed[reg].add("avito")
+                    # Регистрируем точную пару в отдельном планировщике Авито.
+                    # Одинаковые параметры разных пользователей дают один ключ/кэш.
+                    _avito_cached_result(
+                        reg,
+                        price_min=u.get("price_min", 0),
+                        price_max=u.get("price_max", 99_000_000),
+                        sort_by_date=True,
+                        brand=u.get("track_brand", ""),
+                    )
 
             # Скрейпим только нужные (регион, источник) параллельно
             _src_scrapers = {
-                "avito":  lambda r: scrape_avito(r, pages=3, sort_by_date=True),  # ⚡ свежие первыми
                 "drom":   lambda r: scrape_drom(r, pages=3, price_min=0, price_max=99_000_000),
-                "autoru": lambda r: scrape_autoru(r, pages=3, price_min=0, price_max=99_000_000),
+                "autoru": lambda r: _run_platform_scrape(
+                    lambda: scrape_autoru(r, pages=3, price_min=0, price_max=99_000_000)
+                ),
                 "youla":  lambda r: scrape_youla(r, pages=3, price_min=0, price_max=99_000_000),
                 "vk":     lambda r: scrape_vk_groups(r, 0, 99_000_000),
                 "tg":     lambda r: scrape_tg_channels(r, 0, 99_000_000),
@@ -13579,7 +15097,9 @@ async def _global_monitor_loop():
                         continue
                     key_rs = f"{reg}:{src}"
                     fn = _src_scrapers[src]
-                    tasks_m[key_rs] = loop.run_in_executor(None, lambda r=reg, f=fn: f(r))
+                    tasks_m[key_rs] = loop.run_in_executor(
+                        None, lambda r=reg, f=fn: f(r)
+                    )
 
             if tasks_m:
                 done_m, _ = await asyncio.wait(list(tasks_m.values()), timeout=70)
@@ -13596,21 +15116,22 @@ async def _global_monitor_loop():
             # Глобальная дедупликация: один URL не рассылается никому дважды
             # и не появляется в следующих кругах.
             global_seen = await loop.run_in_executor(None, _load_global_seen)
-            new_global_urls: set[str] = set()
+            new_global_listings: dict[str, str] = {}
             for key_rs, items in list(_region_src_cache.items()):
                 kept = []
                 for it in items:
                     nu = _norm_url(it.get("url", ""))
                     if not nu:
                         continue
-                    if nu in global_seen:
+                    listing_id = _listing_key(nu) or nu
+                    if listing_id in global_seen:
                         continue
                     kept.append(it)
-                    new_global_urls.add(nu)
+                    new_global_listings[listing_id] = nu
                 _region_src_cache[key_rs] = kept
-            if new_global_urls:
-                await loop.run_in_executor(None, _add_global_seen, new_global_urls)
-                print(f"  [глоб.монитор] новых URL в круге: {len(new_global_urls)}")
+            if new_global_listings:
+                await loop.run_in_executor(None, _add_global_seen, new_global_listings)
+                print(f"  [глоб.монитор] новых объявлений в круге: {len(new_global_listings)}")
 
             # Все исходящие сообщения собираем в один gather для параллельной рассылки.
             _monitor_send_tasks: list = []
@@ -13635,7 +15156,16 @@ async def _global_monitor_loop():
                             if src in ("vk", "tg") and not do_vk_tg:
                                 continue
                             key_rs = f"{reg}:{src}"
-                            items_rs = _region_src_cache.get(key_rs, [])
+                            if src == "avito":
+                                items_rs = _avito_cached_result(
+                                    reg,
+                                    price_min=pmin,
+                                    price_max=pmax,
+                                    sort_by_date=True,
+                                    brand=track_brand,
+                                )
+                            else:
+                                items_rs = _region_src_cache.get(key_rs, [])
                             for it in items_rs:
                                 u = _norm_url(it.get("url", ""))
                                 if not u:
@@ -13790,7 +15320,8 @@ async def cmd_monitor(msg: Message):
     pmax = s.get("price_max", 99_000_000)
     await msg.answer(
         f"🔔 *Уведомления · ⚡ Ранний доступ*\n\n"
-        f"Бот каждые ~30 сек проверяет Авито (сортировка «сначала свежие») и "
+        f"Авито проверяется отдельным планировщиком не чаще одного раза в 7 минут "
+        f"для одинаковых параметров (сортировка «сначала свежие»). Бот "
         f"присылает новые авто ниже рынка первым — по сути, ты видишь объявления "
         f"раньше тех, кто листает вручную.\n\n"
         f"Статус: {status}\n"
@@ -14044,21 +15575,13 @@ def _run_startup_tests():
     except Exception:
         pass
 
-    # Тест прокси + тест доступа к Авито через прокси
+    # Тестируется только доступность прокси. Авито проверяет исключительно
+    # отдельный планировщик, чтобы startup не создавал диагностический запрос.
     if AVITO_PROXY_HOST:
         try:
             import requests as _rq
             r = _rq.get("https://api.ipify.org", proxies=_avito_proxies(), timeout=10)
             print(f"  [прокси {AVITO_PROXY_PROTOCOL}] ✅ работает, IP: {r.text.strip()}")
-            try:
-                ra = _rq.get("https://www.avito.ru/krasnoyarsk/avtomobili",
-                             proxies=_avito_proxies(), timeout=10,
-                             headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"})
-                has_listings = '"urlPath"' in ra.text or 'data-marker="item"' in ra.text
-                print(f"  [Авито тест] HTTP {ra.status_code}, {len(ra.text):,}б, объявления: {'✅ да' if has_listings else '❌ нет (капча/блок)'}")
-            except Exception as ea:
-                print(f"  [Авито тест] ❌ {ea}")
-            pass
         except Exception as ep:
             print(f"  [прокси] ❌ {ep}")
 
@@ -14206,7 +15729,14 @@ async def main():
     dp.callback_query.middleware(SubscriptionMiddleware())
 
     print("✅ Авто-брокер бот запущен!")
-    print("  [ВЕРСИЯ] 2026-06-22-v18 :: subscription middleware")
+    print("  [ВЕРСИЯ] 2026-07-28-avito-autoru-pagination-fix")
+
+    # Лёгкая проверка прокси: если 407/403 — сразу отключаем, чтобы Авито/Auto.ru
+    # шли напрямую и не ждали 3 повторных попытки на каждом запросе.
+    try:
+        await loop.run_in_executor(None, _startup_proxy_check)
+    except Exception as e:
+        print(f"  [main] _startup_proxy_check: {e}")
 
     # ── Стартап-тесты (прокси/Авито/поисковики) ──────────────────────────────
     # Тяжёлые сетевые вызовы; при недоступном Railway IP они падают по таймауту
@@ -14262,6 +15792,8 @@ async def main():
         print(">>> main(): создаём _global_monitor_loop", flush=True)
         loop.create_task(_global_monitor_loop())
         print(f"  [монитор] глобальный цикл запущен (интервал {GLOBAL_POLL_SEC}с)")
+        loop.create_task(_avito_scheduler_loop())
+        print("  [Авито] отдельный планировщик запущен (≥7 мин на пару, cooldown 45 мин)")
         # Push-уведомления — раз в 2-3 дня всем пользователям
         loop.create_task(_push_notification_loop())
         print("  [push] цикл уведомлений запущен (интервал ~2.5 дня)")
@@ -14271,9 +15803,13 @@ async def main():
         print("  [analytics] автосохранение статистики в PG запущено (раз в 3 мин)")
         loop.create_task(_tg_backup_loop())
         print("  [реестр] Telegram-бэкап статистики запущен (раз в 15 мин)")
-        # Прогрев кеша бесплатных прокси — тестирует их против Авито и кеширует рабочие
-        loop.create_task(_proxy_warmup_loop())
-        print("  [прокси-прогрев] запущен фоновый прогрев кеша прокси")
+        # При настроенном мобильном прокси бесплатные прокси не тестируем:
+        # прогрев создавал десятки параллельных запросов и провоцировал 429 Авито.
+        if not PROXY_URL:
+            loop.create_task(_proxy_warmup_loop())
+            print("  [прокси-прогрев] запущен фоновый прогрев кеша прокси")
+        else:
+            print("  [прокси-прогрев] отключён — используется PROXY_URL")
 
         # Уведомления об окончании тестового периода (за 3 и за 1 день)
         loop.create_task(_trial_notification_loop())
@@ -14299,8 +15835,11 @@ async def main():
         # (не прямой запрос к avito.ru), поэтому риска IP-блокировки нет. Благодаря
         # суточному кэшу один скрейп региона обслуживает всех пользователей — так
         # бот тянет 50-100 человек без вложений.
-        loop.create_task(_warmup_cache())
-        print("  [прогрев] фоновый прогрев кэша Авито запущен")
+        if not PROXY_URL:
+            loop.create_task(_warmup_cache())
+            print("  [прогрев] фоновый прогрев кэша Авито запущен")
+        else:
+            print("  [прогрев] отключён — LTE-канал оставлен для поиска пользователей")
 
         public_commands = [
             BotCommand(command="start",     description="🚀 Главное меню"),
@@ -14411,6 +15950,14 @@ async def main():
 if __name__ == "__main__":
     import sys as _sys
     import traceback as _tb
+
+    if not _acquire_single_instance_lock():
+        raise SystemExit(0)
+    print(
+        ">>> PROCESS STARTED: control_bot.py запущен, Python",
+        sys.version.split()[0],
+        flush=True,
+    )
 
     async def _alert_admin(text: str):
         # Дублируем критические ошибки прямо в Telegram (минуя логи Railway)
