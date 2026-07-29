@@ -6,6 +6,7 @@ import json
 import hashlib
 import os
 import re
+import sqlite3
 import threading
 import time
 import urllib.error
@@ -13,6 +14,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from typing import Any
+from datetime import datetime, timedelta, timezone
 
 
 BASE_URL = "https://rest-app.net/api"
@@ -130,6 +132,11 @@ class RestAppAvitoProvider:
             raise RestAppResponseError("Rest-App returned invalid JSON", http) from exc
         if not isinstance(payload, dict):
             raise RestAppResponseError("Rest-App JSON root is not an object", http)
+        self.last_diagnostics.update({
+            "api_status": payload.get("status"),
+            "top_level_keys": sorted(str(key) for key in payload),
+            "raw_payload": payload,
+        })
         if str(payload.get("status", "")).lower() != "ok":
             message = str(payload.get("message") or payload.get("error") or "API error")
             lowered = message.lower()
@@ -140,6 +147,92 @@ class RestAppAvitoProvider:
                 raise RestAppAuthenticationError(message, http)
             raise RestAppResponseError(message, http)
         return payload
+
+    @staticmethod
+    def _date_range(days: int = 1) -> dict[str, str]:
+        # Europe/Moscow has used fixed UTC+03:00 since 2014.
+        now = datetime.now(timezone(timedelta(hours=3))).replace(tzinfo=None)
+        return {
+            "date1": (now - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S"),
+            "date2": now.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+    @staticmethod
+    def _db_path() -> str:
+        return os.getenv("REST_APP_DB_PATH", "data/rest_app_avito.db")
+
+    @classmethod
+    def _db(cls):
+        path = cls._db_path()
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        connection = sqlite3.connect(path)
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS rest_app_listings ("
+            "source TEXT NOT NULL, source_id TEXT NOT NULL, item_json TEXT NOT NULL, "
+            "fetched_at REAL NOT NULL, UNIQUE(source, source_id))"
+        )
+        return connection
+
+    @classmethod
+    def _save_db(cls, items: list[dict]) -> None:
+        if not items:
+            return
+        with cls._db() as connection:
+            connection.executemany(
+                "INSERT INTO rest_app_listings(source, source_id, item_json, fetched_at) "
+                "VALUES('avito', ?, ?, ?) ON CONFLICT(source, source_id) DO UPDATE SET "
+                "item_json=excluded.item_json, fetched_at=excluded.fetched_at",
+                [
+                    (
+                        item["source_id"],
+                        json.dumps(item, ensure_ascii=False),
+                        time.time(),
+                    )
+                    for item in items
+                ],
+            )
+
+    @classmethod
+    def _load_db(
+        cls, *, region_name: str, city_name: str, price_min: int,
+        price_max: int, query: str, year: int, max_age: float | None = None,
+    ) -> list[dict]:
+        try:
+            with cls._db() as connection:
+                sql = (
+                    "SELECT item_json FROM rest_app_listings WHERE source='avito'"
+                )
+                args: list[Any] = []
+                if max_age is not None:
+                    sql += " AND fetched_at>=?"
+                    args.append(time.time() - max_age)
+                sql += " ORDER BY fetched_at DESC LIMIT 1000"
+                rows = connection.execute(sql, args).fetchall()
+        except sqlite3.Error:
+            return []
+        unique: dict[str, dict] = {}
+        wanted_location = (city_name or region_name).casefold()
+        query_folded = query.casefold()
+        for (raw,) in rows:
+            try:
+                item = json.loads(raw)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            price = int(item.get("price") or 0)
+            if price and not price_min <= price <= price_max:
+                continue
+            if wanted_location and wanted_location not in str(
+                item.get("location") or ""
+            ).casefold():
+                continue
+            if query_folded and query_folded not in str(
+                item.get("title") or ""
+            ).casefold():
+                continue
+            if year and int(item.get("year") or 0) != year:
+                continue
+            unique[item["source_id"]] = item
+        return list(unique.values())
 
     def info(self) -> dict:
         return self._post("info")
@@ -298,11 +391,12 @@ class RestAppAvitoProvider:
         year: int = 0,
         private_only: bool = True,
         limit: int = 1000,
+        lookback_minutes: int = 1440,
     ) -> list[dict]:
         key = (
             region_name.casefold(), city_name.casefold(), int(price_min),
             int(price_max), brand.casefold(), model.casefold(), int(year or 0),
-            bool(private_only), min(1000, int(limit)),
+            bool(private_only), min(1000, int(limit)), int(lookback_minutes),
         )
         now = time.time()
         if now < type(self)._cooldown_until:
@@ -315,6 +409,22 @@ class RestAppAvitoProvider:
                     "items": len(cached[1]),
                 }
                 return list(cached[1])
+            db_cached = self._load_db(
+                region_name=region_name,
+                city_name=city_name,
+                price_min=price_min,
+                price_max=price_max,
+                query=" ".join(part for part in (brand, model) if part),
+                year=int(year or 0),
+                max_age=self.cache_ttl,
+            )
+            if db_cached:
+                self._cache[key] = (now, db_cached)
+                self.last_diagnostics = {
+                    "http": 200, "status": "success", "cache_hit": True,
+                    "db_hit": True, "items": len(db_cached),
+                }
+                return db_cached
             key_lock = self._key_locks.setdefault(key, threading.Lock())
         with key_lock:
             with self._cache_lock:
@@ -328,13 +438,18 @@ class RestAppAvitoProvider:
             cities = self.cities(region_id)
             city_id = self._find_id(cities, city_name)
             params: dict[str, Any] = {
-                "category_id": CAR_CATEGORY_ID,
+                "category_id": "1",
+                "subcategory_id": CAR_CATEGORY_ID,
                 "region_id": region_id,
                 "price1": max(0, int(price_min)),
                 "price2": max(0, int(price_max)),
                 "sort": "desc",
                 "limit": min(1000, max(1, int(limit))),
             }
+            if lookback_minutes <= 30:
+                params["last_m"] = max(1, int(lookback_minutes))
+            else:
+                params.update(self._date_range(1))
             if city_id:
                 params["city_id"] = city_id
             query = " ".join(part.strip() for part in (brand, model) if part.strip())
@@ -343,6 +458,11 @@ class RestAppAvitoProvider:
                 params["in"] = "title"
             payload = self._post("ads", params)
             raw_items, raw_data_type = self._extract_raw_items(payload)
+            if not raw_items and lookback_minutes > 30:
+                fallback_params = dict(params)
+                fallback_params.update(self._date_range(7))
+                payload = self._post("ads", fallback_params)
+                raw_items, raw_data_type = self._extract_raw_items(payload)
             unique: dict[str, dict] = {}
             rejection_reasons: list[str] = []
             for raw in raw_items:
@@ -373,6 +493,16 @@ class RestAppAvitoProvider:
                 key=lambda item: item.get("published_at") or "",
                 reverse=True,
             )
+            self._save_db(items)
+            if not items:
+                items = self._load_db(
+                    region_name=region_name,
+                    city_name=city_name,
+                    price_min=price_min,
+                    price_max=price_max,
+                    query=query,
+                    year=int(year or 0),
+                )
             with self._cache_lock:
                 self._cache[key] = (time.time(), items)
             self.last_diagnostics.update({

@@ -12,7 +12,8 @@ from rest_app_avito_provider import (
 
 
 @pytest.fixture(autouse=True)
-def reset_provider_state():
+def reset_provider_state(monkeypatch, tmp_path):
+    monkeypatch.setenv("REST_APP_DB_PATH", str(tmp_path / "rest-app.db"))
     RestAppAvitoProvider._cache.clear()
     RestAppAvitoProvider._key_locks.clear()
     RestAppAvitoProvider._regions_cache = None
