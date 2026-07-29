@@ -56,6 +56,12 @@ from avito_proxy_config import (
     build_mobile_proxy_config,
 )
 from marketplace_result import MarketplaceResult, STATUS_TEXT, classify_network_error
+from rest_app_avito_provider import (
+    RestAppAuthenticationError,
+    RestAppAvitoProvider,
+    RestAppRateLimitedError,
+    RestAppResponseError,
+)
 
 _INSTANCE_LOCK_HANDLE = None
 
@@ -154,13 +160,13 @@ PROXY_ROTATE_URL = os.getenv("PROXY_ROTATE_URL", "").strip()
 AVITO_ENABLED = os.getenv("AVITO_ENABLED", "true").strip().lower() in {
     "1", "true", "yes", "on",
 }
-AVITO_PROVIDER = os.getenv("AVITO_PROVIDER", "duff_proxy").strip().lower()
+AVITO_PROVIDER = "rest_app"
 try:
     AVITO_MIN_INTERVAL_SECONDS = max(
-        900, int(os.getenv("AVITO_MIN_INTERVAL_SECONDS", "900"))
+        120, int(os.getenv("AVITO_MIN_INTERVAL_SECONDS", "120"))
     )
 except (TypeError, ValueError):
-    AVITO_MIN_INTERVAL_SECONDS = 900
+    AVITO_MIN_INTERVAL_SECONDS = 120
 try:
     AVITO_BLOCK_COOLDOWN_SECONDS = max(
         7200, int(os.getenv("AVITO_BLOCK_COOLDOWN_SECONDS", "7200"))
@@ -8077,6 +8083,24 @@ _AVITO_STATUS: dict[str, object] = {
     "next_attempt_at": 0.0,
 }
 
+REST_APP_REGION_NAMES = {
+    "ekaterinburg": "Свердловская область",
+    "moscow": "Москва",
+    "spb": "Санкт-Петербург",
+    "novosibirsk": "Новосибирская область",
+    "kazan": "Татарстан",
+    "chelyabinsk": "Челябинская область",
+    "ufa": "Башкортостан",
+    "krasnodar": "Краснодарский край",
+    "omsk": "Омская область",
+    "tyumen": "Тюменская область",
+    "perm": "Пермский край",
+    "krasnoyarsk": "Красноярский край",
+    "voronezh": "Воронежская область",
+    "samara": "Самарская область",
+    "rostov": "Ростовская область",
+}
+
 
 def _avito_persistent_key(key: tuple) -> str:
     region, price_min, price_max, sort_by_date, brand = key
@@ -8385,35 +8409,19 @@ def _avito_scheduled_fetch_unlocked(
         page = max(1, int(entry.get("page", 1)))
 
     region, price_min, price_max, sort_by_date, brand = key
-    slug = AVITO_SLUGS.get(region, region)
-    params = ["seller_type=1"]
-    if page > 1:
-        params.append(f"p={page}")
-    if price_min > 0:
-        params.append(f"pmin={price_min}")
-    if price_max < 99_000_000:
-        params.append(f"pmax={price_max}")
-    if sort_by_date:
-        params.append("s=104")
-    if brand:
-        params.append("q=" + urllib.parse.quote(brand))
-    url = f"https://www.avito.ru/{slug}/avtomobili?" + "&".join(params)
-    headers = {
-        "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
-        "Accept-Language": "ru-RU,ru;q=0.9",
-        "Referer": "https://www.avito.ru/",
-    }
-
     try:
-        if AVITO_PROVIDER in {"duff_vless", "duff_proxy"}:
-            if MOBILE_PROXY_CONFIG is None:
-                raise AvitoVpnUnavailable("Мобильный прокси Авито недоступен")
-            provider = AvitoDuffProvider(
-                socks_proxy=MOBILE_PROXY_CONFIG.proxy_url,
-                timeout=MOBILE_PROXY_CONFIG.timeout,
-                max_internal_redirects=AVITO_MAX_INTERNAL_REDIRECTS,
+        if AVITO_PROVIDER == "rest_app":
+            provider = RestAppAvitoProvider(cache_ttl=120)
+            provider_items = provider.search(
+                region_name=REST_APP_REGION_NAMES.get(
+                    region, REGIONS.get(region, region)
+                ),
+                city_name=REGIONS.get(region, region),
+                price_min=price_min,
+                price_max=price_max,
+                brand=brand if brand != "any" else "",
+                private_only=True,
             )
-            provider_items = provider.search(url)
             http = int(provider.last_diagnostics.get("http") or 200)
             parsed = [
                 _adapt_duff_listing(item, datetime.date.today())
@@ -8431,28 +8439,17 @@ def _avito_scheduled_fetch_unlocked(
             _avito_diag(
                 "HTTP",
                 http,
-                provider="duff_proxy",
-                запросов=provider.last_diagnostics.get("requests", 0),
-                internal_redirect=provider.last_diagnostics.get(
-                    "internal_redirect", False
-                ),
+                provider="rest_app",
+                endpoint=provider.last_diagnostics.get("endpoint", "ads"),
+                cache_hit=provider.last_diagnostics.get("cache_hit", False),
             )
             _avito_diag(
                 "найдено карточек",
-                provider.last_diagnostics.get("catalog_items", 0),
+                provider.last_diagnostics.get("raw_items", len(provider_items)),
                 страница=page,
             )
             _avito_diag("после парсинга", len(provider_items))
             _avito_diag("после фильтрации", len(parsed))
-        elif AVITO_PROVIDER == "legacy":
-            # Отключённый по умолчанию старый путь. Он включается только
-            # явной переменной AVITO_PROVIDER=legacy.
-            with _PLATFORM_PROXY_LOCK:
-                response = AVITO_CLIENT.get(url, headers=headers, timeout=20)
-            http = int(response.status_code)
-            parsed = _parse_avito_html(
-                response.text, slug, datetime.date.today()
-            )
         else:
             raise AvitoParseError(
                 f"Неизвестный AVITO_PROVIDER={AVITO_PROVIDER!r}"
@@ -8543,6 +8540,53 @@ def _avito_scheduled_fetch_unlocked(
             })
         _avito_diag("найдено карточек", len(parsed), страница=page)
         return list(entry["items"])
+    except RestAppRateLimitedError as exc:
+        http = 429
+        state = _AVITO_PRODUCTION_STATE.record_block(http, now=now)
+        next_at = float(state["blocked_until"])
+        with _AVITO_SCHEDULE_LOCK:
+            entry.update({
+                "status": "cooldown",
+                "last_http": http,
+                "next_attempt_at": next_at,
+                "in_flight": False,
+            })
+            _AVITO_STATUS.update({
+                "status": "cooldown",
+                "last_http": http,
+                "next_attempt_at": next_at,
+                "blocked": True,
+            })
+        _avito_diag("причина", f"Rest-App HTTP 429; без retry: {exc}")
+        return list(entry.get("items", []))
+    except RestAppAuthenticationError as exc:
+        http = int(exc.status_code or 401)
+        with _AVITO_SCHEDULE_LOCK:
+            entry.update({
+                "status": "blocked",
+                "last_http": http,
+                "in_flight": False,
+            })
+            _AVITO_STATUS.update({
+                "status": "blocked",
+                "last_http": http,
+                "next_attempt_at": entry["next_attempt_at"],
+                "blocked": True,
+            })
+        _avito_diag(
+            "причина",
+            f"Rest-App authorization HTTP {http}; retry отключён",
+        )
+        return list(entry.get("items", []))
+    except RestAppResponseError as exc:
+        with _AVITO_SCHEDULE_LOCK:
+            entry.update({
+                "status": "blocked",
+                "last_http": exc.status_code,
+                "in_flight": False,
+            })
+        _avito_diag("причина", f"Rest-App: {exc}")
+        return list(entry.get("items", []))
     except AvitoBlockedError as exc:
         http = int(exc.status_code or 429)
         state = _AVITO_PRODUCTION_STATE.record_block(http, now=now)

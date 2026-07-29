@@ -191,14 +191,14 @@ def test_scheduler_does_not_run_provider_in_parallel(monkeypatch):
                 "catalog_items": 0,
             }
 
-        def search(self, url):
-            calls.append(url)
+        def search(self, **kwargs):
+            calls.append(kwargs)
             started.set()
             release.wait(timeout=2)
             return []
 
-    monkeypatch.setattr(control_bot, "AvitoDuffProvider", SlowProvider)
-    monkeypatch.setattr(control_bot, "AVITO_PROVIDER", "duff_vless")
+    monkeypatch.setattr(control_bot, "RestAppAvitoProvider", SlowProvider)
+    monkeypatch.setattr(control_bot, "AVITO_PROVIDER", "rest_app")
     monkeypatch.setattr(control_bot, "AVITO_ENABLED", True)
     control_bot._AVITO_SCHEDULE.clear()
     control_bot._AVITO_GLOBAL_NEXT_ATTEMPT_AT = 0
