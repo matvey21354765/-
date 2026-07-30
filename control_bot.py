@@ -27,6 +27,10 @@ import socket
 from dotenv import load_dotenv
 load_dotenv()
 
+AVITO_ENABLED = os.getenv(
+    "AVITO_ENABLED", "false"
+).strip().lower() in {"1", "true", "yes", "on"}
+
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
     Message, CallbackQuery,
@@ -56,12 +60,17 @@ from avito_proxy_config import (
     build_mobile_proxy_config,
 )
 from marketplace_result import MarketplaceResult, STATUS_TEXT, classify_network_error
-from rest_app_avito_provider import (
-    RestAppAuthenticationError,
-    RestAppAvitoProvider,
-    RestAppRateLimitedError,
-    RestAppResponseError,
-)
+if AVITO_ENABLED:
+    from rest_app_avito_provider import (
+        RestAppAuthenticationError,
+        RestAppAvitoProvider,
+        RestAppRateLimitedError,
+        RestAppResponseError,
+    )
+else:
+    RestAppAuthenticationError = RestAppRateLimitedError = RuntimeError
+    RestAppResponseError = RuntimeError
+    RestAppAvitoProvider = None
 
 _INSTANCE_LOCK_HANDLE = None
 
@@ -157,9 +166,6 @@ if AVITO_PROXY_PORT_MIN and AVITO_PROXY_PORT_MAX:
 # Форматы: http://user:pass@host:port  /  socks5://user:pass@host:port  /  host:port
 PROXY_URL = os.getenv("PROXY_URL", "").strip()
 PROXY_ROTATE_URL = os.getenv("PROXY_ROTATE_URL", "").strip()
-AVITO_ENABLED = os.getenv("AVITO_ENABLED", "true").strip().lower() in {
-    "1", "true", "yes", "on",
-}
 AVITO_PROVIDER = "rest_app"
 try:
     AVITO_MIN_INTERVAL_SECONDS = max(
@@ -652,8 +658,12 @@ def _autoru_proxy_dict() -> dict | None:
 def _autoru_user_error(diag: dict | None = None) -> str:
     error_type = str((diag or _AUTORU_LAST_DIAG).get("error_type") or "")
     return {
-        "network": "Auto.ru: источник временно недоступен",
-        "proxy_auth": "Auto.ru: ошибка авторизации proxy",
+        "network": "🟠 Auto.ru временно не ответил.",
+        "proxy_auth": "🟠 Auto.ru: ошибка авторизации выделенного прокси.",
+        "restriction_captcha": (
+            "🟠 Auto.ru временно ограничил доступ с текущего сервера. "
+            "Остальные площадки продолжают работать."
+        ),
         "http_403": "Auto.ru: доступ ограничен",
         "http_429": "Auto.ru: источник временно ограничил доступ",
         "parse_error": "Auto.ru: ошибка формата ответа",
@@ -2506,7 +2516,159 @@ def _autoru_parse_html(text: str, today) -> list[dict]:
     return results
 
 
+def _scrape_autoru_production(
+    region: str,
+    price_min: int = 0,
+    price_max: int = 99_000_000,
+    brand: str = "",
+) -> list[dict]:
+    """Single-request production path for Auto.ru."""
+    from autoru_transport import (
+        autoru_captcha_detected,
+        autoru_timeout,
+        get_autoru_transport,
+    )
+    from curl_cffi import requests as cffi_requests
+
+    slug = AUTORU_SLUGS.get(region, region)
+    brand_slug = (brand or "").strip().lower().replace(" ", "_")
+    brand_path = f"{brand_slug}/" if brand_slug and brand_slug != "any" else ""
+    url = (
+        f"https://auto.ru/{slug}/cars/{brand_path}used/"
+        "?seller_group=PRIVATE&sort=fresh_relevance_1-desc"
+    )
+    if price_min > 0:
+        url += f"&price_from={price_min}"
+    if price_max < 99_000_000:
+        url += f"&price_to={price_max}"
+
+    transport = get_autoru_transport()
+    _AUTORU_LAST_DIAG.update({
+        "request_url": url,
+        "transport": transport["mode"],
+        "proxy_enabled": transport["mode"] == "proxy",
+        "http_status": None,
+        "final_url": "",
+        "content_type": "",
+        "response_size": 0,
+        "captcha_detected": False,
+        "raw": 0,
+        "normalized": 0,
+        "after_location": 0,
+        "after_price": 0,
+        "after_pipeline": 0,
+        "telegram_cards": 0,
+        "error_type": "",
+        "error_message_safe": "",
+    })
+    session = cffi_requests.Session(
+        impersonate="chrome120",
+        trust_env=False,
+    )
+    try:
+        response = session.get(
+            url,
+            headers={
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "ru-RU,ru;q=0.9",
+                "Referer": "https://auto.ru/",
+                "Upgrade-Insecure-Requests": "1",
+            },
+            proxies=_autoru_proxy_dict(),
+            timeout=autoru_timeout(),
+            allow_redirects=True,
+        )
+        html = response.text or ""
+        status = int(response.status_code)
+        final_url = str(response.url)
+        captcha = autoru_captcha_detected(status, final_url, html)
+        _AUTORU_LAST_DIAG.update({
+            "http_status": status,
+            "final_url": final_url,
+            "content_type": str(
+                response.headers.get("content-type", "")
+            ),
+            "response_size": len(response.content or b""),
+            "captcha_detected": captcha,
+        })
+        if status == 407:
+            _AUTORU_LAST_DIAG.update({
+                "error_type": "proxy_auth",
+                "error_message_safe": "HTTP 407",
+            })
+            return []
+        if captcha:
+            _AUTORU_LAST_DIAG.update({
+                "error_type": "restriction_captcha",
+                "error_message_safe": f"HTTP {status}; Auto.ru CAPTCHA",
+            })
+            return []
+        if status != 200:
+            _AUTORU_LAST_DIAG.update({
+                "error_type": "network",
+                "error_message_safe": f"HTTP {status}",
+            })
+            return []
+
+        raw = _autoru_parse_html(html, datetime.date.today())
+        unique: dict[str, dict] = {}
+        for item in raw:
+            identity = _item_identity(item)
+            if identity:
+                unique[identity] = item
+        normalized = list(unique.values())
+        _AUTORU_LAST_DIAG.update({
+            "raw": len(raw),
+            "normalized": len(normalized),
+            "after_location": len(normalized),
+            "after_price": sum(
+                1
+                for item in normalized
+                if in_price_range(item, price_min, price_max)
+            ),
+        })
+        if not normalized:
+            _AUTORU_LAST_DIAG.update({
+                "error_type": "parse_error",
+                "error_message_safe": (
+                    "HTTP 200 response contained no recognized listings"
+                ),
+            })
+        return normalized
+    except Exception as exc:
+        message = str(exc).lower()
+        _AUTORU_LAST_DIAG.update({
+            "error_type": (
+                "proxy_auth"
+                if "407" in message or "proxy authentication" in message
+                else "network"
+            ),
+            "error_message_safe": type(exc).__name__,
+        })
+        return []
+    finally:
+        session.close()
+        print(
+            "[Auto.ru] "
+            f"transport={transport['mode']} "
+            f"http_status={_AUTORU_LAST_DIAG.get('http_status')} "
+            f"captcha_detected={str(bool(_AUTORU_LAST_DIAG.get('captcha_detected'))).lower()} "
+            f"raw={_AUTORU_LAST_DIAG.get('raw', 0)} "
+            f"normalized={_AUTORU_LAST_DIAG.get('normalized', 0)} "
+            f"error_type={_AUTORU_LAST_DIAG.get('error_type') or 'none'}"
+        )
+
+
 def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: int = 99_000_000, brand: str = "") -> list[dict]:
+    return _scrape_autoru_production(
+        region,
+        price_min=price_min,
+        price_max=price_max,
+        brand=brand,
+    )
+
+    # Legacy implementations are retained below for reference but are not
+    # reachable from the production path.
     slug = AUTORU_SLUGS.get(region, region)
     geo_ids = AUTORU_GEO_IDS.get(region, [])
     try:
@@ -9994,7 +10156,7 @@ async def cmd_start(msg: Message, state: FSMContext):
             f"{_subscription_line}\n\n"
             f"👋 *{name}, добро пожаловать в PerekupDrive!*\n\n"
             f"Пока другие обновляют сайты вручную, бот круглосуточно проверяет "
-            f"*Авито, Дром, Auto.ru, ВК и Telegram* и поднимает самые выгодные варианты наверх.\n\n"
+            f"*Дром, Auto.ru, ВК и Telegram* и поднимает самые выгодные варианты наверх.\n\n"
             f"⚡ *Что вы получите:*\n"
             f"• свежие объявления в одном месте;\n"
             f"• сравнение цены с рынком;\n"
@@ -10012,7 +10174,7 @@ async def cmd_start(msg: Message, state: FSMContext):
         await msg.answer(
             f"{_subscription_line}\n\n"
             f"👋 Привет, {name}! Я *PerekupDrive* — бот для поиска авто ниже рыночной цены.\n\n"
-            f"🔍 Ищу объявления от частных лиц на Авито\n"
+            f"🔍 Ищу объявления на доступных автомобильных площадках\n"
             f"📊 Сравниваю цены с рынком и нахожу выгодные\n"
             f"🔔 Могу присылать уведомления когда появится новое выгодное авто",
             parse_mode="Markdown",
@@ -11209,7 +11371,6 @@ async def cmd_dashboard(msg: Message):
 
 # Все возможные площадки для мониторинга
 _MONITOR_SOURCES = [
-    ("avito",  "Авито"),
     ("drom",   "Дром"),
     ("autoru", "Auto.ru"),
     ("youla",  "Юла"),
@@ -11222,7 +11383,7 @@ def _monitor_sources(s: dict) -> list[str]:
     src = s.get("monitor_sources")
     if not src or not isinstance(src, list):
         return [k for k, _ in _MONITOR_SOURCES]
-    return src
+    return [item for item in src if item != "avito"]
 
 
 _SELLER_TYPE_LABELS = {"private": "Частник", "pro": "Профи/перекуп", "dealer": "Автодилер"}
@@ -11846,7 +12007,7 @@ async def cmd_settings(msg: Message, state: FSMContext):
     await state.set_state(Setup.category)
 
 
-ALL_SOURCES = ["drom", "autoru", "avito", "youla", "vk", "tg"]
+ALL_SOURCES = ["drom", "autoru", "youla", "vk", "tg"]
 SOURCE_NAMES = {
     "drom":   "🔵 Дром",
     "autoru": "🟠 Auto.ru",
@@ -11882,7 +12043,7 @@ def _get_enabled_sources(s: dict) -> list[str]:
     enabled = s.get("sources", [])
     if not enabled:
         return list(ALL_SOURCES)
-    return enabled
+    return [item for item in enabled if item in ALL_SOURCES]
 
 
 @dp.message(Command("search"))
@@ -12037,7 +12198,6 @@ async def cmd_global_search(msg: Message):
     scraper_map = {
         "drom":   lambda: scrape_drom(region, pages=15, price_min=pmin, price_max=pmax, brand=_br),
         "autoru": lambda: scrape_autoru(region, pages=4, price_min=pmin, price_max=pmax, brand=_br),
-        "avito":  lambda: scrape_avito(region, pages=10, price_min=0, price_max=99_000_000, sort_by_date=False),
         "youla":  lambda: scrape_youla(region, pages=5, price_min=pmin, price_max=pmax, brand=_br),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
     }
@@ -13842,7 +14002,7 @@ async def do_search_for_user(uid: int, reply_to):
     # Эталон рынка берём БЕЗ фильтра по бюджету (весь ценовой диапазон), иначе
     # «рынок» занижен и скидки не видно. price_max большой → полный рынок модели.
     _avito_ref_fut = None
-    if "avito" not in src_keys:
+    if AVITO_ENABLED and "avito" not in src_keys:
         _avito_ref_fut = asyncio.create_task(
             asyncio.wait_for(
                 loop.run_in_executor(
@@ -14958,8 +15118,9 @@ async def cb_reset_and_search(cb: CallbackQuery):
 async def cmd_help(msg: Message):
     await msg.answer(
         "🤖 *PerekupDrive — умный поиск авто ниже рынка*\n\n"
-        "Бот ищет объявления от частных лиц на *Авито, Дром, Авто.ру, ВКонтакте и Telegram*, "
-        "сравнивает цены с рынком Авито и показывает выгодные первыми.\n\n"
+        "Бот ищет объявления на *Дроме, Auto.ru, ВКонтакте и Telegram* "
+        "и показывает выгодные варианты первыми.\n\n"
+        "ℹ️ Avito временно отключён до подключения полноценного источника данных.\n\n"
         "📌 *Кнопки меню:*\n"
         "🔍 *Найти авто* — поиск по всем выбранным площадкам; ниже рынка идут первыми\n"
         "🌐 *Глобальный поиск* — поиск по барахолкам ВК и Telegram\n"
@@ -15385,13 +15546,14 @@ async def _global_monitor_loop():
                     needed.setdefault(reg, set()).update(user_srcs)
                     # Регистрируем точную пару в отдельном планировщике Авито.
                     # Одинаковые параметры разных пользователей дают один ключ/кэш.
-                    _avito_cached_result(
-                        reg,
-                        price_min=u.get("price_min", 0),
-                        price_max=u.get("price_max", 99_000_000),
-                        sort_by_date=True,
-                        brand=u.get("track_brand", ""),
-                    )
+                    if AVITO_ENABLED and "avito" in user_srcs:
+                        _avito_cached_result(
+                            reg,
+                            price_min=u.get("price_min", 0),
+                            price_max=u.get("price_max", 99_000_000),
+                            sort_by_date=True,
+                            brand=u.get("track_brand", ""),
+                        )
 
             # Скрейпим только нужные (регион, источник) параллельно
             _src_scrapers = {
@@ -15467,7 +15629,10 @@ async def _global_monitor_loop():
                     _seen_raw_norm: set[str] = set()
                     _seen_raw_id: set[str] = set()
                     for reg in all_regions:
-                        for src in user_srcs | {"avito"}:  # всегда включаем авито для рыночной цены
+                        monitor_sources = (
+                            user_srcs | {"avito"} if AVITO_ENABLED else user_srcs
+                        )
+                        for src in monitor_sources:
                             if src in ("vk", "tg") and not do_vk_tg:
                                 continue
                             key_rs = f"{reg}:{src}"
@@ -16107,8 +16272,11 @@ async def main():
         print(">>> main(): создаём _global_monitor_loop", flush=True)
         loop.create_task(_global_monitor_loop())
         print(f"  [монитор] глобальный цикл запущен (интервал {GLOBAL_POLL_SEC}с)")
-        loop.create_task(_avito_scheduler_loop())
-        print("  [Авито] отдельный планировщик запущен (≥7 мин на пару, cooldown 45 мин)")
+        if AVITO_ENABLED:
+            loop.create_task(_avito_scheduler_loop())
+            print("  [Авито] отдельный планировщик запущен")
+        else:
+            print("  [Авито] отключён флагом AVITO_ENABLED=false")
         # Push-уведомления — раз в 2-3 дня всем пользователям
         loop.create_task(_push_notification_loop())
         print("  [push] цикл уведомлений запущен (интервал ~2.5 дня)")

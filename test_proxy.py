@@ -46,7 +46,7 @@ class ProxyHelpersTestCase(unittest.TestCase):
 
     def test_autoru_user_error_classification(self):
         self.assertIn(
-            "авторизации proxy",
+            "авторизации выделенного прокси",
             cb._autoru_user_error({"error_type": "proxy_auth"}),
         )
         self.assertIn(

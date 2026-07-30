@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from typing import Any
+from urllib.parse import urlsplit
 
 
 def get_autoru_transport() -> dict[str, Any]:
@@ -20,3 +21,43 @@ def autoru_proxies() -> dict[str, str] | None:
     if not proxy_url:
         return None
     return {"http": proxy_url, "https": proxy_url}
+
+
+def autoru_timeout() -> float:
+    try:
+        return max(1.0, float(os.getenv("AUTORU_TIMEOUT_SECONDS", "15")))
+    except (TypeError, ValueError):
+        return 15.0
+
+
+def proxy_host_safe() -> str:
+    proxy_url = get_autoru_transport()["proxy_url"]
+    if not proxy_url:
+        return ""
+    try:
+        parsed = urlsplit(proxy_url)
+        if not parsed.hostname:
+            return ""
+        return (
+            f"{parsed.hostname}:{parsed.port}"
+            if parsed.port
+            else parsed.hostname
+        )
+    except (TypeError, ValueError):
+        return ""
+
+
+def autoru_captcha_detected(
+    status_code: int | None,
+    final_url: str,
+    html: str,
+) -> bool:
+    text = (html or "").lower()
+    return bool(
+        status_code in {403, 429}
+        or "/showcaptcha" in (final_url or "").lower()
+        or "showcaptcha" in text
+        or "проверка, что вы не робот" in text
+        or "captcha" in text
+        or "smartcaptcha" in text
+    )

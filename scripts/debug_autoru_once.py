@@ -8,7 +8,13 @@ import os
 import sys
 
 from dotenv import load_dotenv
-from autoru_transport import autoru_proxies, get_autoru_transport
+from autoru_transport import (
+    autoru_captcha_detected,
+    autoru_proxies,
+    autoru_timeout,
+    get_autoru_transport,
+    proxy_host_safe,
+)
 
 load_dotenv()
 
@@ -21,17 +27,17 @@ def main() -> int:
     proxies = autoru_proxies()
     result = {
         "transport": transport["mode"],
-        "AUTORU_PROXY_URL_present": bool(
-            os.getenv("AUTORU_PROXY_URL", "").strip()
-        ),
-        "PROXY_URL_ignored": True,
+        "proxy_configured": transport["mode"] == "proxy",
+        "proxy_host_safe": proxy_host_safe(),
         "http_status": None,
         "final_url": "",
+        "content_type": "",
+        "response_size": 0,
+        "captcha_detected": False,
         "raw_items_count": 0,
         "normalized_items_count": 0,
-        "filtered_items_count": 0,
-        "error_type": "",
-        "error": "",
+        "error_type": None,
+        "error_message_safe": "",
     }
 
     url = (
@@ -52,24 +58,31 @@ def main() -> int:
                 "Upgrade-Insecure-Requests": "1",
             },
             proxies=proxies,
-            timeout=30,
+            timeout=autoru_timeout(),
             allow_redirects=True,
         )
         result["http_status"] = int(response.status_code)
         result["final_url"] = str(response.url)
-        if response.status_code in (403, 407, 429):
-            result["error_type"] = (
-                "proxy_auth"
-                if response.status_code == 407
-                else f"http_{response.status_code}"
+        result["content_type"] = str(
+            response.headers.get("content-type", "")
+        )
+        result["response_size"] = len(response.content or b"")
+        result["captcha_detected"] = autoru_captcha_detected(
+            response.status_code,
+            str(response.url),
+            response.text,
+        )
+        if response.status_code == 407:
+            result["error_type"] = "proxy_auth"
+            result["error_message_safe"] = "HTTP 407"
+        elif result["captcha_detected"]:
+            result["error_type"] = "restriction_captcha"
+            result["error_message_safe"] = (
+                f"HTTP {response.status_code}; Auto.ru CAPTCHA"
             )
-            result["error"] = f"HTTP {response.status_code}"
         elif response.status_code != 200:
             result["error_type"] = "network"
-            result["error"] = f"HTTP {response.status_code}"
-        elif control_bot._autoru_is_captcha(response.text):
-            result["error_type"] = "http_403"
-            result["error"] = "Auto.ru restriction/captcha page"
+            result["error_message_safe"] = f"HTTP {response.status_code}"
         else:
             items = control_bot._autoru_parse_html(
                 response.text, datetime.date.today()
@@ -82,14 +95,11 @@ def main() -> int:
             }
             normalized = list(identities.values())
             result["normalized_items_count"] = len(normalized)
-            result["filtered_items_count"] = sum(
-                1
-                for item in normalized
-                if control_bot.in_price_range(item, 0, 100000)
-            )
-            if not normalized and len(response.text) > 3000:
+            if not normalized:
                 result["error_type"] = "parse_error"
-                result["error"] = "HTTP 200 response contained no recognized listings"
+                result["error_message_safe"] = (
+                    "HTTP 200 response contained no recognized listings"
+                )
     except Exception as exc:
         text = str(exc).lower()
         result["error_type"] = (
@@ -97,12 +107,22 @@ def main() -> int:
             if "407" in text or "proxy authentication" in text
             else "network"
         )
-        result["error"] = type(exc).__name__
+        result["error_message_safe"] = type(exc).__name__
     finally:
         session.close()
 
     print(json.dumps(result, ensure_ascii=False, indent=2))
-    return 0 if result["normalized_items_count"] else 1
+    if result["normalized_items_count"]:
+        return 0
+    if result["error_type"] == "restriction_captcha":
+        return 2
+    if result["error_type"] == "proxy_auth":
+        return 3
+    if result["error_type"] == "network":
+        return 4
+    if result["error_type"] == "parse_error":
+        return 5
+    return 6
 
 
 if __name__ == "__main__":
