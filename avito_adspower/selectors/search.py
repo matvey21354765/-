@@ -1,0 +1,7 @@
+RESULT_CONTAINER = '[data-marker="catalog-serp"]'
+CARD = '[data-marker="item"]'
+CARD_LINK = 'a[itemprop="url"], a[data-marker="item-title"]'
+CARD_TITLE = '[itemprop="name"], [data-marker="item-title"]'
+CARD_PRICE = '[itemprop="price"], [data-marker="item-price"]'
+CARD_IMAGE = 'img[itemprop="image"], img'
+NEXT_PAGE = '[data-marker="pagination-button/next"]'

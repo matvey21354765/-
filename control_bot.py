@@ -27,9 +27,10 @@ import socket
 from dotenv import load_dotenv
 load_dotenv()
 
-AVITO_ENABLED = os.getenv(
-    "AVITO_ENABLED", "false"
-).strip().lower() in {"1", "true", "yes", "on"}
+AVITO_PROVIDER = os.getenv("AVITO_PROVIDER", "disabled").strip().lower()
+if AVITO_PROVIDER not in {"disabled", "rest_app", "adspower_worker"}:
+    AVITO_PROVIDER = "disabled"
+AVITO_ENABLED = AVITO_PROVIDER != "disabled"
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
@@ -60,7 +61,7 @@ from avito_proxy_config import (
     build_mobile_proxy_config,
 )
 from marketplace_result import MarketplaceResult, STATUS_TEXT, classify_network_error
-if AVITO_ENABLED:
+if AVITO_PROVIDER == "rest_app":
     from rest_app_avito_provider import (
         RestAppAuthenticationError,
         RestAppAvitoProvider,
@@ -71,6 +72,10 @@ else:
     RestAppAuthenticationError = RestAppRateLimitedError = RuntimeError
     RestAppResponseError = RuntimeError
     RestAppAvitoProvider = None
+if AVITO_PROVIDER == "adspower_worker":
+    from avito_worker_provider import AvitoWorkerProvider
+else:
+    AvitoWorkerProvider = None
 
 _INSTANCE_LOCK_HANDLE = None
 
@@ -166,7 +171,6 @@ if AVITO_PROXY_PORT_MIN and AVITO_PROXY_PORT_MAX:
 # Форматы: http://user:pass@host:port  /  socks5://user:pass@host:port  /  host:port
 PROXY_URL = os.getenv("PROXY_URL", "").strip()
 PROXY_ROTATE_URL = os.getenv("PROXY_ROTATE_URL", "").strip()
-AVITO_PROVIDER = "rest_app"
 try:
     AVITO_MIN_INTERVAL_SECONDS = max(
         120, int(os.getenv("AVITO_MIN_INTERVAL_SECONDS", "120"))
@@ -596,13 +600,23 @@ AVITO_PROXIES: "dict[str, str] | None" = None
 # Ссылка ротации IP мобильного прокси (mobileproxy.space «Ссылка для смены IP»).
 # Если задана — бот сам меняет IP перед скрейпом Авито, обходя rate-limit (429).
 try:
-    MOBILE_PROXY_CONFIG = build_mobile_proxy_config()
-    AVITO_PROXIES = MOBILE_PROXY_CONFIG.proxies
-    for _key, _value in MOBILE_PROXY_CONFIG.safe_summary().items():
-        _safe = str(_value).lower() if isinstance(_value, bool) else _value
-        print(f"[MOBILE PROXY] {_key}={_safe}")
-    print("[AVITO] transport=mobile_proxy")
-    print("[AUTO.RU] transport=mobile_proxy")
+    MOBILE_PROXY_CONFIG = (
+        build_mobile_proxy_config()
+        if AVITO_PROVIDER == "disabled"
+        else None
+    )
+    AVITO_PROXIES = (
+        MOBILE_PROXY_CONFIG.proxies if MOBILE_PROXY_CONFIG else None
+    )
+    if MOBILE_PROXY_CONFIG:
+        for _key, _value in MOBILE_PROXY_CONFIG.safe_summary().items():
+            _safe = (
+                str(_value).lower()
+                if isinstance(_value, bool)
+                else _value
+            )
+            print(f"[MOBILE PROXY] {_key}={_safe}")
+    print(f"[AVITO] provider={AVITO_PROVIDER}")
 except AvitoProxyConfigError as _proxy_config_error:
     MOBILE_PROXY_CONFIG = None
     AVITO_PROXIES = None
@@ -1647,6 +1661,10 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
     а не смешивается с ценами других площадок.
     """
     from statistics import median
+    for item in items:
+        if item.get("_under_order"):
+            item.pop("_market_price", None)
+            item.pop("_savings_pct", None)
 
     # Для медианы берём МАКСИМУМ данных ради покрытия: и Авито-эталон, и сами
     # найденные объявления (Дром/ВК/ТГ — тоже реальные цены рынка). Чем больше
@@ -8749,6 +8767,31 @@ def _avito_scheduled_fetch_unlocked(
             )
             _avito_diag("после парсинга", len(provider_items))
             _avito_diag("после фильтрации", len(parsed))
+        elif AVITO_PROVIDER == "adspower_worker":
+            worker_result = AvitoWorkerProvider().search(
+                city=region,
+                region_name=REGIONS.get(region, region),
+                brand=brand if brand != "any" else "",
+                price_min=price_min,
+                price_max=price_max,
+                seller_type="private",
+                sort="date" if sort_by_date else "default",
+            )
+            if worker_result.status not in {"ok", "empty"}:
+                raise AvitoParseError(
+                    worker_result.error_class or worker_result.status
+                )
+            parsed = list(worker_result.items)
+            http = int(worker_result.http or 200)
+            _avito_diag(
+                "HTTP",
+                http,
+                provider="adspower_worker",
+                cache_hit=worker_result.diagnostics.get("cache_hit", False),
+            )
+            _avito_diag("найдено карточек", len(parsed), страница=page)
+            _avito_diag("после парсинга", len(parsed))
+            _avito_diag("после фильтрации", len(parsed))
         else:
             raise AvitoParseError(
                 f"Неизвестный AVITO_PROVIDER={AVITO_PROVIDER!r}"
@@ -11371,6 +11414,7 @@ async def cmd_dashboard(msg: Message):
 
 # Все возможные площадки для мониторинга
 _MONITOR_SOURCES = [
+    *(([("avito", "Авито")]) if AVITO_ENABLED else []),
     ("drom",   "Дром"),
     ("autoru", "Auto.ru"),
     ("youla",  "Юла"),
@@ -11383,7 +11427,10 @@ def _monitor_sources(s: dict) -> list[str]:
     src = s.get("monitor_sources")
     if not src or not isinstance(src, list):
         return [k for k, _ in _MONITOR_SOURCES]
-    return [item for item in src if item != "avito"]
+    return [
+        item for item in src
+        if item != "avito" or AVITO_ENABLED
+    ]
 
 
 _SELLER_TYPE_LABELS = {"private": "Частник", "pro": "Профи/перекуп", "dealer": "Автодилер"}
@@ -12007,7 +12054,11 @@ async def cmd_settings(msg: Message, state: FSMContext):
     await state.set_state(Setup.category)
 
 
-ALL_SOURCES = ["drom", "autoru", "youla", "vk", "tg"]
+ALL_SOURCES = [
+    "drom", "autoru",
+    *(["avito"] if AVITO_ENABLED else []),
+    "youla", "vk", "tg",
+]
 SOURCE_NAMES = {
     "drom":   "🔵 Дром",
     "autoru": "🟠 Auto.ru",
@@ -13662,7 +13713,9 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         deal_line = ""
         market = item.get("_market_price", 0)
         pct = item.get("_savings_pct", 0)
-        if market and _pi:
+        if item.get("_under_order"):
+            deal_line = "\n🚢 Автомобиль под заказ"
+        elif market and _pi:
             saving = market - _pi
             if pct > 0:
                 # Дешевле рынка
@@ -13774,7 +13827,12 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         else:
             row1 = []
             if url:
-                row1.append(InlineKeyboardButton(text="🔗 Открыть", url=url))
+                button_text = (
+                    "🔗 Открыть на Avito"
+                    if source == "avito" and item.get("_adspower_worker")
+                    else "🔗 Открыть"
+                )
+                row1.append(InlineKeyboardButton(text=button_text, url=url))
             row1.append(
                 InlineKeyboardButton(
                     text="⭐ Сохранить", callback_data=f"fav|{sid}|{uid}"
