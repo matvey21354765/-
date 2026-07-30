@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from autoru_transport import (
     autoru_captcha_detected,
+    autoru_items_from_result,
     autoru_proxies,
     get_autoru_transport,
     proxy_host_safe,
@@ -79,6 +80,42 @@ def test_normal_listing_page_is_not_captcha():
         "https://auto.ru/krasnodar/cars/used/",
         "<html><title>Автомобили</title></html>",
     )
+
+
+def test_result_contract_accepts_listing_list():
+    items = [{"id": "1"}, {"id": "2"}]
+    assert autoru_items_from_result(items) == items
+
+
+def test_result_contract_accepts_items_mapping():
+    items = [{"id": "1"}, {"id": "2"}]
+    assert autoru_items_from_result({"items": items}) == items
+
+
+def test_result_contract_accepts_empty_list():
+    assert autoru_items_from_result([]) == []
+
+
+def test_result_contract_treats_none_as_empty():
+    assert autoru_items_from_result(None) == []
+
+
+def test_result_contract_rejects_unexpected_type():
+    assert autoru_items_from_result("not-json") == []
+
+
+def test_price_with_currency_is_parsed():
+    assert cb.parse_price("100 000 ₽") == 100000
+
+
+def test_price_above_max_is_filtered():
+    item = {"price": "100 001 ₽"}
+    assert not cb.in_price_range(item, 0, 100000)
+
+
+def test_price_inside_budget_is_kept():
+    item = {"price": "100 000 ₽"}
+    assert cb.in_price_range(item, 0, 100000)
 
 
 class _FakeSession:

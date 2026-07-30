@@ -631,7 +631,11 @@ AVITO_PROXY_ROTATE_URL = os.getenv("AVITO_PROXY_ROTATE_URL", "").strip()
 # бот ходит через официальный API вместо капча-стены desktop-версии.
 AUTORU_API_TOKEN = os.getenv("AUTORU_API_TOKEN", "")
 AUTORU_PROXY_URL = os.getenv("AUTORU_PROXY_URL", "").strip()
-from autoru_transport import autoru_proxies, get_autoru_transport
+from autoru_transport import (
+    autoru_items_from_result,
+    autoru_proxies,
+    get_autoru_transport,
+)
 _AUTORU_LAST_DIAG: dict = {
     "request_url": "",
     "proxy_enabled": False,
@@ -2635,15 +2639,16 @@ def _scrape_autoru_production(
             if identity:
                 unique[identity] = item
         normalized = list(unique.values())
+        filtered = [
+            item
+            for item in normalized
+            if in_price_range(item, price_min, price_max)
+        ]
         _AUTORU_LAST_DIAG.update({
             "raw": len(raw),
             "normalized": len(normalized),
             "after_location": len(normalized),
-            "after_price": sum(
-                1
-                for item in normalized
-                if in_price_range(item, price_min, price_max)
-            ),
+            "after_price": len(filtered),
         })
         if not normalized:
             _AUTORU_LAST_DIAG.update({
@@ -2652,7 +2657,17 @@ def _scrape_autoru_production(
                     "HTTP 200 response contained no recognized listings"
                 ),
             })
-        return normalized
+        print(f"[Auto.ru] result_type={type(filtered).__name__}")
+        print(f"[Auto.ru] items_before_filter={len(normalized)}")
+        print(f"[Auto.ru] items_after_filter={len(filtered)}")
+        print(f"[Auto.ru] city={region}")
+        print(f"[Auto.ru] price_min={price_min}")
+        print(f"[Auto.ru] price_max={price_max}")
+        print(
+            "[Auto.ru] first_item_keys="
+            f"{sorted(filtered[0].keys()) if filtered else []}"
+        )
+        return filtered
     except Exception as exc:
         message = str(exc).lower()
         _AUTORU_LAST_DIAG.update({
@@ -14096,7 +14111,24 @@ async def do_search_for_user(uid: int, reply_to):
             print(f"  [скрапер] {src}: {type(value).__name__}: {str(value)[:120]}")
             results.append([])
         else:
-            results.append(value if isinstance(value, list) else [])
+            if src == "autoru":
+                batch = autoru_items_from_result(value)
+                print(f"[Auto.ru] result_type={type(value).__name__}")
+                print(f"[Auto.ru] items_before_filter={len(batch)}")
+                print(
+                    "[Auto.ru] first_item_keys="
+                    f"{sorted(batch[0].keys()) if batch else []}"
+                )
+                if value is not None and not isinstance(value, (list, dict)):
+                    _AUTORU_LAST_DIAG.update({
+                        "error_type": "parse_error",
+                        "error_message_safe": (
+                            f"unsupported result type: {type(value).__name__}"
+                        ),
+                    })
+                results.append(batch)
+            else:
+                results.append(value if isinstance(value, list) else [])
 
     items = []
     stat_parts = []
@@ -14115,7 +14147,7 @@ async def do_search_for_user(uid: int, reply_to):
                 )
             else:
                 stat_parts.append(f"{tag}: {len(batch)}")
-        elif src == "autoru" and _autoru_user_error():
+        elif src == "autoru" and not batch and _autoru_user_error():
             stat_parts.append(_autoru_user_error())
         else:
             stat_parts.append(f"{tag}: {len(batch)}")

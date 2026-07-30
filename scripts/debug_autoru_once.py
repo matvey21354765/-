@@ -1,17 +1,14 @@
-"""One safe production Auto.ru request with classified diagnostics."""
+"""One safe diagnostic call through the production Auto.ru search path."""
 
 from __future__ import annotations
 
-import datetime
 import json
-import os
 import sys
 
 from dotenv import load_dotenv
+
 from autoru_transport import (
-    autoru_captcha_detected,
-    autoru_proxies,
-    autoru_timeout,
+    autoru_items_from_result,
     get_autoru_transport,
     proxy_host_safe,
 )
@@ -21,10 +18,8 @@ load_dotenv()
 
 def main() -> int:
     import control_bot
-    from curl_cffi import requests as cffi_requests
 
     transport = get_autoru_transport()
-    proxies = autoru_proxies()
     result = {
         "transport": transport["mode"],
         "proxy_configured": transport["mode"] == "proxy",
@@ -39,77 +34,30 @@ def main() -> int:
         "error_type": None,
         "error_message_safe": "",
     }
-
-    url = (
-        "https://auto.ru/krasnodar/cars/used/"
-        "?seller_group=PRIVATE&price_to=100000&sort=fresh_relevance_1-desc"
-    )
-    session = cffi_requests.Session(
-        impersonate="chrome120",
-        trust_env=False,
-    )
     try:
-        response = session.get(
-            url,
-            headers={
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "ru-RU,ru;q=0.9",
-                "Referer": "https://auto.ru/",
-                "Upgrade-Insecure-Requests": "1",
-            },
-            proxies=proxies,
-            timeout=autoru_timeout(),
-            allow_redirects=True,
-        )
-        result["http_status"] = int(response.status_code)
-        result["final_url"] = str(response.url)
-        result["content_type"] = str(
-            response.headers.get("content-type", "")
-        )
-        result["response_size"] = len(response.content or b"")
-        result["captcha_detected"] = autoru_captcha_detected(
-            response.status_code,
-            str(response.url),
-            response.text,
-        )
-        if response.status_code == 407:
-            result["error_type"] = "proxy_auth"
-            result["error_message_safe"] = "HTTP 407"
-        elif result["captcha_detected"]:
-            result["error_type"] = "restriction_captcha"
-            result["error_message_safe"] = (
-                f"HTTP {response.status_code}; Auto.ru CAPTCHA"
+        items = autoru_items_from_result(
+            control_bot.scrape_autoru(
+                "krasnodar",
+                pages=1,
+                price_min=0,
+                price_max=100000,
             )
-        elif response.status_code != 200:
-            result["error_type"] = "network"
-            result["error_message_safe"] = f"HTTP {response.status_code}"
-        else:
-            items = control_bot._autoru_parse_html(
-                response.text, datetime.date.today()
-            )
-            result["raw_items_count"] = len(items)
-            identities = {
-                control_bot._item_identity(item): item
-                for item in items
-                if control_bot._item_identity(item)
-            }
-            normalized = list(identities.values())
-            result["normalized_items_count"] = len(normalized)
-            if not normalized:
-                result["error_type"] = "parse_error"
-                result["error_message_safe"] = (
-                    "HTTP 200 response contained no recognized listings"
-                )
+        )
+        diag = dict(control_bot._AUTORU_LAST_DIAG)
+        result.update({
+            "http_status": diag.get("http_status"),
+            "final_url": diag.get("final_url", ""),
+            "content_type": diag.get("content_type", ""),
+            "response_size": diag.get("response_size", 0),
+            "captcha_detected": bool(diag.get("captcha_detected")),
+            "raw_items_count": int(diag.get("raw", 0)),
+            "normalized_items_count": len(items),
+            "error_type": diag.get("error_type") or None,
+            "error_message_safe": diag.get("error_message_safe", ""),
+        })
     except Exception as exc:
-        text = str(exc).lower()
-        result["error_type"] = (
-            "proxy_auth"
-            if "407" in text or "proxy authentication" in text
-            else "network"
-        )
+        result["error_type"] = "network"
         result["error_message_safe"] = type(exc).__name__
-    finally:
-        session.close()
 
     print(json.dumps(result, ensure_ascii=False, indent=2))
     if result["normalized_items_count"]:

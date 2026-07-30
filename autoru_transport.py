@@ -61,3 +61,15 @@ def autoru_captcha_detected(
         or "captcha" in text
         or "smartcaptcha" in text
     )
+
+
+def autoru_items_from_result(result: Any) -> list[dict]:
+    """Coerce supported Auto.ru result shapes to the production list contract."""
+
+    if isinstance(result, list):
+        return [item for item in result if isinstance(item, dict)]
+    if isinstance(result, dict):
+        items = result.get("items")
+        if isinstance(items, list):
+            return [item for item in items if isinstance(item, dict)]
+    return []
