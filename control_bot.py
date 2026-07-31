@@ -8526,6 +8526,18 @@ def _avito_status_for_key(key: tuple, now: float | None = None) -> dict:
         }
 
 
+def _avito_stat_text(status: dict, count: int) -> str:
+    """Текст статистики Авито для Telegram."""
+    st = status.get("status", "blocked")
+    if st == "not_configured":
+        return "🔵 Avito пока не настроен"
+    if st in ("cooldown", "blocked") and status.get("last_http") in (403, 429):
+        return "🔵 Avito временно ограничил доступ. Показываю результаты с остальных площадок"
+    if count:
+        return f"🔵 Avito: найдено {count} объявлений"
+    return "🔵 Avito: новых объявлений нет"
+
+
 def check_avito_transport_health() -> dict:
     """Проверяет transport и cooldown без единого запроса к avito.ru."""
     import socket
@@ -8777,6 +8789,11 @@ async def _avito_scheduled_fetch_unlocked(
 
     region, price_min, price_max, sort_by_date, brand = key
     try:
+        if AVITO_PROVIDER == "playwright" and not os.getenv("AVITO_PROXY_URL", "").strip():
+            with _AVITO_SCHEDULE_LOCK:
+                entry.update({"status": "not_configured", "in_flight": False})
+                _AVITO_STATUS.update({"status": "not_configured", "blocked": False})
+            return []
         if AVITO_PROVIDER == "rest_app":
             provider = RestAppAvitoProvider()
             provider_items = provider.search(
@@ -12165,7 +12182,7 @@ ALL_SOURCES = [
 SOURCE_NAMES = {
     "drom":   "🔵 Дром",
     "autoru": "🟠 Auto.ru",
-    "avito":  "🔴 Авито",
+    "avito":  "🔵 Avito",
     "youla":  "🟡 Юла",
     "vk":     "📘 ВКонтакте",
     "tg":     "✈️ Telegram",
@@ -12352,6 +12369,7 @@ async def cmd_global_search(msg: Message):
     scraper_map = {
         "drom":   lambda: scrape_drom(region, pages=15, price_min=pmin, price_max=pmax, brand=_br),
         "autoru": lambda: scrape_autoru(region, pages=4, price_min=pmin, price_max=pmax, brand=_br),
+        "avito":  lambda: scrape_avito(region, pages=5, price_min=pmin, price_max=pmax, sort_by_date=True, brand=_br) if AVITO_ENABLED else [],
         "youla":  lambda: scrape_youla(region, pages=5, price_min=pmin, price_max=pmax, brand=_br),
         "vk":     lambda: scrape_vk_groups(region, pmin, pmax),
     }
@@ -12374,6 +12392,15 @@ async def cmd_global_search(msg: Message):
                 stat_parts.append(f"Auto.ru: найдено {len(autoru_items)} объявлений")
             else:
                 stat_parts.append("Auto.ru: новых объявлений нет")
+        elif src == "avito":
+            avito_key = _avito_schedule_key(
+                region, pmin, pmax, True,
+                brand if brand and brand != "any" else "",
+            )
+            avito_status = _avito_status_for_key(avito_key)
+            cnt = len(batch) if isinstance(batch, list) else 0
+            items.extend(batch if isinstance(batch, list) else [])
+            stat_parts.append(_avito_stat_text(avito_status, cnt))
         else:
             if isinstance(batch, list):
                 items.extend(batch)
@@ -13293,7 +13320,7 @@ async def _ensure_photo(item: dict) -> None:
 
 SOURCE_TAGS = {
     "autoru":     "🟠 Auto.ru",
-    "avito":      "🔴 Авито",
+    "avito":      "🔵 Avito",
     "drom":       "🔵 Дром",
     "youla":      "🟡 Юла",
     "tg_channel": "📢 TG-канал",
@@ -14268,12 +14295,7 @@ async def do_search_for_user(uid: int, reply_to):
                 brand if brand and brand != "any" else "",
             )
             avito_status = _avito_status_for_key(avito_key)
-            if avito_status["last_http"] in (403, 429):
-                stat_parts.append(
-                    "🔴 Авито временно ограничил доступ. Остальные площадки работают."
-                )
-            else:
-                stat_parts.append(f"{tag}: {len(batch)}")
+            stat_parts.append(_avito_stat_text(avito_status, len(batch)))
         elif src == "autoru":
             if batch:
                 stat_parts.append(f"Auto.ru: найдено {len(batch)} объявлений")
