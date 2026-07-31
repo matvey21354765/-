@@ -85,6 +85,12 @@ def _update_user(uid: int, action: str, username: str | None, fields: dict):
         pass
 
 
+def track_avito_deal(uid: int | None, score: int, profit: int, below_pct: float, price: int, source: str = "avito"):
+    """Трекает найденную выгодную сделку для дашборда."""
+    track("avito_deal", uid=uid, score=int(score), profit=int(profit),
+          below_pct=float(below_pct), price=int(price), source=source)
+
+
 # ── Публичные аксессоры (для админ-раздела бота) ────────────────
 
 def read_events() -> list[dict]:
@@ -178,6 +184,10 @@ def aggregate(region_names: dict | None = None) -> dict:
     # По площадкам
     platform_counter = Counter()
     error_counter = Counter()
+    avito_deals_today = 0
+    avito_deals_total = 0
+    avito_profits: list[int] = []
+    avito_best: list[dict] = []
     for ev in events:
         action = ev.get("action", "")
         if action == "search":
@@ -191,6 +201,20 @@ def aggregate(region_names: dict | None = None) -> dict:
         if action == "error":
             err = ev.get("error_type", "unknown")
             error_counter[err] += 1
+        if action == "avito_deal":
+            avito_deals_total += 1
+            score = ev.get("score", 0)
+            profit = ev.get("profit", 0) or 0
+            if _day_str(ev.get("ts", 0)) == today:
+                avito_deals_today += 1
+            avito_profits.append(profit)
+            avito_best.append({
+                "score": score,
+                "profit": profit,
+                "price": ev.get("price", 0),
+                "below_pct": ev.get("below_pct", 0),
+                "ts": ev.get("ts", 0),
+            })
 
     # новые юзеры по дням из профилей
     for u in users.values():
@@ -204,6 +228,10 @@ def aggregate(region_names: dict | None = None) -> dict:
             "date": d,
             "searches": by_day_searches.get(d, 0),
             "new_users": by_day_newusers.get(d, 0),
+            "avito_deals": sum(
+                1 for ev in events
+                if ev.get("action") == "avito_deal" and _day_str(ev.get("ts", 0)) == d
+            ),
         })
 
     top_regions = [
@@ -215,6 +243,11 @@ def aggregate(region_names: dict | None = None) -> dict:
     ]
 
     avg_searches = round(searches_total / total_users, 2) if total_users else 0.0
+    avg_profit = round(sum(avito_profits) / len(avito_profits), 0) if avito_profits else 0
+
+    avito_best_sorted = sorted(
+        avito_best, key=lambda x: (-x["score"], -x["profit"])
+    )[:5]
 
     return {
         "generated_at": int(now),
@@ -231,6 +264,10 @@ def aggregate(region_names: dict | None = None) -> dict:
         "timeline": timeline,
         "top_platforms": [{"platform": p, "count": c} for p, c in platform_counter.most_common(10)],
         "errors": [{"error": e, "count": c} for e, c in error_counter.most_common(10)],
+        "avito_deals_today": avito_deals_today,
+        "avito_deals_total": avito_deals_total,
+        "avito_avg_profit": int(avg_profit),
+        "avito_best": avito_best_sorted,
     }
 
 
@@ -338,6 +375,8 @@ async function load(){
         ${card('Поисков всего', m.searches_total, 'сегодня: '+m.searches_today)}
         ${card('Поисков / юзер', m.avg_searches_per_user)}
         ${card('Нулевых поисков', (m.errors||[]).find(e=>e.error==='zero_results')?.count || 0, 'поиски без результатов')}
+        ${card('Avito сделок сегодня', m.avito_deals_today || 0, 'всего: '+(m.avito_deals_total||0))}
+        ${card('Средняя прибыль', (m.avito_avg_profit||0).toLocaleString('ru-RU')+' ₽', 'по выгодным авто')}
       </div>
       <div class="panel"><h2>📈 За 14 дней</h2><canvas id="chart" height="90"></canvas></div>
       <div class="cols">
@@ -345,7 +384,10 @@ async function load(){
         <div class="panel"><h2>💰 Топ бюджетов</h2>${rows(m.top_prices,'range','count')}</div>
       </div>
       <div class="cols">
+        <div class="panel"><h2>🔥 Лучшие авто Avito</h2>${(m.avito_best||[]).map(x=>`<div class="row"><span class="n">Score ${x.score}/100, +${x.profit.toLocaleString('ru-RU')} ₽</span><span class="bar">${x.below_pct}%</span></div>`).join('') || '<div class="sub">нет данных</div>'}</div>
         <div class="panel"><h2>🔌 По площадкам</h2>${rows((m.top_platforms||[]),'platform','count')}</div>
+      </div>
+      <div class="cols">
         <div class="panel"><h2>⚠️ Проблемы</h2>${rows((m.errors||[]),'error','count')}</div>
       </div>`;
     const ctx = document.getElementById('chart');

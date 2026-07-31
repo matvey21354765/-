@@ -32,6 +32,14 @@ if AVITO_PROVIDER not in {"disabled", "rest_app", "adspower_worker", "playwright
     AVITO_PROVIDER = "disabled"
 AVITO_ENABLED = AVITO_PROVIDER != "disabled"
 
+# Primary source strategy for Avito.
+AVITO_SOURCE = os.getenv("AVITO_SOURCE", AVITO_PROVIDER if AVITO_PROVIDER in {"rest_app", "playwright"} else "rest_app").strip().lower()
+if AVITO_SOURCE not in {"rest_app", "playwright", "adspower_worker"}:
+    AVITO_SOURCE = "rest_app" if AVITO_PROVIDER == "rest_app" else "playwright" if AVITO_PROVIDER == "playwright" else "rest_app"
+REST_APP_ENABLED = os.getenv("REST_APP_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+AVITO_HISTORY_ENABLED = os.getenv("AVITO_HISTORY_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+REST_APP_REQUEST_INTERVAL = max(30, int(os.getenv("REST_APP_REQUEST_INTERVAL", "60") or 60))
+
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
     Message, CallbackQuery,
@@ -60,8 +68,13 @@ from avito_proxy_config import (
     AvitoProxyConfigError,
     build_mobile_proxy_config,
 )
+from avito_normalizer import normalize_avito_item
+from avito_history import save_avito_history
+from deal_score import calculate_deal_score, format_deal_score
+from seller_analyzer import analyze_seller, format_seller_analysis, save_seller_observation
+from ai_car_analyzer import analyze_car_text, format_ai_analysis
 from marketplace_result import MarketplaceResult, STATUS_TEXT, classify_network_error
-if AVITO_PROVIDER == "rest_app":
+if AVITO_PROVIDER == "rest_app" or AVITO_SOURCE == "rest_app":
     from rest_app_avito_provider import (
         RestAppAuthenticationError,
         RestAppAvitoProvider,
@@ -72,11 +85,11 @@ else:
     RestAppAuthenticationError = RestAppRateLimitedError = RuntimeError
     RestAppResponseError = RuntimeError
     RestAppAvitoProvider = None
-if AVITO_PROVIDER == "adspower_worker":
+if AVITO_PROVIDER == "adspower_worker" or AVITO_SOURCE == "adspower_worker":
     from avito_worker_provider import AvitoWorkerProvider
 else:
     AvitoWorkerProvider = None
-if AVITO_PROVIDER == "playwright":
+if AVITO_PROVIDER == "playwright" or AVITO_SOURCE == "playwright" or AVITO_SOURCE == "rest_app":
     from avito_playwright import (
         AvitoBrowserManager,
         AvitoPlaywrightConfigError,
@@ -87,6 +100,12 @@ if AVITO_PROVIDER == "playwright":
 else:
     AvitoBrowserManager = AvitoPlaywrightConfigError = AvitoPlaywrightError = None
     search_avito = stop_avito_manager = None
+
+if AVITO_SOURCE == "rest_app" or REST_APP_ENABLED:
+    from avito_rest_provider import AvitoRestProvider, AvitoRestProviderError
+else:
+    AvitoRestProvider = None
+    AvitoRestProviderError = RuntimeError
 
 _INSTANCE_LOCK_HANDLE = None
 
@@ -8684,7 +8703,10 @@ def _adapt_duff_listing(item: dict, today: datetime.date) -> dict:
         except (TypeError, ValueError):
             pass
     days = max(0, (today - posted_date).days)
-    photo_url = item.get("image") or ""
+    images = item.get("images") or []
+    if isinstance(images, str):
+        images = [u.strip() for u in images.split(",") if u.strip()]
+    photo_url = item.get("image") or (images[0] if images else "")
     result = {
         "source": "avito",
         "title": str(item.get("title") or ""),
@@ -8694,8 +8716,10 @@ def _adapt_duff_listing(item: dict, today: datetime.date) -> dict:
         "url": item.get("url"),
         "date": str(posted_date),
         "location": str(item.get("location") or ""),
+        "city": str(item.get("city") or item.get("location") or ""),
         "seller": item.get("seller") or "",
         "seller_type": item.get("seller_type") or "unknown",
+        "seller_url": item.get("seller_url") or "",
         "published_at": published_at,
         "description": item.get("description") or "",
         "specs": item.get("specs") or {},
@@ -8706,15 +8730,60 @@ def _adapt_duff_listing(item: dict, today: datetime.date) -> dict:
         "_demo_mode": bool(item.get("demo_mode")),
         "_private_filter_relaxed": bool(item.get("private_filter_relaxed")),
         "_photo_url": photo_url,
-        "_photos": 1 if photo_url else 0,
+        "_photos": len(images) if images else (1 if photo_url else 0),
         "_price_int": price_int,
         "_days_on_site": days,
         "_date_known": date_known,
         "_duff_id": str(item.get("id") or ""),
         "year": int(item.get("year") or 0),
+        "_brand": str(item.get("marka") or ""),
+        "_model": str(item.get("model") or ""),
+        "_mileage": str(item.get("specs", {}).get("mileage") or ""),
+        "_phone": str(item.get("phone") or ""),
     }
     result["_hot_score"] = hot_score(result)
+
+    # AI-анализ описания (синхронный, быстрый)
+    try:
+        ai_result = analyze_car_text(result)
+        result["_ai_analysis"] = ai_result
+        result["_ai_positives"] = ai_result.get("positives", [])
+        result["_ai_risks"] = ai_result.get("risks", [])
+    except Exception:
+        pass
+
+    # История объявлений
+    if AVITO_HISTORY_ENABLED:
+        try:
+            save_avito_history(result)
+            save_seller_observation(result)
+        except Exception:
+            pass
     return result
+
+
+def _enrich_avito_with_deal_score(item: dict, market_price: int | None) -> dict:
+    """Добавляет DealScore и анализ продавца после расчёта рыночной цены."""
+    try:
+        score_data = calculate_deal_score(item, market_price=market_price)
+        item["_deal_score"] = score_data.get("score")
+        item["_deal_reasons"] = score_data.get("reasons", [])
+        item["_potential_profit"] = score_data.get("potential_profit")
+    except Exception:
+        item["_deal_score"] = None
+        item["_deal_reasons"] = []
+        item["_potential_profit"] = None
+
+    try:
+        seller_data = analyze_seller(item)
+        item["_seller_type"] = seller_data.get("type")
+        item["_seller_confidence"] = seller_data.get("confidence")
+        item["_seller_reasons"] = seller_data.get("reasons", [])
+    except Exception:
+        item["_seller_type"] = None
+        item["_seller_confidence"] = None
+        item["_seller_reasons"] = []
+    return item
 
 
 def _avito_scheduled_fetch(key: tuple, now: float | None = None) -> list[dict]:
@@ -8804,7 +8873,7 @@ async def _avito_scheduled_fetch_unlocked(
                     entry.update({"status": "not_configured", "in_flight": False})
                     _AVITO_STATUS.update({"status": "not_configured", "blocked": False})
                 return []
-        if AVITO_PROVIDER == "rest_app":
+        if AVITO_PROVIDER == "rest_app" or AVITO_SOURCE == "rest_app":
             provider = RestAppAvitoProvider()
             provider_items = provider.search(
                 region_name=REST_APP_REGION_NAMES.get(
@@ -15540,6 +15609,12 @@ async def _send_monitor_item(uid: int, it: dict):
     """Отправляет одно объявление пользователю из монитора."""
     url = it.get("url", "")
     sid = url_to_id(url)
+
+    # Новая карточка для Avito с DealScore
+    if it.get("source") == "avito" and it.get("_deal_score") is not None:
+        await _send_avito_deal_card(uid, it)
+        return
+
     pct = it.get("_savings_pct", 0)
     market = it.get("_market_price", 0)
     price_line = it.get("price", "—") or "—"
@@ -15582,8 +15657,74 @@ async def _send_monitor_item(uid: int, it: dict):
     await bot.send_message(uid, caption, reply_markup=kb)
 
 
+async def _send_avito_deal_card(uid: int, it: dict):
+    """Отправляет профессиональную карточку Avito с DealScore."""
+    url = it.get("url", "")
+    sid = url_to_id(url)
+    title = it.get("title", "Автомобиль")
+    price = it.get("_price_int", 0)
+    market = it.get("_market_price") or 0
+    deal_score = it.get("_deal_score") or 0
+    profit = it.get("_potential_profit") or 0
+
+    lines = ["🔥 ВЫГОДНАЯ СДЕЛКА", f"🚗 {title}"]
+    if price:
+        lines.append(f"💰 Цена: {price:,} ₽".replace(",", " "))
+    if market:
+        lines.append(f"📊 Рынок: {market:,} ₽".replace(",", " "))
+    if profit and profit > 0:
+        lines.append(f"💵 Потенциал: +{profit:,} ₽".replace(",", " "))
+    lines.append(f"⭐ DealScore: {deal_score}/100")
+
+    seller_type = it.get("_seller_type")
+    if seller_type:
+        seller_label = {"private": "Частник", "dealer": "Перекуп/Дилер", "unknown": "Неизвестно"}.get(seller_type, seller_type)
+        confidence = it.get("_seller_confidence") or 0
+        lines.append(f"👤 Продавец: {seller_label} ({confidence}%)")
+
+    if it.get("_deal_reasons"):
+        reason = it["_deal_reasons"][0]
+        lines.append(f"📌 Причина: {reason}")
+
+    if it.get("_ai_risks"):
+        lines.append(f"⚠️ Риски: {', '.join(it['_ai_risks'][:3])}")
+
+    if url:
+        lines.append(f"🔗 Ссылка: {url}")
+
+    caption = "\n".join(lines)
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🔗 Открыть", url=url),
+            InlineKeyboardButton(text="⭐ Сохранить", callback_data=f"fav|{sid}|{uid}"),
+        ],
+        [
+            InlineKeyboardButton(text="❌ Скрыть", callback_data=f"hide|{sid}|{uid}"),
+            InlineKeyboardButton(text="📋 Похожие", callback_data=f"sim|{sid}|{uid}"),
+        ],
+        [
+            InlineKeyboardButton(text="🔍 Проверить машину", url="https://avtocod.ru/"),
+        ],
+    ])
+
+    photo_url = it.get("_photo_url", "")
+    if photo_url:
+        try:
+            await bot.send_photo(uid, photo=photo_url, caption=caption, reply_markup=kb)
+            return
+        except Exception:
+            pass
+    await bot.send_message(uid, caption, reply_markup=kb)
+
+
 async def _send_track_brand_item(uid: int, it: dict, brand_label: str) -> None:
     """Отправляет уведомление о появлении машины отслеживаемой марки."""
+    # Avito с DealScore отправляем профессиональной карточкой
+    if it.get("source") == "avito" and it.get("_deal_score") is not None:
+        await _send_avito_deal_card(uid, it)
+        return
+
     user_region = it.get("_monitor_region", "")
     region_name = REGIONS.get(user_region, user_region)
     url = it.get("url", "")
@@ -15979,13 +16120,37 @@ async def _global_monitor_loop():
                     pool = rank_by_market_price(raw + avito_ref + cached + new_items)
                     new_urls = {x["url"] for x in new_items}
 
+                    # Enrich Avito items with DealScore and seller analysis.
+                    for it in pool:
+                        if it.get("source") == "avito":
+                            _enrich_avito_with_deal_score(it, it.get("_market_price"))
+
                     new_below = sorted(
                         [it for it in pool
                          if it.get("url") in new_urls
-                         and it.get("_below_market")
-                         and it.get("_savings_pct", 0) >= min_pct],
+                         and (
+                             (it.get("source") != "avito" and it.get("_below_market")
+                              and it.get("_savings_pct", 0) >= min_pct)
+                             or (it.get("source") == "avito"
+                                 and int(it.get("_deal_score") or 0) >= 80)
+                         )],
                         key=lambda x: -x.get("_savings_pct", 0)
                     )
+
+                    # For Avito high-score items override message to show deal score.
+                    for it in new_below:
+                        if it.get("source") == "avito" and it.get("_deal_score") is not None:
+                            it["_use_deal_score_card"] = True
+                            try:
+                                analytics.track_avito_deal(
+                                    uid=uid,
+                                    score=int(it.get("_deal_score") or 0),
+                                    profit=int(it.get("_potential_profit") or 0),
+                                    below_pct=float(it.get("_savings_pct") or 0),
+                                    price=int(it.get("_price_int") or 0),
+                                )
+                            except Exception:
+                                pass
 
                     # Уведомления по слежению за маркой (независимо от скидки)
                     brand_new: list[dict] = []

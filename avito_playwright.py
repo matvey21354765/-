@@ -115,7 +115,7 @@ def _detect_page_state(text: str, status: int | None = None) -> dict[str, Any]:
 
 
 def _proxy_error_restartable(error: str | None) -> bool:
-    """Ошибки, при которых можно один раз переключить порт и повторить поиск."""
+    """Ошибки, при которых можно переключить порт и повторить поиск."""
     if not error:
         return False
     return error in {
@@ -131,6 +131,10 @@ def _proxy_error_restartable(error: str | None) -> bool:
     }
 
 
+def _log(tag: str, message: str) -> None:
+    print(f"[Avito] {tag}={message}")
+
+
 class AvitoBrowserManager:
     def __init__(
         self,
@@ -140,6 +144,7 @@ class AvitoBrowserManager:
         navigation_timeout_seconds: float | None = None,
         max_concurrent_pages: int | None = None,
         restart_after_searches: int | None = None,
+        max_proxy_attempts: int | None = None,
     ) -> None:
         self.proxy_url = (proxy_url or os.getenv("AVITO_PROXY_URL", "")).strip()
         self.headless = headless if headless is not None else _bool_env(os.getenv("AVITO_HEADLESS"), True)
@@ -147,8 +152,9 @@ class AvitoBrowserManager:
         self.navigation_timeout = float(navigation_timeout_seconds or os.getenv("AVITO_NAVIGATION_TIMEOUT_SECONDS", "30"))
         self.max_concurrent = int(max_concurrent_pages or os.getenv("AVITO_MAX_CONCURRENT_PAGES", "1"))
         self.restart_after = int(restart_after_searches or os.getenv("AVITO_BROWSER_RESTART_AFTER_SEARCHES", "50"))
+        self.max_proxy_attempts = max(1, int(max_proxy_attempts or os.getenv("AVITO_PROXY_MAX_ATTEMPTS", "3")))
 
-        # Резидентский пул имеет приоритет. AVITO_PROXY_URL — fallback.
+        # Резидентский пул имеет приоритет. AVITO_PROXY_URL — fallback ТОЛЬКО если пул не настроен.
         # Инициализация пула — ленивая и только внутри async-методов,
         # чтобы не сохранять coroutine object в self._proxy_pool.
         self._proxy_pool: AvitoProxyPool | None = None
@@ -200,8 +206,18 @@ class AvitoBrowserManager:
             "credentials_present": False,
         }
 
+    def _selected_port(self) -> int | None:
+        if self._current_endpoint:
+            return self._current_endpoint.port
+        return None
+
     async def _resolve_proxy(self) -> bool:
-        """Выбирает/парсит прокси. Возвращает True если готов к запуску."""
+        """Выбирает/парсит прокси. Возвращает True если готов к запуску.
+
+        Приоритет:
+        1. Резидентский пул proxys.io (AVITO_PROXY_HOST/PORTS/USERNAME/PASSWORD).
+        2. Legacy AVITO_PROXY_URL только если пул не настроен.
+        """
         pool = await self._ensure_proxy_pool()
         if pool and pool.configured:
             endpoint = await pool.select_working_proxy()
@@ -213,6 +229,7 @@ class AvitoBrowserManager:
             self._proxy_config = endpoint.as_playwright_config()
             return True
 
+        # Fallback на единый URL только при отсутствии резидентского пула
         if self.proxy_url:
             try:
                 self._proxy_config = _parse_proxy_url(self.proxy_url)
@@ -267,12 +284,15 @@ class AvitoBrowserManager:
         await self.stop()
         await self._launch()
 
-    async def _restart_with_new_proxy(self) -> bool:
-        """Переключает порт (если пул) и перезапускает browser. Максимум один раз."""
+    async def _restart_with_new_proxy(self, attempt: int) -> bool:
+        """Переключает порт (если пул) и перезапускает browser."""
+        port = None
         if self._proxy_pool:
             endpoint = self._proxy_pool.get_current_proxy()
-            await self._proxy_pool.mark_failed(endpoint.port if endpoint else None, "restart")
+            port = endpoint.port if endpoint else None
+            await self._proxy_pool.mark_failed(port, "restart")
             await self._proxy_pool.reset_current_proxy()
+        _log("switching_port", f"attempt={attempt} old_port={port if port is not None else 'none'}")
         if not await self._resolve_proxy():
             return False
         await self.stop()
@@ -355,45 +375,69 @@ class AvitoBrowserManager:
 
         result.update(await self.proxy_summary())
 
-        page = None
-        try:
-            await self._ensure_browser()
-            result["chromium_started"] = self._started
-            page = await self.new_page()
-            resp = await page.goto(
-                "https://www.avito.ru/",
-                wait_until="domcontentloaded",
-                timeout=self.navigation_timeout * 1000,
-            )
-            result["final_url"] = page.url
-            text = await page.content()
-            state = _detect_page_state(text, status=resp.status if resp else None)
-            result["captcha_detected"] = state["captcha_detected"]
-            result["blocked_detected"] = state["blocked_detected"]
-            result["error"] = state["error"]
-            result["ok"] = state["error"] is None
-        except Exception as exc:
-            err_text = str(exc).lower()
-            if "407" in err_text or "proxy authentication" in err_text:
-                result["error"] = "proxy_auth"
-            elif "no exit node" in err_text or "unable to assign node" in err_text:
-                result["error"] = "no_exit_node"
-            elif "403" in err_text and "connect" in err_text:
-                result["error"] = "proxy_connect_forbidden"
-            elif "timeout" in err_text:
-                result["error"] = "timeout"
-            else:
-                result["error"] = "network_error"
-            result["browser_error_safe"] = _safe_browser_error(exc)
-            # CAPTCHA/blocked можно определить только по реально загруженной странице
-            result["captcha_detected"] = False
-            result["blocked_detected"] = False
-        finally:
-            if page:
-                try:
-                    await page.close()
-                except Exception:
-                    pass
+        for attempt in range(1, self.max_proxy_attempts + 1):
+            page = None
+            port = self._selected_port()
+            _log("attempt", f"{attempt} port={port if port is not None else 'none'}")
+            try:
+                await self._ensure_browser()
+                result["chromium_started"] = self._started
+                _log("browser_started", str(self._started))
+                page = await self.new_page()
+                resp = await page.goto(
+                    "https://www.avito.ru/",
+                    wait_until="domcontentloaded",
+                    timeout=self.navigation_timeout * 1000,
+                )
+                result["final_url"] = page.url
+                text = await page.content()
+                state = _detect_page_state(text, status=resp.status if resp else None)
+                result["captcha_detected"] = state["captcha_detected"]
+                result["blocked_detected"] = state["blocked_detected"]
+                if state["error"]:
+                    result["error"] = state["error"]
+                    _log("captcha" if state["captcha_detected"] else "blocked", "true")
+                    if (
+                        self._proxy_pool
+                        and _proxy_error_restartable(state["error"])
+                        and attempt < self.max_proxy_attempts
+                    ):
+                        continue  # переключим порт в finally
+                    result["ok"] = False
+                    return result
+                result["ok"] = True
+                return result
+            except Exception as exc:
+                err_text = str(exc).lower()
+                if "407" in err_text or "proxy authentication" in err_text:
+                    result["error"] = "proxy_auth"
+                elif "no exit node" in err_text or "unable to assign node" in err_text:
+                    result["error"] = "no_exit_node"
+                elif "403" in err_text and "connect" in err_text:
+                    result["error"] = "proxy_connect_forbidden"
+                elif "timeout" in err_text:
+                    result["error"] = "timeout"
+                else:
+                    result["error"] = "network_error"
+                result["browser_error_safe"] = _safe_browser_error(exc)
+                _log("browser_error_safe", result["browser_error_safe"])
+                result["captcha_detected"] = False
+                result["blocked_detected"] = False
+                if (
+                    self._proxy_pool
+                    and _proxy_error_restartable(result["error"])
+                    and attempt < self.max_proxy_attempts
+                ):
+                    continue  # переключим порт в finally
+                return result
+            finally:
+                if page:
+                    try:
+                        await page.close()
+                    except Exception:
+                        pass
+                if result.get("error") and self._proxy_pool and attempt < self.max_proxy_attempts:
+                    await self._restart_with_new_proxy(attempt)
         return result
 
     async def search(
@@ -439,15 +483,18 @@ class AvitoBrowserManager:
         result = {"items": [], "error": None, "meta": meta}
 
         async with self._semaphore:
-            retry_once = True
-            while True:
+            for attempt in range(1, self.max_proxy_attempts + 1):
                 page = None
+                port = self._selected_port()
+                _log("attempt", f"{attempt} port={port if port is not None else 'none'}")
                 try:
                     if self._search_count >= self.restart_after > 0:
                         await self.restart()
                     else:
                         await self._ensure_browser()
 
+                    meta["chromium_started"] = self._started
+                    _log("browser_started", str(self._started))
                     page = await self.new_page()
                     url = self._build_search_url(city, price_min, price_max, query)
                     resp = await page.goto(
@@ -468,10 +515,13 @@ class AvitoBrowserManager:
                     meta["blocked_detected"] = state["blocked_detected"]
                     if state["error"]:
                         result["error"] = state["error"]
-                        if retry_once and self._proxy_pool and _proxy_error_restartable(state["error"]):
-                            retry_once = False
-                            await self._restart_with_new_proxy()
-                            continue
+                        _log("captcha" if state["captcha_detected"] else "blocked", "true")
+                        if (
+                            self._proxy_pool
+                            and _proxy_error_restartable(state["error"])
+                            and attempt < self.max_proxy_attempts
+                        ):
+                            continue  # переключим порт в finally
                         meta["elapsed_ms"] = int((time.time() - started_at) * 1000)
                         return result
 
@@ -498,10 +548,16 @@ class AvitoBrowserManager:
                         result["error"] = "timeout"
                     else:
                         result["error"] = "network_error"
-                    if retry_once and self._proxy_pool and _proxy_error_restartable(result["error"]):
-                        retry_once = False
-                        await self._restart_with_new_proxy()
-                        continue
+                    meta["browser_error_safe"] = _safe_browser_error(exc)
+                    _log("browser_error_safe", meta["browser_error_safe"])
+                    meta["captcha_detected"] = False
+                    meta["blocked_detected"] = False
+                    if (
+                        self._proxy_pool
+                        and _proxy_error_restartable(result["error"])
+                        and attempt < self.max_proxy_attempts
+                    ):
+                        continue  # переключим порт в finally
                     meta["elapsed_ms"] = int((time.time() - started_at) * 1000)
                     return result
                 finally:
@@ -510,6 +566,10 @@ class AvitoBrowserManager:
                             await page.close()
                         except Exception:
                             pass
+                    if result.get("error") and self._proxy_pool and attempt < self.max_proxy_attempts:
+                        await self._restart_with_new_proxy(attempt)
+        meta["elapsed_ms"] = int((time.time() - started_at) * 1000)
+        return result
 
     def _build_search_url(
         self,
