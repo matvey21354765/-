@@ -6,14 +6,13 @@ from __future__ import annotations
 
 import asyncio
 import datetime as _dt
-import json
 import os
 import re
 import time
 from typing import Any, Optional
 from urllib.parse import urlencode, urlparse
 
-from avito_proxy_pool import AvitoProxyPool, get_avito_proxy_pool
+from avito_proxy_pool import AvitoProxyPool, get_avito_proxy_pool, ProxyEndpoint
 
 try:
     from playwright.async_api import async_playwright, Page, Browser, BrowserContext, Playwright
@@ -65,8 +64,18 @@ def _safe_proxy_summary(config: dict) -> dict[str, Any]:
         "proxy_configured": True,
         "proxy_protocol": config.get("server", "").split("://", 1)[0] or "http",
         "proxy_host_safe": host_port,
+        "selected_port": None,
         "credentials_present": bool(config.get("username") and config.get("password")),
     }
+
+
+def _safe_browser_error(exc: Exception) -> str:
+    """Убирает креденшелы и длинные traceback из текста ошибки браузера."""
+    text = f"{type(exc).__name__}: {exc}".lower()
+    # Убираем потенциальные креденшелы, попавшие в сообщение
+    text = re.sub(r"https?://[^\s]+", "***", text)
+    text = re.sub(r"@[^\s:/]+", "@***", text)
+    return text[:200]
 
 
 def _detect_page_state(text: str, status: int | None = None) -> dict[str, Any]:
@@ -146,6 +155,7 @@ class AvitoBrowserManager:
 
         self._proxy_config: dict | None = None
         self._launch_proxy_config: dict | None = None
+        self._current_endpoint: ProxyEndpoint | None = None
 
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
@@ -175,35 +185,46 @@ class AvitoBrowserManager:
 
     async def proxy_summary(self) -> dict[str, Any]:
         pool = await self._ensure_proxy_pool()
-        if pool and pool.configured:
-            return {
-                **pool.summary(),
-                "proxy_configured": self._proxy_config is not None,
-            }
-        if not self._proxy_config:
-            return {"proxy_configured": False}
-        return _safe_proxy_summary(self._proxy_config)
+        if pool:
+            summary = pool.summary()
+            summary["proxy_configured"] = bool(
+                pool.configured or self._proxy_config is not None
+            )
+            return summary
+        if self._proxy_config:
+            return _safe_proxy_summary(self._proxy_config)
+        return {
+            "proxy_configured": False,
+            "proxy_host_safe": None,
+            "selected_port": None,
+            "credentials_present": False,
+        }
 
     async def _resolve_proxy(self) -> bool:
         """Выбирает/парсит прокси. Возвращает True если готов к запуску."""
         pool = await self._ensure_proxy_pool()
         if pool and pool.configured:
-            port = await pool.select_working_proxy()
-            if port is None:
+            endpoint = await pool.select_working_proxy()
+            if endpoint is None:
                 self._proxy_config = None
+                self._current_endpoint = None
                 return False
-            self._proxy_config = pool.get_playwright_config()
+            self._current_endpoint = endpoint
+            self._proxy_config = endpoint.as_playwright_config()
             return True
 
         if self.proxy_url:
             try:
                 self._proxy_config = _parse_proxy_url(self.proxy_url)
+                self._current_endpoint = None
                 return True
             except Exception:
                 self._proxy_config = None
+                self._current_endpoint = None
                 return False
 
         self._proxy_config = None
+        self._current_endpoint = None
         return False
 
     async def start(self) -> None:
@@ -249,8 +270,8 @@ class AvitoBrowserManager:
     async def _restart_with_new_proxy(self) -> bool:
         """Переключает порт (если пул) и перезапускает browser. Максимум один раз."""
         if self._proxy_pool:
-            port = self._proxy_pool.get_current_proxy()
-            await self._proxy_pool.mark_failed(port.get("port") if port else None, "restart")
+            endpoint = self._proxy_pool.get_current_proxy()
+            await self._proxy_pool.mark_failed(endpoint.port if endpoint else None, "restart")
             await self._proxy_pool.reset_current_proxy()
         if not await self._resolve_proxy():
             return False
@@ -313,23 +334,31 @@ class AvitoBrowserManager:
         return page
 
     async def healthcheck(self) -> dict[str, Any]:
-        summary = await self.proxy_summary()
         result: dict[str, Any] = {
             "ok": False,
             "headless": self.headless,
-            "chromium_started": self._started,
-            **summary,
+            "chromium_started": False,
+            "proxy_configured": False,
+            "proxy_host_safe": None,
+            "selected_port": None,
+            "credentials_present": False,
             "error": None,
             "captcha_detected": False,
             "blocked_detected": False,
             "final_url": None,
+            "browser_error_safe": None,
         }
         if not await self._resolve_proxy():
             result["error"] = "provider_not_configured"
+            result.update(await self.proxy_summary())
             return result
+
+        result.update(await self.proxy_summary())
+
         page = None
         try:
             await self._ensure_browser()
+            result["chromium_started"] = self._started
             page = await self.new_page()
             resp = await page.goto(
                 "https://www.avito.ru/",
@@ -355,6 +384,10 @@ class AvitoBrowserManager:
                 result["error"] = "timeout"
             else:
                 result["error"] = "network_error"
+            result["browser_error_safe"] = _safe_browser_error(exc)
+            # CAPTCHA/blocked можно определить только по реально загруженной странице
+            result["captcha_detected"] = False
+            result["blocked_detected"] = False
         finally:
             if page:
                 try:
@@ -372,6 +405,26 @@ class AvitoBrowserManager:
         limit: int = 30,
     ) -> dict[str, Any]:
         started_at = time.time()
+
+        if not await self._resolve_proxy():
+            summary = await self.proxy_summary()
+            error = "proxy_unavailable" if (self._proxy_pool and self._proxy_pool.configured) else "provider_not_configured"
+            return {
+                "items": [],
+                "error": error,
+                "meta": {
+                    "provider": "playwright",
+                    "transport": "browser_proxy",
+                    **summary,
+                    "final_url": None,
+                    "captcha_detected": False,
+                    "blocked_detected": False,
+                    "raw_items_count": 0,
+                    "normalized_items_count": 0,
+                    "elapsed_ms": int((time.time() - started_at) * 1000),
+                },
+            }
+
         meta = {
             "provider": "playwright",
             "transport": "browser_proxy",
@@ -384,14 +437,6 @@ class AvitoBrowserManager:
             "elapsed_ms": 0,
         }
         result = {"items": [], "error": None, "meta": meta}
-
-        if not await self._resolve_proxy():
-            if self._proxy_pool and self._proxy_pool.configured:
-                result["error"] = "proxy_unavailable"
-            else:
-                result["error"] = "provider_not_configured"
-            meta["elapsed_ms"] = int((time.time() - started_at) * 1000)
-            return result
 
         async with self._semaphore:
             retry_once = True
@@ -437,7 +482,8 @@ class AvitoBrowserManager:
                     result["items"] = items[:limit]
                     self._search_count += 1
                     if self._proxy_pool:
-                        await self._proxy_pool.mark_success(self._proxy_pool.get_current_proxy().get("port") if self._proxy_pool.get_current_proxy() else None)
+                        endpoint = self._proxy_pool.get_current_proxy()
+                        await self._proxy_pool.mark_success(endpoint.port if endpoint else None)
                     meta["elapsed_ms"] = int((time.time() - started_at) * 1000)
                     return result
                 except Exception as exc:

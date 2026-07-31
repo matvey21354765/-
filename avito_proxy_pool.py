@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -34,6 +35,38 @@ except Exception:  # pragma: no cover
 
 class AvitoProxyPoolError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class ProxyEndpoint:
+    """Безопасное представление выбранного прокси-порта."""
+
+    host: str
+    port: int
+    protocol: str
+    username: str
+    password: str
+
+    @property
+    def server(self) -> str:
+        return f"{self.protocol}://{self.host}:{self.port}"
+
+    def as_playwright_config(self) -> dict[str, Any]:
+        """Полный proxy-объект для playwright.chromium.launch(...)."""
+        cfg: dict[str, Any] = {"server": self.server}
+        if self.username:
+            cfg["username"] = self.username
+        if self.password:
+            cfg["password"] = self.password
+        return cfg
+
+    def safe_summary(self) -> dict[str, Any]:
+        return {
+            "proxy_host_safe": f"{self.host}:{self.port}",
+            "selected_port": self.port,
+            "proxy_protocol": self.protocol,
+            "credentials_present": bool(self.username and self.password),
+        }
 
 
 class AvitoProxyPool:
@@ -50,7 +83,7 @@ class AvitoProxyPool:
         self.connect_timeout = max(1, self._int_env("AVITO_PROXY_CONNECT_TIMEOUT_SECONDS", 8))
         self.sticky_seconds = max(0, self._int_env("AVITO_PROXY_STICKY_MINUTES", 60)) * 60
 
-        self._current_port: int | None = None
+        self._current_endpoint: ProxyEndpoint | None = None
         self._current_since: float = 0.0
         self._last_success_port: int | None = None
         self._attempted_count: int = 0
@@ -95,6 +128,15 @@ class AvitoProxyPool:
         if self.password and self.password in error:
             error = error.replace(self.password, "***")
         return error
+
+    def _endpoint(self, port: int) -> ProxyEndpoint:
+        return ProxyEndpoint(
+            host=self.host,
+            port=port,
+            protocol=self.protocol,
+            username=self.username,
+            password=self.password,
+        )
 
     async def check_proxy(self, port: int) -> dict[str, Any]:
         """Проверяет порт через нейтральный сайт.
@@ -173,18 +215,23 @@ class AvitoProxyPool:
                 result["error"] = "proxy_error"
         return result
 
-    async def select_working_proxy(self) -> int | None:
+    async def select_working_proxy(self) -> ProxyEndpoint | None:
         """Выбирает рабочий порт, проверяя не больше AVITO_PROXY_CHECK_LIMIT портов."""
         async with self._lock:
             now = time.time()
             ports_to_try: list[int] = []
 
             # Сначала пытаемся повторно использовать текущий порт (липкость)
-            if self._current_port and (now - self._current_since) < self.sticky_seconds:
-                ports_to_try.append(self._current_port)
+            if (
+                self._current_endpoint
+                and (now - self._current_since) < self.sticky_seconds
+            ):
+                ports_to_try.append(self._current_endpoint.port)
 
             # Затем стартуем с последнего успешного порта или с текущего индекса кругового перебора
-            start = self._last_success_port or self._current_port
+            start = self._last_success_port
+            if start is None and self._current_endpoint:
+                start = self._current_endpoint.port
             if start is None:
                 start = self.port_start + self._idx
             for p in self._iter_ports(start):
@@ -205,22 +252,22 @@ class AvitoProxyPool:
                 self._attempted_count += 1
                 res = await self.check_proxy(port)
                 if res["ok"]:
-                    self._current_port = port
+                    self._current_endpoint = self._endpoint(port)
                     self._current_since = now
                     self._last_success_port = port
-                    return port
+                    return self._current_endpoint
                 # Неверные креденшелы — дальше перебирать бесполезно
                 if res["error"] == "proxy_auth":
                     break
 
-            self._current_port = None
+            self._current_endpoint = None
             self._current_since = 0.0
             return None
 
     async def mark_failed(self, port: int | None, error: str) -> None:
         async with self._lock:
-            if self._current_port == port:
-                self._current_port = None
+            if self._current_endpoint and self._current_endpoint.port == port:
+                self._current_endpoint = None
                 self._current_since = 0.0
             if self._last_success_port == port and error in (
                 "no_exit_node",
@@ -238,44 +285,51 @@ class AvitoProxyPool:
         async with self._lock:
             if port:
                 self._last_success_port = port
-                self._current_port = port
+                if self._current_endpoint is None or self._current_endpoint.port != port:
+                    self._current_endpoint = self._endpoint(port)
                 self._current_since = time.time()
                 total = self.port_end - self.port_start + 1
                 if total > 0:
                     self._idx = (port - self.port_start) % total
 
-    def get_current_proxy(self) -> dict[str, Any] | None:
-        if not self._current_port:
-            return None
-        return {
-            "host": self.host,
-            "port": self._current_port,
-            "protocol": self.protocol,
-        }
+    def get_current_proxy(self) -> ProxyEndpoint | None:
+        return self._current_endpoint
 
     async def reset_current_proxy(self) -> None:
         async with self._lock:
-            self._current_port = None
+            self._current_endpoint = None
             self._current_since = 0.0
 
     def get_playwright_config(self) -> dict[str, Any] | None:
-        if not self._current_port:
+        if not self._current_endpoint:
             return None
-        cfg: dict[str, Any] = {"server": f"{self.protocol}://{self.host}:{self._current_port}"}
-        if self.username:
-            cfg["username"] = self.username
-        if self.password:
-            cfg["password"] = self.password
-        return cfg
+        return self._current_endpoint.as_playwright_config()
 
     def summary(self) -> dict[str, Any]:
-        return {
+        base = {
             "proxy_pool": self.configured,
-            "proxy_host_safe": self.host,
             "ports_range": f"{self.port_start}-{self.port_end}" if self.configured else None,
             "credentials_present": bool(self.username and self.password),
-            "current_port": self._current_port,
             "last_attempted_ports_count": self._attempted_count,
+        }
+        if self._current_endpoint:
+            return {
+                **base,
+                **self._current_endpoint.safe_summary(),
+                "proxy_configured": True,
+            }
+        if self.configured:
+            return {
+                **base,
+                "proxy_host_safe": self.host,
+                "selected_port": None,
+                "proxy_configured": True,
+            }
+        return {
+            **base,
+            "proxy_host_safe": None,
+            "selected_port": None,
+            "proxy_configured": False,
         }
 
 

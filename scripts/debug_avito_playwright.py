@@ -6,7 +6,7 @@
 Скрипт:
 - запускает AvitoBrowserManager;
 - проверяет пул прокси / AVITO_PROXY_URL;
-- выполняет healthcheck;
+- выполняет healthcheck (реальный запуск Chromium);
 - выполняет один поиск;
 - закрывает browser в finally;
 - не запускает polling Telegram;
@@ -41,12 +41,16 @@ async def main() -> int:
         hc = await manager.healthcheck()
         print(f"browser_started={hc.get('chromium_started')}")
         print(f"proxy_configured={hc.get('proxy_configured')}")
-        print(f"selected_port={pool_summary.get('current_port') or hc.get('proxy_host_safe', '').split(':')[-1] or 'null'}")
+        selected_port = hc.get("selected_port") or pool_summary.get("current_port")
+        print(f"selected_port={selected_port if selected_port is not None else 'null'}")
         print(f"neutral_check_ok={hc.get('ok')}")
         print(f"http_status={hc.get('status') or ''}")
         print(f"final_url={hc.get('final_url') or ''}")
         print(f"captcha_detected={hc.get('captcha_detected')}")
         print(f"blocked_detected={hc.get('blocked_detected')}")
+
+        if hc.get("browser_error_safe"):
+            print(f"browser_error_safe={hc['browser_error_safe']}")
 
         if not hc.get("ok"):
             print(f"error={hc.get('error') or 'unknown'}")

@@ -10,6 +10,7 @@ import pytest
 
 import avito_playwright as apw
 import avito_proxy_pool as app
+from avito_proxy_pool import ProxyEndpoint
 
 
 class FakePage:
@@ -62,9 +63,12 @@ class FakeContext:
 class FakeBrowser:
     def __init__(self):
         self.closed = False
+        self.contexts = []
 
     async def new_context(self):
-        return FakeContext()
+        ctx = FakeContext()
+        self.contexts.append(ctx)
+        return ctx
 
     async def close(self):
         self.closed = True
@@ -81,10 +85,12 @@ class FakePlaywright:
 class FakePlaywrightFactory:
     def __init__(self, browser: FakeBrowser):
         self._browser = browser
+        self._last_pw = None
 
     async def start(self):
         pw = FakePlaywright()
         pw.chromium.launch = mock.AsyncMock(return_value=self._browser)
+        self._last_pw = pw
         return pw
 
 
@@ -99,28 +105,39 @@ class FakeProxyPool:
         self.checks = []
         self.failed = []
         self._configured = True
+        self.username = "u"
+        self.password = "p"
+        self.host = "pool.proxys.io"
+        self.protocol = "http"
 
     @property
     def configured(self):
         return self._configured
 
     def summary(self):
-        return {
+        summary = {
             "proxy_pool": self._configured,
-            "proxy_host_safe": "pool.proxys.io",
             "ports_range": "10000-10999",
             "credentials_present": True,
             "current_port": self.current,
             "last_attempted_ports_count": len(self.checks),
         }
+        if self.current is not None:
+            summary["proxy_host_safe"] = f"{self.host}:{self.current}"
+            summary["selected_port"] = self.current
+            summary["proxy_protocol"] = self.protocol
+        else:
+            summary["proxy_host_safe"] = self.host
+            summary["selected_port"] = None
+        return summary
 
     def get_playwright_config(self):
         if self.current is None:
             return None
         return {
-            "server": f"http://pool.proxys.io:{self.current}",
-            "username": "u",
-            "password": "p",
+            "server": f"http://{self.host}:{self.current}",
+            "username": self.username,
+            "password": self.password,
         }
 
     async def select_working_proxy(self):
@@ -128,7 +145,13 @@ class FakeProxyPool:
         if self.fail_with:
             return None
         self.current = self.ports[self._idx]
-        return self.current
+        return ProxyEndpoint(
+            host=self.host,
+            port=self.current,
+            protocol=self.protocol,
+            username=self.username,
+            password=self.password,
+        )
 
     async def mark_failed(self, port, error):
         self.failed.append((port, error))
@@ -146,7 +169,13 @@ class FakeProxyPool:
     def get_current_proxy(self):
         if self.current is None:
             return None
-        return {"host": "pool.proxys.io", "port": self.current, "protocol": "http"}
+        return ProxyEndpoint(
+            host=self.host,
+            port=self.current,
+            protocol=self.protocol,
+            username=self.username,
+            password=self.password,
+        )
 
 
 def _patch_playwright(monkeypatch, browser=None):
@@ -162,7 +191,12 @@ async def test_env_disabled_does_not_start_browser(monkeypatch):
     monkeypatch.setenv("AVITO_PROVIDER", "disabled")
     manager = apw.AvitoBrowserManager(proxy_url="")
     assert manager._proxy_config is None
-    assert await manager.proxy_summary() == {"proxy_configured": False}
+    assert await manager.proxy_summary() == {
+        "proxy_configured": False,
+        "proxy_host_safe": None,
+        "selected_port": None,
+        "credentials_present": False,
+    }
 
 
 def test_autoru_proxy_url_ignored(monkeypatch):
@@ -188,6 +222,45 @@ async def test_resolve_proxy_uses_avito_url():
         "username": "user",
         "password": "pass",
     }
+
+
+@pytest.mark.asyncio
+async def test_resolve_proxy_uses_pool_endpoint(monkeypatch):
+    pool = FakeProxyPool(ports=[10000])
+    monkeypatch.setattr(apw, "get_avito_proxy_pool", mock.AsyncMock(return_value=pool))
+    monkeypatch.setenv("AVITO_PROXY_HOST", "pool.proxys.io")
+    monkeypatch.setenv("AVITO_PROXY_PORT_START", "10000")
+    monkeypatch.setenv("AVITO_PROXY_PORT_END", "10005")
+    monkeypatch.setenv("AVITO_PROXY_USERNAME", "u")
+    monkeypatch.setenv("AVITO_PROXY_PASSWORD", "p")
+
+    manager = apw.AvitoBrowserManager(proxy_url="")
+    assert await manager._resolve_proxy() is True
+    assert manager._proxy_config == {
+        "server": "http://pool.proxys.io:10000",
+        "username": "u",
+        "password": "p",
+    }
+    assert manager._current_endpoint.port == 10000
+
+
+@pytest.mark.asyncio
+async def test_proxy_summary_selected_port_is_int(monkeypatch):
+    pool = FakeProxyPool(ports=[10000])
+    monkeypatch.setattr(apw, "get_avito_proxy_pool", mock.AsyncMock(return_value=pool))
+    monkeypatch.setenv("AVITO_PROXY_HOST", "pool.proxys.io")
+    monkeypatch.setenv("AVITO_PROXY_PORT_START", "10000")
+    monkeypatch.setenv("AVITO_PROXY_PORT_END", "10005")
+    monkeypatch.setenv("AVITO_PROXY_USERNAME", "u")
+    monkeypatch.setenv("AVITO_PROXY_PASSWORD", "p")
+
+    manager = apw.AvitoBrowserManager(proxy_url="")
+    await manager._resolve_proxy()
+    summary = await manager.proxy_summary()
+    assert summary["proxy_configured"] is True
+    assert summary["selected_port"] == 10000
+    assert summary["proxy_host_safe"] == "pool.proxys.io:10000"
+    assert summary["credentials_present"] is True
 
 
 @pytest.mark.asyncio
@@ -255,6 +328,7 @@ async def test_healthcheck_detects_captcha(monkeypatch):
     assert hc["ok"] is False
     assert hc["captcha_detected"] is True
     assert hc["error"] == "captcha"
+    assert hc["chromium_started"] is True
     await manager.stop()
 
 
@@ -269,6 +343,62 @@ async def test_healthcheck_detects_connect_403(monkeypatch):
     hc = await manager.healthcheck()
     assert hc["ok"] is False
     assert hc["error"] == "proxy_connect_forbidden"
+    assert hc["captcha_detected"] is False
+    assert hc["blocked_detected"] is False
+
+
+@pytest.mark.asyncio
+async def test_healthcheck_browser_launch_error_no_captcha(monkeypatch):
+    """Если Chromium не запустился — captcha_detected=false и ошибка реальная."""
+    manager = apw.AvitoBrowserManager(proxy_url="http://u:p@h:1")
+    manager._resolve_proxy = mock.AsyncMock(return_value=True)
+    manager._ensure_browser = mock.AsyncMock(
+        side_effect=RuntimeError("executable does not exist")
+    )
+
+    hc = await manager.healthcheck()
+    assert hc["chromium_started"] is False
+    assert hc["captcha_detected"] is False
+    assert hc["blocked_detected"] is False
+    assert hc["error"] == "network_error"
+    assert hc["browser_error_safe"] is not None
+    assert "http://u:" not in str(hc["browser_error_safe"])
+    assert "u:p@" not in str(hc["browser_error_safe"])
+
+
+@pytest.mark.asyncio
+async def test_healthcheck_launches_browser_with_selected_port(monkeypatch):
+    """Healthcheck передаёт в launch proxy config с выбранным портом."""
+    pool = FakeProxyPool(ports=[10000])
+    monkeypatch.setenv("AVITO_PROXY_HOST", "pool.proxys.io")
+    monkeypatch.setenv("AVITO_PROXY_PORT_START", "10000")
+    monkeypatch.setenv("AVITO_PROXY_PORT_END", "10005")
+    monkeypatch.setenv("AVITO_PROXY_USERNAME", "u")
+    monkeypatch.setenv("AVITO_PROXY_PASSWORD", "p")
+    monkeypatch.setattr(apw, "get_avito_proxy_pool", mock.AsyncMock(return_value=pool))
+
+    browser = FakeBrowser()
+    factory = FakePlaywrightFactory(browser)
+    monkeypatch.setattr(apw, "async_playwright", lambda: factory)
+
+    manager = apw.AvitoBrowserManager(proxy_url="")
+    hc = await manager.healthcheck()
+
+    assert hc["chromium_started"] is True
+    assert hc["proxy_configured"] is True
+    assert hc["selected_port"] == 10000
+    assert hc["proxy_host_safe"] == "pool.proxys.io:10000"
+
+    assert factory._last_pw is not None
+    launch_call = factory._last_pw.chromium.launch.call_args
+    kwargs = launch_call.kwargs if launch_call else {}
+    assert kwargs.get("proxy") == {
+        "server": "http://pool.proxys.io:10000",
+        "username": "u",
+        "password": "p",
+    }
+    assert kwargs.get("headless") is True
+    await manager.stop()
 
 
 @pytest.mark.asyncio
@@ -312,6 +442,8 @@ async def test_search_returns_provider_not_configured_without_proxy():
     manager = apw.AvitoBrowserManager(proxy_url="")
     result = await manager.search("moskva", 0, 1_000_000, limit=10)
     assert result["error"] == "provider_not_configured"
+    assert result["meta"]["captcha_detected"] is False
+    assert result["meta"]["blocked_detected"] is False
 
 
 @pytest.mark.asyncio

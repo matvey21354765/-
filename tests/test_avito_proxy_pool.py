@@ -77,8 +77,8 @@ async def test_503_no_exit_node_switches_port(monkeypatch):
     ])
 
     pool = app.AvitoProxyPool()
-    port = await pool.select_working_proxy()
-    assert port == 10002
+    endpoint = await pool.select_working_proxy()
+    assert endpoint.port == 10002
     assert pool.summary()["last_attempted_ports_count"] == 3
 
 
@@ -112,8 +112,8 @@ async def test_timeout_switches_port(monkeypatch):
     )
 
     pool = app.AvitoProxyPool()
-    port = await pool.select_working_proxy()
-    assert port is None
+    endpoint = await pool.select_working_proxy()
+    assert endpoint is None
 
 
 @pytest.mark.asyncio
@@ -133,7 +133,7 @@ async def test_working_port_reused(monkeypatch):
     pool = app.AvitoProxyPool()
     p1 = await pool.select_working_proxy()
     p2 = await pool.select_working_proxy()
-    assert p1 == p2 == 10000
+    assert p1.port == p2.port == 10000
     assert pool.summary()["last_attempted_ports_count"] == 1
 
 
@@ -149,8 +149,8 @@ async def test_check_limit_respected(monkeypatch):
     _patch_requests_get(monkeypatch, [(503, "No exit node")] * 5)
 
     pool = app.AvitoProxyPool()
-    port = await pool.select_working_proxy()
-    assert port is None
+    endpoint = await pool.select_working_proxy()
+    assert endpoint is None
     assert pool.summary()["last_attempted_ports_count"] == 5
 
 
@@ -166,10 +166,10 @@ async def test_port_stable_during_search(monkeypatch):
     _patch_requests_get(monkeypatch, [(200, '{"ip": "1.2.3.4"}')])
 
     pool = app.AvitoProxyPool()
-    port = await pool.select_working_proxy()
-    assert port == 10000
+    endpoint = await pool.select_working_proxy()
+    assert endpoint.port == 10000
     current = pool.get_current_proxy()
-    assert current["port"] == 10000
+    assert current.port == 10000
     assert pool.get_playwright_config()["server"] == "http://pool.proxys.io:10000"
 
 
@@ -188,10 +188,10 @@ async def test_mark_failed_rotates_to_next_port(monkeypatch):
 
     pool = app.AvitoProxyPool()
     p1 = await pool.select_working_proxy()
-    await pool.mark_failed(p1, "no_exit_node")
+    await pool.mark_failed(p1.port, "no_exit_node")
     p2 = await pool.select_working_proxy()
-    assert p1 == 10000
-    assert p2 == 10001
+    assert p1.port == 10000
+    assert p2.port == 10001
 
 
 def test_pool_not_configured_without_credentials(monkeypatch):
