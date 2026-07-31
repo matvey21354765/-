@@ -54,6 +54,7 @@ class AvitoProxyPool:
         self._current_since: float = 0.0
         self._last_success_port: int | None = None
         self._attempted_count: int = 0
+        self._idx: int = 0
         self._lock = asyncio.Lock()
 
     @staticmethod
@@ -182,8 +183,10 @@ class AvitoProxyPool:
             if self._current_port and (now - self._current_since) < self.sticky_seconds:
                 ports_to_try.append(self._current_port)
 
-            # Затем стартуем с последнего успешного порта
+            # Затем стартуем с последнего успешного порта или с текущего индекса кругового перебора
             start = self._last_success_port or self._current_port
+            if start is None:
+                start = self.port_start + self._idx
             for p in self._iter_ports(start):
                 if p not in ports_to_try:
                     ports_to_try.append(p)
@@ -227,6 +230,9 @@ class AvitoProxyPool:
                 "blocked",
             ):
                 self._last_success_port = None
+            total = self.port_end - self.port_start + 1
+            if total > 0:
+                self._idx = (self._idx + 1) % total
 
     async def mark_success(self, port: int | None) -> None:
         async with self._lock:
@@ -234,6 +240,9 @@ class AvitoProxyPool:
                 self._last_success_port = port
                 self._current_port = port
                 self._current_since = time.time()
+                total = self.port_end - self.port_start + 1
+                if total > 0:
+                    self._idx = (port - self.port_start) % total
 
     def get_current_proxy(self) -> dict[str, Any] | None:
         if not self._current_port:

@@ -1,6 +1,6 @@
 """Серверный headless Playwright-провайдер для Avito.
 
-Telegram-бот → серверный Playwright worker → AVITO_PROXY_URL → Avito.
+Telegram-бот → серверный Playwright worker → резидентский proxy pool / AVITO_PROXY_URL → Avito.
 """
 from __future__ import annotations
 
@@ -12,6 +12,8 @@ import re
 import time
 from typing import Any, Optional
 from urllib.parse import urlencode, urlparse
+
+from avito_proxy_pool import AvitoProxyPool, get_avito_proxy_pool
 
 try:
     from playwright.async_api import async_playwright, Page, Browser, BrowserContext, Playwright
@@ -58,7 +60,6 @@ def _parse_proxy_url(raw: str) -> dict:
 
 def _safe_proxy_summary(config: dict) -> dict[str, Any]:
     server = config.get("server", "")
-    # server = scheme://host:port
     host_port = server.split("://", 1)[-1] if "://" in server else server
     return {
         "proxy_configured": True,
@@ -104,6 +105,23 @@ def _detect_page_state(text: str, status: int | None = None) -> dict[str, Any]:
     return result
 
 
+def _proxy_error_restartable(error: str | None) -> bool:
+    """Ошибки, при которых можно один раз переключить порт и повторить поиск."""
+    if not error:
+        return False
+    return error in {
+        "no_exit_node",
+        "proxy_auth",
+        "proxy_connect",
+        "proxy_timeout",
+        "proxy_dns",
+        "proxy_error",
+        "proxy_unavailable",
+        "blocked",
+        "captcha",
+    }
+
+
 class AvitoBrowserManager:
     def __init__(
         self,
@@ -121,9 +139,13 @@ class AvitoBrowserManager:
         self.max_concurrent = int(max_concurrent_pages or os.getenv("AVITO_MAX_CONCURRENT_PAGES", "1"))
         self.restart_after = int(restart_after_searches or os.getenv("AVITO_BROWSER_RESTART_AFTER_SEARCHES", "50"))
 
+        # Резидентский пул имеет приоритет. AVITO_PROXY_URL — fallback.
+        self._proxy_pool: AvitoProxyPool | None = None
+        if self._pool_configured():
+            self._proxy_pool = get_avito_proxy_pool()
+
         self._proxy_config: dict | None = None
-        if self.proxy_url:
-            self._proxy_config = _parse_proxy_url(self.proxy_url)
+        self._launch_proxy_config: dict | None = None
 
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
@@ -133,10 +155,48 @@ class AvitoBrowserManager:
         self._search_count = 0
         self._started = False
 
+    @staticmethod
+    def _pool_configured() -> bool:
+        host = os.getenv("AVITO_PROXY_HOST", "").strip()
+        try:
+            start = int(os.getenv("AVITO_PROXY_PORT_START", "0") or 0)
+            end = int(os.getenv("AVITO_PROXY_PORT_END", "0") or 0)
+        except (TypeError, ValueError):
+            start = end = 0
+        user = os.getenv("AVITO_PROXY_USERNAME", "").strip()
+        pwd = os.getenv("AVITO_PROXY_PASSWORD", "").strip()
+        return bool(host and start and end >= start and user and pwd)
+
     def proxy_summary(self) -> dict[str, Any]:
+        if self._proxy_pool and self._proxy_pool.configured:
+            return {
+                **self._proxy_pool.summary(),
+                "proxy_configured": self._proxy_config is not None,
+            }
         if not self._proxy_config:
             return {"proxy_configured": False}
         return _safe_proxy_summary(self._proxy_config)
+
+    async def _resolve_proxy(self) -> bool:
+        """Выбирает/парсит прокси. Возвращает True если готов к запуску."""
+        if self._proxy_pool and self._proxy_pool.configured:
+            port = await self._proxy_pool.select_working_proxy()
+            if port is None:
+                self._proxy_config = None
+                return False
+            self._proxy_config = self._proxy_pool.get_playwright_config()
+            return True
+
+        if self.proxy_url:
+            try:
+                self._proxy_config = _parse_proxy_url(self.proxy_url)
+                return True
+            except Exception:
+                self._proxy_config = None
+                return False
+
+        self._proxy_config = None
+        return False
 
     async def start(self) -> None:
         async with self._lock:
@@ -144,20 +204,51 @@ class AvitoBrowserManager:
                 return
             if async_playwright is None:
                 raise AvitoPlaywrightConfigError("playwright не установлен")
+            if not await self._resolve_proxy():
+                raise AvitoPlaywrightConfigError("Avito proxy не настроен")
+            await self._launch()
+
+    async def _launch(self) -> None:
+        if self._playwright is None:
             self._playwright = await async_playwright().start()
-            launch_kwargs: dict[str, Any] = {
-                "headless": self.headless,
-                "args": [
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                ],
-            }
-            if self._proxy_config:
-                launch_kwargs["proxy"] = self._proxy_config
-            self._browser = await self._playwright.chromium.launch(**launch_kwargs)
-            self._context = await self._browser.new_context()
-            self._started = True
+        launch_kwargs: dict[str, Any] = {
+            "headless": self.headless,
+            "args": [
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+            ],
+        }
+        if self._proxy_config:
+            launch_kwargs["proxy"] = self._proxy_config
+        self._browser = await self._playwright.chromium.launch(**launch_kwargs)
+        self._context = await self._browser.new_context()
+        self._launch_proxy_config = dict(self._proxy_config) if self._proxy_config else None
+        self._started = True
+
+    async def _ensure_browser(self) -> None:
+        """Запускает или перезапускает браузер, если прокси изменился."""
+        if not self._started:
+            await self.start()
+            return
+        if self._proxy_config != self._launch_proxy_config:
+            await self._restart_same_pool()
+
+    async def _restart_same_pool(self) -> None:
+        await self.stop()
+        await self._launch()
+
+    async def _restart_with_new_proxy(self) -> bool:
+        """Переключает порт (если пул) и перезапускает browser. Максимум один раз."""
+        if self._proxy_pool:
+            port = self._proxy_pool.get_current_proxy()
+            await self._proxy_pool.mark_failed(port.get("port") if port else None, "restart")
+            await self._proxy_pool.reset_current_proxy()
+        if not await self._resolve_proxy():
+            return False
+        await self.stop()
+        await self._launch()
+        return True
 
     async def stop(self) -> None:
         async with self._lock:
@@ -180,6 +271,7 @@ class AvitoBrowserManager:
                     pass
                 self._playwright = None
             self._started = False
+            self._launch_proxy_config = None
             self._search_count = 0
 
     async def restart(self) -> None:
@@ -187,8 +279,7 @@ class AvitoBrowserManager:
         await self.start()
 
     async def get_browser(self) -> Browser:
-        if not self._started:
-            await self.start()
+        await self._ensure_browser()
         if self._browser is None:
             raise AvitoPlaywrightError("browser_not_started", "Браузер не запущен")
         return self._browser
@@ -225,11 +316,12 @@ class AvitoBrowserManager:
             "blocked_detected": False,
             "final_url": None,
         }
-        if not self._proxy_config:
+        if not await self._resolve_proxy():
             result["error"] = "provider_not_configured"
             return result
         page = None
         try:
+            await self._ensure_browser()
             page = await self.new_page()
             resp = await page.goto(
                 "https://www.avito.ru/",
@@ -247,6 +339,8 @@ class AvitoBrowserManager:
             err_text = str(exc).lower()
             if "407" in err_text or "proxy authentication" in err_text:
                 result["error"] = "proxy_auth"
+            elif "no exit node" in err_text or "unable to assign node" in err_text:
+                result["error"] = "no_exit_node"
             elif "403" in err_text and "connect" in err_text:
                 result["error"] = "proxy_connect_forbidden"
             elif "timeout" in err_text:
@@ -283,71 +377,85 @@ class AvitoBrowserManager:
         }
         result = {"items": [], "error": None, "meta": meta}
 
-        if not self._proxy_config:
-            result["error"] = "provider_not_configured"
+        if not await self._resolve_proxy():
+            if self._proxy_pool and self._proxy_pool.configured:
+                result["error"] = "proxy_unavailable"
+            else:
+                result["error"] = "provider_not_configured"
             meta["elapsed_ms"] = int((time.time() - started_at) * 1000)
             return result
 
         async with self._semaphore:
-            page = None
-            try:
-                if self._search_count >= self.restart_after > 0:
-                    await self.restart()
-
-                page = await self.new_page()
-                url = self._build_search_url(city, price_min, price_max, query)
-                resp = await page.goto(
-                    url,
-                    wait_until="domcontentloaded",
-                    timeout=self.navigation_timeout * 1000,
-                )
-                meta["final_url"] = page.url
-
-                # Ждём контейнер объявлений ограниченное время
+            retry_once = True
+            while True:
+                page = None
                 try:
-                    await page.wait_for_selector('[data-marker="item"]', timeout=5000)
-                except Exception:
-                    pass
+                    if self._search_count >= self.restart_after > 0:
+                        await self.restart()
+                    else:
+                        await self._ensure_browser()
 
-                text = await page.content()
-                state = _detect_page_state(text, status=resp.status if resp else None)
-                meta["captcha_detected"] = state["captcha_detected"]
-                meta["blocked_detected"] = state["blocked_detected"]
-                if state["error"]:
-                    result["error"] = state["error"]
+                    page = await self.new_page()
+                    url = self._build_search_url(city, price_min, price_max, query)
+                    resp = await page.goto(
+                        url,
+                        wait_until="domcontentloaded",
+                        timeout=self.navigation_timeout * 1000,
+                    )
+                    meta["final_url"] = page.url
+
+                    try:
+                        await page.wait_for_selector('[data-marker="item"]', timeout=5000)
+                    except Exception:
+                        pass
+
+                    text = await page.content()
+                    state = _detect_page_state(text, status=resp.status if resp else None)
+                    meta["captcha_detected"] = state["captcha_detected"]
+                    meta["blocked_detected"] = state["blocked_detected"]
+                    if state["error"]:
+                        result["error"] = state["error"]
+                        if retry_once and self._proxy_pool and _proxy_error_restartable(state["error"]):
+                            retry_once = False
+                            await self._restart_with_new_proxy()
+                            continue
+                        meta["elapsed_ms"] = int((time.time() - started_at) * 1000)
+                        return result
+
+                    raw_items = await self._extract_items(page)
+                    meta["raw_items_count"] = len(raw_items)
+                    items = [self._normalize_item(it) for it in raw_items if self._item_has_url(it)]
+                    meta["normalized_items_count"] = len(items)
+                    result["items"] = items[:limit]
+                    self._search_count += 1
+                    if self._proxy_pool:
+                        await self._proxy_pool.mark_success(self._proxy_pool.get_current_proxy().get("port") if self._proxy_pool.get_current_proxy() else None)
                     meta["elapsed_ms"] = int((time.time() - started_at) * 1000)
                     return result
-
-                raw_items = await self._extract_items(page)
-                meta["raw_items_count"] = len(raw_items)
-                items = [self._normalize_item(it) for it in raw_items if self._item_has_url(it)]
-                meta["normalized_items_count"] = len(items)
-                result["items"] = items[:limit]
-                self._search_count += 1
-            except Exception as exc:
-                err_text = str(exc).lower()
-                if "407" in err_text or "proxy authentication" in err_text:
-                    result["error"] = "proxy_auth"
-                elif "403" in err_text and "connect" in err_text:
-                    result["error"] = "proxy_connect_forbidden"
-                elif "timeout" in err_text:
-                    result["error"] = "timeout"
-                else:
-                    result["error"] = "network_error"
-                # Один контролируемный restart при падении
-                if self._started:
-                    try:
-                        await self.restart()
-                    except Exception:
-                        pass
-            finally:
-                if page:
-                    try:
-                        await page.close()
-                    except Exception:
-                        pass
-            meta["elapsed_ms"] = int((time.time() - started_at) * 1000)
-        return result
+                except Exception as exc:
+                    err_text = str(exc).lower()
+                    if "407" in err_text or "proxy authentication" in err_text:
+                        result["error"] = "proxy_auth"
+                    elif "no exit node" in err_text or "unable to assign node" in err_text:
+                        result["error"] = "no_exit_node"
+                    elif "403" in err_text and "connect" in err_text:
+                        result["error"] = "proxy_connect_forbidden"
+                    elif "timeout" in err_text:
+                        result["error"] = "timeout"
+                    else:
+                        result["error"] = "network_error"
+                    if retry_once and self._proxy_pool and _proxy_error_restartable(result["error"]):
+                        retry_once = False
+                        await self._restart_with_new_proxy()
+                        continue
+                    meta["elapsed_ms"] = int((time.time() - started_at) * 1000)
+                    return result
+                finally:
+                    if page:
+                        try:
+                            await page.close()
+                        except Exception:
+                            pass
 
     def _build_search_url(
         self,
@@ -373,7 +481,6 @@ class AvitoBrowserManager:
         """Извлекает сырые объявления из JSON-LD, inline JSON, data-атрибутов."""
         items: list[dict] = []
         try:
-            # Пробуем структурированные JSON-LD
             items = await page.evaluate("""
                 () => {
                     const out = [];
@@ -396,7 +503,6 @@ class AvitoBrowserManager:
             pass
 
         if not items:
-            # data-marker="item" fallback
             try:
                 items = await page.evaluate("""
                     () => {

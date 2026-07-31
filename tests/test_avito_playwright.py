@@ -1,7 +1,6 @@
 """Тесты серверного Playwright-провайдера Avito.
 
-Тесты не запускают реальный Chromium без необходимости — для этого используются
-unit-проверки логики и мок-объекты.
+Тесты не запускают реальный Chromium — используются unit-проверки логики и моки.
 """
 import asyncio
 import os
@@ -10,13 +9,15 @@ from unittest import mock
 import pytest
 
 import avito_playwright as apw
+import avito_proxy_pool as app
 
 
 class FakePage:
-    def __init__(self, content: str = "", url: str = "", status: int = 200):
+    def __init__(self, content: str = "", url: str = "", status: int = 200, items=None):
         self._content = content
         self.url = url
         self._status = status
+        self._items = items or []
         self.closed = False
         self.routes = []
         self.defaults = {}
@@ -41,7 +42,7 @@ class FakePage:
         return None
 
     async def evaluate(self, script):
-        return []
+        return self._items
 
     async def close(self):
         self.closed = True
@@ -87,14 +88,87 @@ class FakePlaywrightFactory:
         return pw
 
 
+class FakeProxyPool:
+    """Мок резидентского пула для проверки логики restart/rotate."""
+
+    def __init__(self, ports=None, fail_with=None):
+        self.ports = list(ports or [10000, 10001, 10002])
+        self.fail_with = fail_with
+        self._idx = 0
+        self.current = None
+        self.checks = []
+        self.failed = []
+        self._configured = True
+
+    @property
+    def configured(self):
+        return self._configured
+
+    def summary(self):
+        return {
+            "proxy_pool": self._configured,
+            "proxy_host_safe": "pool.proxys.io",
+            "ports_range": "10000-10999",
+            "credentials_present": True,
+            "current_port": self.current,
+            "last_attempted_ports_count": len(self.checks),
+        }
+
+    def get_playwright_config(self):
+        if self.current is None:
+            return None
+        return {
+            "server": f"http://pool.proxys.io:{self.current}",
+            "username": "u",
+            "password": "p",
+        }
+
+    async def select_working_proxy(self):
+        self.checks.append(self.ports[self._idx])
+        if self.fail_with:
+            return None
+        self.current = self.ports[self._idx]
+        return self.current
+
+    async def mark_failed(self, port, error):
+        self.failed.append((port, error))
+        if port == self.current:
+            self.current = None
+        self._idx = (self._idx + 1) % len(self.ports)
+
+    async def mark_success(self, port):
+        pass
+
+    async def reset_current_proxy(self):
+        self.current = None
+        self._idx = (self._idx + 1) % len(self.ports)
+
+    def get_current_proxy(self):
+        if self.current is None:
+            return None
+        return {"host": "pool.proxys.io", "port": self.current, "protocol": "http"}
+
+
+def _patch_playwright(monkeypatch, browser=None):
+    browser = browser or FakeBrowser()
+    factory = FakePlaywrightFactory(browser)
+    monkeypatch.setattr(apw, "async_playwright", lambda: factory)
+    return browser
+
+
 def test_env_disabled_does_not_start_browser(monkeypatch):
     monkeypatch.setenv("AVITO_ENABLED", "false")
     monkeypatch.setenv("AVITO_PROVIDER", "disabled")
-    # Перезагрузка модуля не нужна: проверяем, что менеджер без прокси
-    # возвращает provider_not_configured.
     manager = apw.AvitoBrowserManager(proxy_url="")
     assert manager._proxy_config is None
     assert manager.proxy_summary() == {"proxy_configured": False}
+
+
+def test_autoru_proxy_url_ignored(monkeypatch):
+    monkeypatch.setenv("AUTORU_PROXY_URL", "http://bad:bad@host:1")
+    monkeypatch.setenv("AVITO_PROXY_URL", "")
+    manager = apw.AvitoBrowserManager()
+    assert manager.proxy_url == ""
 
 
 def test_only_avito_proxy_url_used(monkeypatch):
@@ -102,6 +176,12 @@ def test_only_avito_proxy_url_used(monkeypatch):
     monkeypatch.setenv("AVITO_PROXY_URL", "http://user:pass@avito-proxy:8080")
     manager = apw.AvitoBrowserManager()
     assert manager.proxy_url == "http://user:pass@avito-proxy:8080"
+
+
+@pytest.mark.asyncio
+async def test_resolve_proxy_uses_avito_url():
+    manager = apw.AvitoBrowserManager(proxy_url="http://user:pass@avito-proxy:8080")
+    assert await manager._resolve_proxy() is True
     assert manager._proxy_config == {
         "server": "http://avito-proxy:8080",
         "username": "user",
@@ -111,6 +191,7 @@ def test_only_avito_proxy_url_used(monkeypatch):
 
 def test_safe_proxy_summary_hides_credentials():
     manager = apw.AvitoBrowserManager(proxy_url="http://user:pass@host:1234")
+    asyncio.run(manager._resolve_proxy())
     summary = manager.proxy_summary()
     assert summary["proxy_configured"] is True
     assert summary["proxy_host_safe"] == "host:1234"
@@ -128,10 +209,7 @@ def test_parse_proxy_url_supports_socks5():
 
 @pytest.mark.asyncio
 async def test_browser_reused_between_searches(monkeypatch):
-    browser = FakeBrowser()
-    factory = FakePlaywrightFactory(browser)
-    monkeypatch.setattr(apw, "async_playwright", lambda: factory)
-
+    browser = _patch_playwright(monkeypatch)
     manager = apw.AvitoBrowserManager(proxy_url="http://u:p@h:1")
     await manager.start()
     b1 = await manager.get_browser()
@@ -144,15 +222,14 @@ async def test_browser_reused_between_searches(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_new_page_closed_in_finally(monkeypatch):
-    browser = FakeBrowser()
-    factory = FakePlaywrightFactory(browser)
-    monkeypatch.setattr(apw, "async_playwright", lambda: factory)
-
+    _patch_playwright(monkeypatch)
     manager = apw.AvitoBrowserManager(proxy_url="http://u:p@h:1")
+    await manager.start()
     page = await manager.new_page()
     assert isinstance(page, FakePage)
     await page.close()
     assert page.closed is True
+    await manager.stop()
 
 
 @pytest.mark.asyncio
@@ -166,24 +243,24 @@ async def test_semaphore_limits_concurrency():
 
 @pytest.mark.asyncio
 async def test_healthcheck_detects_captcha(monkeypatch):
-    browser = FakeBrowser()
-    factory = FakePlaywrightFactory(browser)
-    monkeypatch.setattr(apw, "async_playwright", lambda: factory)
-
+    _patch_playwright(monkeypatch)
     manager = apw.AvitoBrowserManager(proxy_url="http://u:p@h:1")
-    # Подменяем new_page, чтобы вернуть страницу с капчей
-    fake_page = FakePage(content='<html>smartcaptcha</html>', url="https://www.avito.ru/")
+    await manager.start()
+    fake_page = FakePage(content="<html>smartcaptcha</html>", url="https://www.avito.ru/")
     manager.new_page = mock.AsyncMock(return_value=fake_page)
 
     hc = await manager.healthcheck()
     assert hc["ok"] is False
     assert hc["captcha_detected"] is True
     assert hc["error"] == "captcha"
+    await manager.stop()
 
 
 @pytest.mark.asyncio
 async def test_healthcheck_detects_connect_403(monkeypatch):
     manager = apw.AvitoBrowserManager(proxy_url="http://u:p@h:1")
+    manager._resolve_proxy = mock.AsyncMock(return_value=True)
+    manager._ensure_browser = mock.AsyncMock()
     manager.new_page = mock.AsyncMock(
         side_effect=Exception("Proxy connect 403 forbidden")
     )
@@ -194,18 +271,38 @@ async def test_healthcheck_detects_connect_403(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_search_returns_blocked_on_captcha(monkeypatch):
-    browser = FakeBrowser()
-    factory = FakePlaywrightFactory(browser)
-    monkeypatch.setattr(apw, "async_playwright", lambda: factory)
-
+    _patch_playwright(monkeypatch)
     manager = apw.AvitoBrowserManager(proxy_url="http://u:p@h:1")
-    fake_page = FakePage(content='<html>captcha</html>', url="https://www.avito.ru/moskva/avtomobili")
+    await manager.start()
+    fake_page = FakePage(
+        content="<html>captcha</html>",
+        url="https://www.avito.ru/moskva/avtomobili",
+    )
     manager.new_page = mock.AsyncMock(return_value=fake_page)
 
     result = await manager.search("moskva", 0, 1_000_000, limit=10)
     assert result["error"] == "captcha"
     assert result["items"] == []
     assert result["meta"]["captcha_detected"] is True
+    await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_search_returns_blocked_on_429(monkeypatch):
+    _patch_playwright(monkeypatch)
+    manager = apw.AvitoBrowserManager(proxy_url="http://u:p@h:1")
+    await manager.start()
+    fake_page = FakePage(
+        content="<html>доступ ограничен</html>",
+        url="https://www.avito.ru/moskva/avtomobili",
+        status=429,
+    )
+    manager.new_page = mock.AsyncMock(return_value=fake_page)
+
+    result = await manager.search("moskva", 0, 1_000_000, limit=10)
+    assert result["error"] == "blocked"
+    assert result["meta"]["blocked_detected"] is True
+    await manager.stop()
 
 
 @pytest.mark.asyncio
@@ -217,17 +314,13 @@ async def test_search_returns_provider_not_configured_without_proxy():
 
 @pytest.mark.asyncio
 async def test_search_restarts_after_limit(monkeypatch):
-    browser = FakeBrowser()
-    factory = FakePlaywrightFactory(browser)
-    monkeypatch.setattr(apw, "async_playwright", lambda: factory)
-
+    browser = _patch_playwright(monkeypatch)
     manager = apw.AvitoBrowserManager(
         proxy_url="http://u:p@h:1",
         restart_after_searches=1,
     )
+    await manager.start()
     manager._search_count = 1
-    manager._started = True
-    manager._browser = browser
 
     restart_called = {"n": 0}
     orig_restart = manager.restart
@@ -238,32 +331,44 @@ async def test_search_restarts_after_limit(monkeypatch):
 
     manager.restart = tracked_restart
 
-    fake_page = FakePage(content='<html>ok</html>', url="https://www.avito.ru/moskva/avtomobili")
+    fake_page = FakePage(content="<html>ok</html>", url="https://www.avito.ru/moskva/avtomobili")
     manager.new_page = mock.AsyncMock(return_value=fake_page)
 
     await manager.search("moskva", 0, 1_000_000, limit=10)
     assert restart_called["n"] == 1
+    await manager.stop()
 
 
 @pytest.mark.asyncio
-async def test_browser_crash_single_restart(monkeypatch):
-    manager = apw.AvitoBrowserManager(proxy_url="http://u:p@h:1")
-    manager._started = True
-    manager._browser = FakeBrowser()
+async def test_browser_restarts_once_on_pool_no_exit_node(monkeypatch):
+    """При no_exit_node browser перезапускается с новым портом максимум один раз."""
+    pool = FakeProxyPool(ports=[10000, 10001])
+    monkeypatch.setattr(apw, "get_avito_proxy_pool", mock.AsyncMock(return_value=pool))
 
-    calls = {"restart": 0}
+    _patch_playwright(monkeypatch)
+    manager = apw.AvitoBrowserManager(proxy_url="")
+    manager._proxy_pool = pool
+    await manager.start()
 
-    async def fake_restart():
-        calls["restart"] += 1
+    calls = {"n": 0}
 
-    manager.restart = fake_restart
-    manager.new_page = mock.AsyncMock(side_effect=RuntimeError("browser crashed"))
+    async def fake_extract_items(page):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("no exit node")
+        return []
+
+    manager._extract_items = fake_extract_items
+
     result = await manager.search("moskva", 0, 1_000_000, limit=10)
-    assert result["error"] is not None
-    assert calls["restart"] == 1
+    assert result["error"] == "no_exit_node"
+    assert calls["n"] == 2
+    assert any(port == 10000 for port, _ in pool.failed)
+    await manager.stop()
 
 
-def test_detect_page_state_blocked():
+@pytest.mark.asyncio
+async def test_detect_page_state_blocked():
     state = apw._detect_page_state("доступ ограничен", status=429)
     assert state["error"] == "blocked"
     assert state["blocked_detected"] is True
@@ -341,3 +446,24 @@ async def test_search_avito_uses_singleton(monkeypatch):
     apw._avito_manager = manager
     result = await apw.search_avito("moskva", 0, 1000000)
     assert result == {"items": [], "error": None, "meta": {}}
+
+
+def test_detect_page_state_403_connect_forbidden():
+    state = apw._detect_page_state("connect tunnel failed", status=403)
+    assert state["error"] == "proxy_connect_forbidden"
+
+
+def test_captcha_not_solved():
+    state = apw._detect_page_state("<div class=""captcha"">solve me</div>")
+    assert state["captcha_detected"] is True
+    assert state["error"] == "captcha"
+
+
+def test_avito_error_does_not_break_other_sources(monkeypatch):
+    """Ошибка Avito не ломает остальные источники — проверяем, что search возвращает структуру."""
+    manager = apw.AvitoBrowserManager(proxy_url="")
+    result = asyncio.run(manager.search("moskva", 0, 1000000, limit=10))
+    assert "items" in result
+    assert "error" in result
+    assert "meta" in result
+    assert result["error"] == "provider_not_configured"

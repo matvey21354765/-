@@ -8523,16 +8523,20 @@ def _avito_status_for_key(key: tuple, now: float | None = None) -> dict:
             "status": status,
             "last_http": entry.get("last_http"),
             "next_attempt_at": float(entry.get("next_attempt_at", 0.0)),
+            "error": entry.get("error"),
         }
 
 
 def _avito_stat_text(status: dict, count: int) -> str:
     """Текст статистики Авито для Telegram."""
     st = status.get("status", "blocked")
-    if st == "not_configured":
+    err = status.get("error")
+    if st == "not_configured" or err == "provider_not_configured":
         return "🔵 Avito пока не настроен"
-    if st in ("cooldown", "blocked") and status.get("last_http") in (403, 429):
-        return "🔵 Avito временно ограничил доступ. Показываю результаты с остальных площадок"
+    if err in ("proxy_unavailable", "no_exit_node"):
+        return "🔵 Avito: резидентский прокси временно недоступен"
+    if st in ("cooldown", "blocked") and status.get("last_http") in (403, 429, 503):
+        return "🔵 Avito временно ограничил доступ. Показываю остальные площадки"
     if count:
         return f"🔵 Avito: найдено {count} объявлений"
     return "🔵 Avito: новых объявлений нет"
@@ -8789,11 +8793,17 @@ async def _avito_scheduled_fetch_unlocked(
 
     region, price_min, price_max, sort_by_date, brand = key
     try:
-        if AVITO_PROVIDER == "playwright" and not os.getenv("AVITO_PROXY_URL", "").strip():
-            with _AVITO_SCHEDULE_LOCK:
-                entry.update({"status": "not_configured", "in_flight": False})
-                _AVITO_STATUS.update({"status": "not_configured", "blocked": False})
-            return []
+        if AVITO_PROVIDER == "playwright":
+            pool_ok = bool(
+                AvitoBrowserManager is not None
+                and AvitoBrowserManager._pool_configured()
+            )
+            url_ok = bool(os.getenv("AVITO_PROXY_URL", "").strip())
+            if not (pool_ok or url_ok):
+                with _AVITO_SCHEDULE_LOCK:
+                    entry.update({"status": "not_configured", "in_flight": False})
+                    _AVITO_STATUS.update({"status": "not_configured", "blocked": False})
+                return []
         if AVITO_PROVIDER == "rest_app":
             provider = RestAppAvitoProvider()
             provider_items = provider.search(
@@ -8871,15 +8881,38 @@ async def _avito_scheduled_fetch_unlocked(
             )
             if pw_result.get("error"):
                 error = pw_result["error"]
+                if error in {"proxy_unavailable", "no_exit_node"}:
+                    with _AVITO_SCHEDULE_LOCK:
+                        entry.update({
+                            "status": "blocked",
+                            "error": error,
+                            "in_flight": False,
+                        })
+                        _AVITO_STATUS.update({
+                            "status": "blocked",
+                            "last_http": 503,
+                            "error": error,
+                        })
+                    _avito_diag("причина", f"Avito proxy unavailable: {error}")
+                    return list(entry.get("items", []))
                 if error in {"captcha", "blocked", "proxy_auth", "proxy_connect_forbidden"}:
                     raise AvitoBlockedError(
                         f"Avito Playwright blocked: {error}",
                         status_code=429 if error in {"captcha", "blocked"} else 403,
                     )
                 if error == "provider_not_configured":
-                    raise AvitoPlaywrightConfigError(
-                        "AVITO_PROXY_URL is not configured"
-                    )
+                    with _AVITO_SCHEDULE_LOCK:
+                        entry.update({
+                            "status": "blocked",
+                            "error": error,
+                            "in_flight": False,
+                        })
+                        _AVITO_STATUS.update({
+                            "status": "not_configured",
+                            "error": error,
+                        })
+                    _avito_diag("причина", "Avito Playwright not configured")
+                    return list(entry.get("items", []))
                 raise AvitoPlaywrightError(error, f"Avito Playwright error: {error}")
             parsed = []
             today_pw = datetime.date.today()

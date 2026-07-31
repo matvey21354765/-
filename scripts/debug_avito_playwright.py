@@ -5,6 +5,7 @@
 
 Скрипт:
 - запускает AvitoBrowserManager;
+- проверяет пул прокси / AVITO_PROXY_URL;
 - выполняет healthcheck;
 - выполняет один поиск;
 - закрывает browser в finally;
@@ -19,42 +20,38 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from avito_playwright import AvitoBrowserManager
+from avito_proxy_pool import get_avito_proxy_pool
 
 
 async def main() -> int:
-    proxy_url = os.getenv("AVITO_PROXY_URL", "").strip()
     headless = os.getenv("AVITO_HEADLESS", "true").strip().lower() in {"1", "true", "yes", "on"}
+    pool = await get_avito_proxy_pool()
+    pool_summary = pool.summary()
 
     print(f"headless={headless}")
-    print(f"proxy_url_configured={bool(proxy_url)}")
+    print(f"proxy_pool={pool_summary.get('proxy_pool', False)}")
+    print(f"proxy_host_safe={pool_summary.get('proxy_host_safe', '')}")
+    print(f"ports_range={pool_summary.get('ports_range') or ''}")
+    print(f"proxy_url_configured={bool(os.getenv('AVITO_PROXY_URL', '').strip())}")
 
-    if not proxy_url:
-        print("provider_not_configured: AVITO_PROXY_URL не задан")
-        print("error=provider_not_configured")
-        print("raw_items_count=0")
-        print("normalized_items_count=0")
-        print("elapsed_ms=0")
-        return 0
-
-    manager = AvitoBrowserManager(proxy_url=proxy_url, headless=headless)
+    manager = AvitoBrowserManager(headless=headless)
     search_result = None
 
     try:
         hc = await manager.healthcheck()
-        print(f"chromium_started={hc.get('chromium_started')}")
+        print(f"browser_started={hc.get('chromium_started')}")
         print(f"proxy_configured={hc.get('proxy_configured')}")
-        print(f"proxy_protocol={hc.get('proxy_protocol', '')}")
-        print(f"proxy_host_safe={hc.get('proxy_host_safe', '')}")
-        print(f"healthcheck_ok={hc.get('ok')}")
+        print(f"selected_port={pool_summary.get('current_port') or hc.get('proxy_host_safe', '').split(':')[-1] or 'null'}")
+        print(f"neutral_check_ok={hc.get('ok')}")
+        print(f"http_status={hc.get('status') or ''}")
         print(f"final_url={hc.get('final_url') or ''}")
         print(f"captcha_detected={hc.get('captcha_detected')}")
         print(f"blocked_detected={hc.get('blocked_detected')}")
-        print(f"healthcheck_error={hc.get('error') or ''}")
 
         if not hc.get("ok"):
             print(f"error={hc.get('error') or 'unknown'}")
-            print("raw_items_count=0")
-            print("normalized_items_count=0")
+            print("items_count=0")
+            print("elapsed_ms=0")
             return 0
 
         search_result = await manager.search(
@@ -64,12 +61,11 @@ async def main() -> int:
             limit=10,
         )
         meta = search_result.get("meta", {})
-        print(f"search_final_url={meta.get('final_url') or ''}")
-        print(f"search_error={search_result.get('error') or ''}")
+        print(f"avito_opened=true")
+        print(f"final_url={meta.get('final_url') or ''}")
         print(f"captcha_detected={meta.get('captcha_detected')}")
         print(f"blocked_detected={meta.get('blocked_detected')}")
-        print(f"raw_items_count={meta.get('raw_items_count', 0)}")
-        print(f"normalized_items_count={meta.get('normalized_items_count', 0)}")
+        print(f"items_count={meta.get('normalized_items_count', 0)}")
         print(f"elapsed_ms={meta.get('elapsed_ms', 0)}")
 
         for idx, item in enumerate(search_result.get("items", [])[:3], start=1):
