@@ -68,16 +68,16 @@ class ProxyHelpersTestCase(unittest.TestCase):
                 },
             ),
             patch.object(
-                cb, "_curl_cffi_get",
+                __import__("curl_cffi").requests,
+                "Session",
                 side_effect=TimeoutError("connection timed out"),
             ),
         ):
-            self.assertEqual(
-                cb.scrape_autoru(
-                    "krasnodar", pages=1, price_min=0, price_max=100000
-                ),
-                [],
+            result = cb.scrape_autoru(
+                "krasnodar", pages=1, price_min=0, price_max=100000
             )
+            self.assertEqual(result["items"], [])
+            self.assertTrue(result["error"])
         self.assertEqual(cb._AUTORU_LAST_DIAG["error_type"], "network")
         self.assertTrue(cb._autoru_user_error())
 

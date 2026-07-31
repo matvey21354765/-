@@ -3,8 +3,15 @@
 from __future__ import annotations
 
 import os
-from typing import Any
+import inspect
+from typing import Any, TypedDict
 from urllib.parse import urlsplit
+
+
+class AutoRuResult(TypedDict):
+    items: list[dict]
+    error: str | None
+    meta: dict[str, Any]
 
 
 def get_autoru_transport() -> dict[str, Any]:
@@ -63,13 +70,55 @@ def autoru_captcha_detected(
     )
 
 
-def autoru_items_from_result(result: Any) -> list[dict]:
-    """Coerce supported Auto.ru result shapes to the production list contract."""
+def normalize_autoru_result(
+    result: Any,
+    *,
+    default_meta: dict[str, Any] | None = None,
+) -> AutoRuResult:
+    """Normalize current and legacy Auto.ru values to one strict contract."""
 
-    if isinstance(result, list):
-        return [item for item in result if isinstance(item, dict)]
+    meta = dict(default_meta or {})
+    error: str | None = None
+    items_value: Any = None
+
     if isinstance(result, dict):
-        items = result.get("items")
-        if isinstance(items, list):
-            return [item for item in items if isinstance(item, dict)]
-    return []
+        items_value = result.get("items", result.get("results"))
+        raw_meta = result.get("meta")
+        if isinstance(raw_meta, dict):
+            meta.update(raw_meta)
+        raw_error = result.get("error")
+        error = str(raw_error) if raw_error else None
+    elif isinstance(result, list):
+        items_value = result
+    elif isinstance(result, tuple):
+        first = result[0] if result else None
+        if isinstance(first, dict):
+            return normalize_autoru_result(first, default_meta=meta)
+        items_value = first
+    elif result is None:
+        error = "no_result"
+    else:
+        error = f"unsupported_result_type:{type(result).__name__}"
+
+    if isinstance(items_value, list):
+        items = [item for item in items_value if isinstance(item, dict)]
+    else:
+        items = []
+        if error is None:
+            error = f"unsupported_items_type:{type(items_value).__name__}"
+
+    return {"items": items, "error": error, "meta": meta}
+
+
+async def await_autoru_result(result: Any) -> AutoRuResult:
+    """Await an accidental coroutine before applying the strict contract."""
+
+    if inspect.isawaitable(result):
+        result = await result
+    return normalize_autoru_result(result)
+
+
+def autoru_items_from_result(result: Any) -> list[dict]:
+    """Compatibility accessor for callers that only need listings."""
+
+    return normalize_autoru_result(result)["items"]

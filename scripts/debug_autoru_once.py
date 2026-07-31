@@ -8,8 +8,8 @@ import sys
 from dotenv import load_dotenv
 
 from autoru_transport import (
-    autoru_items_from_result,
     get_autoru_transport,
+    normalize_autoru_result,
     proxy_host_safe,
 )
 
@@ -35,14 +35,12 @@ def main() -> int:
         "error_message_safe": "",
     }
     try:
-        items = autoru_items_from_result(
+        autoru_result = normalize_autoru_result(
             control_bot.scrape_autoru(
-                "krasnodar",
-                pages=1,
-                price_min=0,
-                price_max=100000,
-            )
+                "krasnodar", pages=1, price_min=0, price_max=100000
+            ),
         )
+        items = autoru_result["items"]
         diag = dict(control_bot._AUTORU_LAST_DIAG)
         result.update({
             "http_status": diag.get("http_status"),
@@ -52,8 +50,11 @@ def main() -> int:
             "captcha_detected": bool(diag.get("captcha_detected")),
             "raw_items_count": int(diag.get("raw", 0)),
             "normalized_items_count": len(items),
-            "error_type": diag.get("error_type") or None,
-            "error_message_safe": diag.get("error_message_safe", ""),
+            "error_type": autoru_result["error"],
+            "error_message_safe": (
+                autoru_result["error"]
+                or diag.get("error_message_safe", "")
+            ),
         })
     except Exception as exc:
         result["error_type"] = "network"

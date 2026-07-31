@@ -6,7 +6,7 @@ import json
 
 from dotenv import load_dotenv
 
-from autoru_transport import autoru_items_from_result
+from autoru_transport import normalize_autoru_result
 
 
 def main() -> int:
@@ -14,19 +14,22 @@ def main() -> int:
     import control_bot
 
     result = control_bot.scrape_autoru(
-        "voronezh",
+        "krasnodar",
         pages=1,
         price_min=0,
         price_max=100000,
     )
-    items = autoru_items_from_result(result)
+    normalized = normalize_autoru_result(result)
+    items = normalized["items"]
     first = items[0] if items else {}
     output = {
         "result_type": type(result).__name__,
+        "result_keys": sorted(result.keys()) if isinstance(result, dict) else [],
         "items_count": len(items),
         "first_item_title": first.get("title"),
         "first_item_price": first.get("_price_int") or first.get("price"),
         "first_item_url": first.get("url"),
+        "error": normalized["error"],
     }
     print(json.dumps(output, ensure_ascii=False, indent=2))
     return 0 if items else 1

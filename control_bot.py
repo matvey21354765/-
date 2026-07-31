@@ -632,9 +632,12 @@ AVITO_PROXY_ROTATE_URL = os.getenv("AVITO_PROXY_ROTATE_URL", "").strip()
 AUTORU_API_TOKEN = os.getenv("AUTORU_API_TOKEN", "")
 AUTORU_PROXY_URL = os.getenv("AUTORU_PROXY_URL", "").strip()
 from autoru_transport import (
+    AutoRuResult,
     autoru_items_from_result,
+    await_autoru_result,
     autoru_proxies,
     get_autoru_transport,
+    normalize_autoru_result,
 )
 _AUTORU_LAST_DIAG: dict = {
     "request_url": "",
@@ -676,7 +679,6 @@ def _autoru_proxy_dict() -> dict | None:
 def _autoru_user_error(diag: dict | None = None) -> str:
     error_type = str((diag or _AUTORU_LAST_DIAG).get("error_type") or "")
     return {
-        "network": "🟠 Auto.ru временно не ответил.",
         "proxy_auth": "🟠 Auto.ru: ошибка авторизации выделенного прокси.",
         "restriction_captcha": (
             "🟠 Auto.ru временно ограничил доступ с текущего сервера. "
@@ -685,6 +687,9 @@ def _autoru_user_error(diag: dict | None = None) -> str:
         "http_403": "Auto.ru: доступ ограничен",
         "http_429": "Auto.ru: источник временно ограничил доступ",
         "parse_error": "Auto.ru: ошибка формата ответа",
+        "timeout": "Auto.ru временно недоступен",
+        "network": "Auto.ru временно недоступен",
+        "no_result": "Auto.ru временно недоступен",
     }.get(error_type, "")
 
 # Диагностика готовности Auto.ru: Яндекс режет капчей любой «грязный» IP.
@@ -2543,7 +2548,7 @@ def _scrape_autoru_production(
     price_min: int = 0,
     price_max: int = 99_000_000,
     brand: str = "",
-) -> list[dict]:
+) -> AutoRuResult:
     """Single-request production path for Auto.ru."""
     from autoru_transport import (
         autoru_captcha_detected,
@@ -2583,11 +2588,12 @@ def _scrape_autoru_production(
         "error_type": "",
         "error_message_safe": "",
     })
-    session = cffi_requests.Session(
-        impersonate="chrome120",
-        trust_env=False,
-    )
+    session = None
     try:
+        session = cffi_requests.Session(
+            impersonate="chrome120",
+            trust_env=False,
+        )
         response = session.get(
             url,
             headers={
@@ -2618,19 +2624,31 @@ def _scrape_autoru_production(
                 "error_type": "proxy_auth",
                 "error_message_safe": "HTTP 407",
             })
-            return []
+            return normalize_autoru_result({
+                "items": [],
+                "error": "proxy_auth",
+                "meta": dict(_AUTORU_LAST_DIAG),
+            })
         if captcha:
             _AUTORU_LAST_DIAG.update({
                 "error_type": "restriction_captcha",
                 "error_message_safe": f"HTTP {status}; Auto.ru CAPTCHA",
             })
-            return []
+            return normalize_autoru_result({
+                "items": [],
+                "error": "restriction_captcha",
+                "meta": dict(_AUTORU_LAST_DIAG),
+            })
         if status != 200:
             _AUTORU_LAST_DIAG.update({
                 "error_type": "network",
                 "error_message_safe": f"HTTP {status}",
             })
-            return []
+            return normalize_autoru_result({
+                "items": [],
+                "error": f"http_{status}",
+                "meta": dict(_AUTORU_LAST_DIAG),
+            })
 
         raw = _autoru_parse_html(html, datetime.date.today())
         unique: dict[str, dict] = {}
@@ -2650,13 +2668,6 @@ def _scrape_autoru_production(
             "after_location": len(normalized),
             "after_price": len(filtered),
         })
-        if not normalized:
-            _AUTORU_LAST_DIAG.update({
-                "error_type": "parse_error",
-                "error_message_safe": (
-                    "HTTP 200 response contained no recognized listings"
-                ),
-            })
         print(f"[Auto.ru] result_type={type(filtered).__name__}")
         print(f"[Auto.ru] items_before_filter={len(normalized)}")
         print(f"[Auto.ru] items_after_filter={len(filtered)}")
@@ -2667,7 +2678,11 @@ def _scrape_autoru_production(
             "[Auto.ru] first_item_keys="
             f"{sorted(filtered[0].keys()) if filtered else []}"
         )
-        return filtered
+        return normalize_autoru_result({
+            "items": filtered,
+            "error": None,
+            "meta": dict(_AUTORU_LAST_DIAG),
+        })
     except Exception as exc:
         message = str(exc).lower()
         _AUTORU_LAST_DIAG.update({
@@ -2678,9 +2693,14 @@ def _scrape_autoru_production(
             ),
             "error_message_safe": type(exc).__name__,
         })
-        return []
+        return normalize_autoru_result({
+            "items": [],
+            "error": _AUTORU_LAST_DIAG["error_type"],
+            "meta": dict(_AUTORU_LAST_DIAG),
+        })
     finally:
-        session.close()
+        if session is not None:
+            session.close()
         print(
             "[Auto.ru] "
             f"transport={transport['mode']} "
@@ -2692,7 +2712,13 @@ def _scrape_autoru_production(
         )
 
 
-def scrape_autoru(region: str, pages: int = 10, price_min: int = 0, price_max: int = 99_000_000, brand: str = "") -> list[dict]:
+def scrape_autoru(
+    region: str,
+    pages: int = 10,
+    price_min: int = 0,
+    price_max: int = 99_000_000,
+    brand: str = "",
+) -> AutoRuResult:
     return _scrape_autoru_production(
         region,
         price_min=price_min,
@@ -12275,11 +12301,22 @@ async def cmd_global_search(msg: Message):
     src_names = list(scraper_map.keys())
     stat_parts: list[str] = []
     for src, batch in zip(src_names, all_results[:-1]):
-        if isinstance(batch, list):
-            items.extend(batch)
         tag = SOURCE_TAGS.get(src, src)
-        cnt = len(batch) if isinstance(batch, list) else 0
-        stat_parts.append(f"{tag}: {cnt}")
+        if src == "autoru":
+            autoru_result = normalize_autoru_result(batch)
+            autoru_items = autoru_result["items"]
+            items.extend(autoru_items)
+            if autoru_result["error"]:
+                stat_parts.append("Auto.ru временно недоступен")
+            elif autoru_items:
+                stat_parts.append(f"Auto.ru: найдено {len(autoru_items)} объявлений")
+            else:
+                stat_parts.append("Auto.ru: новых объявлений нет")
+        else:
+            if isinstance(batch, list):
+                items.extend(batch)
+            cnt = len(batch) if isinstance(batch, list) else 0
+            stat_parts.append(f"{tag}: {cnt}")
 
     tg_batch = all_results[-1]
     if isinstance(tg_batch, list):
@@ -14061,11 +14098,20 @@ async def do_search_for_user(uid: int, reply_to):
         # Сеть Авито принадлежит исключительно _avito_scheduler_loop.
         awaitable = loop.run_in_executor(None, scraper_map[src])
         try:
-            return await asyncio.wait_for(
+            value = await asyncio.wait_for(
                 awaitable, timeout=source_timeouts.get(src, 25)
             )
+            if src == "autoru":
+                return await await_autoru_result(value)
+            return value
         except asyncio.TimeoutError:
             print(f"  [поиск] {src}: timeout {source_timeouts.get(src, 25)}с")
+            if src == "autoru":
+                return normalize_autoru_result({
+                    "items": [],
+                    "error": "timeout",
+                    "meta": {"caller": "telegram"},
+                })
             return []
 
     source_tasks = [asyncio.create_task(_run_source(src)) for src in src_keys]
@@ -14112,19 +14158,28 @@ async def do_search_for_user(uid: int, reply_to):
             results.append([])
         else:
             if src == "autoru":
-                batch = autoru_items_from_result(value)
+                autoru_result = normalize_autoru_result(value)
+                batch = autoru_result["items"]
+                result_keys = sorted(value.keys()) if isinstance(value, dict) else []
+                items_value = value.get("items") if isinstance(value, dict) else value
+                print("[Auto.ru] caller=telegram")
                 print(f"[Auto.ru] result_type={type(value).__name__}")
-                print(f"[Auto.ru] items_before_filter={len(batch)}")
+                print(f"[Auto.ru] result_keys={result_keys}")
+                print(f"[Auto.ru] items_type={type(items_value).__name__}")
+                print(f"[Auto.ru] items_count_before_filter={len(batch)}")
+                print(f"[Auto.ru] items_count_after_filter={len(batch)}")
+                print(
+                    "[Auto.ru] first_item_type="
+                    f"{type(batch[0]).__name__ if batch else 'none'}"
+                )
                 print(
                     "[Auto.ru] first_item_keys="
                     f"{sorted(batch[0].keys()) if batch else []}"
                 )
-                if value is not None and not isinstance(value, (list, dict)):
+                if autoru_result["error"]:
                     _AUTORU_LAST_DIAG.update({
-                        "error_type": "parse_error",
-                        "error_message_safe": (
-                            f"unsupported result type: {type(value).__name__}"
-                        ),
+                        "error_type": autoru_result["error"],
+                        "error_message_safe": autoru_result["error"],
                     })
                 results.append(batch)
             else:
@@ -14147,8 +14202,17 @@ async def do_search_for_user(uid: int, reply_to):
                 )
             else:
                 stat_parts.append(f"{tag}: {len(batch)}")
-        elif src == "autoru" and not batch and _autoru_user_error():
-            stat_parts.append(_autoru_user_error())
+        elif src == "autoru":
+            if batch:
+                stat_parts.append(f"Auto.ru: найдено {len(batch)} объявлений")
+            elif _AUTORU_LAST_DIAG.get("error_type"):
+                error_type = str(_AUTORU_LAST_DIAG["error_type"])
+                if error_type.startswith(("unsupported_result_type", "unsupported_items_type")):
+                    stat_parts.append("Auto.ru: ошибка формата ответа")
+                else:
+                    stat_parts.append("Auto.ru временно недоступен")
+            else:
+                stat_parts.append("Auto.ru: новых объявлений нет")
         else:
             stat_parts.append(f"{tag}: {len(batch)}")
 
@@ -15674,7 +15738,15 @@ async def _global_monitor_loop():
                     if fut in done_m:
                         try:
                             res = fut.result()
-                            _region_src_cache[key_rs] = res if isinstance(res, list) else []
+                            source = key_rs.rsplit(":", 1)[-1]
+                            if source == "autoru":
+                                _region_src_cache[key_rs] = (
+                                    normalize_autoru_result(res)["items"]
+                                )
+                            else:
+                                _region_src_cache[key_rs] = (
+                                    res if isinstance(res, list) else []
+                                )
                         except Exception:
                             _region_src_cache[key_rs] = []
                     else:

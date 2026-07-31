@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from types import SimpleNamespace
 
 from autoru_transport import (
     autoru_captcha_detected,
     autoru_items_from_result,
+    await_autoru_result,
     autoru_proxies,
     get_autoru_transport,
+    normalize_autoru_result,
     proxy_host_safe,
 )
 import control_bot as cb
@@ -92,6 +95,40 @@ def test_result_contract_accepts_items_mapping():
     assert autoru_items_from_result({"items": items}) == items
 
 
+def test_strict_contract_contains_items_error_and_meta():
+    result = normalize_autoru_result([{"id": "1"}])
+    assert result == {
+        "items": [{"id": "1"}],
+        "error": None,
+        "meta": {},
+    }
+
+
+def test_result_contract_accepts_results_mapping():
+    items = [{"id": "1"}]
+    assert normalize_autoru_result({"results": items})["items"] == items
+
+
+def test_result_contract_accepts_legacy_tuple():
+    items = [{"id": "1"}]
+    assert normalize_autoru_result((items, {"legacy": True}))["items"] == items
+
+
+def test_none_is_a_classified_error():
+    result = normalize_autoru_result(None)
+    assert result["items"] == []
+    assert result["error"] == "no_result"
+
+
+def test_coroutine_is_awaited_before_normalization():
+    async def legacy_search():
+        return [{"id": "1"}]
+
+    result = asyncio.run(await_autoru_result(legacy_search()))
+    assert result["items"] == [{"id": "1"}]
+    assert result["error"] is None
+
+
 def test_result_contract_accepts_empty_list():
     assert autoru_items_from_result([]) == []
 
@@ -118,13 +155,22 @@ def test_price_inside_budget_is_kept():
     assert cb.in_price_range(item, 0, 100000)
 
 
+def test_price_99999_is_kept():
+    item = {"price": "99 999 ₽"}
+    assert cb.in_price_range(item, 0, 100000)
+
+
 class _FakeSession:
     def __init__(self, response):
         self.response = response
         self.calls = 0
+        self.last_url = ""
+        self.last_kwargs = {}
 
-    def get(self, *args, **kwargs):
+    def get(self, url, **kwargs):
         self.calls += 1
+        self.last_url = url
+        self.last_kwargs = kwargs
         return self.response
 
     def close(self):
@@ -159,7 +205,9 @@ def test_http_200_showcaptcha_stops_before_parser(monkeypatch):
             AssertionError("parser must not run for CAPTCHA")
         ),
     )
-    assert cb.scrape_autoru("krasnodar") == []
+    result = cb.scrape_autoru("krasnodar")
+    assert result["items"] == []
+    assert result["error"] == "restriction_captcha"
     assert fake.calls == 1
     assert cb._AUTORU_LAST_DIAG["error_type"] == "restriction_captcha"
 
@@ -182,6 +230,34 @@ def test_http_200_normal_page_is_parsed_once(monkeypatch):
         lambda **kwargs: fake,
     )
     monkeypatch.setattr(cb, "_autoru_parse_html", lambda *args: [listing])
-    assert cb.scrape_autoru("krasnodar", price_max=100000) == [listing]
+    result = cb.scrape_autoru("krasnodar", price_max=100000)
+    assert result["items"] == [listing]
+    assert result["error"] is None
     assert fake.calls == 1
     assert cb._AUTORU_LAST_DIAG["error_type"] == ""
+
+
+def test_krasnodar_uses_region_slug_without_second_text_filter(monkeypatch):
+    fake = _FakeSession(
+        _response(
+            url="https://auto.ru/krasnodarskiy_kray/cars/used/",
+            html="<html>normal listing page</html>",
+        )
+    )
+    listing = {
+        "source": "autoru",
+        "source_id": "43",
+        "title": "Автомобиль из Краснодарского края",
+        "url": "https://auto.ru/cars/used/sale/43/",
+        "_price_int": 99999,
+    }
+    monkeypatch.setattr(
+        "curl_cffi.requests.Session",
+        lambda **kwargs: fake,
+    )
+    monkeypatch.setattr(cb, "_autoru_parse_html", lambda *args: [listing])
+
+    result = cb.scrape_autoru("krasnodar", price_min=0, price_max=100000)
+
+    assert "/krasnodarskiy_kray/" in fake.last_url
+    assert result["items"] == [listing]
