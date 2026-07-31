@@ -140,9 +140,9 @@ class AvitoBrowserManager:
         self.restart_after = int(restart_after_searches or os.getenv("AVITO_BROWSER_RESTART_AFTER_SEARCHES", "50"))
 
         # Резидентский пул имеет приоритет. AVITO_PROXY_URL — fallback.
+        # Инициализация пула — ленивая и только внутри async-методов,
+        # чтобы не сохранять coroutine object в self._proxy_pool.
         self._proxy_pool: AvitoProxyPool | None = None
-        if self._pool_configured():
-            self._proxy_pool = get_avito_proxy_pool()
 
         self._proxy_config: dict | None = None
         self._launch_proxy_config: dict | None = None
@@ -167,10 +167,17 @@ class AvitoBrowserManager:
         pwd = os.getenv("AVITO_PROXY_PASSWORD", "").strip()
         return bool(host and start and end >= start and user and pwd)
 
-    def proxy_summary(self) -> dict[str, Any]:
-        if self._proxy_pool and self._proxy_pool.configured:
+    async def _ensure_proxy_pool(self) -> AvitoProxyPool | None:
+        """Ленивая async-инициализация резидентского пула прокси."""
+        if self._proxy_pool is None and self._pool_configured():
+            self._proxy_pool = await get_avito_proxy_pool()
+        return self._proxy_pool
+
+    async def proxy_summary(self) -> dict[str, Any]:
+        pool = await self._ensure_proxy_pool()
+        if pool and pool.configured:
             return {
-                **self._proxy_pool.summary(),
+                **pool.summary(),
                 "proxy_configured": self._proxy_config is not None,
             }
         if not self._proxy_config:
@@ -179,12 +186,13 @@ class AvitoBrowserManager:
 
     async def _resolve_proxy(self) -> bool:
         """Выбирает/парсит прокси. Возвращает True если готов к запуску."""
-        if self._proxy_pool and self._proxy_pool.configured:
-            port = await self._proxy_pool.select_working_proxy()
+        pool = await self._ensure_proxy_pool()
+        if pool and pool.configured:
+            port = await pool.select_working_proxy()
             if port is None:
                 self._proxy_config = None
                 return False
-            self._proxy_config = self._proxy_pool.get_playwright_config()
+            self._proxy_config = pool.get_playwright_config()
             return True
 
         if self.proxy_url:
@@ -305,7 +313,7 @@ class AvitoBrowserManager:
         return page
 
     async def healthcheck(self) -> dict[str, Any]:
-        summary = self.proxy_summary()
+        summary = await self.proxy_summary()
         result: dict[str, Any] = {
             "ok": False,
             "headless": self.headless,
@@ -367,7 +375,7 @@ class AvitoBrowserManager:
         meta = {
             "provider": "playwright",
             "transport": "browser_proxy",
-            **self.proxy_summary(),
+            **await self.proxy_summary(),
             "final_url": None,
             "captcha_detected": False,
             "blocked_detected": False,

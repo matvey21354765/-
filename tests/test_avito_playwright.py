@@ -156,12 +156,13 @@ def _patch_playwright(monkeypatch, browser=None):
     return browser
 
 
-def test_env_disabled_does_not_start_browser(monkeypatch):
+@pytest.mark.asyncio
+async def test_env_disabled_does_not_start_browser(monkeypatch):
     monkeypatch.setenv("AVITO_ENABLED", "false")
     monkeypatch.setenv("AVITO_PROVIDER", "disabled")
     manager = apw.AvitoBrowserManager(proxy_url="")
     assert manager._proxy_config is None
-    assert manager.proxy_summary() == {"proxy_configured": False}
+    assert await manager.proxy_summary() == {"proxy_configured": False}
 
 
 def test_autoru_proxy_url_ignored(monkeypatch):
@@ -189,10 +190,11 @@ async def test_resolve_proxy_uses_avito_url():
     }
 
 
-def test_safe_proxy_summary_hides_credentials():
+@pytest.mark.asyncio
+async def test_safe_proxy_summary_hides_credentials():
     manager = apw.AvitoBrowserManager(proxy_url="http://user:pass@host:1234")
-    asyncio.run(manager._resolve_proxy())
-    summary = manager.proxy_summary()
+    await manager._resolve_proxy()
+    summary = await manager.proxy_summary()
     assert summary["proxy_configured"] is True
     assert summary["proxy_host_safe"] == "host:1234"
     assert summary["credentials_present"] is True
@@ -467,3 +469,24 @@ def test_avito_error_does_not_break_other_sources(monkeypatch):
     assert "error" in result
     assert "meta" in result
     assert result["error"] == "provider_not_configured"
+
+
+@pytest.mark.asyncio
+async def test_proxy_pool_is_not_coroutine_object(monkeypatch):
+    """get_avito_proxy_pool() не должен оставаться coroutine в self._proxy_pool.
+
+    Проверяем, что proxy_summary и healthcheck не падают с AttributeError.
+    """
+    monkeypatch.setattr(apw, "get_avito_proxy_pool", mock.AsyncMock(return_value=None))
+    manager = apw.AvitoBrowserManager(proxy_url="")
+    assert manager._proxy_pool is None
+    assert not asyncio.iscoroutine(manager._proxy_pool)
+
+    summary = await manager.proxy_summary()
+    assert isinstance(summary, dict)
+    assert "proxy_configured" in summary
+    assert summary["proxy_configured"] is False
+
+    hc = await manager.healthcheck()
+    assert isinstance(hc, dict)
+    assert hc.get("error") == "provider_not_configured"
