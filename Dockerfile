@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.11-bookworm
 
 # Системные зависимости для Playwright
 RUN apt-get update && apt-get install -y \
@@ -21,7 +21,7 @@ RUN wget -q https://github.com/XTLS/Xray-core/releases/download/v1.8.13/Xray-lin
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt
-RUN playwright install --with-deps chromium
+RUN playwright install chromium
 
 COPY . .
 
