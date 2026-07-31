@@ -10,3 +10,4 @@ beautifulsoup4==4.12.3
 lxml==5.2.2
 curl_cffi==0.7.4
 psycopg2-binary==2.9.9
+pytest-asyncio==1.4.0  # для тестов Avito Playwright

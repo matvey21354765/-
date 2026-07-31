@@ -21,7 +21,7 @@ RUN wget -q https://github.com/XTLS/Xray-core/releases/download/v1.8.13/Xray-lin
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt
-RUN playwright install chromium
+RUN playwright install --with-deps chromium
 
 COPY . .
 

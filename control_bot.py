@@ -28,7 +28,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 AVITO_PROVIDER = os.getenv("AVITO_PROVIDER", "disabled").strip().lower()
-if AVITO_PROVIDER not in {"disabled", "rest_app", "adspower_worker"}:
+if AVITO_PROVIDER not in {"disabled", "rest_app", "adspower_worker", "playwright"}:
     AVITO_PROVIDER = "disabled"
 AVITO_ENABLED = AVITO_PROVIDER != "disabled"
 
@@ -76,6 +76,17 @@ if AVITO_PROVIDER == "adspower_worker":
     from avito_worker_provider import AvitoWorkerProvider
 else:
     AvitoWorkerProvider = None
+if AVITO_PROVIDER == "playwright":
+    from avito_playwright import (
+        AvitoBrowserManager,
+        AvitoPlaywrightConfigError,
+        AvitoPlaywrightError,
+        search_avito,
+        stop_avito_manager,
+    )
+else:
+    AvitoBrowserManager = AvitoPlaywrightConfigError = AvitoPlaywrightError = None
+    search_avito = stop_avito_manager = None
 
 _INSTANCE_LOCK_HANDLE = None
 
@@ -8699,7 +8710,7 @@ def _avito_scheduled_fetch(key: tuple, now: float | None = None) -> list[dict]:
         ready_event = entry.get("ready_event")
         if hasattr(ready_event, "clear"):
             ready_event.clear()
-        return _avito_scheduled_fetch_unlocked(key, now=now)
+        return asyncio.run(_avito_scheduled_fetch_unlocked(key, now=now))
     finally:
         with _AVITO_SCHEDULE_LOCK:
             entry["priority"] = 0
@@ -8709,7 +8720,7 @@ def _avito_scheduled_fetch(key: tuple, now: float | None = None) -> list[dict]:
         _AVITO_PROVIDER_LOCK.release()
 
 
-def _avito_scheduled_fetch_unlocked(
+async def _avito_scheduled_fetch_unlocked(
     key: tuple, now: float | None = None
 ) -> list[dict]:
     """Один проход: исходный GET и максимум один внутренний canonical GET."""
@@ -8829,6 +8840,57 @@ def _avito_scheduled_fetch_unlocked(
                 http,
                 provider="adspower_worker",
                 cache_hit=worker_result.diagnostics.get("cache_hit", False),
+            )
+            _avito_diag("найдено карточек", len(parsed), страница=page)
+            _avito_diag("после парсинга", len(parsed))
+            _avito_diag("после фильтрации", len(parsed))
+        elif AVITO_PROVIDER == "playwright":
+            pw_result = await search_avito(
+                city=region,
+                price_min=price_min,
+                price_max=price_max,
+                query=brand if brand and brand != "any" else None,
+                limit=50,
+            )
+            if pw_result.get("error"):
+                error = pw_result["error"]
+                if error in {"captcha", "blocked", "proxy_auth", "proxy_connect_forbidden"}:
+                    raise AvitoBlockedError(
+                        f"Avito Playwright blocked: {error}",
+                        status_code=429 if error in {"captcha", "blocked"} else 403,
+                    )
+                if error == "provider_not_configured":
+                    raise AvitoPlaywrightConfigError(
+                        "AVITO_PROXY_URL is not configured"
+                    )
+                raise AvitoPlaywrightError(error, f"Avito Playwright error: {error}")
+            parsed = []
+            today_pw = datetime.date.today()
+            for it in pw_result.get("items", []):
+                try:
+                    it["_photo_url"] = it.get("image_url") or it.get("_photo_url", "")
+                    if not it.get("_photos"):
+                        it["_photos"] = len(it.get("images") or [])
+                    pub = it.get("published_at")
+                    if pub:
+                        try:
+                            ds = str(pub)[:10]
+                            dt = datetime.datetime.strptime(ds, "%Y-%m-%d").date()
+                            it["_days_on_site"] = max(0, (today_pw - dt).days)
+                        except Exception:
+                            it["_days_on_site"] = 0
+                    else:
+                        it["_days_on_site"] = 0
+                    it["_hot_score"] = hot_score(it)
+                    parsed.append(it)
+                except Exception:
+                    pass
+            http = 200
+            _avito_diag(
+                "HTTP",
+                http,
+                provider="playwright",
+                proxy_configured=pw_result.get("meta", {}).get("proxy_configured", False),
             )
             _avito_diag("найдено карточек", len(parsed), страница=page)
             _avito_diag("после парсинга", len(parsed))
@@ -13651,6 +13713,16 @@ async def _analytics_persist_loop():
 
 import atexit as _atexit
 _atexit.register(lambda: _db_conn and _db_conn.close())
+
+def _shutdown_avito_manager_sync() -> None:
+    try:
+        loop = asyncio.new_event_loop()
+        loop.run_until_complete(stop_avito_manager())
+        loop.close()
+    except Exception:
+        pass
+
+_atexit.register(_shutdown_avito_manager_sync)
 
 
 def _save_cache(uid: int, items: list[dict]):
