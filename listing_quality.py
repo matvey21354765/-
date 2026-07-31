@@ -10,9 +10,11 @@ _CAR_BRANDS = {
     "ford", "chevrolet", "renault", "hyundai", "kia", "volkswagen", "vw",
     "skoda", "audi", "bmw", "mercedes", "opel", "peugeot", "citroen",
     "subaru", "suzuki", "lexus", "infiniti", "volvo", "chery", "geely",
-    "haval", "great wall", "уаз", "газ", "daewoo", "alfa romeo", "land rover",
-    "porsche", "jaguar", "cadillac", "chrysler", "dodge", "jeep",
+    "haval", "great wall", "уаз", "газ", "daewoo", "porsche", "jaguar",
+    "cadillac", "chrysler", "dodge", "jeep",
 }
+
+_COMPOSITE_BRANDS = ("land rover", "alfa romeo", "great wall")
 
 _CAR_BODY_TYPES = {
     "седан", "хэтчбек", "хэтч", "универсал", "кроссовер", "внедорожник",
@@ -39,6 +41,14 @@ _SALE_PHRASES = {
     "готов к продаже", "в продаже", "продается", "продаётся", "пpoдaм",
 }
 
+# Контекстные запчастные шаблоны, когда запчасть — основной товар.
+_PARTS_FOR_CAR_PATTERNS = (
+    "шины на", "зимние шины на", "резина на", "диски на", "колеса на",
+    "запчасти на", "запчасти для", "двигатель на", "коробка на", "мотор на",
+    "на запчасти", "разбор", "разборка", "запчастями",
+)
+
+# Отрицательные категории: штраф к score. Абсолютная блокировка отдельно.
 _NEGATIVE_CATEGORIES = {
     "самокат": -6,
     "электросамокат": -6,
@@ -54,14 +64,6 @@ _NEGATIVE_CATEGORIES = {
     "трактор": -6,
     "спецтехника": -6,
     "прицеп": -6,
-    "запчасти": -4,
-    "запчасть": -4,
-    "двигатель": -3,
-    "коробка": -3,
-    "шины": -4,
-    "диски": -4,
-    "колеса": -4,
-    "резина": -4,
     "банк": -6,
     "банкомат": -6,
     "обмен валюты": -6,
@@ -76,7 +78,6 @@ _NEGATIVE_CATEGORIES = {
     "недвижимость": -6,
     "квартира": -6,
     "комната": -6,
-    "дом": -3,
     "электроника": -6,
     "iphone": -6,
     "samsung": -6,
@@ -84,15 +85,18 @@ _NEGATIVE_CATEGORIES = {
     "диван": -6,
     "стол": -3,
     "холодильник": -6,
+    "дом": -3,
 }
 
+# Абсолютно блокируемые фразы (source=vk/tg). Для коротких слов используем границы слов.
 _NEGATIVE_PHRASES = {
     "банкомат", "банк", "обмен валют", "обмен валюты", "курс валют", "курс доллара",
     "курс евро", "вакансия", "требуется", "ищем сотрудника", "ищу работу",
-    "запчасти", "запчастями", "на запчасти", "разбор", "разборка", "шины", "резина",
-    "диски", "самокат", "электросамокат", "велосипед", "мотоцикл", "мопед", "скутер",
-    "квадроцикл", "лодка", "катер", "трактор", "спецтехника", "прицеп", "недвижимость",
-    "квартира", "комната", "iphone", "samsung", "xiaomi", "холодильник", "мебель",
+    "на запчасти", "разбор", "разборка",
+    "самокат", "электросамокат", "велосипед", "мотоцикл", "мопед", "скутер",
+    "квадроцикл", "лодка", "катер", "трактор", "спецтехника", "прицеп",
+    "недвижимость", "квартира", "комната",
+    "iphone", "samsung", "холодильник", "мебель",
     "диван", "стол", "шкаф", "кровать", "телевизор", "ноутбук", "планшет",
     "кондиционер бытовой", "стиральная машина", "микроволновка", "посудомоечная",
 }
@@ -112,7 +116,24 @@ def _normalize_text(item: dict) -> str:
 
 
 def _word_boundaries(text: str, word: str) -> bool:
-    return bool(re.search(rf"(?:^|[\s\p{{P}}]){re.escape(word)}(?:$|[\s\p{{P}}])", text, re.IGNORECASE))
+    """Проверяет, что word встречается в text как отдельное слово.
+
+    Использует стандартный re, без неподдерживаемого \p{P}.
+    """
+    escaped = re.escape(word)
+    pattern = rf"(?<![\wа-яё]){escaped}(?![\wа-яё])"
+    return bool(re.search(pattern, text, re.IGNORECASE))
+
+
+def _has_negative_phrase(text: str, phrase: str) -> bool:
+    """Многословные фразы ищем как подстроки; одиночные слова — с границами."""
+    if " " in phrase:
+        return phrase in text
+    return _word_boundaries(text, phrase)
+
+
+def _has_parts_for_car_pattern(text: str) -> bool:
+    return any(p in text for p in _PARTS_FOR_CAR_PATTERNS)
 
 
 def classify_car_listing(item: dict) -> dict:
@@ -125,12 +146,17 @@ def classify_car_listing(item: dict) -> dict:
     score = 0
     reasons: list[str] = []
 
-    # Положительные признаки
+    # Положительные признаки: марка (составные сначала).
     found_brand = None
-    for brand in _CAR_BRANDS:
-        if brand in text:
+    for brand in _COMPOSITE_BRANDS:
+        if _word_boundaries(text, brand):
             found_brand = brand
             break
+    if not found_brand:
+        for brand in _CAR_BRANDS:
+            if _word_boundaries(text, brand):
+                found_brand = brand
+                break
     if found_brand:
         score += 3
         reasons.append("brand")
@@ -175,27 +201,27 @@ def classify_car_listing(item: dict) -> dict:
         score += 1
         reasons.append("price")
 
-    # Отрицательные категории (исключаемые)
+    # Отрицательные категории (штраф к score).
     for phrase, penalty in _NEGATIVE_CATEGORIES.items():
-        if phrase in text:
+        if _has_negative_phrase(text, phrase):
             score += penalty
             reasons.append(phrase.replace(" ", "_"))
 
-    # Контекст: "шины на Toyota" — отклоняем, но "Toyota с комплектом шин" — не штрафуем
-    if any(p in text for p in ("шины на", "зимние шины на", "резина на", "диски на", "запчасти на", "запчасти для")):
+    # Контекст: запчасть как основной товар — отклоняем.
+    if _has_parts_for_car_pattern(text):
         score -= 4
         reasons.append("parts_for_car")
 
-    # Основной товар — не авто, если нет сильных признаков
+    # Основной товар — не авто, если нет сильных признаков.
     if not found_brand and not _YEAR_RE.search(text) and not any(p in text for p in _SALE_PHRASES):
         score -= 3
         reasons.append("no_strong_car_signs")
 
     accepted = score >= 4 and ("brand" in reasons or "year" in reasons or "sale_phrase" in reasons)
 
-    # Запрещённые категории всегда отклоняем, даже если score высокий
+    # Абсолютно блокируемые категории всегда отклоняем, даже если score высокий.
     for phrase in _NEGATIVE_PHRASES:
-        if phrase in text:
+        if _has_negative_phrase(text, phrase):
             accepted = False
             reasons.append(f"blocked:{phrase.replace(' ', '_')}")
             break
@@ -263,8 +289,10 @@ def parse_price(s: str) -> int | None:
 # ──────────────────────────────────────────────────────────────────────
 # Извлечение фото Auto.ru
 # ──────────────────────────────────────────────────────────────────────
-_IMAGE_KEYS = ("url", "src", "original", "preview", "image", "imageUrl", "image_url")
-_NESTED_KEYS = ("images", "gallery", "photo", "photos", "offer", "state")
+_IMAGE_KEYS = ("url", "src", "original", "preview", "image", "imageUrl", "image_url",
+               "full", "large", "medium", "small", "thumb", "thumbnail")
+_NESTED_KEYS = ("images", "gallery", "photo", "photos", "offer", "state", "vehicle_info",
+                "external_panorama", "panorama", "image_group")
 
 
 def _extract_url(value: Any) -> Optional[str]:
@@ -279,6 +307,16 @@ def _extract_url(value: Any) -> Optional[str]:
         for key in _IMAGE_KEYS:
             if key in value:
                 return _extract_url(value[key])
+        # Auto.ru: часто внутри dict с "sizes" -> {size: url}
+        sizes = value.get("sizes")
+        if isinstance(sizes, dict):
+            for size in ("1200x900", "1200x1200", "832x624", "456x342", "320x240"):
+                if size in sizes:
+                    return _extract_url(sizes[size])
+            for size in sizes.values():
+                url = _extract_url(size)
+                if url:
+                    return url
     return None
 
 
@@ -433,21 +471,44 @@ def format_autoru_card(item: dict) -> str:
 # Клавиатура карточки Auto.ru (список рядов для aiogram)
 # ──────────────────────────────────────────────────────────────────────
 def autoru_card_buttons(item: dict, uid: int) -> list[list[tuple[str, str]]]:
-    """Возвращает ряды кнопок как список кортежей (text, callback/url)."""
+    """Возвращает ряды кнопок как список кортежей (text, callback/url).
+
+    URL-адреса НЕ помещаются в callback_data — они передаются отдельно.
+    """
     url = item.get("url", "")
     sid = item.get("_sid") or ""
     rows = []
     row1 = []
     if url:
-        row1.append(("🔗 Открыть", f"url:{url}"))
-    row1.append(("⭐ Сохранить", f"fav|{sid}|{uid}"))
+        row1.append(("🔗 Открыть", ("url", url)))
+    row1.append(("⭐ Сохранить", ("callback", f"fav|{sid}|{uid}")))
     rows.append(row1)
     rows.append([
-        ("❌ Скрыть", f"hide|{sid}|{uid}"),
-        ("📋 Похожие", f"sim|{sid}|{uid}"),
+        ("❌ Скрыть", ("callback", f"hide|{sid}|{uid}")),
+        ("📋 Похожие", ("callback", f"sim|{sid}|{uid}")),
     ])
-    rows.append([("🔍 Проверить машину", f"check|{sid}|{uid}")])
+    rows.append([("🔍 Проверить машину", ("callback", f"check|{sid}|{uid}"))])
     return rows
+
+
+def build_autoru_inline_keyboard(item: dict, uid: int):
+    """Адаптер в aiogram InlineKeyboardMarkup.
+
+    Длинные URL не попадают в callback_data.
+    """
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+    rows = []
+    for row in autoru_card_buttons(item, uid):
+        buttons = []
+        for text, payload in row:
+            kind, value = payload
+            if kind == "url":
+                buttons.append(InlineKeyboardButton(text=text, url=value))
+            else:
+                buttons.append(InlineKeyboardButton(text=text, callback_data=value))
+        rows.append(buttons)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 # ──────────────────────────────────────────────────────────────────────

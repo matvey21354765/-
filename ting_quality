@@ -1,0 +1,246 @@
+warning: in the working copy of 'listing_quality.py', LF will be replaced by CRLF the next time Git touches it
+[1mdiff --git a/listing_quality.py b/listing_quality.py[m
+[1mindex 38e4568..1700fb1 100644[m
+[1m--- a/listing_quality.py[m
+[1m+++ b/listing_quality.py[m
+[36m@@ -10,10 +10,12 @@[m [m_CAR_BRANDS = {[m
+     "ford", "chevrolet", "renault", "hyundai", "kia", "volkswagen", "vw",[m
+     "skoda", "audi", "bmw", "mercedes", "opel", "peugeot", "citroen",[m
+     "subaru", "suzuki", "lexus", "infiniti", "volvo", "chery", "geely",[m
+[31m-    "haval", "great wall", "уаз", "газ", "daewoo", "alfa romeo", "land rover",[m
+[31m-    "porsche", "jaguar", "cadillac", "chrysler", "dodge", "jeep",[m
+[32m+[m[32m    "haval", "great wall", "уаз", "газ", "daewoo", "porsche", "jaguar",[m
+[32m+[m[32m    "cadillac", "chrysler", "dodge", "jeep",[m
+ }[m
+ [m
+[32m+[m[32m_COMPOSITE_BRANDS = ("land rover", "alfa romeo", "great wall")[m
+[32m+[m
+ _CAR_BODY_TYPES = {[m
+     "седан", "хэтчбек", "хэтч", "универсал", "кроссовер", "внедорожник",[m
+     "минивэн", "купе", "кабриолет", "пикап", "лифтбек", "родстер", "микроавтобус",[m
+[36m@@ -39,6 +41,14 @@[m [m_SALE_PHRASES = {[m
+     "готов к продаже", "в продаже", "продается", "продаётся", "пpoдaм",[m
+ }[m
+ [m
+[32m+[m[32m# Контекстные запчастные шаблоны, когда запчасть — основной товар.[m
+[32m+[m[32m_PARTS_FOR_CAR_PATTERNS = ([m
+[32m+[m[32m    "шины на", "зимние шины на", "резина на", "диски на", "колеса на",[m
+[32m+[m[32m    "запчасти на", "запчасти для", "двигатель на", "коробка на", "мотор на",[m
+[32m+[m[32m    "на запчасти", "разбор", "разборка", "запчастями",[m
+[32m+[m[32m)[m
+[32m+[m
+[32m+[m[32m# Отрицательные категории: штраф к score. Абсолютная блокировка отдельно.[m
+ _NEGATIVE_CATEGORIES = {[m
+     "самокат": -6,[m
+     "электросамокат": -6,[m
+[36m@@ -54,14 +64,6 @@[m [m_NEGATIVE_CATEGORIES = {[m
+     "трактор": -6,[m
+     "спецтехника": -6,[m
+     "прицеп": -6,[m
+[31m-    "запчасти": -4,[m
+[31m-    "запчасть": -4,[m
+[31m-    "двигатель": -3,[m
+[31m-    "коробка": -3,[m
+[31m-    "шины": -4,[m
+[31m-    "диски": -4,[m
+[31m-    "колеса": -4,[m
+[31m-    "резина": -4,[m
+     "банк": -6,[m
+     "банкомат": -6,[m
+     "обмен валюты": -6,[m
+[36m@@ -76,7 +78,6 @@[m [m_NEGATIVE_CATEGORIES = {[m
+     "недвижимость": -6,[m
+     "квартира": -6,[m
+     "комната": -6,[m
+[31m-    "дом": -3,[m
+     "электроника": -6,[m
+     "iphone": -6,[m
+     "samsung": -6,[m
+[36m@@ -84,15 +85,18 @@[m [m_NEGATIVE_CATEGORIES = {[m
+     "диван": -6,[m
+     "стол": -3,[m
+     "холодильник": -6,[m
+[32m+[m[32m    "дом": -3,[m
+ }[m
+ [m
+[32m+[m[32m# Абсолютно блокируемые фразы (source=vk/tg). Для коротких слов используем границы слов.[m
+ _NEGATIVE_PHRASES = {[m
+     "банкомат", "банк", "обмен валют", "обмен валюты", "курс валют", "курс доллара",[m
+     "курс евро", "вакансия", "требуется", "ищем сотрудника", "ищу работу",[m
+[31m-    "запчасти", "запчастями", "на запчасти", "разбор", "разборка", "шины", "резина",[m
+[31m-    "диски", "самокат", "электросамокат", "велосипед", "мотоцикл", "мопед", "скутер",[m
+[31m-    "квадроцикл", "лодка", "катер", "трактор", "спецтехника", "прицеп", "недвижимость",[m
+[31m-    "квартира", "комната", "iphone", "samsung", "xiaomi", "холодильник", "мебель",[m
+[32m+[m[32m    "на запчасти", "разбор", "разборка",[m
+[32m+[m[32m    "самокат", "электросамокат", "велосипед", "мотоцикл", "мопед", "скутер",[m
+[32m+[m[32m    "квадроцикл", "лодка", "катер", "трактор", "спецтехника", "прицеп",[m
+[32m+[m[32m    "недвижимость", "квартира", "комната",[m
+[32m+[m[32m    "iphone", "samsung", "холодильник", "мебель",[m
+     "диван", "стол", "шкаф", "кровать", "телевизор", "ноутбук", "планшет",[m
+     "кондиционер бытовой", "стиральная машина", "микроволновка", "посудомоечная",[m
+ }[m
+[36m@@ -112,7 +116,24 @@[m [mdef _normalize_text(item: dict) -> str:[m
+ [m
+ [m
+ def _word_boundaries(text: str, word: str) -> bool:[m
+[31m-    return bool(re.search(rf"(?:^|[\s\p{{P}}]){re.escape(word)}(?:$|[\s\p{{P}}])", text, re.IGNORECASE))[m
+[32m+[m[32m    """Проверяет, что word встречается в text как отдельное слово.[m
+[32m+[m
+[32m+[m[32m    Использует стандартный re, без неподдерживаемого \p{P}.[m
+[32m+[m[32m    """[m
+[32m+[m[32m    escaped = re.escape(word)[m
+[32m+[m[32m    pattern = rf"(?<![\wа-яё]){escaped}(?![\wа-яё])"[m
+[32m+[m[32m    return bool(re.search(pattern, text, re.IGNORECASE))[m
+[32m+[m
+[32m+[m
+[32m+[m[32mdef _has_negative_phrase(text: str, phrase: str) -> bool:[m
+[32m+[m[32m    """Многословные фразы ищем как подстроки; одиночные слова — с границами."""[m
+[32m+[m[32m    if " " in phrase:[m
+[32m+[m[32m        return phrase in text[m
+[32m+[m[32m    return _word_boundaries(text, phrase)[m
+[32m+[m
+[32m+[m
+[32m+[m[32mdef _has_parts_for_car_pattern(text: str) -> bool:[m
+[32m+[m[32m    return any(p in text for p in _PARTS_FOR_CAR_PATTERNS)[m
+ [m
+ [m
+ def classify_car_listing(item: dict) -> dict:[m
+[36m@@ -125,12 +146,17 @@[m [mdef classify_car_listing(item: dict) -> dict:[m
+     score = 0[m
+     reasons: list[str] = [][m
+ [m
+[31m-    # Положительные признаки[m
+[32m+[m[32m    # Положительные признаки: марка (составные сначала).[m
+     found_brand = None[m
+[31m-    for brand in _CAR_BRANDS:[m
+[31m-        if brand in text:[m
+[32m+[m[32m    for brand in _COMPOSITE_BRANDS:[m
+[32m+[m[32m        if _word_boundaries(text, brand):[m
+             found_brand = brand[m
+             break[m
+[32m+[m[32m    if not found_brand:[m
+[32m+[m[32m        for brand in _CAR_BRANDS:[m
+[32m+[m[32m            if _word_boundaries(text, brand):[m
+[32m+[m[32m                found_brand = brand[m
+[32m+[m[32m                break[m
+     if found_brand:[m
+         score += 3[m
+         reasons.append("brand")[m
+[36m@@ -175,27 +201,27 @@[m [mdef classify_car_listing(item: dict) -> dict:[m
+         score += 1[m
+         reasons.append("price")[m
+ [m
+[31m-    # Отрицательные категории (исключаемые)[m
+[32m+[m[32m    # Отрицательные категории (штраф к score).[m
+     for phrase, penalty in _NEGATIVE_CATEGORIES.items():[m
+[31m-        if phrase in text:[m
+[32m+[m[32m        if _has_negative_phrase(text, phrase):[m
+             score += penalty[m
+             reasons.append(phrase.replace(" ", "_"))[m
+ [m
+[31m-    # Контекст: "шины на Toyota" — отклоняем, но "Toyota с комплектом шин" — не штрафуем[m
+[31m-    if any(p in text for p in ("шины на", "зимние шины на", "резина на", "диски на", "запчасти на", "запчасти для")):[m
+[32m+[m[32m    # Контекст: запчасть как основной товар — отклоняем.[m
+[32m+[m[32m    if _has_parts_for_car_pattern(text):[m
+         score -= 4[m
+         reasons.append("parts_for_car")[m
+ [m
+[31m-    # Основной товар — не авто, если нет сильных признаков[m
+[32m+[m[32m    # Основной товар — не авто, если нет сильных признаков.[m
+     if not found_brand and not _YEAR_RE.search(text) and not any(p in text for p in _SALE_PHRASES):[m
+         score -= 3[m
+         reasons.append("no_strong_car_signs")[m
+ [m
+     accepted = score >= 4 and ("brand" in reasons or "year" in reasons or "sale_phrase" in reasons)[m
+ [m
+[31m-    # Запрещённые категории всегда отклоняем, даже если score высокий[m
+[32m+[m[32m    # Абсолютно блокируемые категории всегда отклоняем, даже если score высокий.[m
+     for phrase in _NEGATIVE_PHRASES:[m
+[31m-        if phrase in text:[m
+[32m+[m[32m        if _has_negative_phrase(text, phrase):[m
+             accepted = False[m
+             reasons.append(f"blocked:{phrase.replace(' ', '_')}")[m
+             break[m
+[36m@@ -263,8 +289,10 @@[m [mdef parse_price(s: str) -> int | None:[m
+ # ──────────────────────────────────────────────────────────────────────[m
+ # Извлечение фото Auto.ru[m
+ # ──────────────────────────────────────────────────────────────────────[m
+[31m-_IMAGE_KEYS = ("url", "src", "original", "preview", "image", "imageUrl", "image_url")[m
+[31m-_NESTED_KEYS = ("images", "gallery", "photo", "photos", "offer", "state")[m
+[32m+[m[32m_IMAGE_KEYS = ("url", "src", "original", "preview", "image", "imageUrl", "image_url",[m
+[32m+[m[32m               "full", "large", "medium", "small", "thumb", "thumbnail")[m
+[32m+[m[32m_NESTED_KEYS = ("images", "gallery", "photo", "photos", "offer", "state", "vehicle_info",[m
+[32m+[m[32m                "external_panorama", "panorama", "image_group")[m
+ [m
+ [m
+ def _extract_url(value: Any) -> Optional[str]:[m
+[36m@@ -279,6 +307,16 @@[m [mdef _extract_url(value: Any) -> Optional[str]:[m
+         for key in _IMAGE_KEYS:[m
+             if key in value:[m
+                 return _extract_url(value[key])[m
+[32m+[m[32m        # Auto.ru: часто внутри dict с "sizes" -> {size: url}[m
+[32m+[m[32m        sizes = value.get("sizes")[m
+[32m+[m[32m        if isinstance(sizes, dict):[m
+[32m+[m[32m            for size in ("1200x900", "1200x1200", "832x624", "456x342", "320x240"):[m
+[32m+[m[32m                if size in sizes:[m
+[32m+[m[32m                    return _extract_url(sizes[size])[m
+[32m+[m[32m            for size in sizes.values():[m
+[32m+[m[32m                url = _extract_url(size)[m
+[32m+[m[32m                if url:[m
+[32m+[m[32m                    return url[m
+     return None[m
+ [m
+ [m
+[36m@@ -433,23 +471,46 @@[m [mdef format_autoru_card(item: dict) -> str:[m
+ # Клавиатура карточки Auto.ru (список рядов для aiogram)[m
+ # ──────────────────────────────────────────────────────────────────────[m
+ def autoru_card_buttons(item: dict, uid: int) -> list[list[tuple[str, str]]]:[m
+[31m-    """Возвращает ряды кнопок как список кортежей (text, callback/url)."""[m
+[32m+[m[32m    """Возвращает ряды кнопок как список кортежей (text, callback/url).[m
+[32m+[m
+[32m+[m[32m    URL-адреса НЕ помещаются в callback_data — они передаются отдельно.[m
+[32m+[m[32m    """[m
+     url = item.get("url", "")[m
+     sid = item.get("_sid") or ""[m
+     rows = [][m
+     row1 = [][m
+     if url:[m
+[31m-        row1.append(("🔗 Открыть", f"url:{url}"))[m
+[31m-    row1.append(("⭐ Сохранить", f"fav|{sid}|{uid}"))[m
+[32m+[m[32m        row1.append(("🔗 Открыть", ("url", url)))[m
+[32m+[m[32m    row1.append(("⭐ Сохранить", ("callback", f"fav|{sid}|{uid}")))[m
+     rows.append(row1)[m
+     rows.append([[m
+[31m-        ("❌ Скрыть", f"hide|{sid}|{uid}"),[m
+[31m-        ("📋 Похожие", f"sim|{sid}|{uid}"),[m
+[32m+[m[32m        ("❌ Скрыть", ("callback", f"hide|{sid}|{uid}")),[m
+[32m+[m[32m        ("📋 Похожие", ("callback", f"sim|{sid}|{uid}")),[m
+     ])[m
+[31m-    rows.append([("🔍 Проверить машину", f"check|{sid}|{uid}")])[m
+[32m+[m[32m    rows.append([("🔍 Проверить машину", ("callback", f"check|{sid}|{uid}"))])[m
+     return rows[m
+ [m
+ [m
+[32m+[m[32mdef build_autoru_inline_keyboard(item: dict, uid: int):[m
+[32m+[m[32m    """Адаптер в aiogram InlineKeyboardMarkup.[m
+[32m+[m
+[32m+[m[32m    Длинные URL не попадают в callback_data.[m
+[32m+[m[32m    """[m
+[32m+[m[32m    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup[m
+[32m+[m
+[32m+[m[32m    rows = [][m
+[32m+[m[32m    for row in autoru_card_buttons(item, uid):[m
+[32m+[m[32m        buttons = [][m
+[32m+[m[32m        for text, payload in row:[m
+[32m+[m[32m            kind, value = payload[m
+[32m+[m[32m            if kind == "url":[m
+[32m+[m[32m                buttons.append(InlineKeyboardButton(text=text, url=value))[m
+[32m+[m[32m            else:[m
+[32m+[m[32m                buttons.append(InlineKeyboardButton(text=text, callback_data=value))[m
+[32m+[m[32m        rows.append(buttons)[m
+[32m+[m[32m    return InlineKeyboardMarkup(inline_keyboard=rows)[m
+[32m+[m
+[32m+[m
+ # ──────────────────────────────────────────────────────────────────────[m
+ # Логирование[m
+ # ──────────────────────────────────────────────────────────────────────[m
