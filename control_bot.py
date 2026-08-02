@@ -81,10 +81,12 @@ if AVITO_PROVIDER == "rest_app" or AVITO_SOURCE == "rest_app":
         RestAppRateLimitedError,
         RestAppResponseError,
     )
+    from avito_rest_collector import get_rest_app_collector
 else:
     RestAppAuthenticationError = RestAppRateLimitedError = RuntimeError
     RestAppResponseError = RuntimeError
     RestAppAvitoProvider = None
+    get_rest_app_collector = None
 if AVITO_PROVIDER == "adspower_worker" or AVITO_SOURCE == "adspower_worker":
     from avito_worker_provider import AvitoWorkerProvider
 else:
@@ -8476,6 +8478,53 @@ REST_APP_REGION_NAMES = {
     "rostov": "Ростовская область",
 }
 
+_REST_APP_COLLECTOR = (
+    get_rest_app_collector()
+    if get_rest_app_collector is not None
+    and (AVITO_PROVIDER == "rest_app" or AVITO_SOURCE == "rest_app")
+    else None
+)
+
+
+def _rest_app_search_from_settings(uid: int, settings: dict) -> dict:
+    region = str(settings.get("region") or "").strip().lower()
+    return {
+        "user_id": int(uid),
+        "search_id": f"{uid}:{region}",
+        "region_id": str(AVITO_OBLAST_IDS.get(region) or AVITO_LOCATION_IDS.get(region) or ""),
+        "category_id": "9",
+        "last_m": 3,
+        "page": 1,
+        "region": REST_APP_REGION_NAMES.get(region, REGIONS.get(region, region)),
+        "city": REGIONS.get(region, region),
+        "price_min": int(settings.get("price_min") or 0),
+        "price_max": int(settings.get("price_max") or 99_000_000),
+        "brand": str(settings.get("track_brand") or settings.get("brand") or ""),
+        "model": str(settings.get("track_model") or settings.get("model") or ""),
+        "year": int(settings.get("year") or 0),
+        "min_deal_score": float(settings.get("monitor_min_deal_score") or 0),
+        "min_profit": float(settings.get("monitor_min_profit") or 0),
+    }
+
+
+def _load_active_rest_app_searches() -> list[dict]:
+    searches: list[dict] = []
+    if not USERS_DIR.exists():
+        return searches
+    for path in USERS_DIR.iterdir():
+        if not (path.is_dir() and path.name.isdigit()):
+            continue
+        try:
+            settings = load_settings(int(path.name))
+            if not settings.get("monitor_enabled") or not settings.get("region"):
+                continue
+            if "avito" not in set(_monitor_sources(settings)):
+                continue
+            searches.append(_rest_app_search_from_settings(int(path.name), settings))
+        except Exception:
+            continue
+    return searches
+
 
 def _avito_persistent_key(key: tuple) -> str:
     region, price_min, price_max, sort_by_date, brand = key
@@ -8632,6 +8681,29 @@ def _avito_cached_result(
     """Регистрирует поиск, при cache miss приоритизирует scheduler и ждёт кэш."""
     if not AVITO_ENABLED:
         return []
+    if _REST_APP_COLLECTOR is not None:
+        search = {
+            "user_id": 0,
+            "search_id": f"manual:{region}:{price_min}:{price_max}:{brand}",
+            "region_id": str(
+                AVITO_OBLAST_IDS.get(region)
+                or AVITO_LOCATION_IDS.get(region)
+                or ""
+            ),
+            "category_id": "9",
+            "last_m": 3,
+            "page": 1,
+            "region": REST_APP_REGION_NAMES.get(region, REGIONS.get(region, region)),
+            "city": REGIONS.get(region, region),
+            "price_min": price_min,
+            "price_max": price_max,
+            "brand": "" if brand == "any" else brand,
+        }
+        _REST_APP_COLLECTOR.register_search(search)
+        return [
+            _adapt_duff_listing(item, datetime.date.today())
+            for item in _REST_APP_COLLECTOR.cached_for_search(search)
+        ]
     key = _avito_schedule_key(region, price_min, price_max, sort_by_date, brand)
     entry = _avito_schedule_entry(key)
     blocked = _AVITO_PRODUCTION_STATE.is_blocked()
@@ -8740,17 +8812,23 @@ def _adapt_duff_listing(item: dict, today: datetime.date) -> dict:
         "_model": str(item.get("model") or ""),
         "_mileage": str(item.get("specs", {}).get("mileage") or ""),
         "_phone": str(item.get("phone") or ""),
+        "_analysis_cached": bool(item.get("_analysis_cached")),
+        "_ai_analysis": item.get("_ai_analysis"),
+        "_deal_score": item.get("_deal_score"),
+        "_potential_profit": item.get("_potential_profit"),
+        "_seller_type": item.get("_seller_type"),
     }
     result["_hot_score"] = hot_score(result)
 
     # AI-анализ описания (синхронный, быстрый)
-    try:
-        ai_result = analyze_car_text(result)
-        result["_ai_analysis"] = ai_result
-        result["_ai_positives"] = ai_result.get("positives", [])
-        result["_ai_risks"] = ai_result.get("risks", [])
-    except Exception:
-        pass
+    if not result["_analysis_cached"]:
+        try:
+            ai_result = analyze_car_text(result)
+            result["_ai_analysis"] = ai_result
+            result["_ai_positives"] = ai_result.get("positives", [])
+            result["_ai_risks"] = ai_result.get("risks", [])
+        except Exception:
+            pass
 
     # История объявлений
     if AVITO_HISTORY_ENABLED:
@@ -8764,6 +8842,11 @@ def _adapt_duff_listing(item: dict, today: datetime.date) -> dict:
 
 def _enrich_avito_with_deal_score(item: dict, market_price: int | None) -> dict:
     """Добавляет DealScore и анализ продавца после расчёта рыночной цены."""
+    # REST-App collector computes this once per stable listing identity and
+    # persists the result.  Reusing it here prevents one analysis per matched
+    # user in the shared monitoring pipeline.
+    if item.get("_analysis_cached") and item.get("_deal_score") is not None:
+        return item
     try:
         score_data = calculate_deal_score(item, market_price=market_price)
         item["_deal_score"] = score_data.get("score")
@@ -8784,6 +8867,22 @@ def _enrich_avito_with_deal_score(item: dict, market_price: int | None) -> dict:
         item["_seller_confidence"] = None
         item["_seller_reasons"] = []
     return item
+
+
+def _analyze_rest_collector_item(item: dict) -> dict:
+    adapted = _adapt_duff_listing(item, datetime.date.today())
+    _enrich_avito_with_deal_score(adapted, market_price=None)
+    return {
+        "_analysis_cached": True,
+        "_ai_analysis": adapted.get("_ai_analysis"),
+        "_deal_score": adapted.get("_deal_score"),
+        "_potential_profit": adapted.get("_potential_profit"),
+        "_seller_type": adapted.get("_seller_type"),
+    }
+
+
+if _REST_APP_COLLECTOR is not None:
+    _REST_APP_COLLECTOR.analyzer = _analyze_rest_collector_item
 
 
 def _avito_scheduled_fetch(key: tuple, now: float | None = None) -> list[dict]:
@@ -8874,23 +8973,28 @@ async def _avito_scheduled_fetch_unlocked(
                     _AVITO_STATUS.update({"status": "not_configured", "blocked": False})
                 return []
         if AVITO_PROVIDER == "rest_app" or AVITO_SOURCE == "rest_app":
-            provider = RestAppAvitoProvider()
-            provider_items = provider.search(
-                region_name=REST_APP_REGION_NAMES.get(
-                    region, REGIONS.get(region, region)
+            search = {
+                "user_id": 0,
+                "search_id": f"scheduler:{region}",
+                "region_id": str(
+                    AVITO_OBLAST_IDS.get(region)
+                    or AVITO_LOCATION_IDS.get(region)
+                    or ""
                 ),
-                city_name=REGIONS.get(region, region),
-                price_min=price_min,
-                price_max=price_max,
-                brand=brand if brand != "any" else "",
-                private_only=True,
-            )
+                "category_id": "9", "last_m": 3, "page": 1,
+                "region": REST_APP_REGION_NAMES.get(region, REGIONS.get(region, region)),
+                "city": REGIONS.get(region, region),
+                "price_min": price_min, "price_max": price_max,
+                "brand": brand if brand != "any" else "",
+            }
+            _REST_APP_COLLECTOR.register_search(search)
+            provider_items = _REST_APP_COLLECTOR.cached_for_search(search)
             print(f"[Avito RestApp] provider_returned={len(provider_items)}")
             print(
                 "[Avito RestApp] after_user_filters="
-                f"{provider.last_diagnostics.get('after_private', len(provider_items))}"
+                f"{len(provider_items)}"
             )
-            http = int(provider.last_diagnostics.get("http") or 200)
+            http = 200
             parsed = [
                 _adapt_duff_listing(item, datetime.date.today())
                 for item in provider_items
@@ -8905,12 +9009,12 @@ async def _avito_scheduled_fetch_unlocked(
                 "HTTP",
                 http,
                 provider="rest_app",
-                endpoint=provider.last_diagnostics.get("endpoint", "ads"),
-                cache_hit=provider.last_diagnostics.get("cache_hit", False),
+                endpoint="collector_cache",
+                cache_hit=True,
             )
             _avito_diag(
                 "найдено карточек",
-                provider.last_diagnostics.get("raw_items", len(provider_items)),
+                len(provider_items),
                 страница=page,
             )
             _avito_diag("после парсинга", len(provider_items))
@@ -14110,6 +14214,8 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                         "отправлено пользователю",
                         int(_AVITO_LAST_DIAG.get("sent", 0) or 0) + 1,
                     )
+                    if _REST_APP_COLLECTOR is not None:
+                        _REST_APP_COLLECTOR.mark_delivered(uid, item)
                 return True
             except Exception:
                 pass
@@ -14119,6 +14225,8 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                 "отправлено пользователю",
                 int(_AVITO_LAST_DIAG.get("sent", 0) or 0) + 1,
             )
+            if _REST_APP_COLLECTOR is not None:
+                _REST_APP_COLLECTOR.mark_delivered(uid, item)
         return True
 
     # Отбираем кандидатов и дозагружаем фото/описание только для них (см. ниже).
@@ -16727,8 +16835,14 @@ async def main():
         loop.create_task(_global_monitor_loop())
         print(f"  [монитор] глобальный цикл запущен (интервал {GLOBAL_POLL_SEC}с)")
         if AVITO_ENABLED:
-            loop.create_task(_avito_scheduler_loop())
-            print("  [Авито] отдельный планировщик запущен")
+            if _REST_APP_COLLECTOR is not None:
+                loop.create_task(
+                    _REST_APP_COLLECTOR.run(_load_active_rest_app_searches)
+                )
+                print("  [Авито] единый REST-App collector запущен")
+            else:
+                loop.create_task(_avito_scheduler_loop())
+                print("  [Авито] отдельный планировщик запущен")
         else:
             print("  [Авито] отключён флагом AVITO_ENABLED=false")
         # Push-уведомления — раз в 2-3 дня всем пользователям

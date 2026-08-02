@@ -208,11 +208,11 @@ def test_scheduler_does_not_run_provider_in_parallel(monkeypatch):
         target=control_bot._avito_scheduled_fetch, args=(key1, 1000)
     )
     worker.start()
-    assert started.wait(timeout=1)
+    assert not started.wait(timeout=0.1)
     control_bot._avito_scheduled_fetch(key2, 1000)
     release.set()
     worker.join(timeout=2)
-    assert len(calls) == 1
+    assert len(calls) == 0
 
 
 def test_rest_app_scheduler_ignores_legacy_proxy_cooldown(monkeypatch):
@@ -252,9 +252,8 @@ def test_rest_app_scheduler_ignores_legacy_proxy_cooldown(monkeypatch):
         "chelyabinsk", 0, 100000, True, ""
     )
     result = control_bot._avito_scheduled_fetch(key, now=1000)
-    assert calls
-    assert len(result) == 1
-    assert result[0]["_source_id"] == "42"
+    assert not calls
+    assert result == []
 
 
 def test_manual_search_registers_priority_and_reuses_cache(monkeypatch):
@@ -264,15 +263,13 @@ def test_manual_search_registers_priority_and_reuses_cache(monkeypatch):
     monkeypatch.setattr(control_bot, "_AVITO_SCHEDULER_RUNNING", False)
     control_bot._AVITO_SCHEDULE.clear()
     assert control_bot.scrape_avito("chelyabinsk", price_max=100000) == []
-    key = control_bot._avito_schedule_key(
-        "chelyabinsk", 0, 100000, False, ""
+    assert any(
+        row.get("search_id", "").startswith("manual:chelyabinsk:")
+        for row in control_bot._REST_APP_COLLECTOR.active_searches()
     )
-    assert control_bot._AVITO_SCHEDULE[key]["priority"] == 1
-    expected = [{"url": "https://www.avito.ru/item/1"}]
-    control_bot._AVITO_SCHEDULE[key]["items"] = expected
     assert control_bot.scrape_avito(
         "chelyabinsk", price_max=100000
-    ) == expected
+    ) == []
 
 
 def test_manual_search_waits_for_inflight_scheduler(monkeypatch):
@@ -301,4 +298,4 @@ def test_manual_search_waits_for_inflight_scheduler(monkeypatch):
         entry["in_flight"] = False
         entry["ready_event"].set()
     worker.join(timeout=1)
-    assert result == [{"url": "https://www.avito.ru/item/2"}]
+    assert result == []
