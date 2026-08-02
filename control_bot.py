@@ -8600,14 +8600,14 @@ def _avito_stat_text(status: dict, count: int) -> str:
     st = status.get("status", "blocked")
     err = status.get("error")
     if st == "not_configured" or err == "provider_not_configured":
-        return "🔵 Avito пока не настроен"
+        return "🔴 Avito пока не настроен"
     if err in ("proxy_unavailable", "no_exit_node"):
-        return "🔵 Avito: резидентский прокси временно недоступен"
+        return "🔴 Avito: источник временно недоступен"
     if st in ("cooldown", "blocked") and status.get("last_http") in (403, 429, 503):
-        return "🔵 Avito временно ограничил доступ. Показываю остальные площадки"
+        return "🔴 Avito временно ограничил доступ"
     if count:
-        return f"🔵 Avito: найдено {count} объявлений"
-    return "🔵 Avito: новых объявлений нет"
+        return f"🔴 Avito: {count}"
+    return "🔴 Avito: 0"
 
 
 def check_avito_transport_health() -> dict:
@@ -8699,10 +8699,10 @@ def _avito_cached_result(
             "price_max": price_max,
             "brand": "" if brand == "any" else brand,
         }
-        _REST_APP_COLLECTOR.register_search(search)
+        provider_items = _REST_APP_COLLECTOR.search(search)
         return [
             _adapt_duff_listing(item, datetime.date.today())
-            for item in _REST_APP_COLLECTOR.cached_for_search(search)
+            for item in provider_items
         ]
     key = _avito_schedule_key(region, price_min, price_max, sort_by_date, brand)
     entry = _avito_schedule_entry(key)
@@ -12388,7 +12388,7 @@ ALL_SOURCES = [
 SOURCE_NAMES = {
     "drom":   "🔵 Дром",
     "autoru": "🟠 Auto.ru",
-    "avito":  "🔵 Avito",
+    "avito":  "🔴 Avito",
     "youla":  "🟡 Юла",
     "vk":     "📘 ВКонтакте",
     "tg":     "✈️ Telegram",
@@ -12595,7 +12595,7 @@ async def cmd_global_search(msg: Message):
             if autoru_result["error"]:
                 stat_parts.append("Auto.ru временно недоступен")
             elif autoru_items:
-                stat_parts.append(f"Auto.ru: найдено {len(autoru_items)} объявлений")
+                stat_parts.append(f"Auto.ru: {len(autoru_items)}")
             else:
                 stat_parts.append("Auto.ru: новых объявлений нет")
         elif src == "avito":
@@ -13526,7 +13526,7 @@ async def _ensure_photo(item: dict) -> None:
 
 SOURCE_TAGS = {
     "autoru":     "🟠 Auto.ru",
-    "avito":      "🔵 Avito",
+    "avito":      "🔴 Avito",
     "drom":       "🔵 Дром",
     "youla":      "🟡 Юла",
     "tg_channel": "📢 TG-канал",
@@ -14508,7 +14508,7 @@ async def do_search_for_user(uid: int, reply_to):
             stat_parts.append(_avito_stat_text(avito_status, len(batch)))
         elif src == "autoru":
             if batch:
-                stat_parts.append(f"Auto.ru: найдено {len(batch)} объявлений")
+                stat_parts.append(f"Auto.ru: {len(batch)}")
             elif _AUTORU_LAST_DIAG.get("error_type"):
                 error_type = str(_AUTORU_LAST_DIAG["error_type"])
                 if error_type.startswith(("unsupported_result_type", "unsupported_items_type")):
@@ -15100,7 +15100,7 @@ async def do_search_for_user(uid: int, reply_to):
         pass
     _seen_cnt = sum(1 for i in suitable if i.get("_already_seen"))
     src_found = list(dict.fromkeys(i.get("source","") for i in suitable if i.get("source")))
-    src_icons = {"avito":"🟠","drom":"🔵","autoru":"🔴","vk":"💙","tg":"✈️"}
+    src_icons = {"avito":"🔴","drom":"🔵","autoru":"🔴","vk":"💙","tg":"✈️"}
     src_str = " ".join(src_icons.get(s,"") for s in src_found if s)
     if _avito_available:
         _extra = len(suitable) - _below_count
@@ -15729,7 +15729,7 @@ async def _send_monitor_item(uid: int, it: dict):
     if market:
         price_line += f"  🔻 рынок ~{market:,} ₽ (-{pct}%)".replace(",", " ")
     src = it.get("source", "avito")
-    src_icon = {"avito": "🟠 Авито", "drom": "🔵 Дром", "autoru": "🔴 Auto.ru", "vk": "💙 ВКонтакте", "tg": "✈️ Telegram"}.get(src, "📌")
+    src_icon = {"avito": "🔴 Avito", "drom": "🔵 Дром", "autoru": "🔴 Auto.ru", "vk": "💙 ВКонтакте", "tg": "✈️ Telegram"}.get(src, "📌")
     it_region = it.get("_monitor_region", "")
     region_label = f" · {REGIONS.get(it_region, it_region)}" if it_region else ""
     caption = (
@@ -15844,7 +15844,7 @@ async def _send_track_brand_item(uid: int, it: dict, brand_label: str) -> None:
         price_line += f" ▼ рынок ~{market:,} ₽ (-{pct}%)".replace(",", " ")
     days = it.get("_days_on_site", 0)
     days_label = "только что" if days == 0 else f"{days} дн. назад"
-    src_icon = {"avito": "🟠", "drom": "🔵", "autoru": "🔴", "vk": "💙", "tg": "✈️"}.get(
+    src_icon = {"avito": "🔴", "drom": "🔵", "autoru": "🔴", "vk": "💙", "tg": "✈️"}.get(
         it.get("source", ""), "📌"
     )
     caption = (
@@ -16295,7 +16295,7 @@ async def _global_monitor_loop():
                         ))
                         regs_label = ", ".join(regs_in_batch[:3])
                         srcs_in_batch = list(dict.fromkeys(it.get("source", "") for it in new_below))
-                        src_icon_map = {"avito": "🟠", "drom": "🔵", "autoru": "🔴", "vk": "💙", "tg": "✈️"}
+                        src_icon_map = {"avito": "🔴", "drom": "🔵", "autoru": "🔴", "vk": "💙", "tg": "✈️"}
                         srcs_label = " ".join(src_icon_map.get(s, "") for s in srcs_in_batch if s)
                         _monitor_send_tasks.append(bot.send_message(
                             uid,

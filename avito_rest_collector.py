@@ -352,6 +352,18 @@ class RestAppCollector:
             return []
         return [item for item in cached[1] if self.matches(item, search)]
 
+    def search(self, search: dict[str, Any]) -> list[dict]:
+        """Return a filtered shared result, collecting once on a cache miss."""
+        self.register_search(search)
+        cached = self.cached_for_search(search)
+        if cached:
+            return cached
+        result = self.collect_group(search, searches=[search])
+        return [
+            item for item in result.get("items", [])
+            if self.matches(item, search)
+        ]
+
     def collect_active(self, searches: list[dict[str, Any]]) -> dict[str, Any]:
         groups: dict[str, list[dict]] = defaultdict(list)
         for search in searches:

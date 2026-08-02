@@ -261,6 +261,16 @@ def test_manual_search_registers_priority_and_reuses_cache(monkeypatch):
 
     monkeypatch.setattr(control_bot, "AVITO_ENABLED", True)
     monkeypatch.setattr(control_bot, "_AVITO_SCHEDULER_RUNNING", False)
+    calls = []
+    def fake_search(query):
+        calls.append(query)
+        control_bot._REST_APP_COLLECTOR.register_search(query)
+        return []
+    monkeypatch.setattr(
+        control_bot._REST_APP_COLLECTOR,
+        "search",
+        fake_search,
+    )
     control_bot._AVITO_SCHEDULE.clear()
     assert control_bot.scrape_avito("chelyabinsk", price_max=100000) == []
     assert any(
@@ -270,6 +280,7 @@ def test_manual_search_registers_priority_and_reuses_cache(monkeypatch):
     assert control_bot.scrape_avito(
         "chelyabinsk", price_max=100000
     ) == []
+    assert len(calls) == 2
 
 
 def test_manual_search_waits_for_inflight_scheduler(monkeypatch):
@@ -277,6 +288,7 @@ def test_manual_search_waits_for_inflight_scheduler(monkeypatch):
 
     monkeypatch.setattr(control_bot, "AVITO_ENABLED", True)
     monkeypatch.setattr(control_bot, "_AVITO_SCHEDULER_RUNNING", True)
+    monkeypatch.setattr(control_bot._REST_APP_COLLECTOR, "search", lambda query: [])
     control_bot._AVITO_SCHEDULE.clear()
     control_bot._AVITO_GLOBAL_NEXT_ATTEMPT_AT = 0
     key = control_bot._avito_schedule_key(

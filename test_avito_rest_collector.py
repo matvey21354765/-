@@ -144,3 +144,12 @@ def test_cache_prevents_second_request(tmp_path, monkeypatch):
     second = obj.collect_group(search())
     assert FakeProvider.calls == 1
     assert second["cache_hit"] is True
+
+
+def test_manual_search_collects_once_on_cache_miss(tmp_path, monkeypatch):
+    obj = collector(tmp_path, monkeypatch)
+    first = obj.search(search())
+    second = obj.search(search())
+    assert len(first) == 1
+    assert second == first
+    assert FakeProvider.calls == 1
