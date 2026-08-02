@@ -158,6 +158,19 @@ class RestAppAvitoProvider:
             "top_level_keys": sorted(str(key) for key in payload),
             "raw_payload": payload,
         })
+        raw_count = 0
+        data = payload.get("data")
+        if isinstance(data, list):
+            raw_count = len(data)
+        elif isinstance(data, dict) and isinstance(data.get("items"), list):
+            raw_count = len(data["items"])
+        elif isinstance(payload.get("items"), list):
+            raw_count = len(payload["items"])
+        logging.getLogger(__name__).info(
+            "[REST-APP RESPONSE] endpoint=%s http=%d status=%s count=%d seconds=%.3f",
+            endpoint, http, str(payload.get("status", "ok")), raw_count,
+            self.last_diagnostics.get("seconds", 0.0),
+        )
         if str(payload.get("status", "")).lower() != "ok":
             message = str(payload.get("message") or payload.get("error") or "API error")
             lowered = message.lower()
@@ -495,6 +508,12 @@ class RestAppAvitoProvider:
         limit: int = 1000,
         lookback_minutes: int = 1440,
     ) -> list[dict]:
+        logging.getLogger(__name__).info(
+            "[REST-APP START] city=%s region=%s category=%s price=%d-%d "
+            "brand=%s model=%s year=%d lookback_minutes=%d",
+            city_name, region_name, CAR_CATEGORY_ID, price_min, price_max,
+            brand, model, int(year or 0), lookback_minutes,
+        )
         key = (
             region_name.casefold(), city_name.casefold(), int(price_min),
             int(price_max), brand.casefold(), model.casefold(), int(year or 0),

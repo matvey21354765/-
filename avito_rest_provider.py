@@ -169,6 +169,11 @@ class AvitoRestProvider:
         limit: int = 1000,
     ) -> list[dict[str, Any]]:
         """Ищет объявления через REST-App API."""
+        logging.getLogger(__name__).info(
+            "[AVITO REST PROVIDER] search_ads q=%s city=%s region=%s "
+            "price=%s-%s last_m=%s last_s=%s category=%s brand=%s model=%s year=%d",
+            q, city, region, price1, price2, last_m, last_s, category, brand, model, year,
+        )
         provider = self._get_provider()
         loop = asyncio.get_event_loop()
 

@@ -8739,6 +8739,11 @@ def _avito_cached_result(
     brand: str = "",
 ) -> list[dict]:
     """Регистрирует поиск, при cache miss приоритизирует scheduler и ждёт кэш."""
+    print(
+        f"[Avito cached] region={region} price_min={price_min} price_max={price_max} "
+        f"brand={brand} enabled={AVITO_ENABLED} provider={AVITO_PROVIDER} "
+        f"source={AVITO_SOURCE} collector={_REST_APP_COLLECTOR is not None}"
+    )
     if not AVITO_ENABLED:
         return []
     if _REST_APP_COLLECTOR is not None:
@@ -8970,6 +8975,10 @@ async def _avito_scheduled_fetch_unlocked(
     key: tuple, now: float | None = None
 ) -> list[dict]:
     """Один проход: исходный GET и максимум один внутренний canonical GET."""
+    print(
+        f"[Avito scheduler] key={key} provider={AVITO_PROVIDER} source={AVITO_SOURCE} "
+        f"collector={_REST_APP_COLLECTOR is not None} enabled={AVITO_ENABLED}"
+    )
     global _AVITO_GLOBAL_NEXT_ATTEMPT_AT
     now = time.time() if now is None else float(now)
     entry = _avito_schedule_entry(key)
@@ -16769,6 +16778,15 @@ async def main():
         raise RuntimeError("BOT_TOKEN не задан; запуск бота невозможен")
     bot = Bot(token=BOT_TOKEN)
     dp = dp._materialize()
+    @dp.errors()
+    async def _on_telegram_error(event):
+        if isinstance(getattr(event, "exception", None), TelegramConflictError):
+            print(
+                "[TELEGRAM] Conflict detected, another instance is polling. Exiting.",
+                file=sys.stderr,
+                flush=True,
+            )
+            raise SystemExit(2)
     logging.basicConfig(level=logging.WARNING)
     loop = asyncio.get_running_loop()
     # Тяжёлые синхронные загрузки при старте — в executor, чтобы не блокировать
