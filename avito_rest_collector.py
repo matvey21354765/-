@@ -17,6 +17,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 from avito_history import save_avito_history
+from avito_normalizer import normalize_rest_app_items_with_diagnostics
+from avito_rest_provider import (
+    describe_rest_app_payload,
+    extract_rest_app_items,
+    save_safe_rest_app_sample,
+)
 from rest_app_avito_provider import CAR_CATEGORY_ID, RestAppAvitoProvider
 
 
@@ -33,6 +39,7 @@ REST_APP_CACHE_TTL_SECONDS = _env_int("REST_APP_CACHE_TTL_SECONDS", 55)
 REST_APP_MAX_PAGES = _env_int("REST_APP_MAX_PAGES", 1)
 REST_APP_DAILY_SOFT_LIMIT = _env_int("REST_APP_DAILY_SOFT_LIMIT", 8000)
 REST_APP_DAILY_HARD_LIMIT = _env_int("REST_APP_DAILY_HARD_LIMIT", 9500)
+REST_APP_DEGRADED_SECONDS = _env_int("REST_APP_DEGRADED_SECONDS", 600)
 
 
 def canonical_request_key(search: dict[str, Any]) -> str:
@@ -76,6 +83,7 @@ class RestAppCollector:
         self._flights: dict[str, threading.Event] = {}
         self._lock = threading.RLock()
         self._registered: dict[str, dict[str, Any]] = {}
+        self._degraded_until: dict[str, float] = {}
         self._stats = defaultdict(int)
         self._last_request_at = 0.0
         self._init_db()
@@ -179,23 +187,42 @@ class RestAppCollector:
             "date2": moscow_now.strftime("%Y-%m-%d %H:%M:%S"),
         }
         payload = provider._post("ads", params)
-        raw, raw_type = provider._extract_raw_items(payload)
+        save_safe_rest_app_sample(payload)
+        shape = describe_rest_app_payload(payload)
+        raw = extract_rest_app_items(payload)
+        raw_type = str(shape["nested_items_path"] or shape["top_level_type"])
+        logging.getLogger(__name__).info(
+            "[REST-APP RESPONSE] status=%s raw_items_count=%d category_id=%s "
+            "category_name=Автомобили nested_items_path=%s",
+            provider.last_diagnostics.get("http") or 200, len(raw),
+            params["category_id"], shape["nested_items_path"] or "unexpected",
+        )
+        if not shape["nested_items_path"] and not isinstance(payload, list):
+            return [], {
+                "status": "unexpected_payload_shape", "http": 200,
+                "raw_count": 0, "normalized_count": 0,
+                "failed_count": 0, "raw_type": raw_type,
+            }
+        normalized, normalize_diag = normalize_rest_app_items_with_diagnostics(raw)
         unique: dict[str, dict] = {}
-        for row in raw:
-            if not isinstance(row, dict):
-                continue
-            item = provider._normalize(row)
+        for item in normalized:
             identity = _identity(item)
             if identity:
                 unique[identity] = item
         items = sorted(
             unique.values(), key=lambda x: x.get("published_at") or "", reverse=True
         )
+        logging.getLogger(__name__).info(
+            "[AVITO DEDUPE] before=%d after=%d already_seen=%d",
+            len(normalized), len(items), len(normalized) - len(items),
+        )
         return items, {
             "status": payload.get("status"),
             "http": int(provider.last_diagnostics.get("http") or 200),
             "raw_count": len(raw),
             "normalized_count": len(items),
+            "failed_count": normalize_diag["failed_count"],
+            "normalization_failures": normalize_diag["failures"],
             "raw_type": raw_type,
         }
 
@@ -240,6 +267,14 @@ class RestAppCollector:
         request_id = uuid.uuid4().hex[:12]
         now = self.now()
         with self._lock:
+            degraded_until = self._degraded_until.get(key, 0.0)
+            if now < degraded_until:
+                self._stats["duplicate_requests_prevented"] += 1
+                return {
+                    "items": [], "new_items": [], "cache_hit": True,
+                    "single_flight_joined": False, "request_id": request_id,
+                    "status": "normalization_failed", "degraded": True,
+                }
             cached = self._cache.get(key)
             if cached and now - cached[0] < REST_APP_CACHE_TTL_SECONDS:
                 self._stats["cache_hits"] += 1
@@ -275,6 +310,16 @@ class RestAppCollector:
                         "status": status}
             items, meta = self._fetch(search)
             status = str(meta.get("status") or "ok")
+            if int(meta.get("raw_count") or 0) > 0 and not items:
+                status = "normalization_failed"
+                with self._lock:
+                    self._degraded_until[key] = self.now() + REST_APP_DEGRADED_SECONDS
+            elif not items:
+                with self._lock:
+                    self._degraded_until[key] = self.now() + REST_APP_DEGRADED_SECONDS
+            elif items:
+                with self._lock:
+                    self._degraded_until.pop(key, None)
             self._record_request(key, status)
             self._last_request_at = self.now()
             new_items, _ = self._store_and_analyze(items)
@@ -284,7 +329,7 @@ class RestAppCollector:
                 self._cache[key] = (self.now(), list(items))
             return {"items": items, "new_items": new_items, "cache_hit": False,
                     "single_flight_joined": False, "request_id": request_id,
-                    "status": status, **meta}
+                    **meta, "status": status}
         finally:
             with self._lock:
                 event = self._flights.pop(key, None)
@@ -355,7 +400,29 @@ class RestAppCollector:
             cached = self._cache.get(key)
         if not cached:
             return []
-        return [item for item in cached[1] if self.matches(item, search)]
+        return self._filter_with_diagnostics(list(cached[1]), search)
+
+    @classmethod
+    def _filter_with_diagnostics(
+        cls, items: list[dict[str, Any]], search: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        before = len(items)
+        wanted = [str(search.get(key) or "").strip().casefold()
+                  for key in ("region", "city") if search.get(key)]
+        after_city = [item for item in items if not wanted or any(
+            term in str(item.get("location") or "").casefold() for term in wanted
+        )]
+        minimum = int(search.get("price_min") or 0)
+        maximum = int(search.get("price_max") or 99_000_000)
+        after_price = [item for item in after_city if item.get("price") is not None and minimum <= int(item["price"]) <= maximum]
+        after_category = list(after_price)
+        after_user = [item for item in after_category if cls.matches(item, search)]
+        logging.getLogger(__name__).info(
+            "[AVITO FILTER] before=%d after_city=%d after_price=%d "
+            "after_category=%d after_user_filters=%d",
+            before, len(after_city), len(after_price), len(after_category), len(after_user),
+        )
+        return after_user
 
     def search(self, search: dict[str, Any]) -> list[dict]:
         """Return a filtered shared result, collecting once on a cache miss."""
@@ -364,10 +431,7 @@ class RestAppCollector:
         if cached:
             return cached
         result = self.collect_group(search, searches=[search])
-        return [
-            item for item in result.get("items", [])
-            if self.matches(item, search)
-        ]
+        return self._filter_with_diagnostics(list(result.get("items", [])), search)
 
     def collect_active(self, searches: list[dict[str, Any]]) -> dict[str, Any]:
         groups: dict[str, list[dict]] = defaultdict(list)

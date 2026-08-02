@@ -1,0 +1,17 @@
+{
+  "status": "ok",
+  "data": {
+    "items": [
+      {
+        "Id": "sample-1",
+        "avito_id": "hidden_in_demo",
+        "title": "Lada Granta 2015",
+        "price": "65 000 ₽",
+        "location": {"city": "Омск", "region": "Омская область"},
+        "url": "hidden_in_demo",
+        "time": "2026-08-02 10:00:00",
+        "params": [{"name": "Год выпуска", "value": "2015"}]
+      }
+    ]
+  }
+}

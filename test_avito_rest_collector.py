@@ -57,6 +57,7 @@ def collector(tmp_path, monkeypatch, analyzer=None):
     FakeProvider.payloads = []
     FakeProvider.delay = 0
     monkeypatch.setattr(arc, "save_avito_history", lambda item: {"status": "new"})
+    monkeypatch.setattr(arc, "save_safe_rest_app_sample", lambda payload: None)
     return arc.RestAppCollector(
         provider_factory=FakeProvider,
         db_path=tmp_path / "collector.db",
@@ -166,3 +167,25 @@ def test_collector_uses_confirmed_rest_app_time_payload(tmp_path, monkeypatch):
     assert payload["category_id"] == "9"
     assert "last_m" not in payload
     assert "region_id" not in payload
+
+
+def test_normalization_degraded_mode_prevents_duplicate_request(tmp_path, monkeypatch):
+    class InvalidProvider(FakeProvider):
+        calls = 0
+        payloads = []
+
+        def _post(self, endpoint, params):
+            type(self).calls += 1
+            return {"status": "ok", "data": [{"Id": "bad", "title": "No price"}]}
+
+    monkeypatch.setattr(arc, "save_avito_history", lambda item: {"status": "new"})
+    monkeypatch.setattr(arc, "save_safe_rest_app_sample", lambda payload: None)
+    obj = arc.RestAppCollector(
+        provider_factory=InvalidProvider, db_path=tmp_path / "degraded.db"
+    )
+    first = obj.collect_group(search())
+    second = obj.collect_group(search())
+    assert first["status"] == "normalization_failed"
+    assert second["status"] == "normalization_failed"
+    assert second["degraded"] is True
+    assert InvalidProvider.calls == 1

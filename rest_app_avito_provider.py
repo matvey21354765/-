@@ -305,12 +305,14 @@ class RestAppAvitoProvider:
 
     @staticmethod
     def _extract_raw_items(payload: dict) -> tuple[list, str]:
+        if isinstance(payload, list):
+            return payload, "$"
         data = payload.get("data")
         if isinstance(data, list):
             return data, "list"
         if isinstance(data, dict) and isinstance(data.get("items"), list):
             return data["items"], "dict.items"
-        for key in ("items", "results"):
+        for key in ("ads", "items", "result", "results"):
             if isinstance(payload.get(key), list):
                 return payload[key], key
         return [], type(data).__name__

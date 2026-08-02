@@ -6,7 +6,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import os
+from pathlib import Path
 from typing import Any
 
 from rest_app_avito_provider import RestAppAvitoProvider, RestAppConfig
@@ -14,6 +17,83 @@ from rest_app_avito_provider import RestAppAvitoProvider, RestAppConfig
 
 class AvitoRestProviderError(RuntimeError):
     pass
+
+
+class UnexpectedRestAppPayload(AvitoRestProviderError):
+    """REST-App returned HTTP 200 with an unknown JSON shape."""
+
+
+def extract_rest_app_items(payload: Any) -> list[dict[str, Any]]:
+    """Extract ads without confusing object keys with listing count."""
+    candidates: list[tuple[str, Any]] = []
+    if isinstance(payload, list):
+        candidates.append(("$", payload))
+    elif isinstance(payload, dict):
+        for key in ("ads", "items", "data", "result", "results"):
+            candidates.append((key, payload.get(key)))
+        data = payload.get("data")
+        if isinstance(data, dict):
+            candidates.append(("data.items", data.get("items")))
+    for _path, value in candidates:
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def describe_rest_app_payload(payload: Any) -> dict[str, Any]:
+    items = extract_rest_app_items(payload)
+    path = ""
+    candidates = [("$", payload)] if isinstance(payload, list) else []
+    if isinstance(payload, dict):
+        candidates.extend((key, payload.get(key)) for key in (
+            "ads", "items", "data", "result", "results"
+        ))
+        if isinstance(payload.get("data"), dict):
+            candidates.append(("data.items", payload["data"].get("items")))
+    for candidate_path, value in candidates:
+        if isinstance(value, list):
+            path = candidate_path
+            break
+    return {
+        "top_level_type": type(payload).__name__,
+        "top_level_keys": sorted(payload) if isinstance(payload, dict) else [],
+        "raw_count": len(items),
+        "first_item_keys": sorted(items[0]) if items else [],
+        "nested_items_path": path,
+    }
+
+
+def save_safe_rest_app_sample(
+    payload: Any, path: str | Path = "logs/rest_app_sample.json"
+) -> None:
+    """Persist one redacted response sample for production diagnosis."""
+    target = Path(path)
+    if target.exists():
+        return
+    secret_keys = {"token", "phone", "login", "password", "seller_phone"}
+
+    def redact(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                str(key): ("[redacted]" if str(key).casefold() in secret_keys else redact(item))
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [redact(item) for item in value]
+        return value
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    document = {"diagnostics": describe_rest_app_payload(payload), "payload": redact(payload)}
+    target.write_text(json.dumps(document, ensure_ascii=False, indent=2), encoding="utf-8")
+    logging.getLogger(__name__).info(
+        "[REST-APP RESPONSE] top_level_type=%s top_level_keys=%s raw_items_count=%d "
+        "first_item_keys=%s nested_items_path=%s",
+        document["diagnostics"]["top_level_type"],
+        document["diagnostics"]["top_level_keys"],
+        document["diagnostics"]["raw_count"],
+        document["diagnostics"]["first_item_keys"],
+        document["diagnostics"]["nested_items_path"],
+    )
 
 
 class AvitoRestProvider:
