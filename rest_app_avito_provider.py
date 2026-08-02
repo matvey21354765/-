@@ -99,7 +99,7 @@ class RestAppAvitoProvider:
         self.cache_ttl = max(1, int(cache_ttl))
         self.last_diagnostics: dict[str, Any] = {}
 
-    def _post(self, endpoint: str, params: dict | None = None) -> dict:
+    def _post(self, endpoint: str, params: dict | None = None) -> dict | list:
         body = {
             "login": self.config.login,
             "token": self.config.token,
@@ -151,8 +151,20 @@ class RestAppAvitoProvider:
             payload = json.loads(raw.decode("utf-8-sig"))
         except (UnicodeError, json.JSONDecodeError) as exc:
             raise RestAppResponseError("Rest-App returned invalid JSON", http) from exc
-        if not isinstance(payload, dict):
-            raise RestAppResponseError("Rest-App JSON root is not an object", http)
+        if not isinstance(payload, (dict, list)):
+            raise RestAppResponseError("Rest-App JSON root is not an object or list", http)
+        if isinstance(payload, list):
+            self.last_diagnostics.update({
+                "api_status": "ok",
+                "top_level_keys": [],
+                "raw_payload": payload,
+            })
+            logging.getLogger(__name__).info(
+                "[REST-APP RESPONSE] endpoint=%s http=%d status=ok count=%d seconds=%.3f",
+                endpoint, http, len(payload),
+                self.last_diagnostics.get("seconds", 0.0),
+            )
+            return payload
         self.last_diagnostics.update({
             "api_status": payload.get("status"),
             "top_level_keys": sorted(str(key) for key in payload),

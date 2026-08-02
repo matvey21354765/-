@@ -92,6 +92,7 @@ class RestAppCollector:
         self._degraded_until: dict[str, float] = {}
         self._stats = defaultdict(int)
         self._last_request_at = 0.0
+        self.last_diagnostics: dict[str, Any] = {"status": "idle"}
         self._init_db()
         with self._instances_lock:
             type(self)._instances += 1
@@ -192,11 +193,22 @@ class RestAppCollector:
             ),
             "date2": moscow_now.strftime("%Y-%m-%d %H:%M:%S"),
         }
+        print(
+            "[Avito RestApp] request_started category_id=9 page=1 retry=false",
+            flush=True,
+        )
         payload = provider._post("ads", params)
         save_safe_rest_app_sample(payload)
         shape = describe_rest_app_payload(payload)
         raw = extract_rest_app_items(payload)
         raw_type = str(shape["nested_items_path"] or shape["top_level_type"])
+        response_line = (
+            "[REST-APP RESPONSE] "
+            f"status={provider.last_diagnostics.get('http') or 200} "
+            f"raw_items_count={len(raw)} category_id={params['category_id']} "
+            f"nested_items_path={shape['nested_items_path'] or 'unexpected'}"
+        )
+        print(response_line, flush=True)
         logging.getLogger(__name__).info(
             "[REST-APP RESPONSE] status=%s raw_items_count=%d category_id=%s "
             "category_name=Автомобили nested_items_path=%s",
@@ -218,6 +230,12 @@ class RestAppCollector:
         items = sorted(
             unique.values(), key=lambda x: x.get("published_at") or "", reverse=True
         )
+        print(
+            "[AVITO NORMALIZER] "
+            f"normalized_count={len(normalized)} "
+            f"failed_count={normalize_diag['failed_count']}",
+            flush=True,
+        )
         logging.getLogger(__name__).info(
             "[AVITO DEDUPE] before=%d after=%d already_seen=%d",
             len(normalized), len(items), len(normalized) - len(items),
@@ -231,6 +249,23 @@ class RestAppCollector:
             "normalization_failures": normalize_diag["failures"],
             "raw_type": raw_type,
         }
+
+    def _load_recent_items(self, limit: int = 200) -> list[dict[str, Any]]:
+        """Load the last successful catalogue without spending another API call."""
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT item_json FROM collector_items ORDER BY last_seen DESC LIMIT ?",
+                (int(limit),),
+            ).fetchall()
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                item = json.loads(row["item_json"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if isinstance(item, dict):
+                items.append(item)
+        return items
 
     def _store_and_analyze(self, items: list[dict]) -> tuple[list[dict], int]:
         new_items: list[dict] = []
@@ -337,6 +372,30 @@ class RestAppCollector:
             return {"items": items, "new_items": new_items, "cache_hit": False,
                     "single_flight_joined": False, "request_id": request_id,
                     **meta, "status": status}
+        except Exception as exc:
+            status = "request_failed"
+            safe_error = type(exc).__name__
+            fallback_items = self._load_recent_items()
+            self.last_diagnostics = {
+                "status": status,
+                "error_type": safe_error,
+                "db_fallback_count": len(fallback_items),
+            }
+            print(
+                "[Avito RestApp] request_failed "
+                f"error_type={safe_error} db_fallback_count={len(fallback_items)}",
+                flush=True,
+            )
+            return {
+                "items": fallback_items,
+                "new_items": [],
+                "cache_hit": False,
+                "db_hit": bool(fallback_items),
+                "single_flight_joined": False,
+                "request_id": request_id,
+                "status": status,
+                "error_type": safe_error,
+            }
         finally:
             with self._lock:
                 event = self._flights.pop(key, None)
@@ -449,6 +508,15 @@ class RestAppCollector:
         self.register_search(search)
         cached = self.cached_for_search(search)
         if cached:
+            self.last_diagnostics = {
+                "status": "ok", "cache_hit": True, "db_hit": False,
+                "provider_returned": len(cached), "after_user_filters": len(cached),
+            }
+            print(
+                f"[Avito RestApp] provider_returned={len(cached)} "
+                f"after_user_filters={len(cached)} status=ok cache_hit=true db_hit=false",
+                flush=True,
+            )
             return cached
         # Interactive searches never open another API request while the
         # minute collector has a recent global catalogue.  Thirty testers and
@@ -458,9 +526,36 @@ class RestAppCollector:
         if latest and self.now() - latest[0] < 120:
             self._stats["cache_hits"] += 1
             self._stats["duplicate_requests_prevented"] += 1
-            return self._filter_with_diagnostics(list(latest[1]), search)
+            filtered = self._filter_with_diagnostics(list(latest[1]), search)
+            self.last_diagnostics = {
+                "status": "ok", "cache_hit": True, "db_hit": False,
+                "provider_returned": len(latest[1]),
+                "after_user_filters": len(filtered),
+            }
+            print(
+                f"[Avito RestApp] provider_returned={len(latest[1])} "
+                f"after_user_filters={len(filtered)} status=ok "
+                "cache_hit=true db_hit=false",
+                flush=True,
+            )
+            return filtered
         result = self.collect_group(search, searches=[search])
-        return self._filter_with_diagnostics(list(result.get("items", [])), search)
+        filtered = self._filter_with_diagnostics(list(result.get("items", [])), search)
+        self.last_diagnostics = {
+            **{key: value for key, value in result.items() if key != "items"},
+            "provider_returned": len(result.get("items", [])),
+            "after_user_filters": len(filtered),
+        }
+        print(
+            "[Avito RestApp] "
+            f"provider_returned={self.last_diagnostics['provider_returned']} "
+            f"after_user_filters={len(filtered)} "
+            f"status={result.get('status', 'ok')} "
+            f"cache_hit={str(bool(result.get('cache_hit'))).lower()} "
+            f"db_hit={str(bool(result.get('db_hit'))).lower()}",
+            flush=True,
+        )
+        return filtered
 
     def collect_active(self, searches: list[dict[str, Any]]) -> dict[str, Any]:
         groups: dict[str, list[dict]] = defaultdict(list)

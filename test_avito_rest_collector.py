@@ -220,3 +220,21 @@ def test_demo_results_survive_empty_location_and_unreliable_price(tmp_path, monk
     wanted = search()
     wanted.update({"region": "Омская область", "city": "Омск", "price_max": 100000})
     assert obj._filter_with_diagnostics([item], wanted) == [item]
+
+
+def test_network_failure_returns_last_successful_database_catalogue(tmp_path, monkeypatch):
+    obj = collector(tmp_path, monkeypatch)
+    assert obj.search(search())
+    obj._cache.clear()
+    obj._latest_items = None
+
+    class BrokenProvider:
+        def _post(self, endpoint, params):
+            raise TimeoutError("secret upstream detail")
+
+    obj.provider_factory = BrokenProvider
+    result = obj.search({**search(), "last_m": 1440})
+    assert len(result) == 1
+    assert obj.last_diagnostics["status"] == "request_failed"
+    assert obj.last_diagnostics["db_hit"] is True
+    assert obj.last_diagnostics["error_type"] == "TimeoutError"
