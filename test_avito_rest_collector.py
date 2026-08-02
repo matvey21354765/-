@@ -78,6 +78,16 @@ def test_different_brands_same_region_do_not_create_requests(tmp_path, monkeypat
     assert FakeProvider.calls == 1
 
 
+def test_different_regions_share_one_global_rest_request(tmp_path, monkeypatch):
+    obj = collector(tmp_path, monkeypatch)
+    first = search(1, region_id="55")
+    second = search(2, region_id="77")
+    second.update({"region": "Омская область", "city": "Омск"})
+    result = obj.collect_active([first, second])
+    assert FakeProvider.calls == 1
+    assert len(result) == 1
+
+
 def test_single_flight_joins_concurrent_calls(tmp_path, monkeypatch):
     obj = collector(tmp_path, monkeypatch)
     FakeProvider.delay = 0.15
@@ -156,6 +166,15 @@ def test_manual_search_collects_once_on_cache_miss(tmp_path, monkeypatch):
     second = obj.search(search())
     assert len(first) == 1
     assert second == first
+    assert FakeProvider.calls == 1
+
+
+def test_manual_filters_reuse_latest_monitor_catalogue(tmp_path, monkeypatch):
+    obj = collector(tmp_path, monkeypatch)
+    obj.collect_group(search())
+    manual = search(99, region_id="77")
+    manual.update({"last_m": 1440, "region": "Омская область", "city": "Омск"})
+    assert obj.search(manual)
     assert FakeProvider.calls == 1
 
 

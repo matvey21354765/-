@@ -43,8 +43,13 @@ REST_APP_DEGRADED_SECONDS = _env_int("REST_APP_DEGRADED_SECONDS", 600)
 
 
 def canonical_request_key(search: dict[str, Any]) -> str:
+    """Key for the real REST-App payload, never for a user or region.
+
+    REST-App's confirmed ads request is global (category + time window + page),
+    so region/brand/model/price belong only to local matching.  Including them
+    here would spend the same API request once per user group.
+    """
     return ":".join((
-        str(search.get("region_id") or ""),
         str(search.get("category_id") or CAR_CATEGORY_ID),
         str(search.get("last_m") or REST_APP_LAST_MINUTES),
         str(search.get("page") or 1),
@@ -80,6 +85,7 @@ class RestAppCollector:
         self.analyzer = analyzer or (lambda item: {})
         self.now = now
         self._cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+        self._latest_items: tuple[float, list[dict[str, Any]]] | None = None
         self._flights: dict[str, threading.Event] = {}
         self._lock = threading.RLock()
         self._registered: dict[str, dict[str, Any]] = {}
@@ -327,6 +333,7 @@ class RestAppCollector:
                 matched_users = len(self.match_users(new_items, searches))
             with self._lock:
                 self._cache[key] = (self.now(), list(items))
+                self._latest_items = (self.now(), list(items))
             return {"items": items, "new_items": new_items, "cache_hit": False,
                     "single_flight_joined": False, "request_id": request_id,
                     **meta, "status": status}
@@ -443,6 +450,15 @@ class RestAppCollector:
         cached = self.cached_for_search(search)
         if cached:
             return cached
+        # Interactive searches never open another API request while the
+        # minute collector has a recent global catalogue.  Thirty testers and
+        # ten subscribers therefore consume the same request.
+        with self._lock:
+            latest = self._latest_items
+        if latest and self.now() - latest[0] < 120:
+            self._stats["cache_hits"] += 1
+            self._stats["duplicate_requests_prevented"] += 1
+            return self._filter_with_diagnostics(list(latest[1]), search)
         result = self.collect_group(search, searches=[search])
         return self._filter_with_diagnostics(list(result.get("items", [])), search)
 

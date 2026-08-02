@@ -166,6 +166,7 @@ class _FakeSession:
         self.calls = 0
         self.last_url = ""
         self.last_kwargs = {}
+        self.cookies = SimpleNamespace(set=lambda *args, **kwargs: None)
 
     def get(self, url, **kwargs):
         self.calls += 1
