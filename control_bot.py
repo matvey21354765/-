@@ -2683,6 +2683,59 @@ def _scrape_autoru_production(
             })
 
         raw = _autoru_parse_html(html, datetime.date.today())
+        # A normal HTTP 200 page can be a client-side shell without offers.
+        # Reuse the warmed session for one structured listing request instead
+        # of reporting a false zero to Telegram.
+        if not raw:
+            ajax_body: dict = {
+                "category": "cars",
+                "section": "used",
+                "seller_type": ["PRIVATE"],
+                "page": 1,
+                "page_size": 50,
+                "sort": "fresh_relevance_1-desc",
+                "output_type": "list",
+            }
+            geo_ids = AUTORU_GEO_IDS.get(region, [])
+            if geo_ids:
+                ajax_body["geo_id"] = geo_ids
+            if price_min > 0:
+                ajax_body["price_from"] = price_min
+            if price_max < 99_000_000:
+                ajax_body["price_to"] = price_max
+            if brand_slug:
+                ajax_body["catalog_filter"] = [{"mark": brand_slug.upper()}]
+            ajax_response = session.post(
+                "https://auto.ru/-/ajax/desktop/listing/",
+                json=ajax_body,
+                headers={
+                    "Accept": "application/json,*/*",
+                    "Accept-Language": "ru-RU,ru;q=0.9",
+                    "Content-Type": "application/json",
+                    "Origin": "https://auto.ru",
+                    "Referer": url,
+                    "x-client-app": "autoru-frontend-application",
+                    "x-requested-with": "fetch",
+                },
+                proxies=_autoru_proxy_dict(),
+                timeout=autoru_timeout(),
+            )
+            ajax_text = ajax_response.text or ""
+            ajax_captcha = autoru_captcha_detected(
+                int(ajax_response.status_code), str(ajax_response.url), ajax_text
+            )
+            if int(ajax_response.status_code) == 200 and not ajax_captcha:
+                try:
+                    raw = _autoru_parse_offers(
+                        ajax_response.json(), datetime.date.today()
+                    )
+                except (ValueError, TypeError, KeyError):
+                    raw = _autoru_parse_html(ajax_text, datetime.date.today())
+            _AUTORU_LAST_DIAG.update({
+                "ajax_http_status": int(ajax_response.status_code),
+                "ajax_response_size": len(ajax_response.content or b""),
+                "ajax_captcha_detected": ajax_captcha,
+            })
         unique: dict[str, dict] = {}
         for item in raw:
             identity = _item_identity(item)
@@ -2700,6 +2753,11 @@ def _scrape_autoru_production(
             "after_location": len(normalized),
             "after_price": len(filtered),
         })
+        if not raw:
+            _AUTORU_LAST_DIAG.update({
+                "error_type": "parse_error",
+                "error_message_safe": "HTTP 200, listing payload contains no parsed offers",
+            })
         print(f"[Auto.ru] result_type={type(filtered).__name__}")
         print(f"[Auto.ru] items_before_filter={len(normalized)}")
         print(f"[Auto.ru] items_after_filter={len(filtered)}")
@@ -2712,7 +2770,7 @@ def _scrape_autoru_production(
         )
         return normalize_autoru_result({
             "items": filtered,
-            "error": None,
+            "error": _AUTORU_LAST_DIAG.get("error_type") or None,
             "meta": dict(_AUTORU_LAST_DIAG),
         })
     except Exception as exc:

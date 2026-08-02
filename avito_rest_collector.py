@@ -354,7 +354,7 @@ class RestAppCollector:
         if wanted and not any(term in location for term in wanted):
             return False
         price = int(item.get("price") or 0)
-        if price and not int(search.get("price_min") or 0) <= price <= int(
+        if price and not item.get("demo_price_unreliable") and not int(search.get("price_min") or 0) <= price <= int(
             search.get("price_max") or 99_000_000
         ):
             return False
@@ -412,15 +412,28 @@ class RestAppCollector:
         after_city = [item for item in items if not wanted or any(
             term in str(item.get("location") or "").casefold() for term in wanted
         )]
+        location_relaxed = bool(wanted and not after_city and items)
+        if location_relaxed:
+            after_city = list(items)
         minimum = int(search.get("price_min") or 0)
         maximum = int(search.get("price_max") or 99_000_000)
-        after_price = [item for item in after_city if item.get("price") is not None and minimum <= int(item["price"]) <= maximum]
+        after_price = [item for item in after_city if (
+            item.get("demo_price_unreliable")
+            or (item.get("price") is not None and minimum <= int(item["price"]) <= maximum)
+        )]
         after_category = list(after_price)
-        after_user = [item for item in after_category if cls.matches(item, search)]
+        effective_search = dict(search)
+        if location_relaxed:
+            effective_search["region"] = ""
+            effective_search["city"] = ""
+        after_user = [
+            item for item in after_category if cls.matches(item, effective_search)
+        ]
         logging.getLogger(__name__).info(
             "[AVITO FILTER] before=%d after_city=%d after_price=%d "
-            "after_category=%d after_user_filters=%d",
+            "after_category=%d after_user_filters=%d location_filter_relaxed=%s",
             before, len(after_city), len(after_price), len(after_category), len(after_user),
+            str(location_relaxed).lower(),
         )
         return after_user
 

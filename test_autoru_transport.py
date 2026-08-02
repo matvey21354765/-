@@ -261,3 +261,63 @@ def test_krasnodar_uses_region_slug_without_second_text_filter(monkeypatch):
 
     assert "/krasnodarskiy_kray/" in fake.last_url
     assert result["items"] == [listing]
+
+
+def test_http_shell_uses_one_ajax_fallback(monkeypatch):
+    html_response = _response(
+        url="https://auto.ru/omskaya_oblast/cars/used/",
+        html="<html>client shell</html>",
+    )
+    ajax_response = SimpleNamespace(
+        status_code=200,
+        url="https://auto.ru/-/ajax/desktop/listing/",
+        text='{"offers": []}',
+        content=b'{"offers": []}',
+        headers={"content-type": "application/json"},
+        json=lambda: {"offers": [{"id": "55"}]},
+    )
+
+    class AjaxSession(_FakeSession):
+        def __init__(self):
+            super().__init__(html_response)
+            self.post_calls = 0
+
+        def post(self, url, **kwargs):
+            self.post_calls += 1
+            self.post_kwargs = kwargs
+            return ajax_response
+
+    fake = AjaxSession()
+    listing = {
+        "source": "autoru", "source_id": "55",
+        "url": "https://auto.ru/cars/used/sale/55/", "_price_int": 90000,
+    }
+    monkeypatch.setattr("curl_cffi.requests.Session", lambda **kwargs: fake)
+    monkeypatch.setattr(cb, "_autoru_parse_html", lambda *args: [])
+    monkeypatch.setattr(cb, "_autoru_parse_offers", lambda *args: [listing])
+    result = cb.scrape_autoru("omsk", price_max=100000)
+    assert result["items"] == [listing]
+    assert result["error"] is None
+    assert fake.calls == 1
+    assert fake.post_calls == 1
+    assert fake.post_kwargs["json"]["geo_id"] == cb.AUTORU_GEO_IDS["omsk"]
+
+
+def test_http_200_without_offers_is_parse_error(monkeypatch):
+    class EmptySession(_FakeSession):
+        def post(self, url, **kwargs):
+            return SimpleNamespace(
+                status_code=200, url=url, text="{}", content=b"{}",
+                headers={"content-type": "application/json"}, json=lambda: {},
+            )
+
+    fake = EmptySession(_response(
+        url="https://auto.ru/omskaya_oblast/cars/used/",
+        html="<html>client shell</html>",
+    ))
+    monkeypatch.setattr("curl_cffi.requests.Session", lambda **kwargs: fake)
+    monkeypatch.setattr(cb, "_autoru_parse_html", lambda *args: [])
+    monkeypatch.setattr(cb, "_autoru_parse_offers", lambda *args: [])
+    result = cb.scrape_autoru("omsk", price_max=100000)
+    assert result["items"] == []
+    assert result["error"] == "parse_error"

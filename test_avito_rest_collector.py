@@ -189,3 +189,15 @@ def test_normalization_degraded_mode_prevents_duplicate_request(tmp_path, monkey
     assert second["status"] == "normalization_failed"
     assert second["degraded"] is True
     assert InvalidProvider.calls == 1
+
+
+def test_demo_results_survive_empty_location_and_unreliable_price(tmp_path, monkeypatch):
+    obj = collector(tmp_path, monkeypatch)
+    item = {
+        "id": "demo-1", "source_id": "demo-1", "title": "Lada",
+        "price": 999999, "location": "Москва",
+        "demo_price_unreliable": True, "source": "avito",
+    }
+    wanted = search()
+    wanted.update({"region": "Омская область", "city": "Омск", "price_max": 100000})
+    assert obj._filter_with_diagnostics([item], wanted) == [item]
