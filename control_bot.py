@@ -8691,7 +8691,9 @@ def _avito_cached_result(
                 or ""
             ),
             "category_id": "9",
-            "last_m": 3,
+            # Interactive search needs a useful catalogue, not only listings
+            # published during the collector's three-minute monitor window.
+            "last_m": 1440,
             "page": 1,
             "region": REST_APP_REGION_NAMES.get(region, REGIONS.get(region, region)),
             "city": REGIONS.get(region, region),

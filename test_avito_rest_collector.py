@@ -9,6 +9,7 @@ import avito_rest_collector as arc
 
 class FakeProvider:
     calls = 0
+    payloads = []
     delay = 0.0
 
     def __init__(self):
@@ -16,6 +17,7 @@ class FakeProvider:
 
     def _post(self, endpoint, params):
         type(self).calls += 1
+        type(self).payloads.append(dict(params))
         if self.delay:
             time.sleep(self.delay)
         return {"status": "ok", "data": [{
@@ -52,6 +54,7 @@ def search(uid=1, brand="", region_id="23"):
 
 def collector(tmp_path, monkeypatch, analyzer=None):
     FakeProvider.calls = 0
+    FakeProvider.payloads = []
     FakeProvider.delay = 0
     monkeypatch.setattr(arc, "save_avito_history", lambda item: {"status": "new"})
     return arc.RestAppCollector(
@@ -153,3 +156,13 @@ def test_manual_search_collects_once_on_cache_miss(tmp_path, monkeypatch):
     assert len(first) == 1
     assert second == first
     assert FakeProvider.calls == 1
+
+
+def test_collector_uses_confirmed_rest_app_time_payload(tmp_path, monkeypatch):
+    obj = collector(tmp_path, monkeypatch)
+    obj.collect_group(search(region_id="653700"))
+    payload = FakeProvider.payloads[0]
+    assert set(payload) == {"category_id", "sort", "limit", "date1", "date2"}
+    assert payload["category_id"] == "9"
+    assert "last_m" not in payload
+    assert "region_id" not in payload

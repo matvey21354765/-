@@ -12,6 +12,7 @@ import threading
 import time
 import uuid
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -163,16 +164,20 @@ class RestAppCollector:
 
     def _fetch(self, search: dict[str, Any]) -> tuple[list[dict], dict[str, Any]]:
         provider = self.provider_factory()
+        minutes = int(search.get("last_m") or REST_APP_LAST_MINUTES)
+        # REST-App /api/ads is confirmed in production with date1/date2.
+        # region_id/last_m return HTTP 200 with an empty data list for this
+        # account, so region remains a grouping/local-matching dimension only.
+        moscow_now = datetime.now(timezone(timedelta(hours=3))).replace(tzinfo=None)
         params: dict[str, Any] = {
             "category_id": str(search.get("category_id") or CAR_CATEGORY_ID),
-            "last_m": int(search.get("last_m") or REST_APP_LAST_MINUTES),
-            "page": 1,
             "sort": "desc",
             "limit": 50,
+            "date1": (moscow_now - timedelta(minutes=minutes)).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            ),
+            "date2": moscow_now.strftime("%Y-%m-%d %H:%M:%S"),
         }
-        region_id = str(search.get("region_id") or "").strip()
-        if region_id:
-            params["region_id"] = region_id
         payload = provider._post("ads", params)
         raw, raw_type = provider._extract_raw_items(payload)
         unique: dict[str, dict] = {}
