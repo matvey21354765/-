@@ -165,7 +165,7 @@ SUBSCRIPTION_PLANS = {
 }
 
 # ── Токен ───────────────────────────────────────────────────────
-BOT_TOKEN = os.environ["BOT_TOKEN"]
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY", "")
 # Официальный API Авито (бесплатно): зарегистрируй приложение на https://developers.avito.ru/
 # и добавь переменные окружения AVITO_CLIENT_ID и AVITO_CLIENT_SECRET в Railway
@@ -2626,6 +2626,8 @@ def _scrape_autoru_production(
             impersonate="chrome120",
             trust_env=False,
         )
+        # Auto.ru показывает GDPR-заставку для не-РФ IP; cookie принимаем условия.
+        session.cookies.set("autoru_gdpr", "1", domain=".auto.ru")
         response = session.get(
             url,
             headers={
@@ -10115,8 +10117,28 @@ def _deals_keyboard(deals: list[dict]) -> InlineKeyboardMarkup:
 
 # ── Бот ─────────────────────────────────────────────────────────
 
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(storage=MemoryStorage())
+class _LazyBot:
+    """Placeholder that fails only when Telegram API is actually called."""
+    def __getattr__(self, name: str):
+        raise RuntimeError(
+            "BOT_TOKEN не задан; Telegram API недоступна без валидного токена"
+        )
+
+class _LazyDispatcher:
+    """Lazy Dispatcher so @dp.* decorators work during import without a token."""
+    def __init__(self):
+        self._dp = None
+    def __getattr__(self, name: str):
+        if self._dp is None:
+            self._dp = Dispatcher(storage=MemoryStorage())
+        return getattr(self._dp, name)
+    def _materialize(self):
+        if self._dp is None:
+            self._dp = Dispatcher(storage=MemoryStorage())
+        return self._dp
+
+bot = _LazyBot()
+dp = _LazyDispatcher()
 
 # ── Подписка на канал ────────────────────────────────────────────
 REQUIRED_CHANNEL = "@ekbdrivee"
@@ -16742,7 +16764,11 @@ def _run_startup_tests():
 
 
 async def main():
-    global BOT_USERNAME, _registry_dirty
+    global BOT_USERNAME, _registry_dirty, bot, dp
+    if not BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN не задан; запуск бота невозможен")
+    bot = Bot(token=BOT_TOKEN)
+    dp = dp._materialize()
     logging.basicConfig(level=logging.WARNING)
     loop = asyncio.get_running_loop()
     # Тяжёлые синхронные загрузки при старте — в executor, чтобы не блокировать

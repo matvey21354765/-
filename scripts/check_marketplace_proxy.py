@@ -11,12 +11,14 @@ from pathlib import Path
 from curl_cffi import requests
 from dotenv import load_dotenv
 
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
 from avito_duff_provider import AvitoDuffProvider
 from avito_proxy_config import build_mobile_proxy_config
 from marketplace_result import classify_network_error
 
 
-ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(ROOT / ".env")
 
 

@@ -2,7 +2,11 @@
 from __future__ import annotations
 
 import json
+import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from avito_normalizer import normalize_rest_app_items_with_diagnostics
 from avito_rest_provider import describe_rest_app_payload, extract_rest_app_items, save_safe_rest_app_sample
