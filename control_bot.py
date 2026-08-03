@@ -685,22 +685,34 @@ def _spfa_save_disk():
         pass
 
 def _spfa_request(path: str, payload: dict):
+    # spfa.ru за Cloudflare и блокирует дата-центровые IP (Railway). Идём ЧЕРЕЗ
+    # прокси (русский IP) и через curl_cffi (обход Cloudflare), как и Авито.
+    hdrs = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "application/json", "Content-Type": "application/json",
+    }
+    _px = _avito_proxies() if AVITO_PROXIES else None
+    # 1) curl_cffi с имперсонацией Chrome (лучший обход Cloudflare)
+    try:
+        from curl_cffi import requests as _cffi
+        r = _cffi.post(f"{_SPFA_BASE}{path}", json=payload, headers=hdrs,
+                       timeout=30, proxies=_px or {}, impersonate="chrome124")
+        if r.status_code in (200, 202):
+            return r.json()
+        print(f"  [spfa] {path} curl_cffi: HTTP {r.status_code}")
+    except Exception as e:
+        print(f"  [spfa] {path} curl_cffi: {str(e)[:90]}")
+    # 2) обычный requests через прокси — запасной путь
     try:
         import requests as _rq
-    except ImportError:
-        return None
-    try:
-        r = _rq.post(f"{_SPFA_BASE}{path}", json=payload, timeout=25, headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0",
-            "Accept": "application/json", "Content-Type": "application/json",
-        })
-        if r.status_code not in (200, 202):
-            print(f"  [spfa] {path}: HTTP {r.status_code} {r.text[:120]}")
-            return None
-        return r.json()
+        r = _rq.post(f"{_SPFA_BASE}{path}", json=payload, headers=hdrs,
+                     timeout=30, proxies=_px or {})
+        if r.status_code in (200, 202):
+            return r.json()
+        print(f"  [spfa] {path} requests: HTTP {r.status_code} {r.text[:100]}")
     except Exception as e:
-        print(f"  [spfa] {path}: {str(e)[:100]}")
-        return None
+        print(f"  [spfa] {path} requests: {str(e)[:90]}")
+    return None
 
 def _spfa_fetch(unblock: bool = False) -> dict | None:
     """Получает/обновляет cookies Авито через spfa.ru. unblock=True — сначала
