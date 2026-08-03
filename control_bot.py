@@ -714,42 +714,56 @@ def _spfa_request(path: str, payload: dict):
         print(f"  [spfa] {path} requests: {str(e)[:90]}")
     return None
 
+# Троттлинг: spfa лимитирует покупку cookies (≈раз в 10 мин), иначе отдаёт 503.
+_SPFA_MIN_BUY_INTERVAL = 600.0     # /cookies/ — не чаще раза в 10 мин
+_SPFA_MIN_UNBLOCK_INTERVAL = 90.0  # /unblock/ — не чаще раза в 1.5 мин
+
 def _spfa_fetch(unblock: bool = False) -> dict | None:
-    """Получает/обновляет cookies Авито через spfa.ru. unblock=True — сначала
-    просит сервис разблокировать текущие (дешевле, чем покупать новые)."""
+    """Получает/обновляет cookies Авито через spfa.ru с троттлингом (чтобы не
+    ловить 503 «сервис временно недоступен» из-за лимита частоты)."""
     if not SPFA_API_KEY:
         return None
+    now = time.time()
+    # Разблокировка текущих cookies (дешевле покупки), с троттлингом
     if unblock and _spfa_state.get("id"):
-        j = _spfa_request("/unblock/", {"id": _spfa_state["id"], "api_key": SPFA_API_KEY})
-        res = (j or {}).get("results") or {}
-        if res.get("cookies"):
-            _spfa_state.update({"id": res.get("id", _spfa_state["id"]),
-                                "cookies": res["cookies"], "ts": time.time()})
-            _spfa_save_disk()
-            print(f"  [spfa] cookies разблокированы (id={_spfa_state['id']})")
-            return _spfa_state["cookies"]
+        if now - (_spfa_state.get("unblock_ts") or 0) >= _SPFA_MIN_UNBLOCK_INTERVAL:
+            _spfa_state["unblock_ts"] = now
+            j = _spfa_request("/unblock/", {"id": _spfa_state["id"], "api_key": SPFA_API_KEY})
+            res = (j or {}).get("results") or {}
+            if res.get("cookies"):
+                _spfa_state.update({"id": res.get("id", _spfa_state["id"]),
+                                    "cookies": res["cookies"], "ts": now})
+                _spfa_save_disk()
+                print(f"  [spfa] cookies разблокированы (id={_spfa_state['id']})")
+                return _spfa_state["cookies"]
+    # Покупка новых cookies — строго не чаще раза в 10 мин
+    if now - (_spfa_state.get("buy_ts") or 0) < _SPFA_MIN_BUY_INTERVAL:
+        return _spfa_state.get("cookies")  # ещё рано — отдаём что есть (может, старое)
+    _spfa_state["buy_ts"] = now
     j = _spfa_request("/cookies/", {"api_key": SPFA_API_KEY})
     res = (j or {}).get("results") or {}
     if res.get("cookies"):
-        _spfa_state.update({"id": res.get("id"), "cookies": res["cookies"], "ts": time.time()})
+        _spfa_state.update({"id": res.get("id"), "cookies": res["cookies"], "ts": now})
         _spfa_save_disk()
         print(f"  [spfa] новые cookies (id={_spfa_state['id']})")
         return _spfa_state["cookies"]
-    return None
+    print("  [spfa] cookies не получены (сервис 503/лимит) — используем что есть")
+    return _spfa_state.get("cookies")
 
 def _avito_cookies() -> dict | None:
-    """Действующие cookies Авито от spfa.ru (обновляет, если старше 11 часов)."""
+    """Действующие cookies Авито от spfa.ru. Переиспользуем кэш; покупаем новые
+    только если их нет или они старше 11 часов (с учётом троттлинга)."""
     if not SPFA_API_KEY:
         return None
     ck = _spfa_state.get("cookies")
     age = time.time() - (_spfa_state.get("ts") or 0)
     if not ck or age > 11 * 3600:
-        ck = _spfa_fetch(unblock=False)
+        ck = _spfa_fetch(unblock=False) or ck
     return ck
 
 def _avito_cookies_refresh_on_block() -> dict | None:
-    """Вызывать при firewall/403 — просит spfa разблокировать/обновить cookies."""
-    return _spfa_fetch(unblock=True)
+    """Вызывать при 403/439/firewall — просит spfa разблокировать (троттлинг внутри)."""
+    return _spfa_fetch(unblock=True) or _spfa_state.get("cookies")
 
 
 # Токен приложения Auto.ru (заголовок x-authorization для apiauto.ru).
@@ -5519,7 +5533,7 @@ def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_0
                 r = _req.get("https://www.avito.ru/web/1/js/items", params=_params,
                              headers=_hdrs, timeout=20, proxies=_px or {},
                              cookies=_avito_cookies() or None)
-                if r.status_code in (403, 429):
+                if r.status_code in (403, 429, 439):
                     if SPFA_API_KEY:
                         _avito_cookies_refresh_on_block()
                     print(f"  [Авито webJSON {_tag}] стр.{p}: HTTP {r.status_code} → cookies+ротация")
