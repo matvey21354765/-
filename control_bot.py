@@ -652,7 +652,13 @@ except AvitoProxyConfigError as _proxy_config_error:
     print("[MOBILE PROXY] enabled=false")
     print(f"[MOBILE PROXY] configuration_error={type(_proxy_config_error).__name__}")
 
-AVITO_PROXY_ROTATE_URL = os.getenv("AVITO_PROXY_ROTATE_URL", "").strip()
+AVITO_PROXY_ROTATE_URL = (os.getenv("AVITO_PROXY_ROTATE_URL", "").strip()
+                          or PROXY_ROTATE_URL)
+if AVITO_PROXY_ROTATE_URL:
+    print("[прокси] ротация IP включена (ссылка смены IP задана)")
+else:
+    print("[прокси] ⚠️ ссылка ротации IP не задана — Авито будет часто блокироваться "
+          "(добавь PROXY_ROTATE_URL из кабинета прокси для стабильности)")
 
 # ── spfa.ru — сервис рабочих cookies Авито (обход блокировок) ─────
 # Ключ берём из окружения (SPFA_API_KEY). Сервис поддерживает cookies до 12ч;
@@ -5525,10 +5531,19 @@ def _avito_mobile_api_search(region: str, price_min: int = 0, price_max: int = 9
             ("https://m.avito.ru/api/15/items", {**base, "key": _key}),
             ("https://m.avito.ru/api/13/items", {**base, "key": _key}),
         ]
-        _pxs = ([_avito_proxies()] if (AVITO_PROXIES and not _proxy_auth_failed) else []) + [None]
+        # IP: текущий прокси, затем свежие IP (ротация), затем прямое соединение.
+        _pxs = []
+        if AVITO_PROXIES and not _proxy_auth_failed:
+            _pxs.append(("прокси", _avito_proxies()))
+            _pxs += [("прокси-rot%d" % i, "ROTATE") for i in range(1, 4)]
+        _pxs.append(("напрямую", None))
         got = None
         for _url, _prm in variants:
-            for _px in _pxs:
+            for _tag, _px in _pxs:
+                if _px == "ROTATE":
+                    if not _rotate_proxy_ip(min_interval=0):
+                        continue
+                    _px = _avito_proxies()
                 try:
                     r = _req.get(_url, params=_prm, headers=hdrs, timeout=10, proxies=_px or {})
                     if r.status_code == 200:
@@ -5595,9 +5610,13 @@ def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_0
             "x-requested-with": "XMLHttpRequest",
             "Referer": f"https://www.avito.ru/{slug}/avtomobili",
         }
+        # Стабильность: пробуем текущий IP, затем НЕСКОЛЬКО свежих IP (ротация) —
+        # Авито банит один IP по rate-limit, но пропускает свежий. Прямое соединение
+        # (IP сервера) — только как последний резерв.
         _proxy_order = []
         if AVITO_PROXIES and not _proxy_auth_failed:
-            _proxy_order += [("прокси", _avito_proxies()), ("прокси-rot", "ROTATE")]
+            _proxy_order.append(("прокси", _avito_proxies()))
+            _proxy_order += [("прокси-rot%d" % i, "ROTATE") for i in range(1, 4)]
         _proxy_order.append(("напрямую", None))
         _got = None
         for _tag, _px in _proxy_order:
