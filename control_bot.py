@@ -736,9 +736,10 @@ def _spfa_fetch(unblock: bool = False) -> dict | None:
                 _spfa_save_disk()
                 print(f"  [spfa] cookies разблокированы (id={_spfa_state['id']})")
                 return _spfa_state["cookies"]
-    # Покупка новых cookies — строго не чаще раза в 10 мин
+    # Покупка новых cookies — при успехе не чаще раза в 10 мин; при неудаче
+    # (503/лимит) повтор уже через 90с, чтобы быстро подхватить восстановление spfa.
     if now - (_spfa_state.get("buy_ts") or 0) < _SPFA_MIN_BUY_INTERVAL:
-        return _spfa_state.get("cookies")  # ещё рано — отдаём что есть (может, старое)
+        return _spfa_state.get("cookies")
     _spfa_state["buy_ts"] = now
     j = _spfa_request("/cookies/", {"api_key": SPFA_API_KEY})
     res = (j or {}).get("results") or {}
@@ -747,7 +748,9 @@ def _spfa_fetch(unblock: bool = False) -> dict | None:
         _spfa_save_disk()
         print(f"  [spfa] новые cookies (id={_spfa_state['id']})")
         return _spfa_state["cookies"]
-    print("  [spfa] cookies не получены (сервис 503/лимит) — используем что есть")
+    # Неудача — откатываем таймер, чтобы повторить через ~90с, а не через 10 мин.
+    _spfa_state["buy_ts"] = now - _SPFA_MIN_BUY_INTERVAL + 90
+    print("  [spfa] cookies не получены (503/лимит) — повтор через ~90с")
     return _spfa_state.get("cookies")
 
 def _avito_cookies() -> dict | None:
