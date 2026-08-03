@@ -34,7 +34,9 @@ def _env_int(name: str, default: int, minimum: int, maximum: int) -> int:
 # from the retired diagnostic cascade.
 REST_APP_MAX_TIME_WINDOWS = 1
 REST_APP_CACHE_TTL = _env_int("REST_APP_CACHE_TTL", 300, 30, 3600)
-REST_APP_RESULT_LIMIT = 1000
+# The paid account quota is 10,000 requests/day; it is not the /api/ads page
+# size. Production has confirmed that this endpoint returns listings with 50.
+REST_APP_RESULT_LIMIT = 50
 REST_APP_DB_MAX_AGE_HOURS = _env_int(
     "REST_APP_DB_MAX_AGE_HOURS", 24, 1, 168
 )

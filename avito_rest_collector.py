@@ -40,13 +40,10 @@ REST_APP_MAX_PAGES = _env_int("REST_APP_MAX_PAGES", 1)
 REST_APP_DAILY_SOFT_LIMIT = _env_int("REST_APP_DAILY_SOFT_LIMIT", 8000)
 REST_APP_DAILY_HARD_LIMIT = _env_int("REST_APP_DAILY_HARD_LIMIT", 9500)
 REST_APP_DEGRADED_SECONDS = _env_int("REST_APP_DEGRADED_SECONDS", 600)
-# Production account is paid and the documented maximum is 1000.  Older
-# Railway deployments may still contain REST_APP_RESULT_LIMIT=50; accepting
-# that stale value leaves regional searches with an unusably small global
-# sample. Keep the name for compatibility, but never request below 1000.
-REST_APP_RESULT_LIMIT = min(
-    1000, max(1000, _env_int("REST_APP_RESULT_LIMIT", 1000))
-)
+# /api/ads has been confirmed in production with a maximum working page size
+# of 50.  A value of 1000 is an account quota, not the endpoint page size, and
+# makes Rest-App return an API-level error before any listings are parsed.
+REST_APP_RESULT_LIMIT = min(50, max(1, _env_int("REST_APP_RESULT_LIMIT", 50)))
 
 
 def canonical_request_key(search: dict[str, Any]) -> str:
@@ -399,15 +396,25 @@ class RestAppCollector:
         except Exception as exc:
             status = "request_failed"
             safe_error = type(exc).__name__
+            safe_reason = str(exc).replace("\r", " ").replace("\n", " ")
+            for secret in (
+                os.getenv("REST_APP_LOGIN", ""),
+                os.getenv("REST_APP_TOKEN", ""),
+            ):
+                if secret:
+                    safe_reason = safe_reason.replace(str(secret), "***")
+            safe_reason = safe_reason[:300]
             fallback_items = self._load_recent_items()
             self.last_diagnostics = {
                 "status": status,
                 "error_type": safe_error,
+                "error": safe_reason,
                 "db_fallback_count": len(fallback_items),
             }
             print(
                 "[Avito RestApp] request_failed "
-                f"error_type={safe_error} db_fallback_count={len(fallback_items)}",
+                f"error_type={safe_error} reason={safe_reason!r} "
+                f"db_fallback_count={len(fallback_items)}",
                 flush=True,
             )
             return {
@@ -419,6 +426,7 @@ class RestAppCollector:
                 "request_id": request_id,
                 "status": status,
                 "error_type": safe_error,
+                "error": safe_reason,
             }
         finally:
             with self._lock:

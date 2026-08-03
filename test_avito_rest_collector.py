@@ -195,13 +195,13 @@ def test_collector_uses_confirmed_rest_app_time_payload(tmp_path, monkeypatch):
     payload = FakeProvider.payloads[0]
     assert set(payload) == {"category_id", "sort", "limit", "date1", "date2"}
     assert payload["category_id"] == "9"
-    assert payload["limit"] == 1000
+    assert payload["limit"] == 50
     assert "last_m" not in payload
     assert "region_id" not in payload
 
 
-def test_stale_railway_limit_cannot_reduce_paid_batch(monkeypatch):
-    assert arc.REST_APP_RESULT_LIMIT == 1000
+def test_rest_app_batch_uses_confirmed_endpoint_page_size(monkeypatch):
+    assert arc.REST_APP_RESULT_LIMIT == 50
 
 
 def test_normalization_degraded_mode_prevents_duplicate_request(tmp_path, monkeypatch):

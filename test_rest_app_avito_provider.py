@@ -112,7 +112,7 @@ def test_production_payload_and_local_filters(monkeypatch):
     for _, payload in calls:
         assert set(payload) == {"category_id", "sort", "limit", "date1", "date2"}
         assert payload["category_id"] == "9"
-        assert payload["limit"] == 1000
+        assert payload["limit"] == 50
     assert len({(payload["date1"], payload["date2"]) for _, payload in calls}) == 1
     assert client.last_diagnostics["after_location"] == 50
     assert client.last_diagnostics["after_private"] == 50
