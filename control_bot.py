@@ -9054,6 +9054,36 @@ def _enrich_avito_with_deal_score(item: dict, market_price: int | None) -> dict:
     return item
 
 
+def _classify_avito_status(
+    provider_items: int, market_samples: int, returned: int,
+    provider_error: bool = False,
+) -> dict[str, object]:
+    """Keep provider health separate from market-sample sufficiency."""
+    provider_available = provider_items > 0
+    market_analysis_enabled = provider_available and market_samples >= 5
+    if provider_error and not provider_available:
+        status = "provider_error"
+        reason = "provider_error"
+    elif not provider_available:
+        status = "provider_ok_no_results"
+        reason = "provider_returned_no_results"
+    elif market_analysis_enabled:
+        status = "provider_ok_with_results"
+        reason = "ok"
+    else:
+        status = "provider_ok_with_results"
+        reason = "market_analysis_insufficient_data"
+    return {
+        "avito_available": provider_available,
+        "provider_available": provider_available,
+        "provider_status": status,
+        "market_samples": int(market_samples),
+        "market_analysis_enabled": market_analysis_enabled,
+        "returned": int(returned),
+        "reason": reason,
+    }
+
+
 def _analyze_rest_collector_item(item: dict) -> dict:
     adapted = _adapt_duff_listing(item, datetime.date.today())
     _enrich_avito_with_deal_score(adapted, market_price=None)
@@ -15090,8 +15120,16 @@ async def do_search_for_user(uid: int, reply_to):
             it["_already_seen"] = True
 
     _ref_items = [i for i in items if i.get("_market_ref_only")]
-    _avito_available = len(_ref_items) >= 5  # True даже если эталон — Дром/Auto.ru
-    if _avito_available:
+    _avito_provider_count = len(_avito_ref_items)
+    _avito_market_samples = sum(
+        1 for i in _avito_ref_items if int(i.get("_price_int") or 0) > 0
+    )
+    _avito_status = _classify_avito_status(
+        _avito_provider_count, _avito_market_samples, 0
+    )
+    _avito_available = bool(_avito_status["provider_available"])
+    _market_analysis_enabled = bool(_avito_status["market_analysis_enabled"])
+    if _market_analysis_enabled:
         _n_av_ref = sum(1 for i in _ref_items if i.get("source") == "avito")
         _ref_src = "Авито" if _n_av_ref >= 5 else "резервный источник"
         print(f"  [рынок] {_ref_src}-референс: {len(_ref_items)} объявлений → считаем рыночную цену")
@@ -15271,7 +15309,7 @@ async def do_search_for_user(uid: int, reply_to):
     # что ТОЧНО дороже рынка (есть _market_price и savings_pct<=0). Так пользователь
     # видит все объявления выбранных площадок, а выгодные — первыми (сортировка).
     _below_count = 0
-    if _avito_available:
+    if _market_analysis_enabled:
         _below_count = sum(1 for i in suitable if i.get("_savings_pct", 0) > 0)
         shown = [
             i for i in suitable
@@ -15281,7 +15319,10 @@ async def do_search_for_user(uid: int, reply_to):
         if shown:
             suitable = shown
     else:
-        print(f"  [фильтр] Авито недоступен → показываем все {len(suitable)} в бюджете")
+        print(
+            f"  [фильтр] рыночная выборка Avito недостаточна "
+            f"({_avito_market_samples}/5) → показываем все {len(suitable)} в бюджете"
+        )
 
     _search_cache[uid] = suitable
     _save_cache(uid, suitable)
@@ -15311,13 +15352,44 @@ async def do_search_for_user(uid: int, reply_to):
     src_found = list(dict.fromkeys(i.get("source","") for i in suitable if i.get("source")))
     src_icons = {"avito":"🔴","drom":"🔵","autoru":"🔴","vk":"💙","tg":"✈️"}
     src_str = " ".join(src_icons.get(s,"") for s in src_found if s)
-    if _avito_available:
+    _avito_returned = sum(1 for item in suitable if item.get("source") == "avito")
+    _collector_diag = (
+        dict(_REST_APP_COLLECTOR.last_diagnostics)
+        if _REST_APP_COLLECTOR is not None else {}
+    )
+    _avito_status = _classify_avito_status(
+        _avito_provider_count, _avito_market_samples, _avito_returned,
+        provider_error=str(_collector_diag.get("status") or "") in {
+            "request_failed", "provider_error", "normalization_failed"
+        },
+    )
+    print(
+        "[AVITO STATUS] "
+        f"raw={int(_collector_diag.get('raw_count') or _avito_provider_count)} "
+        f"normalized={int(_collector_diag.get('normalized_count') or _avito_provider_count)} "
+        f"filtered={_avito_provider_count} returned={_avito_returned} "
+        f"provider_available={str(_avito_status['provider_available']).lower()} "
+        f"provider_status={_avito_status['provider_status']} "
+        f"market_samples={_avito_market_samples} "
+        f"market_analysis_enabled={str(_market_analysis_enabled).lower()} "
+        f"reason={_avito_status['reason']}",
+        flush=True,
+    )
+    if _market_analysis_enabled:
         _extra = len(suitable) - _below_count
         _msg = f"✅ {src_str} Найдено {_below_count} объявлений ниже рынка!"
         if _extra > 0:
             _msg += f"\n➕ Ещё {_extra} в бюджете (рынок не определён) — ниже в списке."
+    elif _avito_available:
+        _msg = (
+            f"✅ {src_str} Найдено {len(suitable)} объявлений в бюджете!\n"
+            "ℹ️ Avito работает, но данных для надёжной оценки рынка пока недостаточно"
+        )
     else:
-        _msg = f"✅ {src_str} Найдено {len(suitable)} объявлений в бюджете!\n⚠️ Авито недоступен — сравнение с рынком отключено"
+        _msg = (
+            f"✅ {src_str} Найдено {len(suitable)} объявлений в бюджете!\n"
+            "⚠️ Авито недоступен — сравнение с рынком отключено"
+        )
     if _seen_cnt:
         _msg += f"\n♻️ {_seen_cnt} уже видел — они в конце."
 
