@@ -7,6 +7,8 @@ xray_config.json
 .env
 .DS_Store
 price_history.json
+.spfa_cookies.json
+.avito_cookies.json
 users/
 external_avito/
 

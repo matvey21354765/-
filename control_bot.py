@@ -654,6 +654,92 @@ except AvitoProxyConfigError as _proxy_config_error:
 
 AVITO_PROXY_ROTATE_URL = os.getenv("AVITO_PROXY_ROTATE_URL", "").strip()
 
+# ── spfa.ru — сервис рабочих cookies Авито (обход блокировок) ─────
+# Ключ берём из окружения (SPFA_API_KEY). Сервис поддерживает cookies до 12ч;
+# при блокировке дергаем /unblock/, чтобы обновить их без нового покупки.
+SPFA_API_KEY = os.getenv("SPFA_API_KEY", "").strip()
+_SPFA_BASE = "https://spfa.ru/api"
+_SPFA_COOKIE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".spfa_cookies.json")
+_spfa_state = {"id": None, "cookies": None, "ts": 0.0}
+_spfa_lock = _threading.Lock() if "_threading" in dir() else None
+
+def _spfa_load_disk():
+    try:
+        if os.path.exists(_SPFA_COOKIE_FILE):
+            import json as _j
+            with open(_SPFA_COOKIE_FILE, "r", encoding="utf-8") as f:
+                d = _j.load(f)
+            if d.get("cookies"):
+                _spfa_state.update({"id": d.get("id"), "cookies": d.get("cookies"),
+                                    "ts": d.get("ts", 0.0)})
+                print(f"  [spfa] cookies с диска (id={d.get('id')})")
+    except Exception:
+        pass
+
+def _spfa_save_disk():
+    try:
+        import json as _j
+        with open(_SPFA_COOKIE_FILE, "w", encoding="utf-8") as f:
+            _j.dump(_spfa_state, f)
+    except Exception:
+        pass
+
+def _spfa_request(path: str, payload: dict):
+    try:
+        import requests as _rq
+    except ImportError:
+        return None
+    try:
+        r = _rq.post(f"{_SPFA_BASE}{path}", json=payload, timeout=25, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0",
+            "Accept": "application/json", "Content-Type": "application/json",
+        })
+        if r.status_code not in (200, 202):
+            print(f"  [spfa] {path}: HTTP {r.status_code} {r.text[:120]}")
+            return None
+        return r.json()
+    except Exception as e:
+        print(f"  [spfa] {path}: {str(e)[:100]}")
+        return None
+
+def _spfa_fetch(unblock: bool = False) -> dict | None:
+    """Получает/обновляет cookies Авито через spfa.ru. unblock=True — сначала
+    просит сервис разблокировать текущие (дешевле, чем покупать новые)."""
+    if not SPFA_API_KEY:
+        return None
+    if unblock and _spfa_state.get("id"):
+        j = _spfa_request("/unblock/", {"id": _spfa_state["id"], "api_key": SPFA_API_KEY})
+        res = (j or {}).get("results") or {}
+        if res.get("cookies"):
+            _spfa_state.update({"id": res.get("id", _spfa_state["id"]),
+                                "cookies": res["cookies"], "ts": time.time()})
+            _spfa_save_disk()
+            print(f"  [spfa] cookies разблокированы (id={_spfa_state['id']})")
+            return _spfa_state["cookies"]
+    j = _spfa_request("/cookies/", {"api_key": SPFA_API_KEY})
+    res = (j or {}).get("results") or {}
+    if res.get("cookies"):
+        _spfa_state.update({"id": res.get("id"), "cookies": res["cookies"], "ts": time.time()})
+        _spfa_save_disk()
+        print(f"  [spfa] новые cookies (id={_spfa_state['id']})")
+        return _spfa_state["cookies"]
+    return None
+
+def _avito_cookies() -> dict | None:
+    """Действующие cookies Авито от spfa.ru (обновляет, если старше 11 часов)."""
+    if not SPFA_API_KEY:
+        return None
+    ck = _spfa_state.get("cookies")
+    age = time.time() - (_spfa_state.get("ts") or 0)
+    if not ck or age > 11 * 3600:
+        ck = _spfa_fetch(unblock=False)
+    return ck
+
+def _avito_cookies_refresh_on_block() -> dict | None:
+    """Вызывать при firewall/403 — просит spfa разблокировать/обновить cookies."""
+    return _spfa_fetch(unblock=True)
+
+
 # Токен приложения Auto.ru (заголовок x-authorization для apiauto.ru).
 # Эндпоинт apiauto.ru отдаёт чистый JSON без капчи Яндекса — самый надёжный
 # путь для Auto.ru. Токен зашит в мобильное приложение ru.auto.ara; если задан,
@@ -7813,8 +7899,12 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                 r = _req.get(
                     "https://www.avito.ru/web/1/js/items",
                     params=_params, headers=_hdrs, timeout=20,
-                    proxies=_px or {},
+                    proxies=_px or {}, cookies=_avito_cookies() or None,
                 )
+                if r.status_code in (403, 429):
+                    # Блокировка — обновляем cookies через spfa и пробуем следующий вариант
+                    if SPFA_API_KEY:
+                        _avito_cookies_refresh_on_block()
                 if r.status_code != 200 and r.status_code not in (403, 429):
                     print(f"  [Авито webJSON {_tag}] стр.{p}: HTTP {r.status_code}")
                     continue
@@ -7823,9 +7913,11 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
                 except Exception:
                     print(f"  [Авито webJSON {_tag}] стр.{p}: HTTP {r.status_code}, не JSON ({len(r.text):,}б)")
                     continue
-                # too-many-requests / firewall — IP в лимите, пробуем следующий (ротацию)
+                # too-many-requests / firewall — IP в лимите/блок, обновляем cookies и пробуем ротацию
                 if isinstance(data, dict) and ("too-many-requests" in data or "firewall" in str(data)[:200]):
-                    print(f"  [Авито webJSON {_tag}] стр.{p}: firewall (IP лимит) → смена IP")
+                    print(f"  [Авито webJSON {_tag}] стр.{p}: firewall (IP лимит) → cookies+смена IP")
+                    if SPFA_API_KEY:
+                        _avito_cookies_refresh_on_block()
                     continue
                 raw = (data.get("catalog", {}) or {}).get("items", [])
                 if not raw:
@@ -10909,7 +11001,8 @@ async def cmd_avito_debug(msg: Message):
             try:
                 _wr = _rq.get("https://www.avito.ru/web/1/js/items",
                               params=_web_params, headers=_web_hdrs,
-                              proxies=_wpx or {}, timeout=18)
+                              proxies=_wpx or {}, timeout=18,
+                              cookies=_avito_cookies() or None)
                 if _wr.status_code == 200:
                     try:
                         _wd = _wr.json()
@@ -17074,6 +17167,15 @@ async def main():
         await loop.run_in_executor(None, _load_price_history)
     except Exception as e:
         print(f"  [main] _load_price_history: {e}")
+    try:
+        _spfa_load_disk()
+        if SPFA_API_KEY:
+            print(f"  [spfa] обход блокировок Авито ВКЛЮЧЁН (ключ задан)")
+            await loop.run_in_executor(None, _avito_cookies)  # прогреваем cookies
+        else:
+            print(f"  [spfa] ключ SPFA_API_KEY не задан — cookies-обход выключен")
+    except Exception as e:
+        print(f"  [main] spfa init: {e}")
     try:
         await loop.run_in_executor(None, _analytics_restore)
     except Exception as e:
