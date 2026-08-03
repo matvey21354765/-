@@ -655,10 +655,10 @@ except AvitoProxyConfigError as _proxy_config_error:
 AVITO_PROXY_ROTATE_URL = (os.getenv("AVITO_PROXY_ROTATE_URL", "").strip()
                           or PROXY_ROTATE_URL)
 if AVITO_PROXY_ROTATE_URL:
-    print("[прокси] ротация IP включена (ссылка смены IP задана)")
+    print("[прокси] ротация IP включена (мобильный прокси со сменой IP)")
 else:
-    print("[прокси] ⚠️ ссылка ротации IP не задана — Авито будет часто блокироваться "
-          "(добавь PROXY_ROTATE_URL из кабинета прокси для стабильности)")
+    print("[прокси] статичный IP (серверный прокси) — стабильность Авито зависит "
+          "от cookies spfa. Ротация IP недоступна.")
 
 # ── spfa.ru — сервис рабочих cookies Авито (обход блокировок) ─────
 # Ключ берём из окружения (SPFA_API_KEY). Сервис поддерживает cookies до 12ч;
