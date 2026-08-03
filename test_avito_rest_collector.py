@@ -185,7 +185,7 @@ def test_manual_filters_reuse_latest_monitor_catalogue(tmp_path, monkeypatch):
     obj.collect_group(search())
     manual = search(99, region_id="77")
     manual.update({"last_m": 1440, "region": "Омская область", "city": "Омск"})
-    assert obj.search(manual)
+    assert obj.search(manual) == []
     assert FakeProvider.calls == 1
 
 
@@ -202,6 +202,40 @@ def test_collector_uses_confirmed_rest_app_time_payload(tmp_path, monkeypatch):
 
 def test_rest_app_batch_uses_confirmed_endpoint_page_size(monkeypatch):
     assert arc.REST_APP_RESULT_LIMIT == 50
+
+
+def test_moscow_and_oblast_location_variants(tmp_path, monkeypatch):
+    obj = collector(tmp_path, monkeypatch)
+    search_row = {
+        **search(), "region_id": "637640", "region": "Москва",
+        "city": "Москва", "price_max": 99_000_000,
+    }
+    variants = [
+        {"city": "Москва", "region": ""},
+        {"city": "г. Москва", "region": "Москва"},
+        {"city": "Химки", "region": "Московская область"},
+        {"city": "", "region": "Московская область"},
+        {"city": "Одинцово", "region": "Москва и Московская область"},
+    ]
+    items = [{
+        "id": str(index), "source_id": str(index), "source": "avito",
+        "title": f"Car {index}", "price": 100_000,
+        "location": ", ".join(value for value in location.values() if value),
+        **location,
+    } for index, location in enumerate(variants, 1)]
+    filtered = obj._filter_with_diagnostics(items, search_row)
+    assert len(filtered) == 5
+    assert obj._last_filter_diagnostics["after_region_filter"] == 5
+    assert obj._last_filter_diagnostics["after_city_filter"] == 5
+
+
+def test_region_slug_mapping_uses_numeric_moscow_id():
+    import control_bot
+    row = control_bot._rest_app_search_from_settings(1, {
+        "region": "moscow", "price_min": 0, "price_max": 99_000_000,
+    })
+    assert row["region_id"] == "637640"
+    assert row["region"] == "Москва"
 
 
 def test_normalization_degraded_mode_prevents_duplicate_request(tmp_path, monkeypatch):
@@ -226,7 +260,7 @@ def test_normalization_degraded_mode_prevents_duplicate_request(tmp_path, monkey
     assert InvalidProvider.calls == 1
 
 
-def test_demo_results_survive_empty_location_and_unreliable_price(tmp_path, monkeypatch):
+def test_demo_price_is_relaxed_but_location_is_not(tmp_path, monkeypatch):
     obj = collector(tmp_path, monkeypatch)
     item = {
         "id": "demo-1", "source_id": "demo-1", "title": "Lada",
@@ -235,7 +269,7 @@ def test_demo_results_survive_empty_location_and_unreliable_price(tmp_path, monk
     }
     wanted = search()
     wanted.update({"region": "Омская область", "city": "Омск", "price_max": 100000})
-    assert obj._filter_with_diagnostics([item], wanted) == [item]
+    assert obj._filter_with_diagnostics([item], wanted) == []
 
 
 def test_crwl_demo_link_marks_random_price_unreliable():

@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -446,10 +447,7 @@ class RestAppCollector:
 
     @staticmethod
     def matches(item: dict[str, Any], search: dict[str, Any]) -> bool:
-        location = str(item.get("location") or "").casefold()
-        wanted = [str(search.get(k) or "").strip().casefold()
-                  for k in ("region", "city") if search.get(k)]
-        if wanted and not any(term in location for term in wanted):
+        if not RestAppCollector._location_matches(item, search):
             return False
         price = int(item.get("price") or 0)
         if price and not item.get("demo_price_unreliable") and not int(search.get("price_min") or 0) <= price <= int(
@@ -471,6 +469,46 @@ class RestAppCollector:
         if float(item.get("_potential_profit") or 0) < float(search.get("min_profit") or 0):
             return False
         return True
+
+    @staticmethod
+    def _geo_text(value: Any) -> str:
+        text = str(value or "").casefold().replace("ё", "е")
+        text = re.sub(r"\bг\.?\s*", "", text)
+        return " ".join(re.sub(r"[-–—]+", " ", text).split())
+
+    @classmethod
+    def _location_values(cls, item: dict[str, Any]) -> tuple[str, str, str]:
+        city = cls._geo_text(item.get("city"))
+        region = cls._geo_text(item.get("region"))
+        location = cls._geo_text(item.get("location"))
+        return city, region, location
+
+    @classmethod
+    def _is_moscow_search(cls, search: dict[str, Any]) -> bool:
+        text = " ".join(cls._geo_text(search.get(key)) for key in ("region", "city"))
+        return "москва" in text or "московск" in text or str(search.get("region_id")) == "637640"
+
+    @classmethod
+    def _region_matches(cls, item: dict[str, Any], search: dict[str, Any]) -> bool:
+        city, region, location = cls._location_values(item)
+        if cls._is_moscow_search(search):
+            return any(token in " ".join((city, region, location)) for token in (
+                "москва", "московск",
+            ))
+        wanted = cls._geo_text(search.get("region"))
+        return not wanted or wanted in " ".join((region, location, city))
+
+    @classmethod
+    def _location_matches(cls, item: dict[str, Any], search: dict[str, Any]) -> bool:
+        if not cls._region_matches(item, search):
+            return False
+        # "Москва и область" is a regional search: after the region matched,
+        # do not require every Moscow-oblast town to have city == Москва.
+        if cls._is_moscow_search(search):
+            return True
+        city, _region, location = cls._location_values(item)
+        wanted_city = cls._geo_text(search.get("city"))
+        return not wanted_city or wanted_city in " ".join((city, location))
 
     def match_users(self, items: list[dict], searches: list[dict]) -> dict[int, list[dict]]:
         matched: dict[int, list[dict]] = defaultdict(list)
@@ -505,34 +543,73 @@ class RestAppCollector:
         cls, items: list[dict[str, Any]], search: dict[str, Any]
     ) -> list[dict[str, Any]]:
         before = len(items)
-        wanted = [str(search.get(key) or "").strip().casefold()
-                  for key in ("region", "city") if search.get(key)]
-        after_city = [item for item in items if not wanted or any(
-            term in str(item.get("location") or "").casefold() for term in wanted
-        )]
-        location_relaxed = bool(wanted and not after_city and items)
-        if location_relaxed:
-            after_city = list(items)
+        after_region = [item for item in items if cls._region_matches(item, search)]
+        after_city = [item for item in after_region if cls._location_matches(item, search)]
         minimum = int(search.get("price_min") or 0)
         maximum = int(search.get("price_max") or 99_000_000)
         after_price = [item for item in after_city if (
             item.get("demo_price_unreliable")
             or (item.get("price") is not None and minimum <= int(item["price"]) <= maximum)
         )]
-        after_category = list(after_price)
-        effective_search = dict(search)
-        if location_relaxed:
-            effective_search["region"] = ""
-            effective_search["city"] = ""
-        after_user = [
-            item for item in after_category if cls.matches(item, effective_search)
-        ]
+        brand = str(search.get("brand") or "").strip().casefold()
+        after_brand = [item for item in after_price if not brand or brand in " ".join(
+            str(item.get(key) or "") for key in ("title", "marka", "model", "description")
+        ).casefold()]
+        model = str(search.get("model") or "").strip().casefold()
+        after_model = [item for item in after_brand if not model or model in " ".join(
+            str(item.get(key) or "") for key in ("title", "marka", "model", "description")
+        ).casefold()]
+        year = int(search.get("year") or 0)
+        after_year = [item for item in after_model if not year or int(item.get("year") or 0) == year]
+        after_user = [item for item in after_year if (
+            float(item.get("_deal_score") or 0) >= float(search.get("min_deal_score") or 0)
+            and float(item.get("_potential_profit") or 0) >= float(search.get("min_profit") or 0)
+        )]
+        rejected = []
+        for item in items:
+            reason = ""
+            if item not in after_region: reason = "region"
+            elif item not in after_city: reason = "city"
+            elif item not in after_price: reason = "price"
+            elif item not in after_brand: reason = "brand"
+            elif item not in after_model: reason = "model"
+            elif item not in after_year: reason = "year"
+            elif item not in after_user: reason = "user_filters"
+            if reason and len(rejected) < 5:
+                rejected.append((item, reason))
+        unique_locations = []
+        for item in items:
+            combo = (str(item.get("city") or ""), str(item.get("region") or ""))
+            if combo not in unique_locations:
+                unique_locations.append(combo)
+            if len(unique_locations) >= 10:
+                break
         logging.getLogger(__name__).info(
-            "[AVITO FILTER] before=%d after_city=%d after_price=%d "
-            "after_category=%d after_user_filters=%d location_filter_relaxed=%s",
-            before, len(after_city), len(after_price), len(after_category), len(after_user),
-            str(location_relaxed).lower(),
+            "[AVITO FILTER] before_filters=%d after_region_filter=%d "
+            "after_city_filter=%d after_price_filter=%d after_brand_filter=%d "
+            "after_model_filter=%d after_year_filter=%d after_user_filters=%d",
+            before, len(after_region), len(after_city), len(after_price),
+            len(after_brand), len(after_model), len(after_year), len(after_user),
         )
+        logging.getLogger(__name__).info(
+            "[AVITO FILTER] unique_locations=%s api_city_sent=false "
+            "api_region_sent=false local_region_id=%s",
+            unique_locations, search.get("region_id") or "",
+        )
+        for item, reason in rejected:
+            logging.getLogger(__name__).info(
+                "[AVITO FILTER REJECT] title=%r normalized_city=%r "
+                "normalized_region=%r price=%r reject_reason=%s",
+                str(item.get("title") or "")[:100], str(item.get("city") or "")[:80],
+                str(item.get("region") or "")[:80], item.get("price"), reason,
+            )
+        cls._last_filter_diagnostics = {
+            "before_filters": before, "after_region_filter": len(after_region),
+            "after_city_filter": len(after_city), "after_price_filter": len(after_price),
+            "after_brand_filter": len(after_brand), "after_model_filter": len(after_model),
+            "after_year_filter": len(after_year), "after_user_filters": len(after_user),
+            "unique_locations": unique_locations,
+        }
         return after_user
 
     def search(self, search: dict[str, Any]) -> list[dict]:
@@ -552,6 +629,7 @@ class RestAppCollector:
                     "status": "ok", "cache_hit": True, "db_hit": True,
                     "provider_returned": len(history),
                     "after_user_filters": len(history_filtered),
+                    **getattr(type(self), "_last_filter_diagnostics", {}),
                 }
                 print(
                     f"[Avito RestApp] provider_returned={len(history)} "
@@ -565,6 +643,7 @@ class RestAppCollector:
             self.last_diagnostics = {
                 "status": "ok", "cache_hit": True, "db_hit": False,
                 "provider_returned": len(cached), "after_user_filters": len(cached),
+                **getattr(type(self), "_last_filter_diagnostics", {}),
             }
             print(
                 f"[Avito RestApp] provider_returned={len(cached)} "
@@ -585,6 +664,7 @@ class RestAppCollector:
                 "status": "ok", "cache_hit": True, "db_hit": False,
                 "provider_returned": len(latest[1]),
                 "after_user_filters": len(filtered),
+                **getattr(type(self), "_last_filter_diagnostics", {}),
             }
             print(
                 f"[Avito RestApp] provider_returned={len(latest[1])} "
@@ -599,6 +679,7 @@ class RestAppCollector:
             **{key: value for key, value in result.items() if key != "items"},
             "provider_returned": len(result.get("items", [])),
             "after_user_filters": len(filtered),
+            **getattr(type(self), "_last_filter_diagnostics", {}),
         }
         print(
             "[Avito RestApp] "
