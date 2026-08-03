@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from avito_normalizer import normalize_avito_item, normalize_rest_app_items_with_diagnostics, parse_price
+from avito_provider_config import get_avito_provider
 from avito_provider_router import AvitoProviderResult, AvitoProviderRouter
 from avito_rest_provider import describe_rest_app_payload, extract_rest_app_items
 
@@ -18,9 +19,29 @@ def payload():
 def test_extract_rest_app_items_supported_shapes():
     ad = payload()["data"]["items"][0]
     shapes = [[ad], {"ads": [ad]}, {"items": [ad]}, {"data": [ad]},
-              {"result": [ad]}, {"data": {"items": [ad]}}]
+              {"result": [ad]}, {"data": {"items": [ad]}},
+              {"result": {"items": [ad]}}]
     assert all(extract_rest_app_items(shape) == [ad] for shape in shapes)
-    assert describe_rest_app_payload(shapes[-1])["nested_items_path"] == "data.items"
+    assert describe_rest_app_payload(shapes[-1])["nested_items_path"] == "result.items"
+
+
+def test_provider_selection_has_one_precedence(monkeypatch):
+    monkeypatch.setenv("AVITO_PROVIDER", "rest_app")
+    monkeypatch.setenv("AVITO_SOURCE", "playwright")
+    assert get_avito_provider() == "rest_app"
+    monkeypatch.delenv("AVITO_PROVIDER")
+    assert get_avito_provider() == "playwright"
+
+
+def test_normalizer_supports_safe_aliases():
+    item = normalize_avito_item({
+        "item_id": "42", "name": "Lada 2010", "cost": "65 000 ₽",
+        "created_at": "2026-08-03 10:00:00",
+        "user": {"name": "Иван"},
+    }, "avito")
+    assert item["source_id"] == "42"
+    assert item["price"] == 65000
+    assert item["seller"] == "Иван"
 
 
 def test_normalize_price_string_and_nested_location():

@@ -27,15 +27,13 @@ import socket
 from dotenv import load_dotenv
 load_dotenv()
 
-AVITO_PROVIDER = os.getenv("AVITO_PROVIDER", "disabled").strip().lower()
-if AVITO_PROVIDER not in {"disabled", "rest_app", "adspower_worker", "playwright"}:
-    AVITO_PROVIDER = "disabled"
+from avito_provider_config import get_avito_provider
+
+AVITO_PROVIDER = get_avito_provider()
 AVITO_ENABLED = AVITO_PROVIDER != "disabled"
 
-# Primary source strategy for Avito.
-AVITO_SOURCE = os.getenv("AVITO_SOURCE", AVITO_PROVIDER if AVITO_PROVIDER in {"rest_app", "playwright"} else "rest_app").strip().lower()
-if AVITO_SOURCE not in {"rest_app", "playwright", "adspower_worker"}:
-    AVITO_SOURCE = "rest_app" if AVITO_PROVIDER == "rest_app" else "playwright" if AVITO_PROVIDER == "playwright" else "rest_app"
+# Compatibility alias only: every path uses the same resolved provider.
+AVITO_SOURCE = AVITO_PROVIDER
 REST_APP_ENABLED = os.getenv("REST_APP_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 AVITO_HISTORY_ENABLED = os.getenv("AVITO_HISTORY_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 REST_APP_REQUEST_INTERVAL = max(30, int(os.getenv("REST_APP_REQUEST_INTERVAL", "60") or 60))

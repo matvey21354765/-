@@ -34,6 +34,9 @@ def extract_rest_app_items(payload: Any) -> list[dict[str, Any]]:
         data = payload.get("data")
         if isinstance(data, dict):
             candidates.append(("data.items", data.get("items")))
+        result = payload.get("result")
+        if isinstance(result, dict):
+            candidates.append(("result.items", result.get("items")))
     for _path, value in candidates:
         if isinstance(value, list):
             return [item for item in value if isinstance(item, dict)]
@@ -50,6 +53,8 @@ def describe_rest_app_payload(payload: Any) -> dict[str, Any]:
         ))
         if isinstance(payload.get("data"), dict):
             candidates.append(("data.items", payload["data"].get("items")))
+        if isinstance(payload.get("result"), dict):
+            candidates.append(("result.items", payload["result"].get("items")))
     for candidate_path, value in candidates:
         if isinstance(value, list):
             path = candidate_path

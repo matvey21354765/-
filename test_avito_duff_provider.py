@@ -258,8 +258,10 @@ def test_rest_app_scheduler_ignores_legacy_proxy_cooldown(monkeypatch):
 
 def test_manual_search_registers_priority_and_reuses_cache(monkeypatch):
     import control_bot
+    from avito_rest_collector import get_rest_app_collector
 
     monkeypatch.setattr(control_bot, "AVITO_ENABLED", True)
+    monkeypatch.setattr(control_bot, "_REST_APP_COLLECTOR", get_rest_app_collector())
     monkeypatch.setattr(control_bot, "_AVITO_SCHEDULER_RUNNING", False)
     calls = []
     def fake_search(query):
@@ -285,8 +287,10 @@ def test_manual_search_registers_priority_and_reuses_cache(monkeypatch):
 
 def test_manual_search_waits_for_inflight_scheduler(monkeypatch):
     import control_bot
+    from avito_rest_collector import get_rest_app_collector
 
     monkeypatch.setattr(control_bot, "AVITO_ENABLED", True)
+    monkeypatch.setattr(control_bot, "_REST_APP_COLLECTOR", get_rest_app_collector())
     monkeypatch.setattr(control_bot, "_AVITO_SCHEDULER_RUNNING", True)
     monkeypatch.setattr(control_bot._REST_APP_COLLECTOR, "search", lambda query: [])
     control_bot._AVITO_SCHEDULE.clear()

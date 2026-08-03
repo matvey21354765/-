@@ -22,6 +22,21 @@ def _extract_year(text: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def parse_year(value: Any) -> int | None:
+    if isinstance(value, (int, float)):
+        year = int(value)
+        return year if 1950 <= year <= 2039 else None
+    return _extract_year(str(value or ""))
+
+
+def parse_mileage(value: Any) -> int | None:
+    if isinstance(value, (int, float)):
+        mileage = int(value)
+        return mileage if mileage >= 0 else None
+    digits = re.sub(r"\D", "", str(value or ""))
+    return int(digits) if digits else None
+
+
 def _extract_mileage(text: str) -> int | None:
     match = re.search(r"(\d{1,3}(?:\s?\d{3})*)\s*(?:км|тыс\.?\s*км?)", text, re.I)
     if not match:
@@ -30,7 +45,7 @@ def _extract_mileage(text: str) -> int | None:
     return value * 1000 if "тыс" in text.casefold() and value < 1000 else value
 
 
-def _normalize_images(value: Any) -> list[str]:
+def normalize_images(value: Any) -> list[str]:
     if isinstance(value, str):
         values = value.split(",")
     elif isinstance(value, list):
@@ -78,7 +93,7 @@ def normalize_avito_item(raw: dict[str, Any], source: str = "unknown") -> dict[s
     if not isinstance(raw, dict):
         raise TypeError("item_is_not_object")
     title = str(raw.get("title") or raw.get("name") or "").strip()
-    price = parse_price(raw.get("price")) or parse_price(raw.get("price_value")) or parse_price(raw.get("_price_int")) or parse_price(raw.get("price_str"))
+    price = parse_price(raw.get("price")) or parse_price(raw.get("price_value")) or parse_price(raw.get("cost")) or parse_price(raw.get("_price_int")) or parse_price(raw.get("price_str"))
     raw_url = str(raw.get("url") or raw.get("link") or "").strip()
     raw_url_lower = raw_url.casefold()
     demo_url_hidden = (
@@ -90,7 +105,7 @@ def normalize_avito_item(raw: dict[str, Any], source: str = "unknown") -> dict[s
     )
     demo_mode = demo_url_hidden or str(raw.get("avito_id") or "").casefold() == "hidden_in_demo"
     url = None if demo_url_hidden else (raw_url or None)
-    identity = str(raw.get("id") or raw.get("Id") or raw.get("source_id") or raw.get("_source_id") or raw.get("avito_id") or "").strip()
+    identity = str(raw.get("id") or raw.get("Id") or raw.get("item_id") or raw.get("source_id") or raw.get("_source_id") or raw.get("avito_id") or "").strip()
     missing = []
     if not identity and not url:
         missing.append("id_or_url")
@@ -102,15 +117,16 @@ def normalize_avito_item(raw: dict[str, Any], source: str = "unknown") -> dict[s
         raise ValueError("missing_required:" + ",".join(missing))
     location = normalize_location(raw)
     description = str(raw.get("description") or raw.get("text") or "").strip()
-    images = _normalize_images(raw.get("images") or raw.get("photos") or raw.get("image") or raw.get("photo_urls"))
+    images = normalize_images(raw.get("images") or raw.get("photos") or raw.get("image") or raw.get("photo_urls"))
     params = raw.get("params") if isinstance(raw.get("params"), list) else []
     param_text = " ".join(
         f"{p.get('name', '')} {p.get('value', '')}" for p in params if isinstance(p, dict)
     )
-    year = parse_price(raw.get("year")) or _extract_year(param_text) or _extract_year(title) or _extract_year(description)
-    mileage = parse_price(raw.get("mileage")) or _extract_mileage(param_text) or _extract_mileage(description)
-    published = _to_iso_date(raw.get("time") or raw.get("date") or raw.get("published_at"))
-    seller = str(raw.get("seller") or raw.get("seller_name") or raw.get("name") or "").strip()
+    year = parse_year(raw.get("year")) or _extract_year(param_text) or _extract_year(title) or _extract_year(description)
+    mileage = parse_mileage(raw.get("mileage")) or _extract_mileage(param_text) or _extract_mileage(description)
+    published = _to_iso_date(raw.get("time") or raw.get("date") or raw.get("created_at") or raw.get("published_at"))
+    user = raw.get("user") if isinstance(raw.get("user"), dict) else {}
+    seller = str(raw.get("seller") or raw.get("seller_name") or user.get("name") or "").strip()
     return {
         "id": identity or url or "",
         "avito_id": identity,
