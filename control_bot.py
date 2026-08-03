@@ -8885,10 +8885,29 @@ def _avito_cached_result(
             "brand": "" if brand == "any" else brand,
         }
         provider_items = _REST_APP_COLLECTOR.search(search)
-        return [
+        collector_diag = dict(_REST_APP_COLLECTOR.last_diagnostics)
+        cache_age = None
+        latest = getattr(_REST_APP_COLLECTOR, "_latest_items", None)
+        if latest:
+            cache_age = max(0, round(_REST_APP_COLLECTOR.now() - latest[0], 3))
+        print(
+            "[AVITO PIPELINE] "
+            f"collector_returned={len(provider_items)} "
+            f"cache_hit={str(bool(collector_diag.get('cache_hit'))).lower()} "
+            f"cache_age={cache_age} search_key={search['search_id']}",
+            flush=True,
+        )
+        adapted = [
             _adapt_duff_listing(item, datetime.date.today())
             for item in provider_items
         ]
+        print(
+            "[AVITO PIPELINE] "
+            f"adapt_input={len(provider_items)} adapt_output={len(adapted)} "
+            f"cached_result_returned={len(adapted)} search_key={search['search_id']}",
+            flush=True,
+        )
+        return adapted
     key = _avito_schedule_key(region, price_min, price_max, sort_by_date, brand)
     entry = _avito_schedule_entry(key)
     blocked = _AVITO_PRODUCTION_STATE.is_blocked()
@@ -9023,6 +9042,24 @@ def _adapt_duff_listing(item: dict, today: datetime.date) -> dict:
         except Exception:
             pass
     return result
+
+
+def _avito_common_pipeline(
+    items: list[dict], price_min: int, price_max: int,
+    category: str = "all", brand: str = "",
+) -> list[dict]:
+    """Pure Avito portion of the common pipeline, shared with diagnostics."""
+    filtered = [
+        item for item in items
+        if item.get("source") == "avito"
+        and in_price_range(item, price_min, price_max)
+        and _item_identity(item)
+    ]
+    filtered = _filter_by_category(filtered, category, brand)
+    unique: dict[str, dict] = {}
+    for item in filtered:
+        unique.setdefault(_item_identity(item), item)
+    return list(unique.values())
 
 
 def _enrich_avito_with_deal_score(item: dict, market_price: int | None) -> dict:
@@ -14530,6 +14567,12 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         await asyncio.sleep(0.01)
 
     print(f"[Avito RestApp] telegram_cards={avito_sent_count}")
+    print(
+        "[AVITO PIPELINE] "
+        f"telegram_cards_sent={avito_sent_count} telegram_counter="
+        f"{sum(1 for item in items if item.get('source') == 'avito')}",
+        flush=True,
+    )
     _AUTORU_LAST_DIAG["telegram_cards"] = autoru_sent_count
     print(f"[Auto.ru] telegram_cards={autoru_sent_count}")
     next_offset = offset + len(batch)
@@ -14739,6 +14782,12 @@ async def do_search_for_user(uid: int, reply_to):
         items.extend(batch)
         tag = SOURCE_TAGS.get(src, src)
         if src == "avito":
+            print(
+                "[AVITO PIPELINE] "
+                f"common_pipeline_input={len(batch)} "
+                f"search_key=manual:{region}:{pmin}:{pmax}:{brand}",
+                flush=True,
+            )
             avito_key = _avito_schedule_key(
                 region, pmin, pmax, True,
                 brand if brand and brand != "any" else "",
@@ -15113,6 +15162,16 @@ async def do_search_for_user(uid: int, reply_to):
         _deduped_suitable.append(_it)
     suitable = _deduped_suitable
     print(f"  [фильтр] после финальной дедупликации: {len(suitable)}")
+    _avito_common_output = sum(
+        1 for item in suitable if item.get("source") == "avito"
+    )
+    print(
+        "[AVITO PIPELINE] "
+        f"common_pipeline_output={_avito_common_output} "
+        f"telegram_counter={_avito_common_output} "
+        f"search_key=manual:{region}:{pmin}:{pmax}:{brand}",
+        flush=True,
+    )
 
     # Помечаем уже просмотренные — они получат штраф и уйдут в конец
     for it in suitable:
