@@ -8630,6 +8630,7 @@ _AVITO_SCHEDULE_LOCK = _threading.Lock()
 _AVITO_PROVIDER_LOCK = _threading.Lock()
 _AVITO_SCHEDULER_RUNNING = False
 _AVITO_GLOBAL_NEXT_ATTEMPT_AT = 0.0
+_TELEGRAM_POLLING_CONFLICT_AT = 0.0
 _AVITO_PRODUCTION_STATE = AvitoProductionState(
     cache_ttl=AVITO_CACHE_TTL_SECONDS,
     stale_cache_ttl=AVITO_STALE_CACHE_TTL_SECONDS,
@@ -8887,7 +8888,10 @@ def _avito_cached_result(
             "price_max": price_max,
             "brand": "" if brand == "any" else brand,
         }
-        provider_items = _REST_APP_COLLECTOR.search(search)
+        if time.time() - _TELEGRAM_POLLING_CONFLICT_AT < 90:
+            provider_items = _REST_APP_COLLECTOR.search_local(search)
+        else:
+            provider_items = _REST_APP_COLLECTOR.search(search)
         return [
             _adapt_duff_listing(item, datetime.date.today())
             for item in provider_items
@@ -16912,6 +16916,20 @@ async def main():
             )
             raise SystemExit(2)
     logging.basicConfig(level=logging.WARNING)
+
+    class _PollingConflictGuard(logging.Handler):
+        def emit(self, record):
+            global _TELEGRAM_POLLING_CONFLICT_AT
+            message = record.getMessage()
+            if "TelegramConflictError" in message or "terminated by other getUpdates" in message:
+                _TELEGRAM_POLLING_CONFLICT_AT = time.time()
+                print(
+                    "[TELEGRAM] polling_conflict=true; REST-App network disabled for this instance",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
+    logging.getLogger("aiogram.dispatcher").addHandler(_PollingConflictGuard())
     loop = asyncio.get_running_loop()
     # Тяжёлые синхронные загрузки при старте — в executor, чтобы не блокировать
     # event loop до запуска polling (иначе бот "зависает" на старте).

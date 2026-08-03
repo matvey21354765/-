@@ -30,9 +30,9 @@ def _env_int(name: str, default: int, minimum: int, maximum: int) -> int:
     return max(minimum, min(maximum, value))
 
 
-REST_APP_MAX_TIME_WINDOWS = _env_int("REST_APP_MAX_TIME_WINDOWS", 6, 1, 6)
+REST_APP_MAX_TIME_WINDOWS = _env_int("REST_APP_MAX_TIME_WINDOWS", 1, 1, 6)
 REST_APP_CACHE_TTL = _env_int("REST_APP_CACHE_TTL", 300, 30, 3600)
-REST_APP_RESULT_LIMIT = _env_int("REST_APP_RESULT_LIMIT", 50, 1, 50)
+REST_APP_RESULT_LIMIT = _env_int("REST_APP_RESULT_LIMIT", 1000, 1, 1000)
 REST_APP_DB_MAX_AGE_HOURS = _env_int(
     "REST_APP_DB_MAX_AGE_HOURS", 24, 1, 168
 )
@@ -386,7 +386,16 @@ class RestAppAvitoProvider:
             ))
             source_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()
         raw_url = str(ad.get("url") or "").strip()
-        url = None if raw_url == "hidden_in_demo" else (raw_url or None)
+        raw_url_lower = raw_url.casefold()
+        demo_url_hidden = (
+            raw_url_lower == "hidden_in_demo"
+            or raw_url_lower.startswith((
+                "http://crwl.ru", "https://crwl.ru",
+                "http://www.crwl.ru", "https://www.crwl.ru",
+            ))
+        )
+        demo_mode = demo_url_hidden or avito_id == "hidden_in_demo"
+        url = None if demo_url_hidden else (raw_url or None)
         location = ", ".join(
             value for value in (
                 str(ad.get("region") or "").strip(),
@@ -429,9 +438,9 @@ class RestAppAvitoProvider:
             "params": ad.get("params") if isinstance(ad.get("params"), list) else [],
             "specs": specs,
             "year": int(year_match.group(1)) if year_match else 0,
-            "demo_url_hidden": raw_url == "hidden_in_demo",
-            "demo_mode": raw_url == "hidden_in_demo" or avito_id == "hidden_in_demo",
-            "demo_price_unreliable": raw_url == "hidden_in_demo" or avito_id == "hidden_in_demo",
+            "demo_url_hidden": demo_url_hidden,
+            "demo_mode": demo_mode,
+            "demo_price_unreliable": demo_mode,
         }
 
     @staticmethod

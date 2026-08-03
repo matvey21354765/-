@@ -80,7 +80,16 @@ def normalize_avito_item(raw: dict[str, Any], source: str = "unknown") -> dict[s
     title = str(raw.get("title") or raw.get("name") or "").strip()
     price = parse_price(raw.get("price")) or parse_price(raw.get("price_value")) or parse_price(raw.get("_price_int")) or parse_price(raw.get("price_str"))
     raw_url = str(raw.get("url") or raw.get("link") or "").strip()
-    url = None if raw_url == "hidden_in_demo" else (raw_url or None)
+    raw_url_lower = raw_url.casefold()
+    demo_url_hidden = (
+        raw_url_lower == "hidden_in_demo"
+        or raw_url_lower.startswith("http://crwl.ru")
+        or raw_url_lower.startswith("https://crwl.ru")
+        or raw_url_lower.startswith("http://www.crwl.ru")
+        or raw_url_lower.startswith("https://www.crwl.ru")
+    )
+    demo_mode = demo_url_hidden or str(raw.get("avito_id") or "").casefold() == "hidden_in_demo"
+    url = None if demo_url_hidden else (raw_url or None)
     identity = str(raw.get("id") or raw.get("Id") or raw.get("source_id") or raw.get("_source_id") or raw.get("avito_id") or "").strip()
     missing = []
     if not identity and not url:
@@ -128,9 +137,9 @@ def normalize_avito_item(raw: dict[str, Any], source: str = "unknown") -> dict[s
         "model": str(raw.get("model") or "").strip(),
         "params": params,
         "specs": raw.get("specs") if isinstance(raw.get("specs"), dict) else {},
-        "demo_url_hidden": raw_url == "hidden_in_demo",
-        "demo_mode": raw_url == "hidden_in_demo" or str(raw.get("avito_id")) == "hidden_in_demo",
-        "demo_price_unreliable": raw_url == "hidden_in_demo" or str(raw.get("avito_id")) == "hidden_in_demo",
+        "demo_url_hidden": demo_url_hidden,
+        "demo_mode": demo_mode,
+        "demo_price_unreliable": demo_mode,
         "raw": raw,
     }
 

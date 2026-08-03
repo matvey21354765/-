@@ -195,6 +195,7 @@ def test_collector_uses_confirmed_rest_app_time_payload(tmp_path, monkeypatch):
     payload = FakeProvider.payloads[0]
     assert set(payload) == {"category_id", "sort", "limit", "date1", "date2"}
     assert payload["category_id"] == "9"
+    assert payload["limit"] == 1000
     assert "last_m" not in payload
     assert "region_id" not in payload
 
@@ -233,6 +234,19 @@ def test_demo_results_survive_empty_location_and_unreliable_price(tmp_path, monk
     assert obj._filter_with_diagnostics([item], wanted) == [item]
 
 
+def test_crwl_demo_link_marks_random_price_unreliable():
+    from avito_normalizer import normalize_avito_item
+
+    item = normalize_avito_item({
+        "Id": "demo-crwl-1", "title": "ВАЗ 2107", "price": "9999999",
+        "url": "http://crwl.ru/demo", "city": "Новосибирск",
+    }, source="avito")
+    assert item["url"] is None
+    assert item["demo_mode"] is True
+    assert item["demo_url_hidden"] is True
+    assert item["demo_price_unreliable"] is True
+
+
 def test_network_failure_returns_last_successful_database_catalogue(tmp_path, monkeypatch):
     obj = collector(tmp_path, monkeypatch)
     assert obj.search(search())
@@ -261,3 +275,11 @@ def test_manual_search_uses_accumulated_database_before_api(tmp_path, monkeypatc
     assert result
     assert FakeProvider.calls == before
     assert obj.last_diagnostics["db_hit"] is True
+
+
+def test_local_only_search_never_spends_rest_app_request(tmp_path, monkeypatch):
+    obj = collector(tmp_path, monkeypatch)
+    before = FakeProvider.calls
+    assert obj.search_local(search()) == []
+    assert FakeProvider.calls == before
+    assert obj.last_diagnostics["status"] == "polling_conflict"

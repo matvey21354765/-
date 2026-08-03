@@ -40,6 +40,7 @@ REST_APP_MAX_PAGES = _env_int("REST_APP_MAX_PAGES", 1)
 REST_APP_DAILY_SOFT_LIMIT = _env_int("REST_APP_DAILY_SOFT_LIMIT", 8000)
 REST_APP_DAILY_HARD_LIMIT = _env_int("REST_APP_DAILY_HARD_LIMIT", 9500)
 REST_APP_DEGRADED_SECONDS = _env_int("REST_APP_DEGRADED_SECONDS", 600)
+REST_APP_RESULT_LIMIT = min(1000, _env_int("REST_APP_RESULT_LIMIT", 1000))
 
 
 def canonical_request_key(search: dict[str, Any]) -> str:
@@ -187,7 +188,7 @@ class RestAppCollector:
         params: dict[str, Any] = {
             "category_id": str(search.get("category_id") or CAR_CATEGORY_ID),
             "sort": "desc",
-            "limit": 50,
+            "limit": REST_APP_RESULT_LIMIT,
             "date1": (moscow_now - timedelta(minutes=minutes)).strftime(
                 "%Y-%m-%d %H:%M:%S"
             ),
@@ -590,6 +591,23 @@ class RestAppCollector:
             f"status={result.get('status', 'ok')} "
             f"cache_hit={str(bool(result.get('cache_hit'))).lower()} "
             f"db_hit={str(bool(result.get('db_hit'))).lower()}",
+            flush=True,
+        )
+        return filtered
+
+    def search_local(self, search: dict[str, Any]) -> list[dict]:
+        """Read-only search used by a container that lost Telegram polling."""
+        self.register_search(search)
+        history = self._load_recent_items()
+        filtered = self._filter_with_diagnostics(history, search) if history else []
+        self.last_diagnostics = {
+            "status": "polling_conflict", "cache_hit": True,
+            "db_hit": bool(history), "provider_returned": len(history),
+            "after_user_filters": len(filtered),
+        }
+        print(
+            "[Avito RestApp] network_skipped=polling_conflict "
+            f"db_items={len(history)} returned={len(filtered)}",
             flush=True,
         )
         return filtered
