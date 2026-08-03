@@ -15372,13 +15372,23 @@ async def do_search_for_user(uid: int, reply_to):
                 print(f"  [рынок] +{len(_extra)} записей из полного кэша региона (истинный рынок)")
     except Exception as _e:
         print(f"  [рынок] кэш-эталон ошибка: {_e}")
-    # Авито — единый эталон для всех площадок. Юлу используем только как резерв,
-    # когда Авито полностью недоступно; смешивать две базы в одной медиане нельзя.
+    # Эталон рынка — из ВСЕХ площадок сразу (Авито + Дром + Юла + Auto.ru), чтобы
+    # анализ цены работал ВСЕГДА, даже когда Авито просело. Цены б/у авто на разных
+    # площадках сопоставимы, а медиана по «модель+год» с отсечением выбросов
+    # сглаживает разницу. Чем больше выборка — тем точнее рынок и больше покрытие.
     _market_ref_items = list(_avito_ref_items)
-    _market_ref_source = "Авито"
+    _ref_urls = {_norm_url(i.get("url", "")) for i in _market_ref_items}
+    _added_src = {"avito": len(_avito_ref_items)}
+    for _src in ("drom", "youla", "autoru", "vk", "tg"):
+        _batch = [i for i in items if i.get("source") == _src and i.get("_price_int", 0)
+                  and _norm_url(i.get("url", "")) not in _ref_urls]
+        if _batch:
+            _market_ref_items += _batch
+            _added_src[_src] = len(_batch)
+    # Дедуп на всякий случай + добавляем резервную Юлу, если Авито совсем пуст
     if not _market_ref_items:
         _market_ref_items = [i for i in _youla_ref_items if i.get("_price_int", 0)]
-        _market_ref_source = "Юла (резерв)"
+    _market_ref_source = "все площадки (" + ", ".join(f"{k}:{v}" for k, v in _added_src.items() if v) + ")"
     if _market_ref_items:
         _ref_copies = [_copy.copy(i) for i in _market_ref_items]
         for _rc in _ref_copies:
@@ -15516,7 +15526,13 @@ async def do_search_for_user(uid: int, reply_to):
         _avito_provider_count, _avito_market_samples, 0
     )
     _avito_available = bool(_avito_status["provider_available"])
-    _market_analysis_enabled = bool(_avito_status["market_analysis_enabled"])
+    # Анализ рынка включаем, если у нас есть достаточно эталонных цен ИЗ ЛЮБЫХ
+    # площадок (Авито/Дром/Юла/Auto.ru), а не только Авито — тогда оценка цены
+    # работает всегда, даже когда Авито просело.
+    _ref_sample_count = sum(1 for i in _ref_items if int(i.get("_price_int") or 0) > 0)
+    _market_analysis_enabled = (
+        bool(_avito_status["market_analysis_enabled"]) or _ref_sample_count >= 8
+    )
     if _market_analysis_enabled:
         _n_av_ref = sum(1 for i in _ref_items if i.get("source") == "avito")
         _ref_src = "Авито" if _n_av_ref >= 5 else "резервный источник"
