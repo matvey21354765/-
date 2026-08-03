@@ -9596,16 +9596,17 @@ async def _avito_scheduled_fetch_unlocked(
             _avito_diag("после фильтрации", len(parsed))
         elif AVITO_PROVIDER == "webjson":
             _brand_q = brand if brand and brand != "any" else ""
-            # 1) Мобильный API — не требует cookies (работает на мобильном IP).
-            parsed = _avito_mobile_api_search(
+            # 1) web-JSON с cookies от spfa — стр.1 стабильно отдаёт ~49 объявлений
+            # (стр.2+ Авито почти всегда блокирует, поэтому берём ТОЛЬКО первую).
+            parsed = _avito_webjson_search(
                 region, price_min=price_min, price_max=price_max,
-                sort_by_date=sort_by_date, brand=_brand_q, pages=3,
+                sort_by_date=sort_by_date, brand=_brand_q, pages=1,
             )
-            # 2) Если мобильный API пуст — web-JSON с cookies от spfa.
+            # 2) Если web-JSON пуст — мобильный API (без cookies, если IP чистый).
             if not parsed:
-                parsed = _avito_webjson_search(
+                parsed = _avito_mobile_api_search(
                     region, price_min=price_min, price_max=price_max,
-                    sort_by_date=sort_by_date, brand=_brand_q, pages=3,
+                    sort_by_date=sort_by_date, brand=_brand_q, pages=1,
                 )
             http = 200 if parsed else (_AVITO_LAST_DIAG.get("http") or 200)
             _avito_diag("HTTP", http, provider="webjson")
@@ -9789,7 +9790,10 @@ async def _avito_scheduled_fetch_unlocked(
                 "status": "active",
                 "last_http": 200,
                 "next_attempt_at": now + _AVITO_MIN_INTERVAL_SEC,
-                "page": 1 if page >= _AVITO_MAX_STATE_PAGE else page + 1,
+                # webjson: страницы 2+ Авито почти всегда блокирует (403/439),
+                # поэтому всегда обновляем стр.1 — она стабильно отдаёт ~50 свежих.
+                "page": 1 if (AVITO_PROVIDER == "webjson" or page >= _AVITO_MAX_STATE_PAGE)
+                        else page + 1,
                 "items": items[:500],
                 "updated_at": now,
                 "in_flight": False,
