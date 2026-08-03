@@ -250,7 +250,7 @@ class RestAppCollector:
             "raw_type": raw_type,
         }
 
-    def _load_recent_items(self, limit: int = 200) -> list[dict[str, Any]]:
+    def _load_recent_items(self, limit: int = 5000) -> list[dict[str, Any]]:
         """Load the last successful catalogue without spending another API call."""
         with self._connect() as db:
             rows = db.execute(
@@ -322,6 +322,21 @@ class RestAppCollector:
                 self._stats["duplicate_requests_prevented"] += 1
                 return {"items": list(cached[1]), "new_items": [], "cache_hit": True,
                         "single_flight_joined": False, "request_id": request_id}
+            # One physical REST-App feed serves every search key.  A manual
+            # 24-hour key and the three-minute monitor key must never spend
+            # two requests inside the shared TTL window.
+            if (
+                self._latest_items
+                and self._last_request_at
+                and now - self._last_request_at < REST_APP_CACHE_TTL_SECONDS
+            ):
+                self._stats["cache_hits"] += 1
+                self._stats["duplicate_requests_prevented"] += 1
+                return {
+                    "items": list(self._latest_items[1]), "new_items": [],
+                    "cache_hit": True, "single_flight_joined": True,
+                    "request_id": request_id, "status": "ok",
+                }
             flight = self._flights.get(key)
             if flight is None:
                 flight = threading.Event()
@@ -506,6 +521,28 @@ class RestAppCollector:
     def search(self, search: dict[str, Any]) -> list[dict]:
         """Return a filtered shared result, collecting once on a cache miss."""
         self.register_search(search)
+        # The paid feed is global (50 newest ads), while user filters are
+        # regional. Search the accumulated shared history first; otherwise a
+        # valid Краснодар/Омск ad disappears as soon as it leaves the newest
+        # global batch and every button press wastes another API request.
+        history = self._load_recent_items()
+        if history:
+            history_filtered = self._filter_with_diagnostics(history, search)
+            if history_filtered:
+                self._stats["cache_hits"] += 1
+                self._stats["duplicate_requests_prevented"] += 1
+                self.last_diagnostics = {
+                    "status": "ok", "cache_hit": True, "db_hit": True,
+                    "provider_returned": len(history),
+                    "after_user_filters": len(history_filtered),
+                }
+                print(
+                    f"[Avito RestApp] provider_returned={len(history)} "
+                    f"after_user_filters={len(history_filtered)} status=ok "
+                    "cache_hit=true db_hit=true",
+                    flush=True,
+                )
+                return history_filtered
         cached = self.cached_for_search(search)
         if cached:
             self.last_diagnostics = {

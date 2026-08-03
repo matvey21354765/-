@@ -88,6 +88,17 @@ def test_different_regions_share_one_global_rest_request(tmp_path, monkeypatch):
     assert len(result) == 1
 
 
+def test_monitor_and_manual_windows_share_physical_request_ttl(tmp_path, monkeypatch):
+    obj = collector(tmp_path, monkeypatch)
+    first = obj.collect_group(search())
+    manual = {**search(2), "last_m": 1440}
+    second = obj.collect_group(manual)
+    assert first["items"]
+    assert second["items"]
+    assert second["cache_hit"] is True
+    assert FakeProvider.calls == 1
+
+
 def test_single_flight_joins_concurrent_calls(tmp_path, monkeypatch):
     obj = collector(tmp_path, monkeypatch)
     FakeProvider.delay = 0.15
@@ -233,8 +244,20 @@ def test_network_failure_returns_last_successful_database_catalogue(tmp_path, mo
             raise TimeoutError("secret upstream detail")
 
     obj.provider_factory = BrokenProvider
-    result = obj.search({**search(), "last_m": 1440})
-    assert len(result) == 1
+    result = obj.collect_group({**search(), "last_m": 1440})
+    assert len(result["items"]) == 1
     assert obj.last_diagnostics["status"] == "request_failed"
-    assert obj.last_diagnostics["db_hit"] is True
+    assert obj.last_diagnostics["db_fallback_count"] == 1
     assert obj.last_diagnostics["error_type"] == "TimeoutError"
+
+
+def test_manual_search_uses_accumulated_database_before_api(tmp_path, monkeypatch):
+    obj = collector(tmp_path, monkeypatch)
+    assert obj.search(search())
+    obj._cache.clear()
+    obj._latest_items = None
+    before = FakeProvider.calls
+    result = obj.search({**search(42), "last_m": 1440})
+    assert result
+    assert FakeProvider.calls == before
+    assert obj.last_diagnostics["db_hit"] is True

@@ -16398,15 +16398,18 @@ async def _global_monitor_loop():
                                 items_rs = _region_src_cache.get(key_rs, [])
                             for it in items_rs:
                                 u = _norm_url(it.get("url", ""))
-                                if not u:
+                                identity = _item_identity(it)
+                                if not identity:
                                     continue
-                                lid = _listing_key(u)
-                                if u in _seen_raw_norm or (lid and lid in _seen_raw_id):
+                                lid = _listing_key(u) if u else identity
+                                if (u and u in _seen_raw_norm) or (lid and lid in _seen_raw_id):
                                     continue
-                                _seen_raw_norm.add(u)
+                                if u:
+                                    _seen_raw_norm.add(u)
                                 if lid:
                                     _seen_raw_id.add(lid)
-                                it["url"] = u
+                                if u:
+                                    it["url"] = u
                                 it["_monitor_region"] = reg
                                 if src == "avito" and src not in user_srcs:
                                     # Авито не выбрано пользователем — только для рыночной цены
@@ -16422,9 +16425,9 @@ async def _global_monitor_loop():
 
                     new_items = [
                         it for it in raw
-                        if it.get("url")
-                        and it["url"] not in seen
-                        and it["url"] not in skipped
+                        if _item_identity(it)
+                        and (not it.get("url") or it["url"] not in seen)
+                        and (not it.get("url") or it["url"] not in skipped)
                         and not is_dealer(it)
                         and not is_not_running(it)
                         and _is_car_advertisement(it)
