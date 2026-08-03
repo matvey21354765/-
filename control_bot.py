@@ -631,7 +631,7 @@ AVITO_PROXIES: "dict[str, str] | None" = None
 try:
     MOBILE_PROXY_CONFIG = (
         build_mobile_proxy_config()
-        if AVITO_PROVIDER == "disabled"
+        if AVITO_PROVIDER in ("disabled", "webjson")
         else None
     )
     AVITO_PROXIES = (
@@ -5477,6 +5477,92 @@ def _avito_region_loc(region: str) -> int:
     return AVITO_OBLAST_IDS.get(region) or AVITO_LOCATION_IDS.get(region, 637640)
 
 
+def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_000_000,
+                          sort_by_date: bool = False, brand: str = "", pages: int = 3) -> list[dict]:
+    """Поиск авто на avito.ru через web-JSON API (/web/1/js/items) — С фильтром
+    по региону (locationId) и цене. Cookies берём из spfa.ru, запросы — через прокси.
+    Это НАСТОЯЩИЙ поиск Авито (в отличие от ленты rest-app.net «новое по РФ»)."""
+    try:
+        import requests as _req
+    except ImportError:
+        return []
+    today = datetime.date.today()
+    loc = _avito_region_loc(region)
+    slug = region
+    results: list[dict] = []
+    seen: set[str] = set()
+    for p in range(1, pages + 1):
+        _params = {"categoryId": 9, "locationId": loc, "page": p, "owner": 1}
+        if price_min > 0:
+            _params["pmin"] = price_min
+        if price_max < 99_000_000:
+            _params["pmax"] = price_max
+        if sort_by_date:
+            _params["s"] = 104
+        _hdrs = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept": "application/json", "Accept-Language": "ru-RU,ru;q=0.9",
+            "x-requested-with": "XMLHttpRequest",
+            "Referer": f"https://www.avito.ru/{slug}/avtomobili",
+        }
+        _proxy_order = []
+        if AVITO_PROXIES and not _proxy_auth_failed:
+            _proxy_order += [("прокси", _avito_proxies()), ("прокси-rot", "ROTATE")]
+        _proxy_order.append(("напрямую", None))
+        _got = None
+        for _tag, _px in _proxy_order:
+            if _px == "ROTATE":
+                if not _rotate_proxy_ip(min_interval=0):
+                    continue
+                _px = _avito_proxies()
+            try:
+                r = _req.get("https://www.avito.ru/web/1/js/items", params=_params,
+                             headers=_hdrs, timeout=20, proxies=_px or {},
+                             cookies=_avito_cookies() or None)
+                if r.status_code in (403, 429):
+                    if SPFA_API_KEY:
+                        _avito_cookies_refresh_on_block()
+                    print(f"  [Авито webJSON {_tag}] стр.{p}: HTTP {r.status_code} → cookies+ротация")
+                    continue
+                if r.status_code != 200:
+                    print(f"  [Авито webJSON {_tag}] стр.{p}: HTTP {r.status_code}")
+                    continue
+                data = r.json()
+                if isinstance(data, dict) and ("too-many-requests" in data or "firewall" in str(data)[:200]):
+                    if SPFA_API_KEY:
+                        _avito_cookies_refresh_on_block()
+                    print(f"  [Авито webJSON {_tag}] стр.{p}: firewall → cookies+ротация")
+                    continue
+                _got = data
+                break
+            except Exception as e:
+                print(f"  [Авито webJSON {_tag}] стр.{p}: {str(e)[:70]}")
+                continue
+        if not _got:
+            break
+        raw = (_got.get("catalog", {}) or {}).get("items", []) or _avito_find_items_in_json(_got)
+        _added = 0
+        for it in raw:
+            if not isinstance(it, dict) or not it.get("id"):
+                continue
+            item = _avito_item_from_json(it, today)
+            if not item:
+                continue
+            u = item.get("url", "")
+            if u in seen:
+                continue
+            seen.add(u)
+            if brand and brand != "any" and brand.lower() not in item.get("title", "").lower():
+                continue
+            results.append(item)
+            _added += 1
+        print(f"  [Авито webJSON] стр.{p}: +{_added} (всего {len(results)})")
+        if _added == 0:
+            break
+    print(f"  [Авито webJSON] итого {len(results)}")
+    return results
+
+
 
 import threading as _threading
 import asyncio as _aio
@@ -9406,6 +9492,15 @@ async def _avito_scheduled_fetch_unlocked(
                 страница=page,
             )
             _avito_diag("после парсинга", len(provider_items))
+            _avito_diag("после фильтрации", len(parsed))
+        elif AVITO_PROVIDER == "webjson":
+            parsed = _avito_webjson_search(
+                region, price_min=price_min, price_max=price_max,
+                sort_by_date=sort_by_date,
+                brand=brand if brand and brand != "any" else "", pages=3,
+            )
+            http = 200 if parsed else (_AVITO_LAST_DIAG.get("http") or 200)
+            _avito_diag("HTTP", http, provider="webjson")
             _avito_diag("после фильтрации", len(parsed))
         elif AVITO_PROVIDER == "adspower_worker":
             worker_result = AvitoWorkerProvider().search(

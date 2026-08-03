@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 
-SUPPORTED_AVITO_PROVIDERS = {"disabled", "rest_app", "playwright", "adspower_worker"}
+SUPPORTED_AVITO_PROVIDERS = {"disabled", "rest_app", "playwright", "adspower_worker", "webjson"}
 
 
 def get_avito_provider() -> str:
