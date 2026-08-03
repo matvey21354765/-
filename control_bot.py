@@ -5491,6 +5491,79 @@ def _avito_region_loc(region: str) -> int:
     return AVITO_OBLAST_IDS.get(region) or AVITO_LOCATION_IDS.get(region, 637640)
 
 
+def _avito_mobile_api_search(region: str, price_min: int = 0, price_max: int = 99_000_000,
+                             sort_by_date: bool = False, brand: str = "", pages: int = 3) -> list[dict]:
+    """Мобильный API Авито (m.avito.ru/api/16/items). С российским мобильным IP
+    работает БЕЗ cookies/авторизации — не зависит от spfa. Фильтр по региону и цене."""
+    try:
+        import requests as _req
+    except ImportError:
+        return []
+    today = datetime.date.today()
+    loc = _avito_region_loc(region)
+    _key = "af0deccbgcgidddjgnvljitntccdduijhdinfgjgfjir"
+    hdrs = {
+        "User-Agent": "ru.avito.avitomobile/18.0 (Android 13; ru_RU)",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "ru-RU,ru;q=0.9", "x-avito-app-version": "18.0.0",
+    }
+    results: list[dict] = []
+    seen: set[str] = set()
+    _brand_l = (brand or "").lower()
+    for p in range(1, pages + 1):
+        base = {"locationId": loc, "categoryId": 9, "params[109][]": 106,
+                "page": p, "limit": 50, "display": "list", "sortType": "101"}
+        if price_min > 0:
+            base["priceMin"] = price_min
+        if price_max < 99_000_000:
+            base["priceMax"] = price_max
+        variants = [
+            ("https://m.avito.ru/api/16/items", {**base, "key": _key}),
+            ("https://m.avito.ru/api/15/items", {**base, "key": _key}),
+            ("https://m.avito.ru/api/13/items", {**base, "key": _key}),
+        ]
+        _pxs = ([_avito_proxies()] if (AVITO_PROXIES and not _proxy_auth_failed) else []) + [None]
+        got = None
+        for _url, _prm in variants:
+            for _px in _pxs:
+                try:
+                    r = _req.get(_url, params=_prm, headers=hdrs, timeout=10, proxies=_px or {})
+                    if r.status_code == 200:
+                        data = r.json()
+                        raw = (_deep_get(data, "result.items") or _deep_get(data, "result.catalog.items")
+                               or _deep_get(data, "data.items") or data.get("items")
+                               or _avito_find_items_in_json(data))
+                        if raw:
+                            got = raw
+                            break
+                    elif r.status_code in (403, 429, 439, 503):
+                        continue
+                except Exception as e:
+                    print(f"  [Авито mobileAPI] стр.{p}: {str(e)[:60]}")
+            if got:
+                break
+        if not got:
+            break
+        _added = 0
+        for it in got:
+            item = _avito_item_from_json(it, today)
+            if not item:
+                continue
+            u = item.get("url", "")
+            if u in seen:
+                continue
+            seen.add(u)
+            if _brand_l and _brand_l != "any" and _brand_l not in item.get("title", "").lower():
+                continue
+            results.append(item)
+            _added += 1
+        print(f"  [Авито mobileAPI] стр.{p}: +{_added} (всего {len(results)})")
+        if _added == 0:
+            break
+    print(f"  [Авито mobileAPI] итого {len(results)}")
+    return results
+
+
 def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_000_000,
                           sort_by_date: bool = False, brand: str = "", pages: int = 3) -> list[dict]:
     """Поиск авто на avito.ru через web-JSON API (/web/1/js/items) — С фильтром
@@ -9508,11 +9581,18 @@ async def _avito_scheduled_fetch_unlocked(
             _avito_diag("после парсинга", len(provider_items))
             _avito_diag("после фильтрации", len(parsed))
         elif AVITO_PROVIDER == "webjson":
-            parsed = _avito_webjson_search(
+            _brand_q = brand if brand and brand != "any" else ""
+            # 1) Мобильный API — не требует cookies (работает на мобильном IP).
+            parsed = _avito_mobile_api_search(
                 region, price_min=price_min, price_max=price_max,
-                sort_by_date=sort_by_date,
-                brand=brand if brand and brand != "any" else "", pages=3,
+                sort_by_date=sort_by_date, brand=_brand_q, pages=3,
             )
+            # 2) Если мобильный API пуст — web-JSON с cookies от spfa.
+            if not parsed:
+                parsed = _avito_webjson_search(
+                    region, price_min=price_min, price_max=price_max,
+                    sort_by_date=sort_by_date, brand=_brand_q, pages=3,
+                )
             http = 200 if parsed else (_AVITO_LAST_DIAG.get("http") or 200)
             _avito_diag("HTTP", http, provider="webjson")
             _avito_diag("после фильтрации", len(parsed))
