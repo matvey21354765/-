@@ -40,7 +40,13 @@ REST_APP_MAX_PAGES = _env_int("REST_APP_MAX_PAGES", 1)
 REST_APP_DAILY_SOFT_LIMIT = _env_int("REST_APP_DAILY_SOFT_LIMIT", 8000)
 REST_APP_DAILY_HARD_LIMIT = _env_int("REST_APP_DAILY_HARD_LIMIT", 9500)
 REST_APP_DEGRADED_SECONDS = _env_int("REST_APP_DEGRADED_SECONDS", 600)
-REST_APP_RESULT_LIMIT = min(1000, _env_int("REST_APP_RESULT_LIMIT", 1000))
+# Production account is paid and the documented maximum is 1000.  Older
+# Railway deployments may still contain REST_APP_RESULT_LIMIT=50; accepting
+# that stale value leaves regional searches with an unusably small global
+# sample. Keep the name for compatibility, but never request below 1000.
+REST_APP_RESULT_LIMIT = min(
+    1000, max(1000, _env_int("REST_APP_RESULT_LIMIT", 1000))
+)
 
 
 def canonical_request_key(search: dict[str, Any]) -> str:
@@ -195,7 +201,8 @@ class RestAppCollector:
             "date2": moscow_now.strftime("%Y-%m-%d %H:%M:%S"),
         }
         print(
-            "[Avito RestApp] request_started category_id=9 page=1 retry=false",
+            "[Avito RestApp] request_started category_id=9 page=1 "
+            f"requested_limit={REST_APP_RESULT_LIMIT} retry=false",
             flush=True,
         )
         payload = provider._post("ads", params)
@@ -207,6 +214,7 @@ class RestAppCollector:
             "[REST-APP RESPONSE] "
             f"status={provider.last_diagnostics.get('http') or 200} "
             f"raw_items_count={len(raw)} category_id={params['category_id']} "
+            f"requested_limit={params['limit']} "
             f"nested_items_path={shape['nested_items_path'] or 'unexpected'}"
         )
         print(response_line, flush=True)

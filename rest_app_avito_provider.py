@@ -30,9 +30,11 @@ def _env_int(name: str, default: int, minimum: int, maximum: int) -> int:
     return max(minimum, min(maximum, value))
 
 
-REST_APP_MAX_TIME_WINDOWS = _env_int("REST_APP_MAX_TIME_WINDOWS", 1, 1, 6)
+# Exactly one paid request per collection pass. Ignore stale Railway values
+# from the retired diagnostic cascade.
+REST_APP_MAX_TIME_WINDOWS = 1
 REST_APP_CACHE_TTL = _env_int("REST_APP_CACHE_TTL", 300, 30, 3600)
-REST_APP_RESULT_LIMIT = _env_int("REST_APP_RESULT_LIMIT", 1000, 1, 1000)
+REST_APP_RESULT_LIMIT = 1000
 REST_APP_DB_MAX_AGE_HOURS = _env_int(
     "REST_APP_DB_MAX_AGE_HOURS", 24, 1, 168
 )

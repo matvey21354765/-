@@ -200,6 +200,10 @@ def test_collector_uses_confirmed_rest_app_time_payload(tmp_path, monkeypatch):
     assert "region_id" not in payload
 
 
+def test_stale_railway_limit_cannot_reduce_paid_batch(monkeypatch):
+    assert arc.REST_APP_RESULT_LIMIT == 1000
+
+
 def test_normalization_degraded_mode_prevents_duplicate_request(tmp_path, monkeypatch):
     class InvalidProvider(FakeProvider):
         calls = 0
