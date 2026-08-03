@@ -871,7 +871,8 @@ def _rotate_proxy_ip(min_interval: float = 50.0, force: bool = False) -> bool:
             print("[прокси] ⚠️ ссылка ротации не рабочая — отключена")
             return False
         if ok:
-            _t.sleep(2)  # даём прокси применить новый IP
+            _t.sleep(7)  # ВАЖНО: mobileproxy меняет IP асинхронно (~5-10с). Без паузы
+                         # следующий запрос уйдёт со СТАРОГО IP и снова получит 429.
         return ok
     except Exception as e:
         print(f"[прокси] ротация IP ошибка: {str(e)[:80]}")
@@ -5535,7 +5536,7 @@ def _avito_mobile_api_search(region: str, price_min: int = 0, price_max: int = 9
         _pxs = []
         if AVITO_PROXIES and not _proxy_auth_failed:
             _pxs.append(("прокси", _avito_proxies()))
-            _pxs += [("прокси-rot%d" % i, "ROTATE") for i in range(1, 4)]
+            _pxs += [("прокси-rot%d" % i, "ROTATE") for i in range(1, 3)]
         _pxs.append(("напрямую", None))
         got = None
         for _url, _prm in variants:
@@ -5616,7 +5617,7 @@ def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_0
         _proxy_order = []
         if AVITO_PROXIES and not _proxy_auth_failed:
             _proxy_order.append(("прокси", _avito_proxies()))
-            _proxy_order += [("прокси-rot%d" % i, "ROTATE") for i in range(1, 4)]
+            _proxy_order += [("прокси-rot%d" % i, "ROTATE") for i in range(1, 3)]
         _proxy_order.append(("напрямую", None))
         _got = None
         for _tag, _px in _proxy_order:
