@@ -45,6 +45,17 @@ def test_normalize_required_fields():
     assert item["year"] == 2020
 
 
+def test_demo_rest_app_car_survives_legacy_category_filter():
+    import control_bot as cb
+
+    item = cb._adapt_duff_listing({
+        "Id": "rest-1", "id": "rest-1", "source_id": "rest-1",
+        "source": "avito", "title": "Lada Granta", "price": 85000,
+        "url": None, "demo_mode": True, "demo_url_hidden": True,
+    }, __import__("datetime").date.today())
+    assert cb._is_car_advertisement(item)
+
+
 def test_identical_search_uses_cache(monkeypatch):
     client = provider()
     calls = []

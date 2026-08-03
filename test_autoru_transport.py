@@ -322,3 +322,28 @@ def test_http_200_without_offers_is_parse_error(monkeypatch):
     result = cb.scrape_autoru("omsk", price_max=100000)
     assert result["items"] == []
     assert result["error"] == "parse_error"
+
+
+def test_current_ssr_listing_card_is_parsed_without_inline_json():
+    import datetime
+    import control_bot as cb
+
+    html = '''
+    <div data-seo="listing-item">
+      <a href="https://auto.ru/cars/used/sale/lada/granta/1234567890-abcd/">
+        <img src="//avatars.avto.ru/car.jpg" />
+      </a>
+      <div class="ListingItemTitle">
+        <a class="ListingItemTitle__link" href="https://auto.ru/cars/used/sale/lada/granta/1234567890-abcd/">
+          Lada Granta<div class="ListingItemTitle__clicker"></div>
+        </a>
+      </div>
+      <div class="ListingItemUniversalPrice__highlighted-abc">95 000 ₽</div>
+      <div>2012</div>
+    </div>
+    '''
+    items = cb._autoru_parse_html(html, datetime.date(2026, 8, 3))
+    assert len(items) == 1
+    assert items[0]["_price_int"] == 95000
+    assert items[0]["title"] == "Lada Granta"
+    assert items[0]["_photo_url"] == "https://avatars.avto.ru/car.jpg"

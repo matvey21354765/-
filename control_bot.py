@@ -1362,6 +1362,16 @@ _CAR_BRANDS = {
 
 def _is_car_advertisement(item: dict) -> bool:
     """True, если объявление точно о продаже легкового автомобиля."""
+    # REST-App request is already restricted to the confirmed automobile
+    # category (category_id=9). Demo rows deliberately have no public URL and
+    # can omit a year in the title, so the legacy HTML heuristic must not
+    # discard them after the provider has returned a valid source_id.
+    if (
+        item.get("source") == "avito"
+        and item.get("source_id")
+        and (item.get("_demo_mode") or item.get("_demo_url_hidden"))
+    ):
+        return True
     title = str(item.get("title", "")).lower()
     desc = str(item.get("description", "")).lower()
     url = str(item.get("url", "")).lower()
@@ -2338,19 +2348,49 @@ def _autoru_parse_offers(data: dict, today) -> list[dict]:
         or (data.get("result", {}) or {}).get("offers", [])
         or (data.get("listing", {}) or {}).get("offers", [])
     )
+    if not listing:
+        # The desktop endpoint changes the wrapper name regularly.  Detect
+        # only lists whose elements have the stable offer fields instead of
+        # tying production to one response envelope.
+        def _find_offer_list(value, depth=0):
+            if depth > 8:
+                return []
+            if isinstance(value, list):
+                candidates = [row for row in value if isinstance(row, dict)]
+                if candidates and any(
+                    ("vehicle_info" in row or "vehicleInfo" in row)
+                    and ("price_info" in row or "priceInfo" in row)
+                    for row in candidates[:5]
+                ):
+                    return candidates
+                for row in candidates:
+                    found = _find_offer_list(row, depth + 1)
+                    if found:
+                        return found
+            elif isinstance(value, dict):
+                for nested in value.values():
+                    found = _find_offer_list(nested, depth + 1)
+                    if found:
+                        return found
+            return []
+        listing = _find_offer_list(data)
     for offer in listing:
         try:
-            vehicle = offer.get("vehicle_info", {})
+            vehicle = offer.get("vehicle_info") or offer.get("vehicleInfo") or {}
             mark = vehicle.get("mark_info", {}).get("name", "")
             model = vehicle.get("model_info", {}).get("name", "")
-            year = offer.get("documents", {}).get("year", "")
+            mark = mark or (vehicle.get("markInfo") or {}).get("name", "")
+            model = model or (vehicle.get("modelInfo") or {}).get("name", "")
+            year = (offer.get("documents") or {}).get("year", "")
+            year = year or (vehicle.get("super_gen") or vehicle.get("superGen") or {}).get("year_from", "")
             title = f"{mark} {model} {year}".strip()
-            price_val = offer.get("price_info", {}).get("price", "")
+            price_val = (offer.get("price_info") or offer.get("priceInfo") or {}).get("price", "")
             price_str = f"{int(price_val):,} ₽".replace(",", " ") if price_val else ""
             item_url = offer.get("url", "") or f"https://auto.ru/cars/used/sale/{offer.get('id', '')}"
-            if offer.get("seller_type") == "COMMERCIAL":
+            seller_type = str(offer.get("seller_type") or offer.get("sellerType") or "").upper()
+            if seller_type == "COMMERCIAL":
                 continue
-            photos_list = offer.get("photos", [])
+            photos_list = offer.get("photos") or (vehicle.get("state") or {}).get("image_urls") or []
             photo_url = ""
             if photos_list:
                 sizes = photos_list[0].get("sizes", {})
@@ -2396,6 +2436,87 @@ def _autoru_is_captcha(text: str) -> bool:
 def _autoru_parse_html(text: str, today) -> list[dict]:
     """Извлекает объявления из HTML Auto.ru (inline JSON, __INITIAL_STATE__ или regex)."""
     results = []
+
+    # Current SSR listing cards are regular HTML and no longer always expose
+    # the legacy window.__INITIAL_STATE__.  data-seo is the stable public card
+    # marker used by Auto.ru itself.
+    try:
+        from bs4 import BeautifulSoup as _BS
+        soup = _BS(text, "html.parser")
+        for card in soup.select('[data-seo="listing-item"]'):
+            link = card.select_one('a[href*="auto.ru/cars/"][href*="/sale/"]')
+            title_node = card.select_one(".ListingItemTitle__link") or link
+            price_node = card.select_one('[class*="ListingItemUniversalPrice__highlighted"]')
+            if not link or not title_node or not price_node:
+                continue
+            item_url = str(link.get("href") or "").strip()
+            title = title_node.get_text(" ", strip=True)
+            price_val = parse_price(price_node.get_text(" ", strip=True)) or 0
+            if not item_url or not title or price_val < 10_000:
+                continue
+            image_node = card.select_one("img[src]")
+            photo_url = str(image_node.get("src") or "") if image_node else ""
+            if photo_url.startswith("//"):
+                photo_url = "https:" + photo_url
+            year_match = re.search(r"\b(19[5-9]\d|20[0-3]\d)\b", card.get_text(" ", strip=True))
+            item = {
+                "source": "autoru", "title": title,
+                "price": f"{price_val:,} ₽".replace(",", " "),
+                "url": item_url, "date": str(today),
+                "_photos": 1 if photo_url else 0, "_days_on_site": 0,
+                "description": "", "seller": "", "_photo_url": photo_url,
+                "_price_int": price_val,
+                "_year": int(year_match.group(1)) if year_match else 0,
+            }
+            item["_hot_score"] = hot_score(item)
+            results.append(item)
+        if results:
+            print(f"  [Auto.ru] SSR HTML: {len(results)} объявлений")
+            return results
+    except Exception as exc:
+        print(f"  [Auto.ru] SSR HTML parse error: {type(exc).__name__}")
+
+    if not results and 'data-seo="listing-item"' in text:
+        import html as _html
+        blocks = text.split('data-seo="listing-item"')[1:]
+        for block in blocks:
+            block = block[:50000]
+            link_match = re.search(
+                r'href="(https://auto\.ru/cars/[^"<>]+/sale/[^"<>]+)"', block
+            )
+            title_match = re.search(
+                r'ListingItemTitle__link[^>]*>(.*?)<div[^>]+ListingItemTitle__clicker',
+                block, re.S,
+            )
+            price_match = re.search(
+                r'ListingItemUniversalPrice__highlighted[^>]*>([^<]+)<', block
+            )
+            if not (link_match and title_match and price_match):
+                continue
+            title = _html.unescape(re.sub(r"<[^>]+>", " ", title_match.group(1)))
+            title = re.sub(r"\s+", " ", title).strip()
+            price_val = parse_price(_html.unescape(price_match.group(1))) or 0
+            if not title or price_val < 10_000:
+                continue
+            image_match = re.search(r'<img[^>]+src="([^"]+)"', block)
+            photo_url = _html.unescape(image_match.group(1)) if image_match else ""
+            if photo_url.startswith("//"):
+                photo_url = "https:" + photo_url
+            year_match = re.search(r"\b(19[5-9]\d|20[0-3]\d)\b", title + " " + block[:10000])
+            item = {
+                "source": "autoru", "title": title,
+                "price": f"{price_val:,} ₽".replace(",", " "),
+                "url": _html.unescape(link_match.group(1)), "date": str(today),
+                "_photos": 1 if photo_url else 0, "_days_on_site": 0,
+                "description": "", "seller": "", "_photo_url": photo_url,
+                "_price_int": price_val,
+                "_year": int(year_match.group(1)) if year_match else 0,
+            }
+            item["_hot_score"] = hot_score(item)
+            results.append(item)
+        if results:
+            print(f"  [Auto.ru] SSR regex: {len(results)} объявлений")
+            return results
 
     # Метод 1: window.__INITIAL_STATE__ и другие встроенные JSON-блоки
     for marker in ("window.__INITIAL_STATE__=", "window.__INITIAL_STATE__ =",
