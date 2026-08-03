@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import logging
 
 import control_bot
 
@@ -36,3 +37,17 @@ def test_fifty_collector_items_reach_telegram_counter(monkeypatch):
     )
     assert len(final) == 50
     assert sum(item["source"] == "avito" for item in final) == 50
+
+
+def test_common_filter_logs_drop_and_counter_matches_final(caplog):
+    accepted = _normalized(1)
+    rejected = {**_normalized(2), "price": 2_000_000, "_price_int": 2_000_000}
+    with caplog.at_level(logging.INFO):
+        final = control_bot._avito_common_pipeline(
+            [accepted, rejected], 0, 1_000_000, "all", ""
+        )
+    telegram_counter = sum(item.get("source") == "avito" for item in final)
+    assert telegram_counter == len(final) == 1
+    assert "[AVITO COMMON FILTER DROP]" in caplog.text
+    assert "source_id=2" in caplog.text
+    assert "reason=price" in caplog.text

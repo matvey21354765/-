@@ -9049,16 +9049,44 @@ def _avito_common_pipeline(
     category: str = "all", brand: str = "",
 ) -> list[dict]:
     """Pure Avito portion of the common pipeline, shared with diagnostics."""
-    filtered = [
-        item for item in items
-        if item.get("source") == "avito"
-        and in_price_range(item, price_min, price_max)
-        and _item_identity(item)
-    ]
+    filtered = []
+    for item in items:
+        reason = ""
+        if item.get("source") != "avito":
+            reason = "source"
+        elif not in_price_range(item, price_min, price_max):
+            reason = "price"
+        elif not _item_identity(item):
+            reason = "missing_identity"
+        if reason:
+            logging.getLogger(__name__).info(
+                "[AVITO COMMON FILTER DROP] source_id=%s title=%r reason=%s",
+                str(item.get("source_id") or item.get("_source_id") or "")[:80],
+                str(item.get("title") or "")[:100], reason,
+            )
+        else:
+            filtered.append(item)
+    before_category = list(filtered)
     filtered = _filter_by_category(filtered, category, brand)
+    accepted_ids = {_item_identity(item) for item in filtered}
+    for item in before_category:
+        if _item_identity(item) not in accepted_ids:
+            logging.getLogger(__name__).info(
+                "[AVITO COMMON FILTER DROP] source_id=%s title=%r reason=category_or_brand",
+                str(item.get("source_id") or item.get("_source_id") or "")[:80],
+                str(item.get("title") or "")[:100],
+            )
     unique: dict[str, dict] = {}
     for item in filtered:
-        unique.setdefault(_item_identity(item), item)
+        identity = _item_identity(item)
+        if identity in unique:
+            logging.getLogger(__name__).info(
+                "[AVITO COMMON FILTER DROP] source_id=%s title=%r reason=duplicate",
+                str(item.get("source_id") or item.get("_source_id") or "")[:80],
+                str(item.get("title") or "")[:100],
+            )
+            continue
+        unique[identity] = item
     return list(unique.values())
 
 
