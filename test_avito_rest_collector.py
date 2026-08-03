@@ -279,11 +279,3 @@ def test_manual_search_uses_accumulated_database_before_api(tmp_path, monkeypatc
     assert result
     assert FakeProvider.calls == before
     assert obj.last_diagnostics["db_hit"] is True
-
-
-def test_local_only_search_never_spends_rest_app_request(tmp_path, monkeypatch):
-    obj = collector(tmp_path, monkeypatch)
-    before = FakeProvider.calls
-    assert obj.search_local(search()) == []
-    assert FakeProvider.calls == before
-    assert obj.last_diagnostics["status"] == "polling_conflict"

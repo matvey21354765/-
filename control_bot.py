@@ -48,7 +48,6 @@ from aiogram.types import (
     BotCommand,
 )
 from aiogram.filters import Command
-from aiogram.exceptions import TelegramConflictError
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -8630,7 +8629,6 @@ _AVITO_SCHEDULE_LOCK = _threading.Lock()
 _AVITO_PROVIDER_LOCK = _threading.Lock()
 _AVITO_SCHEDULER_RUNNING = False
 _AVITO_GLOBAL_NEXT_ATTEMPT_AT = 0.0
-_TELEGRAM_POLLING_CONFLICT_AT = 0.0
 _AVITO_PRODUCTION_STATE = AvitoProductionState(
     cache_ttl=AVITO_CACHE_TTL_SECONDS,
     stale_cache_ttl=AVITO_STALE_CACHE_TTL_SECONDS,
@@ -8888,10 +8886,7 @@ def _avito_cached_result(
             "price_max": price_max,
             "brand": "" if brand == "any" else brand,
         }
-        if time.time() - _TELEGRAM_POLLING_CONFLICT_AT < 90:
-            provider_items = _REST_APP_COLLECTOR.search_local(search)
-        else:
-            provider_items = _REST_APP_COLLECTOR.search(search)
+        provider_items = _REST_APP_COLLECTOR.search(search)
         return [
             _adapt_duff_listing(item, datetime.date.today())
             for item in provider_items
@@ -16906,30 +16901,7 @@ async def main():
         raise RuntimeError("BOT_TOKEN не задан; запуск бота невозможен")
     bot = Bot(token=BOT_TOKEN)
     dp = dp._materialize()
-    @dp.errors()
-    async def _on_telegram_error(event):
-        if isinstance(getattr(event, "exception", None), TelegramConflictError):
-            print(
-                "[TELEGRAM] Conflict detected, another instance is polling. Exiting.",
-                file=sys.stderr,
-                flush=True,
-            )
-            raise SystemExit(2)
     logging.basicConfig(level=logging.WARNING)
-
-    class _PollingConflictGuard(logging.Handler):
-        def emit(self, record):
-            global _TELEGRAM_POLLING_CONFLICT_AT
-            message = record.getMessage()
-            if "TelegramConflictError" in message or "terminated by other getUpdates" in message:
-                _TELEGRAM_POLLING_CONFLICT_AT = time.time()
-                print(
-                    "[TELEGRAM] polling_conflict=true; REST-App network disabled for this instance",
-                    file=sys.stderr,
-                    flush=True,
-                )
-
-    logging.getLogger("aiogram.dispatcher").addHandler(_PollingConflictGuard())
     loop = asyncio.get_running_loop()
     # Тяжёлые синхронные загрузки при старте — в executor, чтобы не блокировать
     # event loop до запуска polling (иначе бот "зависает" на старте).
@@ -17244,15 +17216,10 @@ async def main():
         flush=True,
     )
     await bot.delete_webhook(drop_pending_updates=False)
-    try:
-        await dp.start_polling(bot)
-    except TelegramConflictError as exc:
-        print(
-            f"[TELEGRAM] polling conflict; instance exits: {type(exc).__name__}",
-            file=sys.stderr,
-            flush=True,
-        )
-        raise SystemExit(2) from exc
+    # Aiogram retries getUpdates conflicts inside its polling loop.  Polling
+    # has no authority over REST-App or any other background service started
+    # above; no conflict hook may pause or disable their network activity.
+    await dp.start_polling(bot)
     print(">>> main(): start_polling завершён (бот остановлен)", flush=True)
     return
 

@@ -603,23 +603,6 @@ class RestAppCollector:
         )
         return filtered
 
-    def search_local(self, search: dict[str, Any]) -> list[dict]:
-        """Read-only search used by a container that lost Telegram polling."""
-        self.register_search(search)
-        history = self._load_recent_items()
-        filtered = self._filter_with_diagnostics(history, search) if history else []
-        self.last_diagnostics = {
-            "status": "polling_conflict", "cache_hit": True,
-            "db_hit": bool(history), "provider_returned": len(history),
-            "after_user_filters": len(filtered),
-        }
-        print(
-            "[Avito RestApp] network_skipped=polling_conflict "
-            f"db_items={len(history)} returned={len(filtered)}",
-            flush=True,
-        )
-        return filtered
-
     def collect_active(self, searches: list[dict[str, Any]]) -> dict[str, Any]:
         groups: dict[str, list[dict]] = defaultdict(list)
         for search in searches:
