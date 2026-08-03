@@ -14819,9 +14819,6 @@ async def do_search_for_user(uid: int, reply_to):
         except Exception as _e:
             print(f"  [рынок] Юла-эталон ошибка: {_e}")
 
-    if stat_parts:
-        await reply_to.answer("📊 " + " | ".join(stat_parts))
-
     # Если Авито — единственный включённый источник и вернул 0 результатов,
     # автоматически добавляем Дром как запасной источник.
     avito_enabled = "avito" in enabled_sources and "avito" in scraper_map
@@ -15172,6 +15169,13 @@ async def do_search_for_user(uid: int, reply_to):
         f"search_key=manual:{region}:{pmin}:{pmax}:{brand}",
         flush=True,
     )
+    if "avito" in src_keys:
+        for index, part in enumerate(stat_parts):
+            if "Avito" in part:
+                stat_parts[index] = f"🔴 Avito: {_avito_common_output}"
+                break
+    if stat_parts:
+        await reply_to.answer("📊 " + " | ".join(stat_parts))
 
     # Помечаем уже просмотренные — они получат штраф и уйдут в конец
     for it in suitable:
