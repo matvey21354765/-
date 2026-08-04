@@ -236,11 +236,13 @@ try:
 except (TypeError, ValueError):
     AVITO_STALE_CACHE_TTL_SECONDS = 86400
 try:
+    # Раньше поиск ждал Авито дольше минуты — и объявления успевали прийти.
+    # Потолок в 20с обрезал ожидание, и выдача уходила без Авито.
     AVITO_MANUAL_WAIT_SECONDS = max(
-        1, min(20, int(os.getenv("AVITO_MANUAL_WAIT_SECONDS", "20")))
+        1, min(120, int(os.getenv("AVITO_MANUAL_WAIT_SECONDS", "75")))
     )
 except (TypeError, ValueError):
-    AVITO_MANUAL_WAIT_SECONDS = 20
+    AVITO_MANUAL_WAIT_SECONDS = 75
 _PROXY_URL_RAW = PROXY_URL
 # Не берём Railway-системный прокси (он не является резидентным)
 if _PROXY_URL_RAW and "__agentproxy" in _PROXY_URL_RAW:
@@ -702,12 +704,17 @@ def _avito_rate_limited() -> bool:
     return time.time() < _AVITO_RATE_LIMIT_UNTIL
 
 def _avito_note_rate_limit(seconds: int = 600) -> None:
+    """Авито ограничил IP. Сразу меняем IP (чтобы забанненный «отдыхал») и
+    выдерживаем общую паузу — иначе бот продолжает долбить и продлевает бан."""
     global _AVITO_RATE_LIMIT_UNTIL
     if time.time() < _AVITO_RATE_LIMIT_UNTIL:
         return
     _AVITO_RATE_LIMIT_UNTIL = time.time() + seconds
-    print(f"  [Авито] IP ограничен — пауза {seconds // 60} мин, "
-          f"чтобы адрес «остыл» (иначе бан держится бесконечно)")
+    print(f"  [Авито] IP ограничен → меняем IP и ждём {seconds // 60} мин")
+    try:
+        _rotate_proxy_ip(min_interval=0)   # освобождаем забаненный адрес
+    except Exception:
+        pass
 _SPFA_BASE = "https://spfa.ru/api"
 _SPFA_COOKIE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".spfa_cookies.json")
 _spfa_state = {"id": None, "cookies": None, "ts": 0.0}
