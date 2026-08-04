@@ -872,6 +872,11 @@ def _spfa_note_cookie_result(ok: bool) -> None:
         _spfa_state["fail_streak"] = 0
         _spfa_state["cooldown_until"] = 0
         return
+    # Считаем провалом только если cookies реально были свежими: когда сервис
+    # лежит и cookies нет вовсе, стоп-кран включать нельзя — иначе он заблокирует
+    # фоновый добытчик и мы пропустим момент, когда spfa поднимется.
+    if not _spfa_state.get("cookies") or (time.time() - (_spfa_state.get("ts") or 0)) > 12 * 3600:
+        return
     n = int(_spfa_state.get("fail_streak") or 0) + 1
     _spfa_state["fail_streak"] = n
     if n >= 3:
@@ -17380,6 +17385,40 @@ _PUSH_MESSAGES = [
 
 _PUSH_INTERVAL_SEC = 4 * 24 * 3600  # не чаще одного полезного сообщения в 4 дня
 
+async def _spfa_keeper_loop():
+    """Фоново ловит момент, когда spfa поднимется, и берёт свежие cookies.
+
+    Сервис работает урывками (503), но НЕУДАЧНЫЕ запросы бесплатны — платим
+    только за успешную выдачу. Одна купленная cookie живёт ~12 часов, поэтому
+    достаточно 1-2 покупок в сутки, а Авито при этом работает постоянно.
+    """
+    if not SPFA_API_KEY:
+        return
+    await asyncio.sleep(20)
+    print("  [spfa] фоновый добытчик cookies запущен (ловим окна работы сервиса)")
+    loop = asyncio.get_running_loop()
+    while True:
+        try:
+            _age = time.time() - (_spfa_state.get("ts") or 0)
+            _need = (not _spfa_state.get("cookies")) or _age > 11 * 3600
+            if _need:
+                ok = await loop.run_in_executor(
+                    None, lambda: _spfa_fetch(unblock=False, allow_buy=True)
+                )
+                if ok:
+                    print("  [spfa] cookies получены фоново — Авито снова доступен")
+                    # сбрасываем паузу Авито: с новыми cookies можно пробовать
+                    globals()["_AVITO_RATE_LIMIT_UNTIL"] = 0.0
+                    _spfa_note_cookie_result(True)
+            # Есть cookies — спим долго; нет — часто проверяем (это бесплатно).
+            await asyncio.sleep(300 if _need else 1800)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"  [spfa] добытчик: {str(e)[:90]}")
+            await asyncio.sleep(300)
+
+
 async def _price_watch_loop():
     """Сообщает пользователям о снижении цены у машин, за которыми они следят.
 
@@ -18749,6 +18788,11 @@ async def main():
 
         # Уведомления об окончании тестового периода (за 3 и за 1 день)
         loop.create_task(_trial_notification_loop())
+        # Фоновый добытчик cookies spfa (ловит окна работы сервиса)
+        try:
+            loop.create_task(_spfa_keeper_loop())
+        except Exception as _e:
+            print(f"  [spfa] добытчик не запущен: {str(_e)[:80]}")
         # Уведомления о снижении цены у наблюдаемых машин
         try:
             _track.init_db()
