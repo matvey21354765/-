@@ -703,7 +703,7 @@ def _spfa_request(path: str, payload: dict):
     try:
         from curl_cffi import requests as _cffi
         r = _cffi.post(f"{_SPFA_BASE}{path}", json=payload, headers=hdrs,
-                       timeout=30, proxies=_px or {}, impersonate="chrome124")
+                       timeout=12, proxies=_px or {}, impersonate="chrome124")
         if r.status_code in (200, 202):
             return r.json()
         print(f"  [spfa] {path} curl_cffi: HTTP {r.status_code}")
@@ -713,7 +713,7 @@ def _spfa_request(path: str, payload: dict):
     try:
         import requests as _rq
         r = _rq.post(f"{_SPFA_BASE}{path}", json=payload, headers=hdrs,
-                     timeout=30, proxies=_px or {})
+                     timeout=12, proxies=_px or {})
         if r.status_code in (200, 202):
             return r.json()
         print(f"  [spfa] {path} requests: HTTP {r.status_code} {r.text[:100]}")
@@ -5646,6 +5646,64 @@ def _avito_mobile_api_search(region: str, price_min: int = 0, price_max: int = 9
     return results
 
 
+def _avito_html_search(region: str, price_min: int = 0, price_max: int = 99_000_000,
+                       sort_by_date: bool = False, brand: str = "", page: int = 1,
+                       allow_buy: bool = False) -> list[dict]:
+    """Обычная HTML-страница каталога Авито с cookies от spfa.
+
+    Именно так работает parser_avito: cookies выдаются под браузерную страницу,
+    а не под внутренний JSON-API (тот отвечает 403/439 даже со свежими cookies).
+    Используем curl_cffi с имперсонацией Chrome — иначе Cloudflare режет по TLS.
+    """
+    today = datetime.date.today()
+    _brand_path = f"/{brand}" if brand and brand != "any" else ""
+    url = f"https://www.avito.ru/{region}/avtomobili{_brand_path}"
+    params: dict = {"cd": 1, "radius": 200, "p": page}
+    if price_min > 0:
+        params["pmin"] = price_min
+    if price_max < 99_000_000:
+        params["pmax"] = price_max
+    if sort_by_date:
+        params["s"] = 104
+    hdrs = {
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                       "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "ru-RU,ru;q=0.9",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+    }
+    ck = _avito_cookies(allow_buy) or None
+    _pxs = []
+    if AVITO_PROXIES and not _proxy_auth_failed:
+        _pxs.append(("прокси", _avito_proxies()))
+    _pxs.append(("напрямую", None))
+    for _tag, _px in _pxs:
+        try:
+            from curl_cffi import requests as _cffi
+            r = _cffi.get(url, params=params, headers=hdrs, cookies=ck,
+                          proxies=_px or {}, timeout=25, impersonate="chrome124")
+            code = int(r.status_code)
+            text = r.text or ""
+            if code != 200:
+                print(f"  [Авито HTML {_tag}] стр.{page}: HTTP {code}")
+                continue
+            if "firewall" in text[:2000].lower() or len(text) < 5000:
+                print(f"  [Авито HTML {_tag}] стр.{page}: заблокировано ({len(text)}б)")
+                continue
+            items = _parse_avito_html(text, region, today)
+            if items:
+                print(f"  [Авито HTML {_tag}] стр.{page}: {len(items)} объявлений ✅")
+                return items
+            print(f"  [Авито HTML {_tag}] стр.{page}: страница получена ({len(text)}б), "
+                  f"но объявления не распознаны")
+        except Exception as e:
+            print(f"  [Авито HTML {_tag}] стр.{page}: {str(e)[:80]}")
+    return []
+
+
 def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_000_000,
                           sort_by_date: bool = False, brand: str = "", pages: int = 3,
                           allow_buy: bool = False) -> list[dict]:
@@ -5658,11 +5716,8 @@ def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_0
         return []
     # Без рабочих cookies Авито отдаёт только 403/439 — нет смысла жечь ротации
     # IP и время на заведомо неуспешные попытки. Выходим сразу с понятной причиной.
-    if SPFA_API_KEY and not _spfa_state.get("cookies"):
-        if not (allow_buy and _avito_cookies(allow_buy=True)):
-            print("  [Авито] нет рабочих cookies (spfa) — пропускаем Авито в этом поиске")
-            _AVITO_LAST_DIAG["reason"] = "no_cookies"
-            return []
+    if SPFA_API_KEY and not _spfa_state.get("cookies") and allow_buy:
+        _avito_cookies(allow_buy=True)  # пробуем получить cookies под живой поиск
     today = datetime.date.today()
     loc = _avito_region_loc(region)
     slug = region
@@ -5709,9 +5764,8 @@ def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_0
                     # Два блока подряд = дело не в IP, а в cookies. Дальше менять
                     # IP бессмысленно (жжём лимит ротаций провайдера) — выходим.
                     if _blocked_streak >= 2:
-                        print("  [Авито] блокировка не из-за IP — нужны свежие cookies "
-                              "(проверь баланс spfa.ru)")
-                        return results
+                        print("  [Авито] JSON-API закрыт — переходим на HTML-страницу")
+                        break  # выходим из перебора IP, ниже пробуем HTML
                     continue
                 if r.status_code != 200:
                     print(f"  [Авито webJSON {_tag}] стр.{p}: HTTP {r.status_code}")
@@ -5728,6 +5782,21 @@ def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_0
                 print(f"  [Авито webJSON {_tag}] стр.{p}: {str(e)[:70]}")
                 continue
         if not _got:
+            # JSON-API закрыт (403/439). Cookies от spfa рассчитаны на ОБЫЧНУЮ
+            # HTML-страницу (так работает parser_avito), поэтому пробуем её —
+            # это основной рабочий путь, а не запасной.
+            _html_items = _avito_html_search(
+                region, price_min=price_min, price_max=price_max,
+                sort_by_date=sort_by_date, brand=brand, page=p, allow_buy=allow_buy,
+            )
+            if _html_items:
+                for _hit in _html_items:
+                    _u = _hit.get("url", "")
+                    if _u and _u not in seen:
+                        seen.add(_u)
+                        results.append(_hit)
+                print(f"  [Авито HTML] стр.{p}: +{len(_html_items)} (всего {len(results)})")
+                continue
             break
         raw = (_got.get("catalog", {}) or {}).get("items", []) or _avito_find_items_in_json(_got)
         _added = 0
