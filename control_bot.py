@@ -5935,6 +5935,9 @@ _AVITO_MOBILE_API_VERSIONS = (16, 15, 13, 11, 9)
 _AVITO_WEBJSON_VERSIONS = (1, 2, 3)
 
 
+AVITO_ENABLE_MOBILE_API = os.getenv("AVITO_ENABLE_MOBILE_API", "0").strip() in {"1", "true", "yes"}
+
+
 def _avito_mobile_api_endpoints() -> list[str]:
     """URL мобильного API в порядке перебора (новые версии — первыми)."""
     return [f"https://m.avito.ru/api/{v}/items" for v in _AVITO_MOBILE_API_VERSIONS]
@@ -6061,6 +6064,8 @@ def _avito_mobile_api_search(region: str, price_min: int = 0, price_max: int = 9
                              sort_by_date: bool = False, brand: str = "", pages: int = 3) -> list[dict]:
     """Мобильный API Авито (m.avito.ru/api/N/items). С российским мобильным IP
     работает БЕЗ cookies/авторизации — не зависит от spfa. Фильтр по региону и цене."""
+    if not AVITO_ENABLE_MOBILE_API:
+        return []   # маршруты мертвы (404), включается через AVITO_ENABLE_MOBILE_API=1
     today = datetime.date.today()
     loc = _avito_region_loc(region)
     _key = AVITO_MOBILE_API_KEY
@@ -6712,13 +6717,27 @@ def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_0
     # простой запрос без cookies. Он дешёвый и часто проходит там, где
     # «умные» запросы с cookies получают 403.
     try:
-        _legacy = _avito_legacy_fetch(
-            region, price_min=price_min, price_max=price_max,
-            sort_by_date=sort_by_date,
-            brand=brand if brand and brand != "any" else "", page=1,
-        )
-        if _legacy:
-            return _legacy
+        # Как в рабочей версии: обходим несколько страниц подряд простыми
+        # запросами (без cookies), пока они отдают объявления.
+        _legacy_all: list[dict] = []
+        _seen_u: set[str] = set()
+        for _lp in range(1, max(1, pages) + 1):
+            _batch = _avito_legacy_fetch(
+                region, price_min=price_min, price_max=price_max,
+                sort_by_date=sort_by_date,
+                brand=brand if brand and brand != "any" else "", page=_lp,
+            )
+            if not _batch:
+                break
+            for _it in _batch:
+                _u = _it.get("url", "")
+                if _u and _u not in _seen_u:
+                    _seen_u.add(_u)
+                    _legacy_all.append(_it)
+            time.sleep(random.uniform(0.8, 1.8))   # человеческий темп
+        if _legacy_all:
+            print(f"  [Авито legacy] итого {len(_legacy_all)} объявлений")
+            return _legacy_all
     except Exception as _le:
         print(f"  [Авито legacy] ошибка: {str(_le)[:70]}")
     if SPFA_API_KEY and not _spfa_state.get("cookies") and allow_buy:
