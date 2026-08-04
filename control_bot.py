@@ -720,50 +720,85 @@ def _spfa_request(path: str, payload: dict):
         print(f"  [spfa] {path} requests: {str(e)[:90]}")
     return None
 
-# Cookies дешёвые (~0.5₽), поэтому при блокировке берём свежие часто.
-# /unblock/ НЕ возвращает cookies (только {success:true}) — он просто просит
-# spfa снять блок, после чего надо заново купить /cookies/.
-_SPFA_MIN_BUY_INTERVAL = 45.0      # /cookies/ — не чаще раза в 45с (защита от 503)
+# ЗАЩИТА БАЛАНСА: cookies стоят денег (0.5₽), а фоновый планировщик работает
+# круглосуточно. Без лимитов за ночь уходит весь баланс (101 покупка = 50₽).
+# Правила: покупка только под РЕАЛЬНЫЙ пользовательский поиск, не чаще раза в
+# 10 мин, и не больше SPFA_MAX_BUYS_PER_DAY покупок в сутки.
+_SPFA_MIN_BUY_INTERVAL = 600.0     # не чаще раза в 10 минут
+try:
+    SPFA_MAX_BUYS_PER_DAY = max(1, int(os.getenv("SPFA_MAX_BUYS_PER_DAY", "40")))
+except (TypeError, ValueError):
+    SPFA_MAX_BUYS_PER_DAY = 40
+# Фоновым задачам (планировщик/мониторинг) покупать cookies ЗАПРЕЩЕНО —
+# они лишь переиспользуют уже купленные. Флаг включается на время поиска.
+_spfa_allow_buy = _threading.local() if "_threading" in dir() else None
 
-def _spfa_fetch(unblock: bool = False) -> dict | None:
-    """Покупает свежие cookies Авито через spfa.ru. unblock=True — сперва просит
-    /unblock/ (снять блок с текущего id), затем покупает новые cookies."""
+# Окно пользовательского поиска: только в нём разрешено ПОКУПАТЬ cookies.
+_SPFA_USER_SEARCH_UNTIL = 0.0
+
+def _spfa_mark_user_search(seconds: float = 180.0) -> None:
+    """Пользователь нажал «Найти авто» — на N секунд разрешаем покупку cookies."""
+    global _SPFA_USER_SEARCH_UNTIL
+    _SPFA_USER_SEARCH_UNTIL = time.time() + seconds
+
+def _spfa_user_search_active() -> bool:
+    return time.time() < _SPFA_USER_SEARCH_UNTIL
+
+def _spfa_buys_today() -> int:
+    """Сколько cookies куплено за текущие сутки (счётчик сбрасывается в полночь)."""
+    day = time.strftime("%Y-%m-%d")
+    if _spfa_state.get("buy_day") != day:
+        _spfa_state["buy_day"] = day
+        _spfa_state["buy_count"] = 0
+    return int(_spfa_state.get("buy_count") or 0)
+
+def _spfa_fetch(unblock: bool = False, allow_buy: bool = False) -> dict | None:
+    """Покупает свежие cookies Авито через spfa.ru.
+    allow_buy=False (по умолчанию) — НЕ тратим деньги, отдаём уже купленные."""
     if not SPFA_API_KEY:
         return None
+    ck = _spfa_state.get("cookies")
+    if not allow_buy:
+        return ck  # фоновые задачи используют существующие cookies, не покупают
     now = time.time()
-    # Снять блок на стороне spfa (ответ без cookies — просто триггер), затем купить
+    if _spfa_buys_today() >= SPFA_MAX_BUYS_PER_DAY:
+        print(f"  [spfa] дневной лимит покупок ({SPFA_MAX_BUYS_PER_DAY}) исчерпан — "
+              f"работаем на текущих cookies")
+        return ck
+    if now - (_spfa_state.get("buy_ts") or 0) < _SPFA_MIN_BUY_INTERVAL:
+        return ck
     if unblock and _spfa_state.get("id"):
         _spfa_request("/unblock/", {"id": _spfa_state["id"], "api_key": SPFA_API_KEY})
-    # Троттлинг покупки — не чаще раза в 45с
-    if now - (_spfa_state.get("buy_ts") or 0) < _SPFA_MIN_BUY_INTERVAL:
-        return _spfa_state.get("cookies")
     _spfa_state["buy_ts"] = now
     j = _spfa_request("/cookies/", {"api_key": SPFA_API_KEY})
     res = (j or {}).get("results") or {}
     if res.get("cookies"):
+        _spfa_state["buy_count"] = _spfa_buys_today() + 1
         _spfa_state.update({"id": res.get("id"), "cookies": res["cookies"], "ts": now})
         _spfa_save_disk()
-        print(f"  [spfa] свежие cookies (id={_spfa_state['id']})")
+        print(f"  [spfa] свежие cookies (id={_spfa_state['id']}, "
+              f"куплено сегодня: {_spfa_state['buy_count']}/{SPFA_MAX_BUYS_PER_DAY})")
         return _spfa_state["cookies"]
-    # Неудача (503) — повтор уже через ~20с.
-    _spfa_state["buy_ts"] = now - _SPFA_MIN_BUY_INTERVAL + 20
-    print("  [spfa] cookies не получены (503) — повтор через ~20с")
-    return _spfa_state.get("cookies")
+    print("  [spfa] cookies не получены (503) — работаем на текущих")
+    return ck
 
-def _avito_cookies() -> dict | None:
-    """Действующие cookies Авито от spfa.ru. Переиспользуем кэш; покупаем новые
-    только если их нет или они старше 11 часов (с учётом троттлинга)."""
+def _avito_cookies(allow_buy: bool = False) -> dict | None:
+    """Действующие cookies Авито. Покупаем новые ТОЛЬКО при allow_buy=True
+    (реальный пользовательский поиск) и если текущие пусты/старше 11 часов."""
     if not SPFA_API_KEY:
         return None
     ck = _spfa_state.get("cookies")
     age = time.time() - (_spfa_state.get("ts") or 0)
-    if not ck or age > 11 * 3600:
-        ck = _spfa_fetch(unblock=False) or ck
+    if allow_buy and (not ck or age > 11 * 3600):
+        ck = _spfa_fetch(unblock=False, allow_buy=True) or ck
     return ck
 
-def _avito_cookies_refresh_on_block() -> dict | None:
-    """Вызывать при 403/439/firewall — просит spfa разблокировать (троттлинг внутри)."""
-    return _spfa_fetch(unblock=True) or _spfa_state.get("cookies")
+def _avito_cookies_refresh_on_block(allow_buy: bool = False) -> dict | None:
+    """При 403/439: покупаем свежие cookies только если это пользовательский
+    поиск (allow_buy=True). Фоновые задачи деньги не тратят."""
+    if not allow_buy:
+        return _spfa_state.get("cookies")
+    return _spfa_fetch(unblock=True, allow_buy=True) or _spfa_state.get("cookies")
 
 
 # Токен приложения Auto.ru (заголовок x-authorization для apiauto.ru).
@@ -5575,7 +5610,8 @@ def _avito_mobile_api_search(region: str, price_min: int = 0, price_max: int = 9
 
 
 def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_000_000,
-                          sort_by_date: bool = False, brand: str = "", pages: int = 3) -> list[dict]:
+                          sort_by_date: bool = False, brand: str = "", pages: int = 3,
+                          allow_buy: bool = False) -> list[dict]:
     """Поиск авто на avito.ru через web-JSON API (/web/1/js/items) — С фильтром
     по региону (locationId) и цене. Cookies берём из spfa.ru, запросы — через прокси.
     Это НАСТОЯЩИЙ поиск Авито (в отличие от ленты rest-app.net «новое по РФ»)."""
@@ -5619,10 +5655,10 @@ def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_0
             try:
                 r = _req.get("https://www.avito.ru/web/1/js/items", params=_params,
                              headers=_hdrs, timeout=20, proxies=_px or {},
-                             cookies=_avito_cookies() or None)
+                             cookies=_avito_cookies(allow_buy) or None)
                 if r.status_code in (403, 429, 439):
                     if SPFA_API_KEY:
-                        _avito_cookies_refresh_on_block()
+                        _avito_cookies_refresh_on_block(allow_buy)
                     print(f"  [Авито webJSON {_tag}] стр.{p}: HTTP {r.status_code} → cookies+ротация")
                     continue
                 if r.status_code != 200:
@@ -5631,7 +5667,7 @@ def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_0
                 data = r.json()
                 if isinstance(data, dict) and ("too-many-requests" in data or "firewall" in str(data)[:200]):
                     if SPFA_API_KEY:
-                        _avito_cookies_refresh_on_block()
+                        _avito_cookies_refresh_on_block(allow_buy)
                     print(f"  [Авито webJSON {_tag}] стр.{p}: firewall → cookies+ротация")
                     continue
                 _got = data
@@ -9598,9 +9634,11 @@ async def _avito_scheduled_fetch_unlocked(
             _brand_q = brand if brand and brand != "any" else ""
             # 1) web-JSON с cookies от spfa — стр.1 стабильно отдаёт ~49 объявлений
             # (стр.2+ Авито почти всегда блокирует, поэтому берём ТОЛЬКО первую).
+            _allow_buy = _spfa_user_search_active()
             parsed = _avito_webjson_search(
                 region, price_min=price_min, price_max=price_max,
                 sort_by_date=sort_by_date, brand=_brand_q, pages=1,
+                allow_buy=_allow_buy,
             )
             # 2) Если web-JSON пуст — мобильный API (без cookies, если IP чистый).
             if not parsed:
@@ -13067,6 +13105,7 @@ async def cmd_new_today(msg: Message):
         await msg.answer(f"⏳ Подожди {int(wait_left) + 1} сек перед новым поиском.")
         return
     _last_search_at[uid] = now_ts
+    _spfa_mark_user_search()  # разрешаем покупку cookies только под живой поиск
 
     region = s["region"]
     pmin = s.get("price_min", 0)
@@ -13170,6 +13209,7 @@ async def cmd_global_search(msg: Message):
         await msg.answer(f"⏳ Подожди {int(wait_left) + 1} сек перед новым поиском.")
         return
     _last_search_at[uid] = now_ts
+    _spfa_mark_user_search()  # разрешаем покупку cookies только под живой поиск
 
     region = s["region"]
     pmin = s.get("price_min", 0)
@@ -13316,6 +13356,7 @@ async def cmd_vk_tg_search(msg: Message):
         await msg.answer(f"⏳ Подожди {int(wait_left) + 1} сек.")
         return
     _last_search_at[uid] = now_ts
+    _spfa_mark_user_search()  # разрешаем покупку cookies только под живой поиск
 
     region = s["region"]
     pmin = s.get("price_min", 0)
@@ -14981,6 +15022,7 @@ async def do_search_for_user(uid: int, reply_to):
         await reply_to.answer(f"⏳ Подожди {int(wait_left) + 1} сек перед новым поиском.")
         return
     _last_search_at[uid] = now_ts
+    _spfa_mark_user_search()  # разрешаем покупку cookies только под живой поиск
 
     region = s["region"]
     pmin = s.get("price_min", 0)
