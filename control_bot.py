@@ -817,6 +817,18 @@ def _avito_user_agent() -> str:
             "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
 
+def _avito_impersonate() -> str:
+    """TLS-отпечаток под версию Chrome из User-Agent spfa. Несовпадение
+    отпечатка и UA — верный признак бота для Авито (403/439)."""
+    import re as _re
+    m = _re.search(r"Chrome/(\d+)", _avito_user_agent())
+    v = int(m.group(1)) if m else 124
+    for cand in (146, 145, 142, 136, 133, 131, 124, 123):
+        if v >= cand:
+            return f"chrome{cand}a" if cand == 133 else f"chrome{cand}"
+    return "chrome124"
+
+
 def _avito_cookies(allow_buy: bool = False) -> dict | None:
     """Действующие cookies Авито. Покупаем новые ТОЛЬКО при allow_buy=True
     (реальный пользовательский поиск) и если текущие пусты/старше 11 часов."""
@@ -5701,14 +5713,24 @@ def _avito_html_search(region: str, price_min: int = 0, price_max: int = 99_000_
         params["pmax"] = price_max
     if sort_by_date:
         params["s"] = 104
+    _ua = _avito_user_agent()
+    import re as _re
+    _cv = (_re.search(r"Chrome/(\d+)", _ua).group(1) if _re.search(r"Chrome/(\d+)", _ua) else "124")
     hdrs = {
-        "User-Agent": _avito_user_agent(),  # ОБЯЗАТЕЛЬНО тот же UA, что у cookies
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "User-Agent": _ua,  # ОБЯЗАТЕЛЬНО тот же UA, что у cookies
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": "ru-RU,ru;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
         "Upgrade-Insecure-Requests": "1",
         "Sec-Fetch-Dest": "document",
         "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-User": "?1",
+        "sec-ch-ua": f'"Chromium";v="{_cv}", "Google Chrome";v="{_cv}", "Not?A_Brand";v="24"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "Referer": "https://www.avito.ru/",
+        "Connection": "keep-alive",
     }
     ck = _avito_cookies(allow_buy) or None
     _pxs = []
@@ -5718,8 +5740,25 @@ def _avito_html_search(region: str, price_min: int = 0, price_max: int = 99_000_
     for _tag, _px in _pxs:
         try:
             from curl_cffi import requests as _cffi
-            r = _cffi.get(url, params=params, headers=hdrs, cookies=ck,
-                          proxies=_px or {}, timeout=25, impersonate="chrome124")
+            _imp = _avito_impersonate()
+            # Браузер сначала открывает главную (получает/освежает сессию),
+            # и только потом каталог. Без этого Авито видит «голый» запрос.
+            _sess = _cffi.Session(impersonate=_imp)
+            try:
+                if ck:
+                    _sess.cookies.update(ck)
+                try:
+                    _sess.get("https://www.avito.ru/", headers=hdrs,
+                              proxies=_px or {}, timeout=15)
+                except Exception:
+                    pass
+                r = _sess.get(url, params=params, headers=hdrs,
+                              proxies=_px or {}, timeout=25)
+            finally:
+                try:
+                    _sess.close()
+                except Exception:
+                    pass
             code = int(r.status_code)
             text = r.text or ""
             if code != 200:
