@@ -2903,6 +2903,10 @@ def _autoru_cffi_fetch(region: str, price_min: int, price_max: int,
     if AVITO_PROXIES and not _proxy_auth_failed:
         _pxs.append(_avito_proxies())
     _pxs.append(None)
+    # В июле Auto.ru качался 10 страницами — одна даёт лишь ~2-40 объявлений.
+    _max_pages = max(1, int(os.getenv("AUTORU_PAGES", "8")))
+    _all: list[dict] = []
+    _seen_u: set[str] = set()
     for _px in _pxs:
         try:
             _sess = _cffi_ru.Session()
@@ -2919,9 +2923,37 @@ def _autoru_cffi_fetch(region: str, price_min: int, price_max: int,
                 print(f"  [Auto.ru cffi {_tag}] HTTP {r.status_code}, {len(r.text or ''):,}б")
                 if r.status_code == 200 and not _autoru_is_captcha(r.text or ""):
                     batch = _autoru_parse_html(r.text, today)
-                    if batch:
-                        print(f"  [Auto.ru cffi {_tag}] {len(batch)} объявлений ✅")
-                        return batch
+                    for _it in batch:
+                        _u = _it.get("url", "")
+                        if _u and _u not in _seen_u:
+                            _seen_u.add(_u)
+                            _all.append(_it)
+                    # Остальные страницы — той же прогретой сессией
+                    for _pg in range(2, _max_pages + 1):
+                        _sep = "&" if "?" in html_url else "?"
+                        try:
+                            _rp = _sess.get(f"{html_url}{_sep}page={_pg}",
+                                            impersonate="chrome124", timeout=10,
+                                            proxies=_px or {})
+                            if _rp.status_code != 200 or _autoru_is_captcha(_rp.text or ""):
+                                break
+                            _b = _autoru_parse_html(_rp.text, today)
+                            _added = 0
+                            for _it in _b:
+                                _u = _it.get("url", "")
+                                if _u and _u not in _seen_u:
+                                    _seen_u.add(_u)
+                                    _all.append(_it)
+                                    _added += 1
+                            if _added == 0:
+                                break
+                            time.sleep(random.uniform(0.5, 1.2))
+                        except Exception:
+                            break
+                    if _all:
+                        print(f"  [Auto.ru cffi {_tag}] {len(_all)} объявлений ✅ "
+                              f"({_max_pages} стр. максимум)")
+                        return _all
             finally:
                 try:
                     _sess.close()
@@ -11057,12 +11089,20 @@ def _avito_cached_result(
         if _avito_rate_limited():
             return _cached_now
         try:
-            _direct = _avito_webjson_search(
-                region, price_min=price_min, price_max=price_max,
+            # Июльский парсер: 5 страниц вместо одной (одна даёт лишь ~50).
+            _direct = _avito_july_scraper(
+                region, pages=int(os.getenv("AVITO_PAGES", "5")),
+                price_min=price_min, price_max=price_max,
                 sort_by_date=sort_by_date,
-                brand="" if brand == "any" else brand, pages=1,
-                allow_buy=_spfa_user_search_active(),
+                brand="" if brand == "any" else brand,
             )
+            if not _direct:
+                _direct = _avito_webjson_search(
+                    region, price_min=price_min, price_max=price_max,
+                    sort_by_date=sort_by_date,
+                    brand="" if brand == "any" else brand, pages=1,
+                    allow_buy=_spfa_user_search_active(),
+                )
             if _direct:
                 with _AVITO_SCHEDULE_LOCK:
                     entry["items"] = _direct[:500]
