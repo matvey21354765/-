@@ -202,8 +202,11 @@ if AVITO_PROXY_PORT_MIN and AVITO_PROXY_PORT_MAX:
 PROXY_URL = os.getenv("PROXY_URL", "").strip()
 PROXY_ROTATE_URL = os.getenv("PROXY_ROTATE_URL", "").strip()
 try:
+    # Авито банит IP за частые запросы. 120с на регион при нескольких регионах
+    # = десятки запросов в час с одного IP → постоянное «доступ ограничен».
+    # 600с (10 мин) держит IP «чистым», а свежесть обеспечивает прямой поиск.
     AVITO_MIN_INTERVAL_SECONDS = max(
-        120, int(os.getenv("AVITO_MIN_INTERVAL_SECONDS", "120"))
+        120, int(os.getenv("AVITO_MIN_INTERVAL_SECONDS", "600"))
     )
 except (TypeError, ValueError):
     AVITO_MIN_INTERVAL_SECONDS = 120
@@ -691,6 +694,20 @@ SPFA_API_KEY = os.getenv("SPFA_API_KEY", "").strip()
 # Вместе с ними желательно задать AVITO_USER_AGENT — тот же, что в браузере.
 AVITO_MANUAL_COOKIE = os.getenv("AVITO_COOKIE", "").strip()
 AVITO_MANUAL_UA = os.getenv("AVITO_USER_AGENT", "").strip()
+# Авито ограничивает по IP при частых запросах. Ловим это и делаем ОБЩУЮ паузу,
+# иначе планировщик и поиски продолжают долбить тот же IP и держат его в бане.
+_AVITO_RATE_LIMIT_UNTIL = 0.0
+
+def _avito_rate_limited() -> bool:
+    return time.time() < _AVITO_RATE_LIMIT_UNTIL
+
+def _avito_note_rate_limit(seconds: int = 600) -> None:
+    global _AVITO_RATE_LIMIT_UNTIL
+    if time.time() < _AVITO_RATE_LIMIT_UNTIL:
+        return
+    _AVITO_RATE_LIMIT_UNTIL = time.time() + seconds
+    print(f"  [Авито] IP ограничен — пауза {seconds // 60} мин, "
+          f"чтобы адрес «остыл» (иначе бан держится бесконечно)")
 _SPFA_BASE = "https://spfa.ru/api"
 _SPFA_COOKIE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".spfa_cookies.json")
 _spfa_state = {"id": None, "cookies": None, "ts": 0.0}
@@ -834,6 +851,8 @@ def _spfa_note_cookie_result(ok: bool) -> None:
 def _spfa_fetch(unblock: bool = False, allow_buy: bool = False) -> dict | None:
     """Покупает свежие cookies Авито через spfa.ru.
     allow_buy=False (по умолчанию) — НЕ тратим деньги, отдаём уже купленные."""
+    if AVITO_MANUAL_COOKIE:
+        return None  # используем свои cookies — spfa не нужен
     if not SPFA_API_KEY:
         return None
     ck = _spfa_state.get("cookies")
@@ -5879,6 +5898,8 @@ def _avito_html_search(region: str, price_min: int = 0, price_max: int = 99_000_
                 print(f"  [Авито HTML {_tag}] стр.{page}: HTTP {code} | "
                       f"imp={_imp} ua=…{_ua[-18:]} cookies={len(ck or {})} "
                       f"тело: {_snippet[:200]!r}")
+                if "IP-адреса" in text[:2000] or "too-many-requests" in text[:2000]:
+                    _avito_note_rate_limit(600)
                 if code in (403, 429, 439) and SPFA_API_KEY:
                     _avito_cookies_refresh_on_block(allow_buy)
                     ck = _avito_cookies(allow_buy) or ck
@@ -5911,6 +5932,9 @@ def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_0
         return []
     # Без рабочих cookies Авито отдаёт только 403/439 — нет смысла жечь ротации
     # IP и время на заведомо неуспешные попытки. Выходим сразу с понятной причиной.
+    if _avito_rate_limited():
+        print("  [Авито] IP ещё в паузе после ограничения — пропускаем")
+        return []
     if SPFA_API_KEY and not _spfa_state.get("cookies") and allow_buy:
         _avito_cookies(allow_buy=True)  # пробуем получить cookies под живой поиск
     today = datetime.date.today()
@@ -5969,6 +5993,8 @@ def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_0
                         _avito_cookies_refresh_on_block(allow_buy)
                     _ck_now = _avito_cookies(allow_buy) or {}
                     _body = re.sub(r"\s+", " ", (r.text or "")[:200]).strip()
+                    if "IP-адреса" in _body or "too-many-requests" in _body:
+                        _avito_note_rate_limit(600)
                     print(f"  [Авито webJSON {_tag}] стр.{p}: HTTP {r.status_code} | "
                           f"cookies={len(_ck_now)} ua=…{_avito_user_agent()[-18:]} "
                           f"тело: {_body[:150]!r}")
