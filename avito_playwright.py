@@ -153,7 +153,9 @@ class AvitoBrowserManager:
                           or os.getenv("PROXY_URL", "")).strip()
         self.headless = headless if headless is not None else _bool_env(os.getenv("AVITO_HEADLESS"), True)
         self.timeout = float(timeout_seconds or os.getenv("AVITO_BROWSER_TIMEOUT_SECONDS", "30"))
-        self.navigation_timeout = float(navigation_timeout_seconds or os.getenv("AVITO_NAVIGATION_TIMEOUT_SECONDS", "30"))
+        # 30с на страницу × 2 (главная + каталог) не укладывалось в общий бюджет
+        # и браузер «висел» без результата. 20с достаточно и оставляет запас.
+        self.navigation_timeout = float(navigation_timeout_seconds or os.getenv("AVITO_NAVIGATION_TIMEOUT_SECONDS", "20"))
         self.max_concurrent = int(max_concurrent_pages or os.getenv("AVITO_MAX_CONCURRENT_PAGES", "1"))
         self.restart_after = int(restart_after_searches or os.getenv("AVITO_BROWSER_RESTART_AFTER_SEARCHES", "50"))
         self.max_proxy_attempts = max(1, int(max_proxy_attempts or os.getenv("AVITO_PROXY_MAX_ATTEMPTS", "3")))
@@ -555,7 +557,7 @@ class AvitoBrowserManager:
                     try:
                         await page.goto("https://www.avito.ru/",
                                         wait_until="domcontentloaded",
-                                        timeout=min(20, self.navigation_timeout) * 1000)
+                                        timeout=min(12, self.navigation_timeout) * 1000)
                         # Даём JS-челленджу Авито отработать и выдать cookie `f`:
                         # без этой паузы уходим на каталог с «недоделанной» сессией.
                         await page.wait_for_timeout(4000)

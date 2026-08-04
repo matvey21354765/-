@@ -10197,13 +10197,23 @@ async def _avito_scheduled_fetch_unlocked(
             _avito_diag("после парсинга", len(parsed))
             _avito_diag("после фильтрации", len(parsed))
         elif AVITO_PROVIDER == "playwright":
-            pw_result = await search_avito(
-                city=region,
-                price_min=price_min,
-                price_max=price_max,
-                query=brand if brand and brand != "any" else None,
-                limit=50,
-            )
+            # Жёсткий предохранитель: браузер не должен «висеть» молча —
+            # иначе поиск ждёт впустую и причина остаётся неизвестной.
+            try:
+                pw_result = await asyncio.wait_for(
+                    search_avito(
+                        city=region,
+                        price_min=price_min,
+                        price_max=price_max,
+                        query=brand if brand and brand != "any" else None,
+                        limit=50,
+                    ),
+                    timeout=float(os.getenv("AVITO_PW_HARD_TIMEOUT", "75")),
+                )
+            except asyncio.TimeoutError:
+                print("=== AVITO РЕЗУЛЬТАТ: playwright ОШИБКА=timeout "
+                      f"регион={region} ===", flush=True)
+                pw_result = {"error": "timeout", "items": [], "meta": {}}
             if pw_result.get("error"):
                 error = pw_result["error"]
                 print(f"=== AVITO РЕЗУЛЬТАТ: playwright ОШИБКА={error} регион={region} ===",
