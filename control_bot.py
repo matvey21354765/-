@@ -2875,6 +2875,63 @@ AUTORU_GEO_IDS = {
 
 # ── Парсер Auto.ru ──────────────────────────────────────────────
 
+def _autoru_cffi_fetch(region: str, price_min: int, price_max: int,
+                       brand: str = "") -> list[dict]:
+    """Метод Auto.ru из рабочей июльской версии.
+
+    Яндекс отсекает по двум признакам: «грязный» IP И не-браузерный TLS-отпечаток.
+    Поэтому обычный requests ловит капчу даже с чистого РФ-адреса. curl_cffi с
+    имперсонацией Chrome даёт браузерный отпечаток: сначала GET страницы листинга
+    (прогревает cookie spravka), затем при необходимости AJAX той же сессией.
+    """
+    try:
+        from curl_cffi import requests as _cffi_ru
+    except Exception:
+        return []
+    slug = AUTORU_SLUGS.get(region, region)
+    today = datetime.date.today()
+    _brand_path = f"/{brand.lower()}" if brand and brand != "any" else ""
+    html_url = f"https://auto.ru/{slug}/cars{_brand_path}/used/"
+    _qs = []
+    if price_min > 0:
+        _qs.append(f"price_from={price_min}")
+    if price_max < 99_000_000:
+        _qs.append(f"price_to={price_max}")
+    if _qs:
+        html_url += "?" + "&".join(_qs)
+    _pxs = []
+    if AVITO_PROXIES and not _proxy_auth_failed:
+        _pxs.append(_avito_proxies())
+    _pxs.append(None)
+    for _px in _pxs:
+        try:
+            _sess = _cffi_ru.Session()
+            try:
+                r = _sess.get(
+                    html_url, impersonate="chrome124", timeout=10,
+                    headers={"Accept-Language": "ru-RU,ru;q=0.9",
+                             "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+                             "Referer": f"https://auto.ru/{slug}/cars/used/",
+                             "Upgrade-Insecure-Requests": "1"},
+                    proxies=_px or {},
+                )
+                _tag = "прокси" if _px else "напрямую"
+                print(f"  [Auto.ru cffi {_tag}] HTTP {r.status_code}, {len(r.text or ''):,}б")
+                if r.status_code == 200 and not _autoru_is_captcha(r.text or ""):
+                    batch = _autoru_parse_html(r.text, today)
+                    if batch:
+                        print(f"  [Auto.ru cffi {_tag}] {len(batch)} объявлений ✅")
+                        return batch
+            finally:
+                try:
+                    _sess.close()
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"  [Auto.ru cffi] {str(e)[:70]}")
+    return []
+
+
 def _autoru_parse_offers(data: dict, today) -> list[dict]:
     """Парсит список объявлений из JSON Auto.ru."""
     results = []
@@ -3416,6 +3473,28 @@ def _scrape_autoru_production(
             "after_location": len(normalized),
             "after_price": len(filtered),
         })
+        if not raw:
+            # РАБОЧИЙ ИЮЛЬСКИЙ МЕТОД: Яндекс режет по ДВУМ признакам — «грязный»
+            # IP и не-браузерный TLS. Обычный requests ловит капчу даже с чистого
+            # IP. curl_cffi с имперсонацией Chrome даёт браузерный отпечаток:
+            # сначала GET страницы (греет cookie spravka), затем AJAX той же сессией.
+            try:
+                raw = _autoru_cffi_fetch(region, price_min, price_max, brand)
+                if raw:
+                    unique2: dict[str, dict] = {}
+                    for item in raw:
+                        ident = _item_identity(item)
+                        if ident:
+                            unique2[ident] = item
+                    normalized = list(unique2.values())
+                    filtered = [i for i in normalized
+                                if in_price_range(i, price_min, price_max)]
+                    _AUTORU_LAST_DIAG.update({
+                        "raw": len(raw), "normalized": len(normalized),
+                        "after_price": len(filtered), "error_type": "",
+                    })
+            except Exception as _ae:
+                print(f"[Auto.ru] cffi-метод: {str(_ae)[:80]}")
         if not raw:
             _AUTORU_LAST_DIAG.update({
                 "error_type": "parse_error",
@@ -6537,20 +6616,35 @@ def _avito_legacy_fetch(region: str, price_min: int = 0, price_max: int = 99_000
             print(f"  [Авито legacy] стр.{page}: {str(e)[:70]}")
         return None
 
-    text = _try_fetch(_build_url(page, with_price=True))
-    if not text:
-        # Запасной URL без ценового фильтра — как в оригинале
-        text = _try_fetch(_build_url(page, with_price=False))
-    if not text:
-        return []
-    items = _parse_avito_html(text, slug, today)
-    if not items:
-        items = _avito_items_from_initial_data(text, today)
-    if items:
-        print(f"  [Авито legacy] стр.{page}: {len(items)} объявлений ✅ "
-              f"(простой запрос без cookies)")
+    out: list[dict] = []
+    seen_u: set[str] = set()
+    # В рабочей июльской версии Авито качался НЕСКОЛЬКИМИ страницами (pages=5) —
+    # одна страница даёт ~50 объявлений, этого мало для выдачи.
+    _max_pages = max(1, int(os.getenv("AVITO_PAGES", "5")))
+    for _p in range(page, page + _max_pages):
+        text = _try_fetch(_build_url(_p, with_price=True))
+        if not text:
+            text = _try_fetch(_build_url(_p, with_price=False))
+        if not text:
+            break
+        items = _parse_avito_html(text, slug, today)
+        if not items:
+            items = _avito_items_from_initial_data(text, today)
+        _added = 0
+        for it in items:
+            u = it.get("url", "")
+            if u and u not in seen_u:
+                seen_u.add(u)
+                out.append(it)
+                _added += 1
+        print(f"  [Авито legacy] стр.{_p}: +{_added} (всего {len(out)})")
+        if _added == 0:
+            break
         _avito_reset_blocks()
-    return items
+        _avito_pace()   # пауза между страницами, как у человека
+    if out:
+        print(f"  [Авито legacy] итого {len(out)} объявлений ✅ (без cookies)")
+    return out
 
 
 def _avito_html_search(region: str, price_min: int = 0, price_max: int = 99_000_000,
