@@ -678,6 +678,7 @@ def _spfa_load_disk():
                 d = _j.load(f)
             if d.get("cookies"):
                 _spfa_state.update({"id": d.get("id"), "cookies": d.get("cookies"),
+                                    "user_agent": d.get("user_agent") or "",
                                     "ts": d.get("ts", 0.0)})
                 print(f"  [spfa] cookies с диска (id={d.get('id')})")
     except Exception:
@@ -777,7 +778,10 @@ def _spfa_fetch(unblock: bool = False, allow_buy: bool = False) -> dict | None:
     res = (j or {}).get("results") or {}
     if res.get("cookies"):
         _spfa_state["buy_count"] = _spfa_buys_today() + 1
-        _spfa_state.update({"id": res.get("id"), "cookies": res["cookies"], "ts": now})
+        # ВАЖНО: cookies Авито привязаны к User-Agent, под который выданы.
+        # Без него (мы слали свой Chrome) Авито отвечает 403/439.
+        _spfa_state.update({"id": res.get("id"), "cookies": res["cookies"],
+                            "user_agent": res.get("user_agent") or "", "ts": now})
         _spfa_save_disk()
         print(f"  [spfa] свежие cookies (id={_spfa_state['id']}, "
               f"куплено сегодня: {_spfa_state['buy_count']}/{SPFA_MAX_BUYS_PER_DAY})")
@@ -787,6 +791,14 @@ def _spfa_fetch(unblock: bool = False, allow_buy: bool = False) -> dict | None:
     _spfa_state["buy_ts"] = now - _SPFA_MIN_BUY_INTERVAL + 120  # повтор через ~2 мин
     print("  [spfa] cookies не получены — повтор через ~2 мин")
     return ck
+
+def _avito_user_agent() -> str:
+    """User-Agent, под который spfa выдал текущие cookies. Обязателен: Авито
+    сверяет UA с фингерпринтом cookies и иначе отдаёт 403/439."""
+    return (_spfa_state.get("user_agent") or
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+
 
 def _avito_cookies(allow_buy: bool = False) -> dict | None:
     """Действующие cookies Авито. Покупаем новые ТОЛЬКО при allow_buy=True
@@ -813,10 +825,13 @@ def _avito_cookies_refresh_on_block(allow_buy: bool = False) -> dict | None:
         return ck
     if not allow_buy:
         return ck
-    # Блок при живом поиске: cookies действительно мертвы → берём свежие, даже
-    # если 3-часовой интервал ещё не истёк (0.5₽ дешевле, чем пустая выдача).
-    _spfa_state["buy_ts"] = 0
-    return _spfa_fetch(unblock=False, allow_buy=True) or ck
+    # По докам spfa: при 403 главное — СМЕНИТЬ IP (это делает вызывающий код),
+    # а unblock даёт ещё 1-2 запроса на текущих cookies. Покупаем новые только
+    # если cookies уже старые (>6ч) — иначе зря тратим баланс.
+    if (time.time() - (_spfa_state.get("ts") or 0)) > 6 * 3600:
+        _spfa_state["buy_ts"] = 0
+        return _spfa_fetch(unblock=False, allow_buy=True) or ck
+    return ck
 
 
 # Токен приложения Auto.ru (заголовок x-authorization для apiauto.ru).
@@ -5670,8 +5685,7 @@ def _avito_html_search(region: str, price_min: int = 0, price_max: int = 99_000_
     if sort_by_date:
         params["s"] = 104
     hdrs = {
-        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                       "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
+        "User-Agent": _avito_user_agent(),  # ОБЯЗАТЕЛЬНО тот же UA, что у cookies
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "ru-RU,ru;q=0.9",
         "Upgrade-Insecure-Requests": "1",
@@ -5737,7 +5751,7 @@ def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_0
         if sort_by_date:
             _params["s"] = 104
         _hdrs = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "User-Agent": _avito_user_agent(),  # ОБЯЗАТЕЛЬНО тот же UA, что у cookies
             "Accept": "application/json", "Accept-Language": "ru-RU,ru;q=0.9",
             "x-requested-with": "XMLHttpRequest",
             "Referer": f"https://www.avito.ru/{slug}/avtomobili",
@@ -5748,11 +5762,12 @@ def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_0
         # ВАЖНО: cookies от spfa привязаны к IP, с которого их получили. Смена
         # IP делает их невалидными (Авито → 403/439). Поэтому при включённом
         # spfa работаем со СТАБИЛЬНЫМ IP и не ротируем.
+        # spfa рекомендует: при 403 сразу менять IP (cookies к IP НЕ привязаны,
+        # но один IP живёт 10-15 минут). Меняем IP, cookies остаются те же.
         _proxy_order = []
         if AVITO_PROXIES and not _proxy_auth_failed:
             _proxy_order.append(("прокси", _avito_proxies()))
-            if not SPFA_API_KEY:
-                _proxy_order += [("прокси-rot%d" % i, "ROTATE") for i in range(1, 3)]
+            _proxy_order += [("прокси-rot%d" % i, "ROTATE") for i in range(1, 3)]
         _proxy_order.append(("напрямую", None))
         _got = None
         for _tag, _px in _proxy_order:
