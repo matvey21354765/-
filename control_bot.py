@@ -932,6 +932,30 @@ def _normalize_cookies(raw) -> dict:
     return {}
 
 
+def _avito_absorb_cookies(resp) -> None:
+    """Запоминает cookies, которые Авито прислал в ответе.
+
+    Авито обновляет анти-бот cookies на каждом успешном запросе. Если их не
+    сохранять, следующая попытка идёт со «старой» сессией и снова ловит капчу.
+    """
+    try:
+        got = {}
+        for k, v in dict(resp.cookies).items():
+            if k and v:
+                got[str(k)] = str(v)
+        if not got:
+            return
+        cur = dict(_spfa_state.get("cookies") or {})
+        if AVITO_MANUAL_COOKIE and not cur:
+            cur = _normalize_cookies(AVITO_MANUAL_COOKIE)
+        cur.update(got)
+        _spfa_state["cookies"] = cur
+        _spfa_state["ts"] = time.time()
+        _spfa_save_disk()
+    except Exception:
+        pass
+
+
 def _avito_user_agent() -> str:
     """User-Agent, под который spfa выдал текущие cookies. Обязателен: Авито
     сверяет UA с фингерпринтом cookies и иначе отдаёт 403/439."""
@@ -5970,6 +5994,7 @@ def _avito_html_search(region: str, price_min: int = 0, price_max: int = 99_000_
                     print(f"  [Авито HTML {_tag}] стр.{page}: разобрано из __initialData__")
             if items:
                 print(f"  [Авито HTML {_tag}] стр.{page}: {len(items)} объявлений ✅")
+                _avito_absorb_cookies(r)
                 _spfa_note_cookie_result(True)
                 return items
             _marks = {
@@ -6090,6 +6115,7 @@ def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_0
                     print(f"  [Авито webJSON {_tag}] стр.{p}: firewall → cookies+ротация")
                     continue
                 _got = data
+                _avito_absorb_cookies(r)
                 _spfa_note_cookie_result(True)
                 break
             except Exception as e:
