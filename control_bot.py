@@ -10184,6 +10184,23 @@ async def _avito_scheduled_fetch_unlocked(
             )
             if pw_result.get("error"):
                 error = pw_result["error"]
+                # Браузер не смог выйти через прокси (или упёрся в капчу) —
+                # пробуем обычный путь с cookies, чтобы Авито не терялся совсем.
+                try:
+                    _fb = _avito_webjson_search(
+                        region, price_min=price_min, price_max=price_max,
+                        sort_by_date=sort_by_date,
+                        brand=brand if brand and brand != "any" else "", pages=1,
+                        allow_buy=_spfa_user_search_active(),
+                    )
+                except Exception:
+                    _fb = []
+                if _fb:
+                    print(f"[Avito] playwright={error} → webJSON дал {len(_fb)} объявлений")
+                    parsed = _fb
+                    http = 200
+                    pw_result = {"items": [], "meta": {}}
+                    error = ""
                 if error in {"proxy_unavailable", "no_exit_node"}:
                     with _AVITO_SCHEDULE_LOCK:
                         entry.update({
@@ -10216,7 +10233,8 @@ async def _avito_scheduled_fetch_unlocked(
                         })
                     _avito_diag("причина", "Avito Playwright not configured")
                     return list(entry.get("items", []))
-                raise AvitoPlaywrightError(error, f"Avito Playwright error: {error}")
+                if error:
+                    raise AvitoPlaywrightError(error, f"Avito Playwright error: {error}")
             parsed = []
             today_pw = datetime.date.today()
             for it in pw_result.get("items", []):
