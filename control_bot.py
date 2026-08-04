@@ -13987,7 +13987,7 @@ async def _ensure_photo(item: dict) -> None:
                     # 1. curl_cffi — лучший TLS-fingerprint Chrome, обходит Railway-блок
                     try:
                         from curl_cffi import requests as _cffi
-                        r = _cffi.get(url, impersonate="chrome124", timeout=15, headers={
+                        r = _cffi.get(url, impersonate="chrome124", timeout=15, cookies=_avito_cookies() or None, headers={
                             "Accept": "text/html,application/xhtml+xml,*/*;q=0.9",
                             "Accept-Language": "ru-RU,ru;q=0.9",
                             "Referer": "https://www.avito.ru/",
@@ -14000,7 +14000,7 @@ async def _ensure_photo(item: dict) -> None:
                         pass
                     # 2. Пробуем мобильный URL
                     try:
-                        r = _req.get(mobile_url, timeout=10, headers=_MOB_HDR, proxies=_avito_proxies())
+                        r = _req.get(mobile_url, timeout=10, headers=_MOB_HDR, proxies=_avito_proxies(), cookies=_avito_cookies() or None)
                         if r.status_code == 200 and len(r.text) > 5000:
                             res = _extract_from_page(r.text)
                             if res[0] or res[1]:
@@ -14009,7 +14009,7 @@ async def _ensure_photo(item: dict) -> None:
                         pass
                     # 3. Десктопный URL
                     try:
-                        r = _req.get(url, timeout=10, headers=_HDR, proxies=_avito_proxies())
+                        r = _req.get(url, timeout=10, headers=_HDR, proxies=_avito_proxies(), cookies=_avito_cookies() or None)
                         if r.status_code == 200 and len(r.text) > 5000:
                             res = _extract_from_page(r.text)
                             if res[0] or res[1]:
@@ -14022,7 +14022,7 @@ async def _ensure_photo(item: dict) -> None:
                         cs = cloudscraper.create_scraper(
                             browser={"browser": "chrome", "platform": "android", "mobile": True}
                         )
-                        r = cs.get(mobile_url, timeout=12, proxies=_avito_proxies())
+                        r = cs.get(mobile_url, timeout=12, proxies=_avito_proxies(), cookies=_avito_cookies() or None)
                         if r.status_code == 200 and len(r.text) > 3000:
                             res = _extract_from_page(r.text)
                             if res[0] or res[1]:
@@ -15472,6 +15472,20 @@ async def do_search_for_user(uid: int, reply_to):
         if not is_dealer(i) and in_price_range(i, pmin, pmax)
         and i.get("url") and i["url"] in seen_norm
     )
+    # Цена из текста для ВК/ТГ/Юлы: в постах она часто написана словами
+    # («Цена 185000т.р.»), поэтому без этого объявление уходит как «цена не указана»
+    # и выпадает из бюджета/анализа рынка.
+    _price_fixed = 0
+    for _it in items:
+        if _it.get("_price_int", 0):
+            continue
+        _p = parse_price(f"{_it.get('title','')} {_it.get('description','')}")
+        if _p and 10_000 <= _p <= 99_000_000:
+            _it["_price_int"] = _p
+            _it["price"] = f"{_p:,} ₽".replace(",", " ")
+            _price_fixed += 1
+    if _price_fixed:
+        print(f"  [цена] извлечено из текста: {_price_fixed} объявлений")
     print(f"  [поиск] items={len(items)}, seen={len(seen_norm)}, skipped={len(skipped_norm)}, already_seen={already_seen_count}")
     _before = len(items)
     # Показываем ВСЕ объявления (новые + просмотренные), кроме скрытых.
