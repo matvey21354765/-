@@ -725,11 +725,13 @@ def _spfa_request(path: str, payload: dict):
 # круглосуточно. Без лимитов за ночь уходит весь баланс (101 покупка = 50₽).
 # Правила: покупка только под РЕАЛЬНЫЙ пользовательский поиск, не чаще раза в
 # 10 мин, и не больше SPFA_MAX_BUYS_PER_DAY покупок в сутки.
-_SPFA_MIN_BUY_INTERVAL = 600.0     # не чаще раза в 10 минут
+# Cookies живут у spfa до ~12 часов, поэтому 2-4 покупки в сутки достаточно
+# (≈2₽/сутки). Раньше бот покупал их на каждый блок → 101 покупка за ночь.
+_SPFA_MIN_BUY_INTERVAL = 3 * 3600.0   # не чаще раза в 3 часа
 try:
-    SPFA_MAX_BUYS_PER_DAY = max(1, int(os.getenv("SPFA_MAX_BUYS_PER_DAY", "40")))
+    SPFA_MAX_BUYS_PER_DAY = max(1, int(os.getenv("SPFA_MAX_BUYS_PER_DAY", "8")))
 except (TypeError, ValueError):
-    SPFA_MAX_BUYS_PER_DAY = 40
+    SPFA_MAX_BUYS_PER_DAY = 8
 # Фоновым задачам (планировщик/мониторинг) покупать cookies ЗАПРЕЩЕНО —
 # они лишь переиспользуют уже купленные. Флаг включается на время поиска.
 _spfa_allow_buy = _threading.local() if "_threading" in dir() else None
@@ -790,22 +792,35 @@ def _avito_cookies(allow_buy: bool = False) -> dict | None:
         return None
     ck = _spfa_state.get("cookies")
     age = time.time() - (_spfa_state.get("ts") or 0)
-    if allow_buy and (not ck or age > 11 * 3600):
+    if allow_buy and (not ck or age > 11.5 * 3600):
         ck = _spfa_fetch(unblock=False, allow_buy=True) or ck
     return ck
 
 def _avito_cookies_refresh_on_block(allow_buy: bool = False) -> dict | None:
-    """При 403/439: покупаем свежие cookies только если это пользовательский
-    поиск (allow_buy=True). Фоновые задачи деньги не тратят."""
+    """При 403/439 сначала БЕСПЛАТНО просим spfa снять блок с текущих cookies.
+    Покупаем новые только если они реально протухли (>3ч) и идёт живой поиск."""
+    ck = _spfa_state.get("cookies")
+    if not SPFA_API_KEY:
+        return ck
+    now = time.time()
+    # бесплатный unblock — не чаще раза в 2 минуты
+    if ck and _spfa_state.get("id") and now - (_spfa_state.get("unblock_ts") or 0) > 120:
+        _spfa_state["unblock_ts"] = now
+        _spfa_request("/unblock/", {"id": _spfa_state["id"], "api_key": SPFA_API_KEY})
+        return ck
     if not allow_buy:
-        return _spfa_state.get("cookies")
-    return _spfa_fetch(unblock=True, allow_buy=True) or _spfa_state.get("cookies")
+        return ck
+    return _spfa_fetch(unblock=False, allow_buy=True) or ck
 
 
 # Токен приложения Auto.ru (заголовок x-authorization для apiauto.ru).
 # Эндпоинт apiauto.ru отдаёт чистый JSON без капчи Яндекса — самый надёжный
 # путь для Auto.ru. Токен зашит в мобильное приложение ru.auto.ara; если задан,
 # бот ходит через официальный API вместо капча-стены desktop-версии.
+# Токен мобильного приложения ru.auto.ara для apiauto.ru. БЕЗ него Auto.ru идёт
+# на desktop-HTML и упирается в антибот Яндекса (в логах: http 200, raw=0,
+# error_type=parse_error). Публичные токены отклоняются (403 NO_AUTH), поэтому
+# нужен действующий токен в переменной AUTORU_API_TOKEN.
 AUTORU_API_TOKEN = os.getenv("AUTORU_API_TOKEN", "")
 AUTORU_PROXY_URL = os.getenv("AUTORU_PROXY_URL", "").strip()
 from autoru_transport import (
@@ -9256,6 +9271,40 @@ def _avito_cached_result(
         return adapted
     key = _avito_schedule_key(region, price_min, price_max, sort_by_date, brand)
     entry = _avito_schedule_entry(key)
+    # webjson: планировщик асинхронный и часто не успевает за 20с ожидания —
+    # объявления приходили уже ПОСЛЕ выдачи (в логах «+48», а в боте Avito: 0).
+    # Поэтому под живой поиск ходим на Авито напрямую и сразу отдаём результат.
+    if AVITO_PROVIDER == "webjson":
+        with _AVITO_SCHEDULE_LOCK:
+            _cached_now = list(entry.get("items", []))
+        _fresh_enough = (time.time() - float(entry.get("updated_at", 0) or 0)) < 600
+        if _cached_now and _fresh_enough:
+            return _cached_now
+        try:
+            _direct = _avito_webjson_search(
+                region, price_min=price_min, price_max=price_max,
+                sort_by_date=sort_by_date,
+                brand="" if brand == "any" else brand, pages=1,
+                allow_buy=_spfa_user_search_active(),
+            )
+            if _direct:
+                with _AVITO_SCHEDULE_LOCK:
+                    entry["items"] = _direct[:500]
+                    entry["updated_at"] = time.time()
+                    entry["status"] = "active"
+                try:
+                    _AVITO_PRODUCTION_STATE.record_success(
+                        _avito_persistent_key(key), _direct[:500],
+                        provider=AVITO_PROVIDER, now=time.time(),
+                    )
+                except Exception:
+                    pass
+                print(f"[Avito webjson] прямой поиск: {len(_direct)} объявлений")
+                return _direct
+        except Exception as _de:
+            print(f"[Avito webjson] прямой поиск ошибка: {str(_de)[:90]}")
+        if _cached_now:
+            return _cached_now  # свежего нет — отдаём последнее известное
     blocked = _AVITO_PRODUCTION_STATE.is_blocked()
     persisted, cache_meta = _AVITO_PRODUCTION_STATE.cached(
         _avito_persistent_key(key),
