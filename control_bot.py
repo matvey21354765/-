@@ -28,6 +28,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from avito_provider_config import get_avito_provider
+import perekup_tracking as _track
 
 AVITO_PROVIDER = get_avito_provider()
 AVITO_ENABLED = AVITO_PROVIDER != "disabled"
@@ -2034,10 +2035,28 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
             deal_score += _ars * 12.0
 
         # Снижение цены: продавец скинул → мотивирован. Помечаем и поднимаем в топе.
+        # Событие пишем в историю цен (perekup_tracking): она хранит первую/
+        # предыдущую/минимальную цену, число снижений и повторные размещения.
         if p > 0:
-            _drop = _note_price_drop(it.get("url", ""), p)
-            if _drop > 0:
-                it["_price_drop"] = _drop
+            try:
+                _ev = _track.record_listing(it)
+                if _ev.get("event") == "price_drop":
+                    it["_price_drop"] = _ev.get("drop", 0)
+                    it["_price_drop_pct"] = _ev.get("drop_pct", 0.0)
+                    it["_drops_count"] = _ev.get("drops_count", 0)
+                    it["_first_price"] = _ev.get("first_price", 0)
+                    deal_score += 12.0
+                elif _ev.get("event") == "relisted":
+                    it["_relisted"] = True
+                    deal_score += 8.0
+                if _ev.get("days_on_sale"):
+                    it["_days_on_sale"] = _ev["days_on_sale"]
+            except Exception as _te:
+                # Трекинг не должен ломать поиск.
+                print(f"  [трекинг] {str(_te)[:80]}")
+            _drop_legacy = _note_price_drop(it.get("url", ""), p)
+            if _drop_legacy > 0 and not it.get("_price_drop"):
+                it["_price_drop"] = _drop_legacy
                 deal_score += 12.0
 
         # Бонус за возраст: объявление давно висит → продавец готов к торгу
@@ -14852,14 +14871,19 @@ async def send_batch(chat_id: int, uid: int, offset: int):
                     text="⭐ Сохранить", callback_data=f"fav|{sid}|{uid}"
                 )
             )
+        # «Следить» — подписка на изменение цены (без автоподписки).
         row2 = [
+            InlineKeyboardButton(text="🔔 Следить", callback_data=f"watch|{sid}|{uid}"),
+            InlineKeyboardButton(text="📞 Позвонил", callback_data=f"called|{sid}|{uid}"),
+        ]
+        row3 = [
             InlineKeyboardButton(text="❌ Скрыть", callback_data=f"hide|{sid}|{uid}"),
             InlineKeyboardButton(text="📋 Похожие", callback_data=f"sim|{sid}|{uid}"),
         ]
-        row3 = [
+        row4 = [
             InlineKeyboardButton(text="🔍 Пробить машину (штрафы, аресты)", callback_data=f"check|{sid}|{uid}"),
         ]
-        kb = InlineKeyboardMarkup(inline_keyboard=[row1, row2, row3])
+        kb = InlineKeyboardMarkup(inline_keyboard=[row1, row2, row3, row4])
 
         # URL-only режим: не качаем фото на сервер, отдаём Telegram прямую ссылку.
         photo_url = item.get("_photo_url", "")
@@ -15970,6 +15994,74 @@ async def cb_check_car(cb: CallbackQuery):
     await cb.answer()
 
 
+def _item_by_sid(uid: int, sid: str) -> dict | None:
+    """Находит объявление пользователя по короткому id из callback_data."""
+    url = id_to_url(sid)
+    if not url:
+        return None
+    items = _search_cache.get(uid) or _load_cache(uid)
+    return next((it for it in items if it.get("url") == url), None)
+
+
+@dp.callback_query(F.data.startswith("watch|"))
+async def cb_watch(cb: CallbackQuery):
+    """🔔 Следить — подписка на снижение цены (без автоподписки, по кнопке)."""
+    uid = cb.from_user.id
+    sid = cb.data.split("|")[1]
+    item = _item_by_sid(uid, sid)
+    if not item:
+        await cb.answer("Объявление устарело — обнови поиск", show_alert=True)
+        return
+    try:
+        created = _track.add_watch(uid, item, days=_track.DEFAULT_WATCH_DAYS)
+        _track.bump_stat(uid, "saved")
+    except Exception as e:
+        print(f"  [watch] {str(e)[:80]}")
+        await cb.answer("Не удалось включить наблюдение")
+        return
+    if created:
+        await cb.answer(f"🔔 Слежу за ценой {_track.DEFAULT_WATCH_DAYS} дней — "
+                        f"сообщу, если продавец снизит", show_alert=True)
+    else:
+        await cb.answer("Уже слежу за этим объявлением")
+
+
+@dp.callback_query(F.data.startswith("called|"))
+async def cb_called(cb: CallbackQuery):
+    """📞 Позвонил — отмечаем контакт и продолжаем следить за ценой."""
+    uid = cb.from_user.id
+    sid = cb.data.split("|")[1]
+    item = _item_by_sid(uid, sid)
+    if not item:
+        await cb.answer("Объявление устарело", show_alert=True)
+        return
+    try:
+        _track.record_view(uid, item)
+        _track.add_watch(uid, item, days=_track.DEFAULT_WATCH_DAYS)
+        _track.bump_stat(uid, "calls")
+    except Exception as e:
+        print(f"  [called] {str(e)[:80]}")
+    await cb.answer("📞 Отметил: позвонил. Слежу за ценой этой машины")
+
+
+@dp.callback_query(F.data.startswith("unwatch|"))
+async def cb_unwatch(cb: CallbackQuery):
+    """🔕 Не следить — отписка от уведомлений по объявлению."""
+    uid = cb.from_user.id
+    sid = cb.data.split("|")[1]
+    url = id_to_url(sid)
+    if not url:
+        await cb.answer("Объявление устарело")
+        return
+    try:
+        _track.stop_watch(uid, _track.listing_key({"url": url, "source": ""}))
+        for _src in ("avito", "drom", "youla", "autoru", "vk", "tg"):
+            _track.stop_watch(uid, _track.listing_key({"url": url, "source": _src}))
+    except Exception as e:
+        print(f"  [unwatch] {str(e)[:80]}")
+    await cb.answer("🔕 Больше не слежу за этим объявлением")
+
+
 @dp.callback_query(F.data.startswith("fav|"))
 async def cb_fav(cb: CallbackQuery):
     parts = cb.data.split("|")
@@ -15985,7 +16077,13 @@ async def cb_fav(cb: CallbackQuery):
         favs.append(item)
         fav_file.write_text(json.dumps(favs, ensure_ascii=False, default=str), encoding="utf-8")
         analytics.track("favorite", uid=uid, username=cb.from_user.username)
-        await cb.answer("⭐ Добавлено в избранное!")
+        # Машина в гараже — следим за ценой бессрочно (days=0).
+        try:
+            _track.add_watch(uid, item, days=0)
+            _track.bump_stat(uid, "saved")
+        except Exception as e:
+            print(f"  [garage-watch] {str(e)[:80]}")
+        await cb.answer("⭐ В гараже. Слежу за ценой — сообщу о снижении")
     else:
         await cb.answer("Уже в избранном")
 
@@ -16379,6 +16477,106 @@ _PUSH_MESSAGES = [
 ]
 
 _PUSH_INTERVAL_SEC = 4 * 24 * 3600  # не чаще одного полезного сообщения в 4 дня
+
+async def _price_watch_loop():
+    """Сообщает пользователям о снижении цены у машин, за которыми они следят.
+
+    Источник событий — история цен (perekup_tracking), которая наполняется при
+    каждом поиске/мониторинге. Здесь только рассылка: одно событие = одно
+    сообщение (защита от дублей в notification_history).
+    """
+    await asyncio.sleep(90)  # даём боту подняться
+    print("  [наблюдение] цикл уведомлений о снижении цены запущен")
+    while True:
+        try:
+            await asyncio.sleep(300)  # раз в 5 минут
+            loop = asyncio.get_running_loop()
+            expired = await loop.run_in_executor(None, _track.expire_watches)
+            if expired:
+                print(f"  [наблюдение] истекло подписок: {expired}")
+            # Берём все активные наблюдения и сверяем цену с текущим состоянием.
+            watches = await loop.run_in_executor(
+                None, lambda: _track.all_active_watches()
+            )
+            sent = 0
+            for w in watches:
+                key = w.get("listing_key")
+                st = await loop.run_in_executor(None, lambda k=key: _track.get_listing_state(k))
+                if not st:
+                    continue
+                cur = int(st.get("current_price") or 0)
+                base = int(w.get("last_notified_price") or w.get("last_known_price") or 0)
+                if not cur or not base or cur >= base:
+                    continue
+                if not _track.is_significant_drop(base, cur):
+                    continue
+                sig = _track.drop_signature(key, base, cur)
+                ok = await loop.run_in_executor(
+                    None, lambda u=w["user_id"], s=sig, k=key:
+                    _track.should_notify(u, "price_drop", s, k)
+                )
+                if not ok:
+                    continue
+                drop = base - cur
+                pct = round(drop / base * 100, 1)
+                drops_n = int(st.get("drops_count") or 0)
+                first_seen = st.get("first_seen_at")
+                days_sale = int((time.time() - float(first_seen)) / 86400) if first_seen else 0
+                viewed_ts = await loop.run_in_executor(
+                    None, lambda u=w["user_id"], k=key: _track.has_viewed(u, k)
+                )
+                lines = [
+                    "📉 Машина, которую вы смотрели, подешевела",
+                    "",
+                    f"{st.get('title') or w.get('title') or 'Автомобиль'}",
+                    "",
+                    f"Было: {base:,} ₽".replace(",", " "),
+                    f"Стало: {cur:,} ₽".replace(",", " "),
+                    "",
+                    f"Снижение: {drop:,} ₽ (-{pct}%)".replace(",", " "),
+                ]
+                if viewed_ts:
+                    d = int((time.time() - float(viewed_ts)) / 86400)
+                    lines.append(f"Вы открывали её: {d} дн. назад" if d else "Вы открывали её сегодня")
+                if days_sale:
+                    lines.append(f"В продаже: {days_sale} дн.")
+                if drops_n > 1:
+                    lines.append(f"Цена снижалась: {drops_n} раза")
+                lines += ["", "Что изменилось:", "• продавец снизил цену"]
+                if drops_n > 1:
+                    lines.append("• снижает уже не первый раз — вероятно, готов торговаться")
+                _url = st.get("url") or w.get("url") or ""
+                _sid = url_to_id(_url) if _url else ""
+                _rows = []
+                if _url:
+                    _rows.append([InlineKeyboardButton(text="🌐 Открыть объявление", url=_url)])
+                if _sid:
+                    _rows.append([
+                        InlineKeyboardButton(text="📞 Позвонил", callback_data=f"called|{_sid}|{w['user_id']}"),
+                        InlineKeyboardButton(text="🔕 Не следить", callback_data=f"unwatch|{_sid}|{w['user_id']}"),
+                    ])
+                try:
+                    await bot.send_message(
+                        w["user_id"], "\n".join(lines),
+                        reply_markup=InlineKeyboardMarkup(inline_keyboard=_rows) if _rows else None,
+                        disable_web_page_preview=True,
+                    )
+                    await loop.run_in_executor(
+                        None, lambda u=w["user_id"], k=key, c=cur:
+                        _track.mark_notified(u, k, c)
+                    )
+                    await loop.run_in_executor(None, lambda u=w["user_id"]: _track.bump_stat(u, "price_drops"))
+                    sent += 1
+                    await asyncio.sleep(0.05)
+                except Exception as e:
+                    print(f"  [наблюдение] отправка uid={w['user_id']}: {str(e)[:60]}")
+            if sent:
+                print(f"  [наблюдение] отправлено уведомлений о снижении: {sent}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"  [наблюдение] ошибка цикла: {str(e)[:120]}")
+
 
 async def _trial_notification_loop():
     """Раз в 6 часов напоминает пользователям о скором окончании теста (за 3 и за 1 день)."""
@@ -17638,6 +17836,12 @@ async def main():
 
         # Уведомления об окончании тестового периода (за 3 и за 1 день)
         loop.create_task(_trial_notification_loop())
+        # Уведомления о снижении цены у наблюдаемых машин
+        try:
+            _track.init_db()
+            loop.create_task(_price_watch_loop())
+        except Exception as _e:
+            print(f"  [наблюдение] не запущен: {str(_e)[:80]}")
         print("  [тест] цикл уведомлений о конце теста запущен")
         await _diag("циклы созданы")
 

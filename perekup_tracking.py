@@ -389,6 +389,31 @@ def expire_watches(now: float | None = None) -> int:
         return cur.rowcount or 0
 
 
+def all_active_watches(now: float | None = None, limit: int = 5000) -> list[dict]:
+    """Все действующие наблюдения (для фоновой рассылки о снижении цены)."""
+    now = time.time() if now is None else float(now)
+    with _db() as conn:
+        rows = conn.execute(
+            """SELECT * FROM listing_watches
+                WHERE status='active' AND (watch_until IS NULL OR watch_until > ?)
+                ORDER BY created_at DESC LIMIT ?""",
+            (now, int(limit)),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def mark_notified(user_id: int, key: str, price: int) -> None:
+    """Запоминает цену, о которой уже сообщили — следующее сообщение только
+    при НОВОМ снижении относительно неё."""
+    with _db() as conn:
+        conn.execute(
+            """UPDATE listing_watches
+                  SET last_notified_price = ?, last_known_price = ?
+                WHERE user_id = ? AND listing_key = ?""",
+            (int(price), int(price), int(user_id), key),
+        )
+
+
 def user_watches(user_id: int, now: float | None = None) -> list[dict]:
     now = time.time() if now is None else float(now)
     with _db() as conn:
