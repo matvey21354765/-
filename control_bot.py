@@ -5828,6 +5828,54 @@ def _avito_mobile_api_search(region: str, price_min: int = 0, price_max: int = 9
     return results
 
 
+def _avito_items_from_initial_data(text: str, today) -> list[dict]:
+    """Достаёт объявления из window.__initialData__ / __NEXT_DATA__ страницы Авито.
+
+    Современный каталог Авито отдаёт данные не в разметке карточек, а в
+    URL-кодированном JSON внутри <script>. Поэтому парсер по data-marker
+    находил 0 объявлений на полностью валидной странице (375КБ).
+    """
+    import urllib.parse as _up
+    out: list[dict] = []
+    seen_u: set[str] = set()
+    blobs: list[str] = []
+    # 1) window.__initialData__ = "%7B..." (URL-encoded JSON)
+    for m in re.finditer(r'window\.__initialData__\s*=\s*"([^"]+)"', text):
+        try:
+            blobs.append(_up.unquote(m.group(1)))
+        except Exception:
+            continue
+    # 2) __NEXT_DATA__ / прочие JSON-блоки
+    for m in re.finditer(r'<script[^>]*id="__NEXT_DATA__"[^>]*>(.*?)</script>', text, re.S):
+        blobs.append(m.group(1))
+    for blob in blobs:
+        try:
+            data = json.loads(blob)
+        except Exception:
+            # внутри может лежать вложенный JSON-строкой
+            try:
+                data = json.loads(json.loads(blob)) if blob.strip().startswith('"') else None
+            except Exception:
+                data = None
+        if not data:
+            continue
+        try:
+            raw = _avito_find_items_in_json(data)
+        except Exception:
+            raw = []
+        for it in raw:
+            if not isinstance(it, dict):
+                continue
+            item = _avito_item_from_json(it, today)
+            if not item:
+                continue
+            u = item.get("url", "")
+            if u and u not in seen_u:
+                seen_u.add(u)
+                out.append(item)
+    return out
+
+
 def _avito_html_search(region: str, price_min: int = 0, price_max: int = 99_000_000,
                        sort_by_date: bool = False, brand: str = "", page: int = 1,
                        allow_buy: bool = False) -> list[dict]:
@@ -5916,12 +5964,26 @@ def _avito_html_search(region: str, price_min: int = 0, price_max: int = 99_000_
                 print(f"  [Авито HTML {_tag}] стр.{page}: заблокировано ({len(text)}б)")
                 continue
             items = _parse_avito_html(text, region, today)
+            if not items:
+                items = _avito_items_from_initial_data(text, today)
+                if items:
+                    print(f"  [Авито HTML {_tag}] стр.{page}: разобрано из __initialData__")
             if items:
                 print(f"  [Авито HTML {_tag}] стр.{page}: {len(items)} объявлений ✅")
                 _spfa_note_cookie_result(True)
                 return items
+            _marks = {
+                "initialData": "__initialData__" in text,
+                "NEXT_DATA": "__NEXT_DATA__" in text,
+                "data-marker": 'data-marker="item"' in text,
+                "captcha": ("captcha" in text.lower() or "робот" in text.lower()),
+                "firewall": "firewall" in text.lower(),
+                "нет объявлений": ("ничего не найдено" in text.lower()
+                                   or "по вашему запросу" in text.lower()),
+            }
             print(f"  [Авито HTML {_tag}] стр.{page}: страница получена ({len(text)}б), "
-                  f"но объявления не распознаны")
+                  f"объявления не распознаны | маркеры: "
+                  f"{', '.join(k for k, v in _marks.items() if v) or 'нет'}")
         except Exception as e:
             print(f"  [Авито HTML {_tag}] стр.{page}: {str(e)[:80]}")
     return []
