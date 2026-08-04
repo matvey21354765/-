@@ -5762,7 +5762,12 @@ def _avito_html_search(region: str, price_min: int = 0, price_max: int = 99_000_
             code = int(r.status_code)
             text = r.text or ""
             if code != 200:
-                print(f"  [Авито HTML {_tag}] стр.{page}: HTTP {code}")
+                # Диагностика: Авито в теле 403 обычно пишет причину
+                # (firewall/captcha/ip). Без неё чинить вслепую невозможно.
+                _snippet = re.sub(r"\s+", " ", text[:300]).strip()
+                print(f"  [Авито HTML {_tag}] стр.{page}: HTTP {code} | "
+                      f"imp={_imp} ua=…{_ua[-18:]} cookies={len(ck or {})} "
+                      f"тело: {_snippet[:200]!r}")
                 continue
             if "firewall" in text[:2000].lower() or len(text) < 5000:
                 print(f"  [Авито HTML {_tag}] стр.{page}: заблокировано ({len(text)}б)")
@@ -5840,7 +5845,11 @@ def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_0
                     _blocked_streak += 1
                     if SPFA_API_KEY:
                         _avito_cookies_refresh_on_block(allow_buy)
-                    print(f"  [Авито webJSON {_tag}] стр.{p}: HTTP {r.status_code}")
+                    _ck_now = _avito_cookies(allow_buy) or {}
+                    _body = re.sub(r"\s+", " ", (r.text or "")[:200]).strip()
+                    print(f"  [Авито webJSON {_tag}] стр.{p}: HTTP {r.status_code} | "
+                          f"cookies={len(_ck_now)} ua=…{_avito_user_agent()[-18:]} "
+                          f"тело: {_body[:150]!r}")
                     # Два блока подряд = дело не в IP, а в cookies. Дальше менять
                     # IP бессмысленно (жжём лимит ротаций провайдера) — выходим.
                     if _blocked_streak >= 2:
