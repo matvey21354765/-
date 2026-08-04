@@ -710,6 +710,34 @@ _AVITO_LAST_PREROTATE = 0.0
 # ПОРТЯТ запрос, который без них проходит (без кук 200, с ними 403). Поэтому
 # при блокировке сначала пробуем БЕЗ cookies и, если помогло, дальше не шлём.
 _AVITO_SKIP_COOKIES = False
+# Предохранитель против шторма ретраев: Авито банит ПОДСЕТЬ, поэтому перебор
+# эндпоинтов × IP даёт десятки бесполезных запросов. Считаем блокировки подряд
+# и полностью прекращаем попытки на этот цикл.
+_AVITO_BLOCK_STREAK = 0
+# Прямое соединение (IP сервера) первой попыткой: подсеть мобильного прокси
+# может быть забанена целиком, а серверный адрес — нет.
+AVITO_TRY_DIRECT_FIRST = os.getenv("AVITO_TRY_DIRECT_FIRST", "1").strip() in {"1", "true", "yes"}
+try:
+    AVITO_MAX_BLOCKS = max(2, int(os.getenv("AVITO_MAX_BLOCKS", "4")))
+except (TypeError, ValueError):
+    AVITO_MAX_BLOCKS = 4
+
+def _avito_note_block() -> bool:
+    """True — пора прекратить попытки Авито в этом цикле."""
+    global _AVITO_BLOCK_STREAK
+    _AVITO_BLOCK_STREAK += 1
+    if _AVITO_BLOCK_STREAK >= AVITO_MAX_BLOCKS:
+        print(f"  [Авито] {_AVITO_BLOCK_STREAK} блокировок подряд — "
+              f"прекращаю попытки (подсеть забанена, перебор бессмысленен)")
+        return True
+    return False
+
+def _avito_reset_blocks() -> None:
+    global _AVITO_BLOCK_STREAK
+    _AVITO_BLOCK_STREAK = 0
+# Прямое соединение (IP сервера) первой попыткой: подсеть мобильного прокси
+# может быть забанена целиком, а серверный адрес — нет.
+AVITO_TRY_DIRECT_FIRST = os.getenv("AVITO_TRY_DIRECT_FIRST", "1").strip() in {"1", "true", "yes"}
 _AVITO_LAST_WARMUP = 0.0
 try:
     AVITO_PREROTATE_SEC = max(0, int(os.getenv("AVITO_PREROTATE_SEC", "150")))
@@ -6643,9 +6671,12 @@ def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_0
         # ВАЖНО: cookies от spfa привязаны к IP, с которого их получили. Смена
         # IP делает их невалидными (Авито → 403/439). Поэтому при включённом
         # spfa работаем со СТАБИЛЬНЫМ IP и не ротируем.
-        # spfa рекомендует: при 403 сразу менять IP (cookies к IP НЕ привязаны,
-        # но один IP живёт 10-15 минут). Меняем IP, cookies остаются те же.
+        # Qrator банит ПОДСЕТЬ целиком, поэтому смена IP внутри мобильного пула
+        # часто не помогает, а прямой выход (IP сервера) бывает не забанен.
+        # Пробуем его ПЕРВЫМ: он бесплатный, мгновенный и не жжёт ротации.
         _proxy_order = []
+        if AVITO_TRY_DIRECT_FIRST:
+            _proxy_order.append(("напрямую", None))
         if AVITO_PROXIES and not _proxy_auth_failed:
             _proxy_order.append(("прокси", _avito_proxies()))
             _proxy_order += [("прокси-rot%d" % i, "ROTATE") for i in range(1, 3)]
@@ -6707,6 +6738,8 @@ def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_0
                     print(f"  [Авито webJSON {_tag}] стр.{p}: HTTP {r.status_code} | "
                           f"cookies={len(_ck_now)} ua=…{_avito_user_agent()[-18:]} "
                           f"тело: {_body[:150]!r}")
+                    if _avito_note_block():
+                        return results
                     # Два блока подряд = дело не в IP, а в cookies. Дальше менять
                     # IP бессмысленно (жжём лимит ротаций провайдера) — выходим.
                     if _blocked_streak >= 2:
@@ -6723,6 +6756,7 @@ def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_0
                     print(f"  [Авито webJSON {_tag}] стр.{p}: firewall → cookies+ротация")
                     continue
                 _got = data
+                _avito_reset_blocks()
                 _avito_absorb_cookies(r)
                 _spfa_note_cookie_result(True)
                 break
