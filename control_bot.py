@@ -6476,6 +6476,62 @@ def _avito_via_search_engines(region: str, price_min: int = 0,
     return out
 
 
+def _avito_legacy_fetch(region: str, price_min: int = 0, price_max: int = 99_000_000,
+                        sort_by_date: bool = False, brand: str = "", page: int = 1) -> list[dict]:
+    """РАБОЧИЙ рецепт из версии, которая отдавала объявления каждый день месяц
+    (коммит от 03.07.2026): обычный requests, пять простых заголовков, БЕЗ
+    cookies и без TLS-имперсонации, обычная HTML-страница через мобильный прокси.
+
+    Именно отсутствие cookies тут ключевое: выгоревшие cookies сами вызывают 403.
+    """
+    try:
+        import requests as _req
+    except ImportError:
+        return []
+    _brand_path = f"/{brand}" if brand and brand != "any" else ""
+    qs = []
+    if price_min > 0:
+        qs.append(f"pmin={price_min}")
+    if price_max < 99_000_000:
+        qs.append(f"pmax={price_max}")
+    if sort_by_date:
+        qs.append("s=104")
+    if page > 1:
+        qs.append(f"p={page}")
+    url = f"https://www.avito.ru/{region}/avtomobili{_brand_path}"
+    if qs:
+        url += "?" + "&".join(qs)
+    _HEADERS = {
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                       "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
+        "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+        "Accept-Language": "ru-RU,ru;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Referer": "https://www.avito.ru/",
+    }
+    today = datetime.date.today()
+    try:
+        r = _req.get(url, timeout=10, headers=_HEADERS, proxies=_avito_proxies() or {})
+        _avito_ip_budget_spend()
+        if r.status_code != 200:
+            print(f"  [Авито legacy] стр.{page}: HTTP {r.status_code}")
+            return []
+        text = r.text or ""
+        items = _parse_avito_html(text, region, today)
+        if not items:
+            items = _avito_items_from_initial_data(text, today)
+        if items:
+            print(f"  [Авито legacy] стр.{page}: {len(items)} объявлений ✅ "
+                  f"(простой запрос без cookies)")
+            _avito_reset_blocks()
+        else:
+            print(f"  [Авито legacy] стр.{page}: страница {len(text)}б, объявлений 0")
+        return items
+    except Exception as e:
+        print(f"  [Авито legacy] стр.{page}: {str(e)[:80]}")
+        return []
+
+
 def _avito_html_search(region: str, price_min: int = 0, price_max: int = 99_000_000,
                        sort_by_date: bool = False, brand: str = "", page: int = 1,
                        allow_buy: bool = False) -> list[dict]:
@@ -6652,6 +6708,19 @@ def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_0
         print("  [Авито] IP ещё в паузе после ограничения — пропускаем")
         return []
     _avito_prerotate_ip()   # свежий IP до запроса — главное для мобильного прокси
+    # ПЕРВЫМ пробуем рецепт, который работал каждый день целый месяц:
+    # простой запрос без cookies. Он дешёвый и часто проходит там, где
+    # «умные» запросы с cookies получают 403.
+    try:
+        _legacy = _avito_legacy_fetch(
+            region, price_min=price_min, price_max=price_max,
+            sort_by_date=sort_by_date,
+            brand=brand if brand and brand != "any" else "", page=1,
+        )
+        if _legacy:
+            return _legacy
+    except Exception as _le:
+        print(f"  [Авито legacy] ошибка: {str(_le)[:70]}")
     if SPFA_API_KEY and not _spfa_state.get("cookies") and allow_buy:
         _avito_cookies(allow_buy=True)  # пробуем получить cookies под живой поиск
     today = datetime.date.today()
