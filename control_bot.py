@@ -6105,7 +6105,11 @@ def _avito_html_search(region: str, price_min: int = 0, price_max: int = 99_000_
                       f"{'m.avito' if url.startswith('https://m.') else 'www'} "
                       f"стр.{page}: HTTP {code} | imp={_imp} cookies={len(ck or {})} "
                       f"тело: {_snippet[:160]!r}")
-                if "IP-адреса" in text[:2000] or "too-many-requests" in text[:2000]:
+                # Блокировку определяем только по ответу-заглушке: на реальной
+                # странице каталога (с __initialData__) эти слова бывают в скриптах.
+                if ("__initialData__" not in text
+                        and ("IP-адреса" in text[:2000]
+                             or "too-many-requests" in text[:2000])):
                     _avito_note_rate_limit(90 if AVITO_PROXY_ROTATE_URL else 600)
                 if code in (403, 429, 439) and SPFA_API_KEY:
                     _avito_cookies_refresh_on_block(allow_buy)
@@ -6130,7 +6134,13 @@ def _avito_html_search(region: str, price_min: int = 0, price_max: int = 99_000_
                 "initialData": "__initialData__" in text,
                 "NEXT_DATA": "__NEXT_DATA__" in text,
                 "data-marker": 'data-marker="item"' in text,
-                "captcha": ("captcha" in text.lower() or "робот" in text.lower()),
+                # ВАЖНО: слово "captcha" есть в обычном JS-бандле Авито, поэтому
+                # по нему судить нельзя. Настоящая страница-заглушка: маленькая,
+                # без данных каталога и с явной формой проверки.
+                "captcha": (len(text) < 600_000 and "__initialData__" not in text
+                            and ("firewall/captcha" in text.lower()
+                                 or "подтвердите, что вы не робот" in text.lower()
+                                 or "you are not a robot" in text.lower())),
                 "firewall": "firewall" in text.lower(),
                 "нет объявлений": ("ничего не найдено" in text.lower()
                                    or "по вашему запросу" in text.lower()),
