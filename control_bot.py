@@ -689,6 +689,9 @@ SPFA_API_KEY = os.getenv("SPFA_API_KEY", "").strip()
 _SPFA_BASE = "https://spfa.ru/api"
 _SPFA_COOKIE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".spfa_cookies.json")
 _spfa_state = {"id": None, "cookies": None, "ts": 0.0}
+# Покупку cookies выполняет только ОДИН поток: параллельные поиски + планировщик
+# дёргали spfa одновременно и ловили 429 «Rate limit exceeded» → cookies=0.
+_spfa_buy_lock = _threading.Lock() if "_threading" in dir() else None
 _spfa_lock = _threading.Lock() if "_threading" in dir() else None
 
 def _spfa_load_disk():
@@ -702,14 +705,37 @@ def _spfa_load_disk():
                                     "user_agent": d.get("user_agent") or "",
                                     "ts": d.get("ts", 0.0)})
                 print(f"  [spfa] cookies с диска (id={d.get('id')})")
+                return
+    except Exception:
+        pass
+    # Диск на Railway эфемерный — восстанавливаем из kv-хранилища (переживает
+    # рестарт), чтобы не покупать cookies заново после каждого деплоя.
+    try:
+        import json as _j
+        _raw = _kv_get("spfa_cookies")
+        if _raw:
+            d = _j.loads(_raw)
+            if d.get("cookies"):
+                _spfa_state.update({"id": d.get("id"),
+                                    "cookies": _normalize_cookies(d.get("cookies")),
+                                    "user_agent": d.get("user_agent") or "",
+                                    "ts": d.get("ts", 0.0)})
+                print(f"  [spfa] cookies восстановлены из БД (id={d.get('id')})")
     except Exception:
         pass
 
 def _spfa_save_disk():
     try:
         import json as _j
+        _payload = {k: _spfa_state.get(k) for k in ("id", "cookies", "user_agent", "ts")}
         with open(_SPFA_COOKIE_FILE, "w", encoding="utf-8") as f:
-            _j.dump(_spfa_state, f)
+            _j.dump(_payload, f)
+        # Диск на Railway эфемерный — дублируем в kv-хранилище, чтобы cookies
+        # (0.5₽ каждая) переживали рестарт и не покупались заново.
+        try:
+            _kv_set("spfa_cookies", _j.dumps(_payload, ensure_ascii=False))
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -728,6 +754,10 @@ def _spfa_request(path: str, payload: dict):
                        timeout=30, proxies=_px or {}, impersonate="chrome124")
         if r.status_code in (200, 202):
             return r.json()
+        if r.status_code == 429:
+            _spfa_state["rate_limited_until"] = time.time() + 900  # 15 мин
+            print("  [spfa] лимит запросов (429) — пауза 15 мин")
+            return None
         print(f"  [spfa] {path} curl_cffi: HTTP {r.status_code}")
     except Exception as e:
         print(f"  [spfa] {path} curl_cffi: {str(e)[:90]}")
@@ -738,6 +768,10 @@ def _spfa_request(path: str, payload: dict):
                      timeout=30, proxies=_px or {})
         if r.status_code in (200, 202):
             return r.json()
+        if r.status_code == 429:
+            _spfa_state["rate_limited_until"] = time.time() + 900
+            print("  [spfa] лимит запросов (429) — пауза 15 мин")
+            return None
         print(f"  [spfa] {path} requests: HTTP {r.status_code} {r.text[:100]}")
     except Exception as e:
         print(f"  [spfa] {path} requests: {str(e)[:90]}")
@@ -803,6 +837,8 @@ def _spfa_fetch(unblock: bool = False, allow_buy: bool = False) -> dict | None:
     now = time.time()
     if now < float(_spfa_state.get("cooldown_until") or 0):
         return ck  # стоп-кран: недавно купленные cookies не работали
+    if now < float(_spfa_state.get("rate_limited_until") or 0):
+        return ck  # spfa ограничил частоту запросов — ждём
     if _spfa_buys_today() >= SPFA_MAX_BUYS_PER_DAY:
         print(f"  [spfa] дневной лимит покупок ({SPFA_MAX_BUYS_PER_DAY}) исчерпан — "
               f"работаем на текущих cookies")
@@ -811,8 +847,22 @@ def _spfa_fetch(unblock: bool = False, allow_buy: bool = False) -> dict | None:
         return ck
     if unblock and _spfa_state.get("id"):
         _spfa_request("/unblock/", {"id": _spfa_state["id"], "api_key": SPFA_API_KEY})
-    _spfa_state["buy_ts"] = now
-    j = _spfa_request("/cookies/", {"api_key": SPFA_API_KEY})
+    # Один покупатель за раз (иначе spfa отвечает 429 и мы остаёмся без cookies)
+    _lk = globals().get("_spfa_buy_lock")
+    if _lk is not None and not _lk.acquire(blocking=False):
+        return ck  # покупка уже идёт в другом потоке — ждать не нужно
+    try:
+        # пока ждали лок, cookies могли появиться
+        if _spfa_state.get("cookies") and (time.time() - (_spfa_state.get("ts") or 0)) < 600:
+            return _spfa_state["cookies"]
+        _spfa_state["buy_ts"] = now
+        j = _spfa_request("/cookies/", {"api_key": SPFA_API_KEY})
+    finally:
+        if _lk is not None:
+            try:
+                _lk.release()
+            except Exception:
+                pass
     res = (j or {}).get("results") or {}
     if res.get("cookies"):
         _spfa_state["buy_count"] = _spfa_buys_today() + 1
@@ -827,8 +877,8 @@ def _spfa_fetch(unblock: bool = False, allow_buy: bool = False) -> dict | None:
         return _spfa_state["cookies"]
     # Неудача (503/сбой сервиса) НЕ должна блокировать покупку на 3 часа —
     # иначе после сбоя spfa бот остаётся без cookies и Авито не ищет.
-    _spfa_state["buy_ts"] = now - _SPFA_MIN_BUY_INTERVAL + 120  # повтор через ~2 мин
-    print("  [spfa] cookies не получены — повтор через ~2 мин")
+    _spfa_state["buy_ts"] = now - _SPFA_MIN_BUY_INTERVAL + 300  # повтор через ~5 мин
+    print("  [spfa] cookies не получены — повтор через ~5 мин")
     return ck
 
 def _normalize_cookies(raw) -> dict:
