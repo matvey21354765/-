@@ -146,7 +146,11 @@ class AvitoBrowserManager:
         restart_after_searches: int | None = None,
         max_proxy_attempts: int | None = None,
     ) -> None:
-        self.proxy_url = (proxy_url or os.getenv("AVITO_PROXY_URL", "")).strip()
+        # Берём AVITO_PROXY_URL, а если он не задан — общий PROXY_URL бота,
+        # чтобы не заводить отдельную переменную для браузерного режима.
+        self.proxy_url = (proxy_url
+                          or os.getenv("AVITO_PROXY_URL", "")
+                          or os.getenv("PROXY_URL", "")).strip()
         self.headless = headless if headless is not None else _bool_env(os.getenv("AVITO_HEADLESS"), True)
         self.timeout = float(timeout_seconds or os.getenv("AVITO_BROWSER_TIMEOUT_SECONDS", "30"))
         self.navigation_timeout = float(navigation_timeout_seconds or os.getenv("AVITO_NAVIGATION_TIMEOUT_SECONDS", "30"))
@@ -335,7 +339,28 @@ class AvitoBrowserManager:
 
     async def new_page(self) -> Page:
         browser = await self.get_browser()
-        context = await browser.new_context()
+        # Cookies и User-Agent из окружения (AVITO_COOKIE / AVITO_USER_AGENT):
+        # браузер стартует с УЖЕ пройденной капчей, как обычная вкладка человека.
+        _ctx_kwargs: dict = {"locale": "ru-RU", "viewport": {"width": 1440, "height": 900}}
+        _ua = os.getenv("AVITO_USER_AGENT", "").strip()
+        if _ua:
+            _ctx_kwargs["user_agent"] = _ua
+        context = await browser.new_context(**_ctx_kwargs)
+        _raw_ck = os.getenv("AVITO_COOKIE", "").strip()
+        if _raw_ck:
+            _cookies = []
+            for _part in _raw_ck.split(";"):
+                if "=" in _part:
+                    _k, _v = _part.split("=", 1)
+                    _k, _v = _k.strip(), _v.strip()
+                    if _k:
+                        _cookies.append({"name": _k, "value": _v,
+                                         "domain": ".avito.ru", "path": "/"})
+            if _cookies:
+                try:
+                    await context.add_cookies(_cookies)
+                except Exception as _ce:
+                    print(f"  [Авито PW] cookies: {str(_ce)[:80]}")
         page = await context.new_page()
         page.set_default_timeout(self.timeout * 1000)
         page.set_default_navigation_timeout(self.navigation_timeout * 1000)
