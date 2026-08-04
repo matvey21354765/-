@@ -5653,11 +5653,19 @@ def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_0
         import requests as _req
     except ImportError:
         return []
+    # Без рабочих cookies Авито отдаёт только 403/439 — нет смысла жечь ротации
+    # IP и время на заведомо неуспешные попытки. Выходим сразу с понятной причиной.
+    if SPFA_API_KEY and not _spfa_state.get("cookies"):
+        if not (allow_buy and _avito_cookies(allow_buy=True)):
+            print("  [Авито] нет рабочих cookies (spfa) — пропускаем Авито в этом поиске")
+            _AVITO_LAST_DIAG["reason"] = "no_cookies"
+            return []
     today = datetime.date.today()
     loc = _avito_region_loc(region)
     slug = region
     results: list[dict] = []
     seen: set[str] = set()
+    _blocked_streak = 0
     for p in range(1, pages + 1):
         _params = {"categoryId": 9, "locationId": loc, "page": p, "owner": 1}
         if price_min > 0:
@@ -5691,9 +5699,16 @@ def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_0
                              headers=_hdrs, timeout=20, proxies=_px or {},
                              cookies=_avito_cookies(allow_buy) or None)
                 if r.status_code in (403, 429, 439):
+                    _blocked_streak += 1
                     if SPFA_API_KEY:
                         _avito_cookies_refresh_on_block(allow_buy)
-                    print(f"  [Авито webJSON {_tag}] стр.{p}: HTTP {r.status_code} → cookies+ротация")
+                    print(f"  [Авито webJSON {_tag}] стр.{p}: HTTP {r.status_code}")
+                    # Два блока подряд = дело не в IP, а в cookies. Дальше менять
+                    # IP бессмысленно (жжём лимит ротаций провайдера) — выходим.
+                    if _blocked_streak >= 2:
+                        print("  [Авито] блокировка не из-за IP — нужны свежие cookies "
+                              "(проверь баланс spfa.ru)")
+                        return results
                     continue
                 if r.status_code != 200:
                     print(f"  [Авито webJSON {_tag}] стр.{p}: HTTP {r.status_code}")
