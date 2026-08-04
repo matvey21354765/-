@@ -6616,6 +6616,9 @@ class _AvitoJulyDone(Exception):
     """Маркер: июльский парсер уже дал результат, остальные пути не нужны."""
 
 
+_AVITO_PAGE1_BLOCKED = False
+
+
 def _avito_july_scraper(region: str, pages: int = 5, price_min: int = 0, price_max: int = 99_000_000, sort_by_date: bool = False, brand: str = "") -> list[dict]:
     """ОРИГИНАЛ из версии 03.07.2026, работавшей стабильно месяц.
 
@@ -6719,6 +6722,10 @@ def _avito_july_scraper(region: str, pages: int = 5, price_min: int = 0, price_m
                 text = _try_fetch(fallback_url)
                 if not text:
                     print(f"  [Авито] стр.{p}: нет данных")
+                    if p == 1:
+                        # Первая страница заблокирована — остальные тем более.
+                        # Перебор только сжигает IP, поэтому прекращаем сразу.
+                        globals()["_AVITO_PAGE1_BLOCKED"] = True
                     return []
                 from_fallback = True
                 url_has_price_filter = False
@@ -6924,12 +6931,22 @@ def _avito_july_scraper(region: str, pages: int = 5, price_min: int = 0, price_m
             print(f"  [Авито] стр.{p}: {e}")
             return []
 
-    # Параллельно запрашиваем все страницы (5 потоков — лимит конкурентности ScraperAPI)
+    # ПОСЛЕДОВАТЕЛЬНО, а не параллельно: 5 одновременных запросов с одного
+    # мобильного IP — характерный признак бота, после которого Авито блокирует
+    # адрес. Пять запросов подряд с паузой выглядят как обычный человек.
+    # И если первая страница заблокирована — остальные не пробуем вообще.
     results = []
-    with ThreadPoolExecutor(max_workers=5) as ex:
-        futs = {ex.submit(_fetch_page, p): p for p in range(1, pages + 1)}
-        for fut in as_completed(futs):
-            results.extend(fut.result())
+    globals()["_AVITO_PAGE1_BLOCKED"] = False
+    for _p in range(1, pages + 1):
+        _batch = _fetch_page(_p)
+        results.extend(_batch)
+        if _AVITO_PAGE1_BLOCKED:
+            print("  [Авито] стр.1 заблокирована — остальные страницы пропускаем")
+            break
+        if not _batch:
+            break
+        if _p < pages:
+            time.sleep(random.uniform(1.2, 2.5))   # пауза как у человека
 
     # Глобальный fallback: если 0 результатов — пробуем без ценового фильтра.
     # Авито часто отдаёт CAPTCHA именно на URL с pmin/pmax, поэтому сканируем
@@ -9352,7 +9369,10 @@ def _avito_api_fetch(region: str, pages: int, price_min: int, price_max: int, to
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         ]
-        for attempt in range(6):
+        # Было 6 повторов на страницу: при 5 страницах это 30+ запросов за один
+        # поиск, чего хватает, чтобы сжечь мобильный IP. Если две попытки подряд
+        # заблокированы, остальные тем более не пройдут — только вредят.
+        for attempt in range(max(1, int(os.getenv("AVITO_HTML_RETRIES", "2")))):
             _hdrs = {
                 "User-Agent": _uas[attempt % len(_uas)],
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -12270,6 +12290,10 @@ def _scrape_avito_raw(region: str, pages: int = 5, price_min: int = 0, price_max
                 if not text:
                     _avito_diag("причина", f"страница {p}: после retry нет HTML с карточками")
                     print(f"  [Авито] стр.{p}: нет данных")
+                    if p == 1:
+                        # Первая страница заблокирована — остальные тем более.
+                        # Перебор только сжигает IP, поэтому прекращаем сразу.
+                        globals()["_AVITO_PAGE1_BLOCKED"] = True
                     return []
                 from_fallback = True
                 url_has_price_filter = False
