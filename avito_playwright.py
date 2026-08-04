@@ -188,7 +188,13 @@ class AvitoBrowserManager:
         return bool(host and start and end >= start and user and pwd)
 
     async def _ensure_proxy_pool(self) -> AvitoProxyPool | None:
-        """Ленивая async-инициализация резидентского пула прокси."""
+        """Ленивая async-инициализация резидентского пула прокси.
+
+        Если задан явный PROXY_URL — пул НЕ создаём: cookies (AVITO_COOKIE)
+        привязаны к этому IP, а чужие порты пула дают капчу.
+        """
+        if self.proxy_url:
+            return None
         if self._proxy_pool is None and self._pool_configured():
             self._proxy_pool = await get_avito_proxy_pool()
         return self._proxy_pool
