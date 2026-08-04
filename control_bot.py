@@ -2905,6 +2905,10 @@ def _autoru_cffi_fetch(region: str, price_min: int, price_max: int,
     _pxs.append(None)
     # В июле Auto.ru качался 10 страницами — одна даёт лишь ~2-40 объявлений.
     _max_pages = max(1, int(os.getenv("AUTORU_PAGES", "8")))
+    # Страница Auto.ru весит ~2.2 МБ: 8 страниц не укладываются в таймаут поиска,
+    # и результат не успевал вернуться. Ограничиваем общее время и отдаём то,
+    # что успели собрать.
+    _deadline = time.time() + max(8, int(os.getenv("AUTORU_BUDGET_SEC", "20")))
     _all: list[dict] = []
     _seen_u: set[str] = set()
     for _px in _pxs:
@@ -2930,6 +2934,8 @@ def _autoru_cffi_fetch(region: str, price_min: int, price_max: int,
                             _all.append(_it)
                     # Остальные страницы — той же прогретой сессией
                     for _pg in range(2, _max_pages + 1):
+                        if time.time() > _deadline:
+                            break
                         _sep = "&" if "?" in html_url else "?"
                         try:
                             _rp = _sess.get(f"{html_url}{_sep}page={_pg}",
@@ -11089,20 +11095,17 @@ def _avito_cached_result(
         if _avito_rate_limited():
             return _cached_now
         try:
-            # Июльский парсер: 5 страниц вместо одной (одна даёт лишь ~50).
-            _direct = _avito_july_scraper(
-                region, pages=int(os.getenv("AVITO_PAGES", "5")),
-                price_min=price_min, price_max=price_max,
+            # В ЖИВОМ поиске важна скорость: webJSON отвечает за секунды и даёт
+            # ~50 объявлений со страницы. Июльский парсер сначала перебирает
+            # API-методы (все 403, ~20с) — для интерактива это слишком долго,
+            # он остаётся для фонового планировщика.
+            _direct = _avito_webjson_search(
+                region, price_min=price_min, price_max=price_max,
                 sort_by_date=sort_by_date,
                 brand="" if brand == "any" else brand,
+                pages=int(os.getenv("AVITO_PAGES", "5")),
+                allow_buy=_spfa_user_search_active(),
             )
-            if not _direct:
-                _direct = _avito_webjson_search(
-                    region, price_min=price_min, price_max=price_max,
-                    sort_by_date=sort_by_date,
-                    brand="" if brand == "any" else brand, pages=1,
-                    allow_buy=_spfa_user_search_active(),
-                )
             if _direct:
                 with _AVITO_SCHEDULE_LOCK:
                     entry["items"] = _direct[:500]
@@ -11520,8 +11523,27 @@ async def _avito_scheduled_fetch_unlocked(
             _avito_diag("после фильтрации", len(parsed))
         elif AVITO_PROVIDER == "webjson":
             _brand_q = brand if brand and brand != "any" else ""
-            # ОРИГИНАЛ из рабочей июльской версии — первым и без обвязки.
+            # Быстрый путь первым: webJSON отдаёт ~50 объявлений за секунды.
             try:
+                parsed = _avito_webjson_search(
+                    region, price_min=price_min, price_max=price_max,
+                    sort_by_date=sort_by_date, brand=_brand_q,
+                    pages=int(os.getenv("AVITO_PAGES", "5")),
+                    allow_buy=_spfa_user_search_active(),
+                )
+                if parsed:
+                    http = 200
+                    _avito_reset_blocks()
+                    globals()["_AVITO_RATE_LIMIT_UNTIL"] = 0.0
+                    raise _AvitoJulyDone()
+            except _AvitoJulyDone:
+                pass
+            except Exception as _we:
+                print(f"[Avito] webJSON: {str(_we)[:70]}")
+            # Июльский оригинал — если быстрый путь ничего не дал.
+            try:
+                if parsed:
+                    raise _AvitoJulyDone()
                 _july = _avito_july_scraper(
                     region, pages=int(os.getenv("AVITO_PAGES", "5")),
                     price_min=price_min, price_max=price_max,
