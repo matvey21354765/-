@@ -236,13 +236,13 @@ try:
 except (TypeError, ValueError):
     AVITO_STALE_CACHE_TTL_SECONDS = 86400
 try:
-    # Раньше поиск ждал Авито дольше минуты — и объявления успевали прийти.
-    # Потолок в 20с обрезал ожидание, и выдача уходила без Авито.
+    # Пользователь НЕ должен ждать Авито: он часто заблокирован или медленный.
+    # Поиск отдаёт результаты сразу, а Авито подтягивается из фонового кэша.
     AVITO_MANUAL_WAIT_SECONDS = max(
-        1, min(120, int(os.getenv("AVITO_MANUAL_WAIT_SECONDS", "75")))
+        1, min(120, int(os.getenv("AVITO_MANUAL_WAIT_SECONDS", "6")))
     )
 except (TypeError, ValueError):
-    AVITO_MANUAL_WAIT_SECONDS = 75
+    AVITO_MANUAL_WAIT_SECONDS = 6
 _PROXY_URL_RAW = PROXY_URL
 # Не берём Railway-системный прокси (он не является резидентным)
 if _PROXY_URL_RAW and "__agentproxy" in _PROXY_URL_RAW:
@@ -5886,11 +5886,11 @@ def _avito_html_search(region: str, price_min: int = 0, price_max: int = 99_000_
                     _sess.cookies.update(ck)
                 try:
                     _sess.get("https://www.avito.ru/", headers=hdrs,
-                              proxies=_px or {}, timeout=15)
+                              proxies=_px or {}, timeout=8)
                 except Exception:
                     pass
                 r = _sess.get(url, params=params, headers=hdrs,
-                              proxies=_px or {}, timeout=25)
+                              proxies=_px or {}, timeout=10)
             finally:
                 try:
                     _sess.close()
@@ -5990,7 +5990,7 @@ def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_0
                 from curl_cffi import requests as _cffi_json
                 r = _cffi_json.get(
                     "https://www.avito.ru/web/1/js/items", params=_params,
-                    headers=_hdrs, timeout=20, proxies=_px or {},
+                    headers=_hdrs, timeout=8, proxies=_px or {},
                     cookies=_avito_cookies(allow_buy) or None,
                     impersonate=_avito_impersonate(),
                 )
@@ -9613,6 +9613,9 @@ def _avito_cached_result(
             _cached_now = list(entry.get("items", []))
         _fresh_enough = (time.time() - float(entry.get("updated_at", 0) or 0)) < 600
         if _cached_now and _fresh_enough:
+            return _cached_now
+        # Если Авито в паузе после бана — даже не пробуем, отдаём кэш мгновенно.
+        if _avito_rate_limited():
             return _cached_now
         try:
             _direct = _avito_webjson_search(
