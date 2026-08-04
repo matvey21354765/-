@@ -236,10 +236,12 @@ try:
 except (TypeError, ValueError):
     AVITO_STALE_CACHE_TTL_SECONDS = 86400
 try:
-    # Пользователь НЕ должен ждать Авито: он часто заблокирован или медленный.
-    # Поиск отдаёт результаты сразу, а Авито подтягивается из фонового кэша.
+    # Браузерному режиму (playwright) нужно время: он реально грузит страницу.
+    # Даём ему до ~100с, но ТОЛЬКО когда Авито не в бане (иначе не ждём вовсе).
+    # Для быстрых режимов оставляем 6с, чтобы поиск не тормозил.
+    _WAIT_DEFAULT = "100" if AVITO_PROVIDER == "playwright" else "6"
     AVITO_MANUAL_WAIT_SECONDS = max(
-        1, min(120, int(os.getenv("AVITO_MANUAL_WAIT_SECONDS", "6")))
+        1, min(180, int(os.getenv("AVITO_MANUAL_WAIT_SECONDS", _WAIT_DEFAULT)))
     )
 except (TypeError, ValueError):
     AVITO_MANUAL_WAIT_SECONDS = 6
@@ -9775,7 +9777,11 @@ def _avito_cached_result(
         if can_wait and not in_flight and hasattr(ready_event, "clear"):
             ready_event.clear()
     if can_wait and hasattr(ready_event, "wait"):
-        ready_event.wait(timeout=AVITO_MANUAL_WAIT_SECONDS)
+        # В бане ждать бессмысленно — выдача уходит мгновенно.
+        _wait_for = 0 if _avito_rate_limited() else AVITO_MANUAL_WAIT_SECONDS
+        if _wait_for:
+            print(f"[Avito] ждём результат до {_wait_for}с (провайдер {AVITO_PROVIDER})")
+            ready_event.wait(timeout=_wait_for)
     with _AVITO_SCHEDULE_LOCK:
         cached = list(entry.get("items", []))
     if cached:
