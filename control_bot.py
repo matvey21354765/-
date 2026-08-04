@@ -782,7 +782,10 @@ def _spfa_fetch(unblock: bool = False, allow_buy: bool = False) -> dict | None:
         print(f"  [spfa] свежие cookies (id={_spfa_state['id']}, "
               f"куплено сегодня: {_spfa_state['buy_count']}/{SPFA_MAX_BUYS_PER_DAY})")
         return _spfa_state["cookies"]
-    print("  [spfa] cookies не получены (503) — работаем на текущих")
+    # Неудача (503/сбой сервиса) НЕ должна блокировать покупку на 3 часа —
+    # иначе после сбоя spfa бот остаётся без cookies и Авито не ищет.
+    _spfa_state["buy_ts"] = now - _SPFA_MIN_BUY_INTERVAL + 120  # повтор через ~2 мин
+    print("  [spfa] cookies не получены — повтор через ~2 мин")
     return ck
 
 def _avito_cookies(allow_buy: bool = False) -> dict | None:
@@ -17726,7 +17729,12 @@ async def main():
         _spfa_load_disk()
         if SPFA_API_KEY:
             print(f"  [spfa] обход блокировок Авито ВКЛЮЧЁН (ключ задан)")
-            await loop.run_in_executor(None, _avito_cookies)  # прогреваем cookies
+            # Покупаем cookies на старте, если их нет (0.5₽ раз в 12ч) — иначе
+            # первый же поиск Авито упрётся в 403/439.
+            _ck0 = await loop.run_in_executor(
+                None, lambda: _avito_cookies(allow_buy=True)
+            )
+            print(f"  [spfa] cookies на старте: {'есть' if _ck0 else 'НЕТ'}")
         else:
             print(f"  [spfa] ключ SPFA_API_KEY не задан — cookies-обход выключен")
     except Exception as e:
