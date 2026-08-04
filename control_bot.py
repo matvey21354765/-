@@ -729,7 +729,7 @@ def _avito_note_block() -> bool:
     if _AVITO_BLOCK_STREAK >= AVITO_MAX_BLOCKS:
         # Подсети нужно ДАТЬ ОСТЫТЬ: репутация восстанавливается только когда
         # запросы прекращаются. Продолжать перебор = держать бан бесконечно.
-        _cool = max(300, int(os.getenv("AVITO_SUBNET_COOLDOWN_SEC", "1800")))
+        _cool = max(30, int(os.getenv("AVITO_SUBNET_COOLDOWN_SEC", "120")))
         _avito_note_rate_limit(_cool)
         print(f"  [Авито] {_AVITO_BLOCK_STREAK} блокировок подряд — пауза "
               f"{_cool // 60} мин, чтобы подсеть восстановила репутацию")
@@ -1020,7 +1020,7 @@ def _spfa_fetch(unblock: bool = False, allow_buy: bool = False) -> dict | None:
         return ck  # фоновые задачи используют существующие cookies, не покупают
     now = time.time()
     if now < float(_spfa_state.get("cooldown_until") or 0):
-        return ck  # стоп-кран: недавно купленные cookies не работали
+        return ck
     if now < float(_spfa_state.get("rate_limited_until") or 0):
         return ck  # spfa ограничил частоту запросов — ждём
     if _spfa_buys_today() >= SPFA_MAX_BUYS_PER_DAY:
@@ -6574,6 +6574,437 @@ def _avito_via_search_engines(region: str, price_min: int = 0,
     return out
 
 
+class _AvitoJulyDone(Exception):
+    """Маркер: июльский парсер уже дал результат, остальные пути не нужны."""
+
+
+def _avito_july_scraper(region: str, pages: int = 5, price_min: int = 0, price_max: int = 99_000_000, sort_by_date: bool = False, brand: str = "") -> list[dict]:
+    """ОРИГИНАЛ из версии 03.07.2026, работавшей стабильно месяц.
+
+    Перенесён целиком, БЕЗ добавленной позже обвязки (cookies spfa, TLS-
+    имперсонация, паузы при блокировках, мобильный API). Именно в таком виде
+    Авито отдавал объявления каждый день.
+
+    Бесплатный парсер Авито. Стратегия (порядок попыток):
+    1. _avito_api_fetch: cloudscraper+Android UA, m.avito.ru, публичный API, веб-API —
+       всё это легче проходит с датацентровых IP, чем десктопный скрейпинг.
+    2. Прямой HTTP-запрос с Desktop UA (иногда работает в определённых регионах).
+    3. Headless Playwright + stealth — последний резерв, требует больше времени.
+    """
+    slug = AVITO_SLUGS.get(region, region)
+    today = datetime.date.today()
+
+    # Перед сетевым скрейпом (кэш-промах) меняем IP прокси на свежий, чтобы
+    # обойти rate-limit Авито (429). min_interval=8с — каждый поиск стартует
+    # со свежим IP, но защита от слишком частой ротации (лимиты провайдера).
+    if AVITO_PROXIES and not _proxy_auth_failed:
+        _rotate_proxy_ip(min_interval=8)
+
+    try:
+        import requests as _req
+        from bs4 import BeautifulSoup as _BS
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+    except ImportError:
+        return []
+
+    # ── Метод 1: API / мобильный сайт / cloudscraper ─────────────
+    print(f"  [Авито] пробуем API-методы для {region}…")
+    api_results = _avito_api_fetch(region, pages, price_min, price_max, today, sort_by_date=sort_by_date, brand=brand)
+    if api_results:
+        print(f"  [Авито] API-метод дал {len(api_results)} объявлений")
+        return api_results
+    # API-методы не дали результатов — пробуем прямой HTML-скрейпинг (методы 2-3)
+    print(f"  [Авито] API дал 0 — пробуем HTML-скрейпинг…")
+
+    def _build_url(p: int) -> str:
+        qs_parts = ["seller_type=1"]  # только частники
+        if p > 1:
+            qs_parts.append(f"p={p}")
+        if price_min > 0:
+            qs_parts.append(f"pmin={price_min}")
+        if price_max < 99_000_000:
+            qs_parts.append(f"pmax={price_max}")
+        # s=104 — по дате (только свежие). Без сортировки Авито отдаёт
+        # релевантные объявления любых дат — это даёт больше машин ниже рынка.
+        if sort_by_date:
+            qs_parts.append("s=104")
+        u = f"https://www.avito.ru/{slug}/avtomobili"
+        if qs_parts:
+            u += "?" + "&".join(qs_parts)
+        return u
+
+    _HEADERS = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+        "Accept-Language": "ru-RU,ru;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Referer": "https://www.avito.ru/",
+    }
+
+    def _fetch_page(p: int) -> list[dict]:
+        url = _build_url(p)
+        url_has_price_filter = price_max < 99_000_000 or price_min > 0
+
+        def _page_has_listings(t: str) -> bool:
+            """Проверяем что страница содержит реальные объявления, а не заглушку."""
+            return (
+                '"urlPath"' in t or
+                'data-marker="item"' in t or
+                ('__NEXT_DATA__' in t and (f'"/{slug}/' in t or '"catalog"' in t)) or
+                ('"items"' in t and (f'"/{slug}/' in t or '"priceDetailed"' in t))
+            )
+
+        def _try_fetch(fetch_url: str) -> str | None:
+            """Пробуем: быстрый прямой запрос → headless-браузер (только без прокси)."""
+            # 1. Прямой запрос через прокси (если есть) или напрямую
+            try:
+                r2 = _req.get(fetch_url, timeout=8, headers=_HEADERS, proxies=_avito_proxies())
+                if r2.status_code == 200 and _page_has_listings(r2.text):
+                    return r2.text
+            except Exception:
+                pass
+            # 2. Headless-браузер с прокси (SOCKS5 поддерживает HTTPS, HTTP — нет)
+            if AVITO_PROXIES and AVITO_PROXY_PROTOCOL == "http":
+                return None  # HTTP-прокси не поддерживает CONNECT для HTTPS
+            html = _avito_fetch_html(fetch_url)
+            if html and _page_has_listings(html):
+                return html
+            return None
+
+        try:
+            text = _try_fetch(url)
+            from_fallback = False
+
+            if not text:
+                # Fallback URL без ценового фильтра
+                fallback_url = f"https://www.avito.ru/{slug}/avtomobili?seller_type=1" + (f"&p={p}" if p > 1 else "")
+                text = _try_fetch(fallback_url)
+                if not text:
+                    print(f"  [Авито] стр.{p}: нет данных")
+                    return []
+                from_fallback = True
+                url_has_price_filter = False
+                print(f"  [Авито] стр.{p}: fallback URL, {len(text):,}б")
+            else:
+                print(f"  [Авито] стр.{p}: {len(text):,}б")
+            batch = _parse_avito_html(text, slug, today)
+
+            # Если price-filtered URL вернул страницу но 0 items (CAPTCHA/пустая) — пробуем fallback
+            if not batch and not from_fallback:
+                fallback_url = f"https://www.avito.ru/{slug}/avtomobili?seller_type=1" + (f"&p={p}" if p > 1 else "")
+                text2 = _try_fetch(fallback_url)
+                if text2:
+                    batch2 = _parse_avito_html(text2, slug, today)
+                    if batch2:
+                        text = text2
+                        batch = batch2
+                        from_fallback = True
+                        url_has_price_filter = False
+                        print(f"  [Авито] стр.{p}: fallback дал {len(batch)} объявлений")
+
+            # Помечаем: пришли ли из URL с ценовым фильтром Авито
+            for it in batch:
+                it["_avito_price_filtered"] = url_has_price_filter and not from_fallback
+
+            # Строим карты: цена, фото, описание — глобальный скан всей страницы
+            price_map: dict[str, int] = {}
+            image_map: dict[str, str] = {}
+            desc_map: dict[str, str] = {}
+            title_map: dict[str, str] = {}
+            mileage_map: dict[str, int] = {}
+
+            # Все urlPath объявлений этого города
+            listing_pat = re.compile(
+                r'"urlPath"\s*:\s*"(/' + re.escape(slug) + r'/[a-z0-9_./-]+-\d{5,})"'
+            )
+            slug_matches = list(listing_pat.finditer(text))
+            print(f"  [Авито] найдено listing urlPath: {len(slug_matches)}")
+
+            if slug_matches:
+                # Глобальный скан: находим ВСЕ цены, фото, описания, заголовки
+                # и привязываем к ближайшему urlPath по позиции в тексте
+
+                # Все цены — valueText с числом
+                all_prices: list[tuple[int, int]] = []  # (позиция, цена)
+                for pm in re.finditer(r'"valueText"\s*:\s*"([\d][\d\s.,]{1,18}(?:₽|руб|\\u20bd|р\.)?)"', text):
+                    d = re.sub(r"[^\d]", "", pm.group(1))
+                    if d and 10_000 < int(d) < 99_000_000:
+                        all_prices.append((pm.start(), int(d)))
+                # Fallback: priceDetailed → value (число)
+                for pm in re.finditer(r'"priceDetailed"\s*:\s*\{[^}]{0,200}"value"\s*:\s*(\d{4,9})', text):
+                    val = int(pm.group(1))
+                    if 10_000 < val < 99_000_000:
+                        all_prices.append((pm.start(), val))
+                # Прямое "price":NNN (только если нет valueText рядом)
+                for pm in re.finditer(r'"price"\s*:\s*(\d{5,8})\b', text):
+                    val = int(pm.group(1))
+                    if 10_000 < val < 99_000_000:
+                        all_prices.append((pm.start(), val))
+
+                # Все фото — img.avito.st (расширенный поиск без требования расширения)
+                all_images: list[tuple[int, str]] = []
+                seen_imgs: set[str] = set()
+
+                def _add_img(pos: int, raw_match: str) -> None:
+                    raw_url = raw_match.replace("\\/", "/").replace("\\u002F", "/")
+                    url_img = ("https:" + raw_url) if raw_url.startswith("//") else raw_url
+                    if any(x in url_img.lower() for x in ("/stub", "placeholder", "noimage", "logo")):
+                        return
+                    if url_img not in seen_imgs:
+                        seen_imgs.add(url_img)
+                        all_images.append((pos, url_img))
+
+                # Паттерн 1: стандартный CDN URL (img/images.avito.st), в т.ч.
+                # экранированный JSON ("https:\/\/75.img.avito.st\/...") и
+                # protocol-relative ("//75.img.avito.st/...").
+                for im in re.finditer(r'((?:https?:)?(?:\\?/){2}(?:[a-z0-9-]+\.)?(?:img|images)\.avito\.st/[^"\'<\s,\]}{\\]{10,})', text):
+                    _add_img(im.start(), im.group(1))
+
+                # Паттерн 2: HTML-атрибуты data-src / src указывающие на CDN
+                #            (мобильная/ленивая загрузка карточек выдачи).
+                for im in re.finditer(r'(?:data-src|src|data-marker[^=]*)=["\'](\s*(?:https:)?//(?:[a-z0-9-]+\.)?(?:img|images)\.avito\.st/images?/[^"\']{5,})["\']', text):
+                    _add_img(im.start(), im.group(1).strip())
+
+                # Паттерн 3: srcset="//75.img.avito.st/... 1x, ... 2x"
+                for im in re.finditer(r'srcset=["\']([^"\']+)["\']', text):
+                    for piece in im.group(1).split(","):
+                        u = piece.strip().split(" ")[0]
+                        if "img.avito.st" in u or "images.avito.st" in u:
+                            _add_img(im.start(), u)
+
+                # Паттерн 4: JSON-массив "images":["https://..."] / вложенные
+                #            размеры {"864x648":"https://..."} с экранированием.
+                for im in re.finditer(r'"(?:images?|photos?|gallery|preview|\d+x\d+)"\s*:\s*"((?:https?:)?(?:\\?/){2}(?:[a-z0-9-]+\.)?(?:img|images)\.avito\.st(?:\\?/)[^"]{5,})"', text):
+                    _add_img(im.start(), im.group(1))
+
+                # Все описания
+                all_descs: list[tuple[int, str]] = []
+                for dm in re.finditer(r'"description"\s*:\s*"([^"]{30,800})"', text):
+                    d = dm.group(1).replace("\\n", " ").replace('\\"', '"').strip()
+                    if len(d) > 20 and not d.startswith("http") and "avito" not in d[:20]:
+                        all_descs.append((dm.start(), d[:400]))
+
+                # Все заголовки
+                all_titles: list[tuple[int, str]] = []
+                for tm in re.finditer(r'"title"\s*:\s*"([^"]{5,120})"', text):
+                    t = tm.group(1).replace('\\"', '"')
+                    if not t.startswith("http") and len(t) > 3:
+                        all_titles.append((tm.start(), t))
+
+                # Привязка к urlPath: для каждого urlPath ищем ближайший элемент
+                positions = [m.start() for m in slug_matches]
+                paths = [m.group(1) for m in slug_matches]
+
+                def _nearest_path(pos: int, max_dist: int = 8000) -> str | None:
+                    """Ближайший urlPath к данной позиции в тексте."""
+                    best = None
+                    best_d = max_dist
+                    for i, p_pos in enumerate(positions):
+                        d = abs(p_pos - pos)
+                        if d < best_d:
+                            best_d = d
+                            best = paths[i]
+                    return best
+
+                # Пробег — mileage в params
+                # "mileage" or "km" in params array
+                for mm in re.finditer(r'"mileage"\s*:\s*(\d{3,7})', text):
+                    val = int(mm.group(1))
+                    if 1000 < val < 9_000_000:
+                        path = _nearest_path(mm.start(), max_dist=5000)
+                        if path and path not in mileage_map:
+                            mileage_map[path] = val
+
+                for pos, price in all_prices:
+                    path = _nearest_path(pos, max_dist=6000)
+                    if path and path not in price_map:
+                        price_map[path] = price
+
+                # Фото: привязываем к ближайшему urlPath по абсолютному расстоянию.
+                # Авито может размещать urlPath как ДО, так и ПОСЛЕ блока images,
+                # поэтому убираем направленное ограничение (0 < d) и берём min(abs).
+                for pos, url_img in all_images:
+                    best = None
+                    best_d = 8000
+                    for i, p_pos in enumerate(positions):
+                        d = abs(p_pos - pos)  # абсолютное расстояние — направление не важно
+                        if d < best_d:
+                            best_d = d
+                            best = paths[i]
+                    if best and not image_map.get(best):
+                        image_map[best] = url_img
+
+                for pos, desc in all_descs:
+                    path = _nearest_path(pos, max_dist=6000)
+                    if path and path not in desc_map:
+                        desc_map[path] = desc
+
+                for pos, title in all_titles:
+                    path = _nearest_path(pos, max_dist=5000)
+                    if path and path not in title_map:
+                        title_map[path] = title
+
+            print(f"  [Авито] глоб.скан: цены={len(price_map)}, фото={len(image_map)}, описания={len(desc_map)}")
+
+
+            for it in batch:
+                path = it["url"].replace("https://www.avito.ru", "")
+                if it.get("_price_int", 0) == 0 and path in price_map:
+                    v = price_map[path]
+                    it["_price_int"] = v
+                    it["price"] = f"{v:,} ₽".replace(",", " ")
+                if not it.get("_photo_url") and path in image_map:
+                    it["_photo_url"] = image_map[path]
+                if not it.get("description") and path in desc_map:
+                    it["description"] = desc_map[path]
+                if not it.get("mileage") and path in mileage_map:
+                    it["mileage"] = mileage_map[path]
+
+            # Если _parse_avito_html не нашёл объявлений — строим их из regex-карт
+            if not batch and (price_map or image_map or title_map):
+                for url_p, title in title_map.items():
+                    item_url = "https://www.avito.ru" + url_p
+                    price_int = price_map.get(url_p, 0)
+                    price_str = f"{price_int:,} ₽".replace(",", " ") if price_int else ""
+                    item = {
+                        "source": "avito", "title": title,
+                        "price": price_str, "url": item_url,
+                        "date": str(today), "_photos": 0, "_days_on_site": 0,
+                        "description": desc_map.get(url_p, ""),
+                        "seller": "", "_photo_url": image_map.get(url_p, ""),
+                        "_price_int": price_int,
+                        "_avito_price_filtered": url_has_price_filter and not from_fallback,
+                    }
+                    item["_hot_score"] = hot_score(item)
+                    batch.append(item)
+                if batch:
+                    print(f"  [Авито] regex fallback: построено {len(batch)} объявлений")
+
+            print(f"  [Авито] стр.{p}: {len(batch)} объявлений")
+            return batch
+        except Exception as e:
+            print(f"  [Авито] стр.{p}: {e}")
+            return []
+
+    # Параллельно запрашиваем все страницы (5 потоков — лимит конкурентности ScraperAPI)
+    results = []
+    with ThreadPoolExecutor(max_workers=5) as ex:
+        futs = {ex.submit(_fetch_page, p): p for p in range(1, pages + 1)}
+        for fut in as_completed(futs):
+            results.extend(fut.result())
+
+    # Глобальный fallback: если 0 результатов — пробуем без ценового фильтра.
+    # Авито часто отдаёт CAPTCHA именно на URL с pmin/pmax, поэтому сканируем
+    # несколько страниц обычного списка и фильтруем по цене на нашей стороне.
+    if not results and (price_min > 0 or price_max < 99_000_000):
+        print(f"  [Авито] 0 результатов с ценовым фильтром — пробуем без фильтра")
+        import requests as _req_fb
+        fb_results: list[dict] = []
+
+        def _fetch_fallback_page(fb_page: int) -> list[dict]:
+            try:
+                fallback_url = f"https://www.avito.ru/{slug}/avtomobili?seller_type=1"
+                if sort_by_date:
+                    fallback_url += "&s=104"
+                if fb_page > 1:
+                    fallback_url += f"&p={fb_page}"
+                # Прямой запрос первой — бесплатно и быстро, при неудаче — headless-браузер
+                fb_text = ""
+                try:
+                    r_direct = _req_fb.get(fallback_url, timeout=8, headers=_HEADERS, proxies=_avito_proxies())
+                    if r_direct.status_code == 200 and ('"urlPath"' in r_direct.text or 'data-marker="item"' in r_direct.text):
+                        fb_text = r_direct.text
+                except Exception:
+                    pass
+                if not fb_text:
+                    html = _avito_fetch_html(fallback_url)
+                    if html and ('"urlPath"' in html or 'data-marker="item"' in html):
+                        fb_text = html
+                if not fb_text:
+                    return []
+                batch_fb = _parse_avito_html(fb_text, slug, today)
+                price_map_fb: dict[str, int] = {}
+                image_map_fb: dict[str, str] = {}
+                desc_map_fb: dict[str, str] = {}
+                for m in re.finditer(r'"urlPath"\s*:\s*"(/[^"]+)"', fb_text):
+                    url_p = m.group(1)
+                    chunk = fb_text[m.end():m.end() + 3000]
+                    pm = re.search(r'"value"\s*:\s*(\d{4,9})', chunk)
+                    if pm:
+                        val = int(pm.group(1))
+                        if 10_000 < val < 99_000_000:
+                            price_map_fb[url_p] = val
+                    elif True:
+                        pm2 = re.search(r'"valueText"\s*:\s*"([^"]+)"', chunk)
+                        if pm2:
+                            digits = re.sub(r"[^\d]", "", pm2.group(1))
+                            if digits and 10_000 < int(digits) < 99_000_000:
+                                price_map_fb[url_p] = int(digits)
+                    img_m = re.search(
+                        r'"(?:864x648|1280x960|640x480|432x324|320x240)"\s*:\s*"((?:https:)?(?:\\?/){2}(?:[a-z0-9-]+\.)?(?:img|images)\.avito\.st[^"\\]{10,}\.(?:jpg|jpeg|webp|png))"',
+                        chunk
+                    )
+                    if img_m:
+                        raw = img_m.group(1).replace("\\/", "/")
+                        image_map_fb[url_p] = ("https:" + raw) if raw.startswith("//") else raw
+                    dm = re.search(r'"description"\s*:\s*"([^"]{25,})"', chunk)
+                    if dm:
+                        d = dm.group(1).replace("\\n", " ").replace('\\"', '"').strip()
+                        if len(d) > 20 and not d.startswith("http"):
+                            desc_map_fb[url_p] = d[:350]
+                for it in batch_fb:
+                    path = it["url"].replace("https://www.avito.ru", "")
+                    if it.get("_price_int", 0) == 0 and path in price_map_fb:
+                        v = price_map_fb[path]
+                        it["_price_int"] = v
+                        it["price"] = f"{v:,} ₽".replace(",", " ")
+                    if not it.get("_photo_url") and path in image_map_fb:
+                        it["_photo_url"] = image_map_fb[path]
+                    if not it.get("description") and path in desc_map_fb:
+                        it["description"] = desc_map_fb[path]
+                    it["_avito_price_filtered"] = False
+                print(f"  [Авито] fallback стр.{fb_page}: {len(batch_fb)} объявлений")
+                return batch_fb
+            except Exception as e:
+                print(f"  [Авито] fallback стр.{fb_page} ошибка: {e}")
+                return []
+
+        with ThreadPoolExecutor(max_workers=5) as ex:
+            futs = [ex.submit(_fetch_fallback_page, p) for p in range(1, 4)]
+            for fut in as_completed(futs):
+                fb_results.extend(fut.result())
+        results = fb_results
+        print(f"  [Авито] fallback итого: {len(results)} объявлений")
+
+    print(f"  [Авито] итого {len(results)} объявлений")
+    return results
+
+
+
+# ── FSM состояния ────────────────────────────────────────────────
+
+class Setup(StatesGroup):
+    category = State()
+    brand = State()
+    region = State()
+    price_min = State()
+    price_max = State()
+
+
+class TrackBrand(StatesGroup):
+    choosing = State()
+
+
+class MyDeals(StatesGroup):
+    add_title = State()
+    add_buy = State()
+    add_expenses = State()
+    sell_price = State()
+
+
+# ── 🚗 Мои сделки (аналитика перекупа) ───────────────────────────
+
+
 def _avito_legacy_fetch(region: str, price_min: int = 0, price_max: int = 99_000_000,
                         sort_by_date: bool = False, brand: str = "", page: int = 1) -> list[dict]:
     """ТОЧНАЯ копия рецепта из версии, работавшей ежедневно месяц (03.07.2026).
@@ -6834,9 +7265,9 @@ def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_0
     # Без рабочих cookies Авито отдаёт только 403/439 — нет смысла жечь ротации
     # IP и время на заведомо неуспешные попытки. Выходим сразу с понятной причиной.
     if _avito_rate_limited():
-        print("  [Авито] IP ещё в паузе после ограничения — пропускаем")
-        return []
-    _avito_prerotate_ip()   # свежий IP до запроса — главное для мобильного прокси
+        print("  [Авито] пауза после ограничения — пробуем только простой путь")
+    else:
+        _avito_prerotate_ip()   # свежий IP до запроса — главное для мобильного прокси
     # ПЕРВЫМ пробуем рецепт, который работал каждый день целый месяц:
     # простой запрос без cookies. Он дешёвый и часто проходит там, где
     # «умные» запросы с cookies получают 403.
@@ -11049,6 +11480,24 @@ async def _avito_scheduled_fetch_unlocked(
             _avito_diag("после фильтрации", len(parsed))
         elif AVITO_PROVIDER == "webjson":
             _brand_q = brand if brand and brand != "any" else ""
+            # ОРИГИНАЛ из рабочей июльской версии — первым и без обвязки.
+            try:
+                _july = _avito_july_scraper(
+                    region, pages=int(os.getenv("AVITO_PAGES", "5")),
+                    price_min=price_min, price_max=price_max,
+                    sort_by_date=sort_by_date, brand=_brand_q,
+                )
+                if _july:
+                    print(f"[Avito] июльский парсер: {len(_july)} объявлений ✅")
+                    parsed = _july
+                    http = 200
+                    _avito_reset_blocks()
+                    globals()["_AVITO_RATE_LIMIT_UNTIL"] = 0.0
+                    raise _AvitoJulyDone()
+            except _AvitoJulyDone:
+                pass
+            except Exception as _je:
+                print(f"[Avito] июльский парсер: {str(_je)[:80]}")
             # 1) web-JSON с cookies от spfa — стр.1 стабильно отдаёт ~49 объявлений
             # (стр.2+ Авито почти всегда блокирует, поэтому берём ТОЛЬКО первую).
             _allow_buy = _spfa_user_search_active()
