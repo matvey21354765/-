@@ -5984,6 +5984,13 @@ def _avito_html_search(region: str, price_min: int = 0, price_max: int = 99_000_
             print(f"  [Авито HTML {_tag}] стр.{page}: страница получена ({len(text)}б), "
                   f"объявления не распознаны | маркеры: "
                   f"{', '.join(k for k, v in _marks.items() if v) or 'нет'}")
+            if _marks["captcha"] or _marks["firewall"]:
+                # Капча = IP помечен Авито. Меняем IP и делаем длинную паузу:
+                # дальнейшие запросы только укрепляют метку и тратят ротации.
+                print("  [Авито] капча — IP помечен. Меняем IP и ждём 30 мин "
+                      "(нужен «чистый» IP: другой оператор/город или spfa-cookies)")
+                _avito_note_rate_limit(1800)
+                return []
         except Exception as e:
             print(f"  [Авито HTML {_tag}] стр.{page}: {str(e)[:80]}")
     return []
