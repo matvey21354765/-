@@ -290,6 +290,12 @@ class AvitoClient:
 
     def _get_session(self):
         from curl_cffi import requests as cffi_requests
+        # TLS-отпечаток должен совпадать с User-Agent, под который выданы cookies
+        # (spfa отдаёт свой UA). Иначе Авито видит несоответствие → 403/439.
+        want = _avito_impersonate() if "_avito_impersonate" in globals() else self._impersonate
+        if self._session is not None and want != self._impersonate:
+            self.reset_session()          # UA сменился — пересоздаём сессию
+        self._impersonate = want
         if self._session is None:
             self._session = cffi_requests.Session(impersonate=self._impersonate)
         return self._session
@@ -313,15 +319,30 @@ class AvitoClient:
         headers: dict | None = None,
         json_body: dict | None = None,
         timeout: float = 15,
+        cookies: dict | None = None,
     ):
         started = time.monotonic()
         try:
             session = self._get_session()
+            # Cookies от spfa ОБЯЗАТЕЛЬНЫ: без них Авито отдаёт только 403/439.
+            if cookies is None and "_avito_cookies" in globals():
+                try:
+                    cookies = _avito_cookies()
+                except Exception:
+                    cookies = None
+            if cookies:
+                try:
+                    session.cookies.update(cookies)
+                except Exception:
+                    pass
+            _hdrs = dict(headers or {})
+            if "_avito_user_agent" in globals():
+                _hdrs.setdefault("User-Agent", _avito_user_agent())
             response = session.request(
                 method.upper(),
                 url,
                 params=params,
-                headers=headers,
+                headers=_hdrs,
                 json=json_body,
                 timeout=timeout,
                 proxies=self.proxies,
@@ -797,7 +818,8 @@ def _spfa_fetch(unblock: bool = False, allow_buy: bool = False) -> dict | None:
         _spfa_state["buy_count"] = _spfa_buys_today() + 1
         # ВАЖНО: cookies Авито привязаны к User-Agent, под который выданы.
         # Без него (мы слали свой Chrome) Авито отвечает 403/439.
-        _spfa_state.update({"id": res.get("id"), "cookies": res["cookies"],
+        _spfa_state.update({"id": res.get("id"),
+                            "cookies": _normalize_cookies(res["cookies"]),
                             "user_agent": res.get("user_agent") or "", "ts": now})
         _spfa_save_disk()
         print(f"  [spfa] свежие cookies (id={_spfa_state['id']}, "
@@ -808,6 +830,26 @@ def _spfa_fetch(unblock: bool = False, allow_buy: bool = False) -> dict | None:
     _spfa_state["buy_ts"] = now - _SPFA_MIN_BUY_INTERVAL + 120  # повтор через ~2 мин
     print("  [spfa] cookies не получены — повтор через ~2 мин")
     return ck
+
+def _normalize_cookies(raw) -> dict:
+    """spfa может вернуть cookies строкой/списком/словарём — приводим к dict."""
+    if isinstance(raw, dict):
+        return {str(k): str(v) for k, v in raw.items() if k}
+    if isinstance(raw, str):
+        out = {}
+        for part in raw.split(";"):
+            if "=" in part:
+                k, v = part.split("=", 1)
+                out[k.strip()] = v.strip()
+        return out
+    if isinstance(raw, list):
+        out = {}
+        for c in raw:
+            if isinstance(c, dict) and c.get("name"):
+                out[str(c["name"])] = str(c.get("value", ""))
+        return out
+    return {}
+
 
 def _avito_user_agent() -> str:
     """User-Agent, под который spfa выдал текущие cookies. Обязателен: Авито
@@ -5646,9 +5688,9 @@ def _avito_mobile_api_search(region: str, price_min: int = 0, price_max: int = 9
         _pxs = []
         if AVITO_PROXIES and not _proxy_auth_failed:
             _pxs.append(("прокси", _avito_proxies()))
-            if not SPFA_API_KEY:  # ротация ломает cookies spfa
-                _pxs += [("прокси-rot%d" % i, "ROTATE") for i in range(1, 3)]
-        _pxs.append(("напрямую", None))
+            _pxs += [("прокси-rot%d" % i, "ROTATE") for i in range(1, 3)]
+        if not _pxs:
+            _pxs.append(("напрямую", None))
         got = None
         for _url, _prm in variants:
             for _tag, _px in _pxs:
@@ -5657,7 +5699,11 @@ def _avito_mobile_api_search(region: str, price_min: int = 0, price_max: int = 9
                         continue
                     _px = _avito_proxies()
                 try:
-                    r = _req.get(_url, params=_prm, headers=hdrs, timeout=10, proxies=_px or {})
+                    from curl_cffi import requests as _cffi_m
+                    r = _cffi_m.get(_url, params=_prm, headers=hdrs, timeout=10,
+                                    proxies=_px or {},
+                                    cookies=_avito_cookies() or None,
+                                    impersonate=_avito_impersonate())
                     if r.status_code == 200:
                         data = r.json()
                         raw = (_deep_get(data, "result.items") or _deep_get(data, "result.catalog.items")
@@ -5736,7 +5782,10 @@ def _avito_html_search(region: str, price_min: int = 0, price_max: int = 99_000_
     _pxs = []
     if AVITO_PROXIES and not _proxy_auth_failed:
         _pxs.append(("прокси", _avito_proxies()))
-    _pxs.append(("напрямую", None))
+    else:
+        # Прямой запрос с IP сервера Авито блокирует всегда — только если
+        # прокси вообще не настроен.
+        _pxs.append(("напрямую", None))
     for _tag, _px in _pxs:
         try:
             from curl_cffi import requests as _cffi
@@ -5768,6 +5817,10 @@ def _avito_html_search(region: str, price_min: int = 0, price_max: int = 99_000_
                 print(f"  [Авито HTML {_tag}] стр.{page}: HTTP {code} | "
                       f"imp={_imp} ua=…{_ua[-18:]} cookies={len(ck or {})} "
                       f"тело: {_snippet[:200]!r}")
+                if code in (403, 429, 439) and SPFA_API_KEY:
+                    _avito_cookies_refresh_on_block(allow_buy)
+                    ck = _avito_cookies(allow_buy) or ck
+                    _spfa_note_cookie_result(False)
                 continue
             if "firewall" in text[:2000].lower() or len(text) < 5000:
                 print(f"  [Авито HTML {_tag}] стр.{page}: заблокировано ({len(text)}б)")
@@ -5830,7 +5883,8 @@ def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_0
         if AVITO_PROXIES and not _proxy_auth_failed:
             _proxy_order.append(("прокси", _avito_proxies()))
             _proxy_order += [("прокси-rot%d" % i, "ROTATE") for i in range(1, 3)]
-        _proxy_order.append(("напрямую", None))
+        if not _proxy_order:   # прокси не настроен — только тогда напрямую
+            _proxy_order.append(("напрямую", None))
         _got = None
         for _tag, _px in _proxy_order:
             if _px == "ROTATE":
@@ -5838,9 +5892,15 @@ def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_0
                     continue
                 _px = _avito_proxies()
             try:
-                r = _req.get("https://www.avito.ru/web/1/js/items", params=_params,
-                             headers=_hdrs, timeout=20, proxies=_px or {},
-                             cookies=_avito_cookies(allow_buy) or None)
+                # curl_cffi с имперсонацией: обычный requests даёт питоновский
+                # TLS-отпечаток, который Авито банит мгновенно.
+                from curl_cffi import requests as _cffi_json
+                r = _cffi_json.get(
+                    "https://www.avito.ru/web/1/js/items", params=_params,
+                    headers=_hdrs, timeout=20, proxies=_px or {},
+                    cookies=_avito_cookies(allow_buy) or None,
+                    impersonate=_avito_impersonate(),
+                )
                 if r.status_code in (403, 429, 439):
                     _blocked_streak += 1
                     if SPFA_API_KEY:
