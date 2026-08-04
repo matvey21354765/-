@@ -239,12 +239,12 @@ try:
     # Браузерному режиму (playwright) нужно время: он реально грузит страницу.
     # Даём ему до ~100с, но ТОЛЬКО когда Авито не в бане (иначе не ждём вовсе).
     # Для быстрых режимов оставляем 6с, чтобы поиск не тормозил.
-    _WAIT_DEFAULT = "100" if AVITO_PROVIDER == "playwright" else "6"
+    _WAIT_DEFAULT = "100" if AVITO_PROVIDER == "playwright" else "40"
     AVITO_MANUAL_WAIT_SECONDS = max(
         1, min(180, int(os.getenv("AVITO_MANUAL_WAIT_SECONDS", _WAIT_DEFAULT)))
     )
 except (TypeError, ValueError):
-    AVITO_MANUAL_WAIT_SECONDS = 6
+    AVITO_MANUAL_WAIT_SECONDS = 40
 _PROXY_URL_RAW = PROXY_URL
 # Не берём Railway-системный прокси (он не является резидентным)
 if _PROXY_URL_RAW and "__agentproxy" in _PROXY_URL_RAW:
@@ -2908,7 +2908,7 @@ def _autoru_cffi_fetch(region: str, price_min: int, price_max: int,
     # Страница Auto.ru весит ~2.2 МБ: 8 страниц не укладываются в таймаут поиска,
     # и результат не успевал вернуться. Ограничиваем общее время и отдаём то,
     # что успели собрать.
-    _deadline = time.time() + max(8, int(os.getenv("AUTORU_BUDGET_SEC", "20")))
+    _deadline = time.time() + max(8, int(os.getenv("AUTORU_BUDGET_SEC", "35")))
     _all: list[dict] = []
     _seen_u: set[str] = set()
     for _px in _pxs:
@@ -17030,13 +17030,21 @@ async def do_search_for_user(uid: int, reply_to):
     src_keys = [src for src in enabled_sources if src in scraper_map]
     if not src_keys:
         src_keys = list(scraper_map.keys())  # подстраховка: если выбор пуст — все
+    # Таймауты на источник. Авито и Auto.ru отдают многостраничные результаты и
+    # тяжёлые страницы (Auto.ru ~2.2 МБ на страницу), поэтому им нужно больше
+    # времени — иначе распарсенные объявления не успевают попасть в выдачу.
+    # Настраивается переменной SEARCH_TIMEOUT_MULT (по умолчанию 1).
+    try:
+        _tmul = max(1.0, min(4.0, float(os.getenv("SEARCH_TIMEOUT_MULT", "1"))))
+    except (TypeError, ValueError):
+        _tmul = 1.0
     source_timeouts = {
-        "drom": 25,
-        "autoru": 20,
-        "avito": 35,  # включает максимум одну LTE-ротацию и паузу 10с
-        "youla": 15,
-        "vk": 15,
-        "tg": 15,
+        "drom": int(30 * _tmul),
+        "autoru": int(45 * _tmul),   # 8 страниц по ~2.2 МБ
+        "avito": int(75 * _tmul),    # 5 страниц + возможная ротация IP
+        "youla": int(20 * _tmul),
+        "vk": int(20 * _tmul),
+        "tg": int(20 * _tmul),
     }
 
     async def _run_source(src: str):
