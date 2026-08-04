@@ -355,12 +355,27 @@ class AvitoBrowserManager:
         browser = await self.get_browser()
         # Cookies и User-Agent из окружения (AVITO_COOKIE / AVITO_USER_AGENT):
         # браузер стартует с УЖЕ пройденной капчей, как обычная вкладка человека.
-        _ctx_kwargs: dict = {"locale": "ru-RU", "viewport": {"width": 1440, "height": 900}}
+        _ctx_kwargs: dict = {"locale": "ru-RU", "viewport": {"width": 1440, "height": 900},
+                             "timezone_id": "Europe/Moscow"}
+        # Сессия, которую браузер заработал сам (прошёл JS-челлендж), живёт в
+        # файле и переиспользуется — второй заход уже «доверенный».
+        _state_file = os.getenv("AVITO_STATE_FILE", "data/avito_state.json")
+        try:
+            if os.path.exists(_state_file):
+                _ctx_kwargs["storage_state"] = _state_file
+        except Exception:
+            pass
         _ua = os.getenv("AVITO_USER_AGENT", "").strip()
         if _ua:
             _ctx_kwargs["user_agent"] = _ua
         context = await browser.new_context(**_ctx_kwargs)
-        _raw_ck = os.getenv("AVITO_COOKIE", "").strip()
+        # ВАЖНО: cookies из AVITO_COOKIE сняты с ДРУГОГО IP (домашнего). Токен
+        # анти-бота `f` привязан к IP+отпечатку, поэтому чужие cookies только
+        # выдают бота. Браузер должен заработать свои сам, выполнив JS Авито с
+        # IP прокси. Инъекция включается явно: AVITO_INJECT_COOKIES=1.
+        _raw_ck = (os.getenv("AVITO_COOKIE", "").strip()
+                   if os.getenv("AVITO_INJECT_COOKIES", "").strip() in {"1", "true", "yes"}
+                   else "")
         if _raw_ck:
             _cookies = []
             for _part in _raw_ck.split(";"):
@@ -541,7 +556,15 @@ class AvitoBrowserManager:
                         await page.goto("https://www.avito.ru/",
                                         wait_until="domcontentloaded",
                                         timeout=min(20, self.navigation_timeout) * 1000)
-                        await page.wait_for_timeout(1500)
+                        # Даём JS-челленджу Авито отработать и выдать cookie `f`:
+                        # без этой паузы уходим на каталог с «недоделанной» сессией.
+                        await page.wait_for_timeout(4000)
+                        try:
+                            await page.mouse.move(400, 300)
+                            await page.mouse.wheel(0, 600)
+                            await page.wait_for_timeout(1200)
+                        except Exception:
+                            pass
                     except Exception:
                         pass
                     url = self._build_search_url(city, price_min, price_max, query)
@@ -573,6 +596,14 @@ class AvitoBrowserManager:
                         meta["elapsed_ms"] = int((time.time() - started_at) * 1000)
                         return result
 
+                    # Челлендж пройден — сохраняем сессию, чтобы следующий заход
+                    # был «доверенным» и не проходил проверку заново.
+                    try:
+                        _sf = os.getenv("AVITO_STATE_FILE", "data/avito_state.json")
+                        os.makedirs(os.path.dirname(_sf) or ".", exist_ok=True)
+                        await page.context.storage_state(path=_sf)
+                    except Exception as _se:
+                        print(f"  [Авито PW] сессия не сохранена: {str(_se)[:70]}")
                     raw_items = await self._extract_items(page)
                     meta["raw_items_count"] = len(raw_items)
                     items = [self._normalize_item(it) for it in raw_items if self._item_has_url(it)]
