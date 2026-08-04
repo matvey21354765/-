@@ -5877,51 +5877,260 @@ def _avito_mobile_api_search(region: str, price_min: int = 0, price_max: int = 9
     return results
 
 
-def _avito_items_from_initial_data(text: str, today) -> list[dict]:
-    """Достаёт объявления из window.__initialData__ / __NEXT_DATA__ страницы Авито.
+def _avito_balanced_json(s: str, start: int) -> str:
+    """Строка сбалансированного JSON-литерала из s, начиная с s[start]."""
+    if start >= len(s) or s[start] not in "{[":
+        return ""
+    opens, closes = {"{": "}", "[": "]"}, {"}": "{", "]": "["}
+    stack, in_str, esc = [], False, False
+    for i in range(start, min(len(s), start + 4_000_000)):
+        c = s[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            continue
+        if c == '"':
+            in_str = True
+        elif c in opens:
+            stack.append(c)
+        elif c in closes:
+            if not stack or stack[-1] != closes[c]:
+                return ""
+            stack.pop()
+            if not stack:
+                return s[start:i + 1]
+    return ""
 
-    Современный каталог Авито отдаёт данные не в разметке карточек, а в
-    URL-кодированном JSON внутри <script>. Поэтому парсер по data-marker
-    находил 0 объявлений на полностью валидной странице (375КБ).
-    """
+
+def _avito_blobs_from_page(text: str) -> list:
+    """Все JSON-структуры страницы Авито (любой формат хранения данных)."""
     import urllib.parse as _up
+    raws: list[str] = []
+    _VARS = (r'(?:window|self)\.__(?:initialData|APP_STATE|STATE|'
+             r'PRELOADED_STATE|initialState)__')
+    for m in re.finditer(_VARS + r'\s*=\s*(?P<q>["\'])(?P<v>.*?)(?<!\\)(?P=q)', text, re.S):
+        v = m.group("v")
+        raws.append(v)
+        try:
+            raws.append(_up.unquote(v))
+        except Exception:
+            pass
+    for m in re.finditer(_VARS + r'\s*=\s*(?=[\{\[])', text):
+        blob = _avito_balanced_json(text, m.end())
+        if blob:
+            raws.append(blob)
+    for m in re.finditer(r'JSON\.parse\(\s*(?P<q>["\'])(?P<v>.*?)(?<!\\)(?P=q)\s*\)', text, re.S):
+        raws.append(m.group("v"))
+    for m in re.finditer(
+            r'<script[^>]*(?:id="__NEXT_DATA__"|type="application/(?:ld\+)?json")[^>]*>(.*?)</script>',
+            text, re.S):
+        raws.append(m.group(1))
+    for m in re.finditer(r'__next_f\.push\(\s*\[', text):
+        blob = _avito_balanced_json(text, m.end() - 1)
+        if blob:
+            raws.append(blob)
+
+    out, seen = [], set()
+
+    def _try(s, depth=0):
+        if not isinstance(s, str) or depth > 3:
+            return
+        s = s.strip()
+        if len(s) < 2:
+            return
+        key = (len(s), s[:80])
+        if key in seen:
+            return
+        seen.add(key)
+        obj = None
+        for cand in (s, s.replace('\\"', '"').replace("\\\\", "\\")):
+            try:
+                obj = json.loads(cand)
+                break
+            except Exception:
+                continue
+        if obj is None and "%" in s[:200]:
+            try:
+                import urllib.parse as _u2
+                obj = json.loads(_u2.unquote(s))
+            except Exception:
+                obj = None
+        if obj is None:
+            _pos = [p for p in (s.find("{"), s.find("[")) if p >= 0]
+            if _pos:
+                i = min(_pos)
+                if i > 0:
+                    bal = _avito_balanced_json(s, i)
+                    if bal and bal != s:
+                        _try(bal, depth + 1)
+            return
+        if isinstance(obj, str):
+            _try(obj, depth + 1)
+            return
+        out.append(obj)
+        if isinstance(obj, list):
+            for el in obj:
+                if isinstance(el, str) and len(el) > 40 and ("{" in el or "[" in el):
+                    _try(el, depth + 1)
+
+    for r in raws:
+        _try(r)
+    return out
+
+
+# ВНИМАНИЕ: slug/seoPath сюда НЕ входят — из них URL собирается отдельно
+# (нужно добавить регион, раздел и id, иначе получается «/toyota_camry_2015»).
+_AVITO_URL_KEYS = ("urlPath", "url", "itemUrl", "link", "seoUrl", "canonicalUrl",
+                   "shortUrl", "share_url", "shareUrl", "href")
+_AVITO_TITLE_KEYS = ("title", "name", "titleText", "header", "heading")
+_AVITO_ID_KEYS = ("id", "itemId", "item_id", "advertId", "objectId", "adId")
+
+
+def _avito_duck_items(obj, region: str, acc: list, depth: int = 0, seen_ids=None):
+    """Ищет объявления по признакам (id + название + цена), а не по фикс. ключу."""
+    if seen_ids is None:
+        seen_ids = set()
+    if depth > 18 or obj is None:
+        return acc
+    if isinstance(obj, list):
+        for el in obj:
+            _avito_duck_items(el, region, acc, depth + 1, seen_ids)
+        return acc
+    if not isinstance(obj, dict):
+        return acc
+
+    _id = next((obj[k] for k in _AVITO_ID_KEYS
+                if isinstance(obj.get(k), (int, str)) and str(obj.get(k)).isdigit()
+                and len(str(obj.get(k))) >= 6), None)
+    _title = next((obj[k] for k in _AVITO_TITLE_KEYS
+                   if isinstance(obj.get(k), str) and 4 < len(obj[k]) < 250), "")
+    _pint = 0
+    if _id and _title:
+        try:
+            _, _pint = _avito_price_from_item(obj)
+        except Exception:
+            _pint = 0
+    if _id and _title and _pint:
+        u = ""
+        for k in _AVITO_URL_KEYS:
+            v = obj.get(k)
+            if isinstance(v, dict):
+                v = v.get("url") or v.get("path") or v.get("href") or ""
+            if isinstance(v, str) and v and not v.lower().endswith(
+                    (".jpg", ".jpeg", ".png", ".webp", ".svg")):
+                u = v
+                break
+        if u.startswith("http") and "avito.ru" not in u:
+            u = ""
+        if not u:
+            slug = obj.get("slug") or obj.get("seoSlug") or ""
+            if isinstance(slug, str) and slug:
+                slug = slug.strip("/")
+                u = slug if str(_id) in slug else f"{slug}_{_id}"
+                if "/" not in u:
+                    u = f"/{region}/avtomobili/{u}"
+                elif not u.startswith("/"):
+                    u = "/" + u
+            else:
+                u = f"/{region}/avtomobili/avto_{_id}"
+        if not u.startswith(("http", "/")):
+            u = "/" + u
+        key = str(_id)
+        if key not in seen_ids:
+            seen_ids.add(key)
+            it = dict(obj)
+            it["urlPath"] = u
+            it.setdefault("title", _title)
+            acc.append(it)
+        return acc
+
+    for v in obj.values():
+        if isinstance(v, (dict, list)):
+            _avito_duck_items(v, region, acc, depth + 1, seen_ids)
+    return acc
+
+
+def _avito_items_from_raw_text(text: str, today, region: str = "rossiya") -> list[dict]:
+    """Последний рубеж: regex прямо по тексту страницы, без разбора JSON."""
+    out, seen = [], set()
+    for m in re.finditer(r'"(?:id|itemId)"\s*:\s*"?(\d{7,12})"?', text):
+        _id = m.group(1)
+        if _id in seen:
+            continue
+        win = text[m.start():m.start() + 1200]
+        tm = re.search(r'"(?:title|name)"\s*:\s*"([^"\\]{6,200})"', win)
+        pm = re.search(r'"(?:price|value|priceValue)"\s*:\s*"?(\d{5,8})"?', win)
+        if not (tm and pm):
+            continue
+        price = int(pm.group(1))
+        if not (30_000 < price < 99_000_000):
+            continue
+        um = re.search(r'"(?:urlPath|url|slug|seoUrl)"\s*:\s*"(/?[^"\\]{5,200})"', win)
+        path = (um.group(1) if um else f"/{region}/avtomobili/avto_{_id}").replace("\\/", "/")
+        url = path if path.startswith("http") else "https://www.avito.ru/" + path.lstrip("/")
+        if "avito.ru" not in url:
+            continue
+        seen.add(_id)
+        title = tm.group(1)
+        img = re.search(r'https?://(?:img|images)\.avito\.st/[^\s"\'\\]{10,}\.(?:jpg|jpeg|webp|png)', win)
+        out.append({
+            "source": "avito", "title": title,
+            "price": f"{price:,} ₽".replace(",", " "), "url": url,
+            "date": str(today), "_photos": 1 if img else 0,
+            "_days_on_site": 0, "_date_known": False,
+            "description": _avito_desc_from_title(title, 0)[:400], "_desc_synthetic": True,
+            "seller": "", "_photo_url": img.group(0) if img else "",
+            "_price_int": price, "mileage": _extract_mileage(title),
+            "_junk": 0, "_hot_score": 0.0,
+        })
+    if out:
+        print(f"  [rawRegex] аварийно извлечено {len(out)}")
+    return out
+
+
+def _avito_items_from_initial_data(text: str, today) -> list[dict]:
+    """Достаёт объявления из ЛЮБОГО JSON-состояния страницы Авито.
+
+    Современный каталог не содержит ни data-marker, ни urlPath, поэтому ищем
+    объявления по признакам (id + название + цена) во всех JSON-блоках страницы.
+    """
     out: list[dict] = []
     seen_u: set[str] = set()
-    blobs: list[str] = []
-    # 1) window.__initialData__ = "%7B..." (URL-encoded JSON)
-    for m in re.finditer(r'window\.__initialData__\s*=\s*"([^"]+)"', text):
-        try:
-            blobs.append(_up.unquote(m.group(1)))
-        except Exception:
-            continue
-    # 2) __NEXT_DATA__ / прочие JSON-блоки
-    for m in re.finditer(r'<script[^>]*id="__NEXT_DATA__"[^>]*>(.*?)</script>', text, re.S):
-        blobs.append(m.group(1))
-    for blob in blobs:
-        try:
-            data = json.loads(blob)
-        except Exception:
-            # внутри может лежать вложенный JSON-строкой
+    m_reg = re.search(r'avito\.ru/([a-z_\-]+)/avtomobili', text)
+    region = m_reg.group(1) if m_reg else "rossiya"
+    raw_items: list[dict] = []
+    try:
+        for data in _avito_blobs_from_page(text):
             try:
-                data = json.loads(json.loads(blob)) if blob.strip().startswith('"') else None
+                for it in _avito_find_items_in_json(data):
+                    if isinstance(it, dict):
+                        raw_items.append(it)
             except Exception:
-                data = None
-        if not data:
-            continue
+                pass
+            try:
+                _avito_duck_items(data, region, raw_items)
+            except Exception:
+                pass
+    except Exception as _e:
+        print(f"  [initialData] ошибка разбора: {str(_e)[:80]}")
+    for it in raw_items:
         try:
-            raw = _avito_find_items_in_json(data)
-        except Exception:
-            raw = []
-        for it in raw:
-            if not isinstance(it, dict):
-                continue
             item = _avito_item_from_json(it, today)
-            if not item:
-                continue
-            u = item.get("url", "")
-            if u and u not in seen_u:
-                seen_u.add(u)
-                out.append(item)
+        except Exception:
+            item = None
+        if not item:
+            continue
+        u = item.get("url", "")
+        if u and u not in seen_u:
+            seen_u.add(u)
+            out.append(item)
+    if not out:
+        out = _avito_items_from_raw_text(text, today, region)
+    print(f"  [initialData] объявлений: {len(out)}")
     return out
 
 
