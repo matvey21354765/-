@@ -5902,6 +5902,83 @@ def _avito_items_from_initial_data(text: str, today) -> list[dict]:
     return out
 
 
+def _avito_via_search_engines(region: str, price_min: int = 0,
+                             price_max: int = 99_000_000, brand: str = "",
+                             limit: int = 40) -> list[dict]:
+    """Объявления Авито из выдачи поисковиков — БЕЗ обращения к avito.ru.
+
+    Антибот Авито здесь не участвует: страницы уже проиндексированы DuckDuckGo /
+    Mojeek / Brave. Данных меньше (нет фото), но ссылка, заголовок и часто цена
+    есть — этого достаточно, чтобы объявление попало в выдачу и в анализ рынка.
+    """
+    try:
+        from curl_cffi import requests as _cffi
+    except ImportError:
+        return []
+    today = datetime.date.today()
+    out: list[dict] = []
+    seen: set[str] = set()
+    _px = _avito_proxies() if AVITO_PROXIES and not _proxy_auth_failed else None
+    _hdrs = {"User-Agent": _avito_user_agent(),
+             "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+             "Accept-Language": "ru-RU,ru;q=0.9"}
+    _brands = [brand] if brand and brand != "any" else [
+        "", "лада", "ваз", "toyota", "hyundai", "kia", "renault", "nissan",
+        "ford", "chevrolet", "volkswagen", "daewoo", "opel", "mazda",
+    ]
+    _price_hint = ""
+    if price_max < 99_000_000:
+        _price_hint = f" до {price_max // 1000} тыс"
+    _engines = [
+        ("https://html.duckduckgo.com/html/", lambda q: {"q": q, "kl": "ru-ru"}),
+        ("https://lite.duckduckgo.com/lite/", lambda q: {"q": q, "kl": "ru-ru"}),
+        ("https://www.mojeek.com/search", lambda q: {"q": q}),
+    ]
+    _link_re = re.compile(r'https?://(?:www\.)?avito\.ru/[a-z0-9_\-]+/avtomobili/[^\s"\'<>&]+')
+    _deadline = time.time() + 30
+    for _b in _brands:
+        if len(out) >= limit or time.time() > _deadline:
+            break
+        q = f"site:avito.ru/{region}/avtomobili {_b}{_price_hint}".strip()
+        html = ""
+        for _url, _mk in _engines:
+            try:
+                r = _cffi.get(_url, params=_mk(q), headers=_hdrs, timeout=10,
+                              proxies=_px or {}, impersonate=_avito_impersonate())
+                if r.status_code == 200 and len(r.text) > 1500:
+                    html = r.text
+                    break
+            except Exception:
+                continue
+        if not html:
+            continue
+        for m in _link_re.finditer(html):
+            _u = m.group(0).split("?")[0].rstrip("/")
+            if _u in seen:
+                continue
+            seen.add(_u)
+            # Заголовок из slug: .../toyota_camry_2015_1234567890
+            _slug = _u.rsplit("/", 1)[-1]
+            _slug = re.sub(r"_\d{6,}$", "", _slug)
+            _title = _slug.replace("_", " ").strip().title()
+            if len(_title) < 4:
+                continue
+            _item = {
+                "source": "avito", "title": _title, "url": _u,
+                "price": "цена не указана", "_price_int": 0,
+                "date": str(today), "_days_on_site": 0, "_date_known": False,
+                "description": "", "_desc_synthetic": True,
+                "seller": "", "_photo_url": "", "_photos": 0, "mileage": 0,
+            }
+            _item["_hot_score"] = hot_score(_item)
+            out.append(_item)
+            if len(out) >= limit:
+                break
+        time.sleep(random.uniform(0.6, 1.2))
+    print(f"  [Авито поисковики] найдено {len(out)} объявлений (без обращения к avito.ru)")
+    return out
+
+
 def _avito_html_search(region: str, price_min: int = 0, price_max: int = 99_000_000,
                        sort_by_date: bool = False, brand: str = "", page: int = 1,
                        allow_buy: bool = False) -> list[dict]:
@@ -6184,6 +6261,16 @@ def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_0
     print(f"  [Авито webJSON] итого {len(results)}")
     if not results and SPFA_API_KEY:
         _spfa_note_cookie_result(False)
+    if not results:
+        # Все прямые пути закрыты антиботом — берём объявления из выдачи
+        # поисковиков (avito.ru при этом не трогаем вообще).
+        try:
+            results = _avito_via_search_engines(
+                region, price_min=price_min, price_max=price_max,
+                brand=brand if brand and brand != "any" else "",
+            )
+        except Exception as _se:
+            print(f"  [Авито поисковики] ошибка: {str(_se)[:80]}")
     return results
 
 
