@@ -702,6 +702,29 @@ AVITO_MANUAL_UA = os.getenv("AVITO_USER_AGENT", "").strip()
 # иначе планировщик и поиски продолжают долбить тот же IP и держат его в бане.
 _AVITO_RATE_LIMIT_UNTIL = 0.0
 
+# Мобильный прокси: меняем IP ЗАРАНЕЕ, перед обращением к Авито. Так каждый
+# заход идёт со свежего адреса и бан не успевает накопиться (после бана менять
+# поздно — метка уже стоит и держится).
+_AVITO_LAST_PREROTATE = 0.0
+_AVITO_LAST_WARMUP = 0.0
+try:
+    AVITO_PREROTATE_SEC = max(0, int(os.getenv("AVITO_PREROTATE_SEC", "150")))
+except (TypeError, ValueError):
+    AVITO_PREROTATE_SEC = 150
+
+def _avito_prerotate_ip() -> None:
+    """Свежий IP перед запросом к Авито (не чаще раза в AVITO_PREROTATE_SEC)."""
+    global _AVITO_LAST_PREROTATE
+    if not AVITO_PROXY_ROTATE_URL or AVITO_PREROTATE_SEC <= 0:
+        return
+    now = time.time()
+    if now - _AVITO_LAST_PREROTATE < AVITO_PREROTATE_SEC:
+        return
+    _AVITO_LAST_PREROTATE = now
+    if _rotate_proxy_ip(min_interval=0):
+        print("  [Авито] взят свежий IP перед запросом")
+
+
 def _avito_rate_limited() -> bool:
     return time.time() < _AVITO_RATE_LIMIT_UNTIL
 
@@ -6055,11 +6078,16 @@ def _avito_html_search(region: str, price_min: int = 0, price_max: int = 99_000_
             try:
                 if ck:
                     _sess.cookies.update(ck)
-                try:
-                    _sess.get("https://m.avito.ru/" if _is_mobile else "https://www.avito.ru/",
-                              headers=hdrs, proxies=_px or {}, timeout=8)
-                except Exception:
-                    pass
+                # Прогрев главной нужен только на «свежей» сессии: он стоит
+                # ~0.3 МБ трафика, а в мониторинге запросы идут постоянно.
+                global _AVITO_LAST_WARMUP
+                if time.time() - _AVITO_LAST_WARMUP > 900:
+                    _AVITO_LAST_WARMUP = time.time()
+                    try:
+                        _sess.get("https://m.avito.ru/" if _is_mobile else "https://www.avito.ru/",
+                                  headers=hdrs, proxies=_px or {}, timeout=8)
+                    except Exception:
+                        pass
                 r = _sess.get(url, params=params, headers=hdrs,
                               proxies=_px or {}, timeout=10)
             finally:
@@ -6078,7 +6106,7 @@ def _avito_html_search(region: str, price_min: int = 0, price_max: int = 99_000_
                       f"стр.{page}: HTTP {code} | imp={_imp} cookies={len(ck or {})} "
                       f"тело: {_snippet[:160]!r}")
                 if "IP-адреса" in text[:2000] or "too-many-requests" in text[:2000]:
-                    _avito_note_rate_limit(600)
+                    _avito_note_rate_limit(90 if AVITO_PROXY_ROTATE_URL else 600)
                 if code in (403, 429, 439) and SPFA_API_KEY:
                     _avito_cookies_refresh_on_block(allow_buy)
                     ck = _avito_cookies(allow_buy) or ck
@@ -6113,9 +6141,9 @@ def _avito_html_search(region: str, price_min: int = 0, price_max: int = 99_000_
             if _marks["captcha"] or _marks["firewall"]:
                 # Капча = IP помечен Авито. Меняем IP и делаем длинную паузу:
                 # дальнейшие запросы только укрепляют метку и тратят ротации.
-                print("  [Авито] капча — IP помечен. Меняем IP и ждём 30 мин "
-                      "(нужен «чистый» IP: другой оператор/город или spfa-cookies)")
-                _avito_note_rate_limit(1800)
+                print("  [Авито] капча — меняем IP" if AVITO_PROXY_ROTATE_URL
+                      else "  [Авито] капча — IP помечен, нужен чистый IP/spfa")
+                _avito_note_rate_limit(120 if AVITO_PROXY_ROTATE_URL else 1800)
                 return []
         except Exception as e:
             print(f"  [Авито HTML {_tag}] стр.{page}: {str(e)[:80]}")
@@ -6137,6 +6165,7 @@ def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_0
     if _avito_rate_limited():
         print("  [Авито] IP ещё в паузе после ограничения — пропускаем")
         return []
+    _avito_prerotate_ip()   # свежий IP до запроса — главное для мобильного прокси
     if SPFA_API_KEY and not _spfa_state.get("cookies") and allow_buy:
         _avito_cookies(allow_buy=True)  # пробуем получить cookies под живой поиск
     today = datetime.date.today()
@@ -6196,7 +6225,9 @@ def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_0
                     _ck_now = _avito_cookies(allow_buy) or {}
                     _body = re.sub(r"\s+", " ", (r.text or "")[:200]).strip()
                     if "IP-адреса" in _body or "too-many-requests" in _body:
-                        _avito_note_rate_limit(600)
+                        # На мобильном прокси бан снимается сменой IP, поэтому
+                        # длинная пауза не нужна — меняем адрес и продолжаем.
+                        _avito_note_rate_limit(90 if AVITO_PROXY_ROTATE_URL else 600)
                     print(f"  [Авито webJSON {_tag}] стр.{p}: HTTP {r.status_code} | "
                           f"cookies={len(_ck_now)} ua=…{_avito_user_agent()[-18:]} "
                           f"тело: {_body[:150]!r}")
