@@ -756,6 +756,21 @@ def _spfa_buys_today() -> int:
         _spfa_state["buy_count"] = 0
     return int(_spfa_state.get("buy_count") or 0)
 
+def _spfa_note_cookie_result(ok: bool) -> None:
+    """Отмечает, помогли ли купленные cookies. Если подряд не помогают —
+    включаем стоп-кран: покупать бесполезно, только тратим баланс."""
+    if ok:
+        _spfa_state["fail_streak"] = 0
+        _spfa_state["cooldown_until"] = 0
+        return
+    n = int(_spfa_state.get("fail_streak") or 0) + 1
+    _spfa_state["fail_streak"] = n
+    if n >= 3:
+        _spfa_state["cooldown_until"] = time.time() + 3600  # пауза на час
+        print("  [spfa] ⛔ купленные cookies не помогают 3 раза подряд — "
+              "покупки приостановлены на 1 час (баланс не тратим)")
+
+
 def _spfa_fetch(unblock: bool = False, allow_buy: bool = False) -> dict | None:
     """Покупает свежие cookies Авито через spfa.ru.
     allow_buy=False (по умолчанию) — НЕ тратим деньги, отдаём уже купленные."""
@@ -765,6 +780,8 @@ def _spfa_fetch(unblock: bool = False, allow_buy: bool = False) -> dict | None:
     if not allow_buy:
         return ck  # фоновые задачи используют существующие cookies, не покупают
     now = time.time()
+    if now < float(_spfa_state.get("cooldown_until") or 0):
+        return ck  # стоп-кран: недавно купленные cookies не работали
     if _spfa_buys_today() >= SPFA_MAX_BUYS_PER_DAY:
         print(f"  [spfa] дневной лимит покупок ({SPFA_MAX_BUYS_PER_DAY}) исчерпан — "
               f"работаем на текущих cookies")
@@ -5714,6 +5731,7 @@ def _avito_html_search(region: str, price_min: int = 0, price_max: int = 99_000_
             items = _parse_avito_html(text, region, today)
             if items:
                 print(f"  [Авито HTML {_tag}] стр.{page}: {len(items)} объявлений ✅")
+                _spfa_note_cookie_result(True)
                 return items
             print(f"  [Авито HTML {_tag}] стр.{page}: страница получена ({len(text)}б), "
                   f"но объявления не распознаны")
@@ -5800,6 +5818,7 @@ def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_0
                     print(f"  [Авито webJSON {_tag}] стр.{p}: firewall → cookies+ротация")
                     continue
                 _got = data
+                _spfa_note_cookie_result(True)
                 break
             except Exception as e:
                 print(f"  [Авито webJSON {_tag}] стр.{p}: {str(e)[:70]}")
@@ -5841,6 +5860,8 @@ def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_0
         if _added == 0:
             break
     print(f"  [Авито webJSON] итого {len(results)}")
+    if not results and SPFA_API_KEY:
+        _spfa_note_cookie_result(False)
     return results
 
 
