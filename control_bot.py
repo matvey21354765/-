@@ -6363,7 +6363,10 @@ def _avito_duck_items(obj, region: str, acc: list, depth: int = 0, seen_ids=None
             _, _pint = _avito_price_from_item(obj)
         except Exception:
             _pint = 0
-    if _id and _title and _pint:
+    # Цену НЕ требуем: в новом формате она лежит в отдельной структуре, а
+    # объявление однозначно опознаётся по id + названию (+ ссылке). Цену
+    # дотянем позже при показе карточки.
+    if _id and _title:
         u = ""
         for k in _AVITO_URL_KEYS:
             v = obj.get(k)
@@ -6452,8 +6455,19 @@ def _avito_items_from_initial_data(text: str, today) -> list[dict]:
     m_reg = re.search(r'avito\.ru/([a-z_\-]+)/avtomobili', text)
     region = m_reg.group(1) if m_reg else "rossiya"
     raw_items: list[dict] = []
+    _blobs = []
     try:
-        for data in _avito_blobs_from_page(text):
+        _blobs = _avito_blobs_from_page(text)
+        print(f"  [initialData] JSON-блоков найдено: {len(_blobs)}")
+        for _b in _blobs[:3]:
+            if isinstance(_b, dict):
+                print(f"  [initialData] ключи блока: {list(_b.keys())[:12]}")
+            elif isinstance(_b, list):
+                print(f"  [initialData] блок-массив, элементов: {len(_b)}")
+    except Exception as _be:
+        print(f"  [initialData] сбор блоков: {str(_be)[:70]}")
+    try:
+        for data in _blobs:
             try:
                 for it in _avito_find_items_in_json(data):
                     if isinstance(it, dict):
@@ -7468,12 +7482,17 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
 
         price_str, price_int = _avito_price_from_item(it)
 
-        # Объявление без цены — почти всегда дилерский шоурум-листинг ("цена по запросу"),
-        # частники на Авито всегда указывают цену. Отбрасываем сразу, чтобы не показывать
-        # карточки с "—" вместо цены.
+        # Обычно объявление без цены — дилерский шоурум-листинг, его отбрасываем.
+        # НО в новом формате каталога цена лежит отдельно от карточки, поэтому
+        # пробуем достать её из заголовка ("…, 450 000 ₽"), и только если и там
+        # нет — отбрасываем.
         if not price_int:
-            print(f"  [item] DROPPED (no price): {title[:30]!r}")
-            return None
+            _pt = parse_price(title)
+            if _pt and 10_000 <= _pt <= 99_000_000:
+                price_int = _pt
+                price_str = f"{_pt:,} ₽".replace(",", " ")
+            else:
+                return None
 
         mileage = 0
         for param in (it.get("params") or it.get("parameters") or []):
