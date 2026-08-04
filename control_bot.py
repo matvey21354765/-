@@ -706,6 +706,10 @@ _AVITO_RATE_LIMIT_UNTIL = 0.0
 # заход идёт со свежего адреса и бан не успевает накопиться (после бана менять
 # поздно — метка уже стоит и держится).
 _AVITO_LAST_PREROTATE = 0.0
+# Замер сообщества (2026-07): выгоревшие cookies не просто бесполезны — они
+# ПОРТЯТ запрос, который без них проходит (без кук 200, с ними 403). Поэтому
+# при блокировке сначала пробуем БЕЗ cookies и, если помогло, дальше не шлём.
+_AVITO_SKIP_COOKIES = False
 _AVITO_LAST_WARMUP = 0.0
 try:
     AVITO_PREROTATE_SEC = max(0, int(os.getenv("AVITO_PREROTATE_SEC", "150")))
@@ -1099,6 +1103,8 @@ def _avito_cookies(allow_buy: bool = False) -> dict | None:
     Приоритет: свои cookies из переменной AVITO_COOKIE (бесплатно, не зависят
     от spfa), затем купленные у spfa. Покупка — только при allow_buy=True.
     """
+    if _AVITO_SKIP_COOKIES:
+        return None   # проверено: без cookies Авито пускает, с ними — блокирует
     # ПРИОРИТЕТ — cookies от spfa: они получены на их ферме с пройденной капчей
     # и подходят к любому IP. Ручные (AVITO_COOKIE) сняты с домашнего IP, поэтому
     # используются только когда spfa недоступен.
@@ -5928,6 +5934,18 @@ def _avito_mobile_headers() -> dict:
     }
 
 
+def _avito_strip_ua(hdrs: dict) -> dict:
+    """Без cookies свой User-Agent НЕ навязываем: curl_cffi через impersonate
+    уже ставит UA/sec-ch-ua/платформу, согласованные с TLS-отпечатком. Ручной UA
+    поверх профиля — противоречие, которое антибот читает как автоматизацию."""
+    if not _AVITO_SKIP_COOKIES:
+        return hdrs
+    out = {k: v for k, v in (hdrs or {}).items()
+           if k.lower() not in ("user-agent", "sec-ch-ua", "sec-ch-ua-platform",
+                                "sec-ch-ua-mobile")}
+    return out
+
+
 def _avito_web_xhr_headers(referer: str) -> dict:
     """Заголовки XHR-запроса к внутреннему JSON каталога.
 
@@ -6647,7 +6665,7 @@ def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_0
                 _avito_pace()
                 r = _cffi_json.get(
                     _ep, params=_params,
-                    headers=_hdrs, timeout=8, proxies=_px or {},
+                    headers=_avito_strip_ua(_hdrs), timeout=8, proxies=_px or {},
                     cookies=_avito_cookies(allow_buy) or None,
                     impersonate=_avito_impersonate(),
                 )
@@ -6655,6 +6673,22 @@ def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_0
                 if r.status_code in (404, 410):
                     # Это поколение API снято — молча пробуем следующее.
                     continue
+                # САМОЕ ДЕШЁВОЕ ЛЕКАРСТВО: повторить БЕЗ cookies. Выгоревшие
+                # cookies сами вызывают 403 — запрос без них часто проходит.
+                if (r.status_code in (403, 429, 439) and not _AVITO_SKIP_COOKIES
+                        and _avito_cookies(allow_buy)):
+                    try:
+                        r2 = _cffi_json.get(
+                            _ep, params=_params, headers=_avito_strip_ua(_hdrs),
+                            timeout=8, proxies=_px or {}, cookies=None,
+                            impersonate=_avito_impersonate(),
+                        )
+                        if r2.status_code == 200:
+                            globals()["_AVITO_SKIP_COOKIES"] = True
+                            print("  [Авито] прошло БЕЗ cookies — дальше не прикладываю их")
+                            r = r2
+                    except Exception:
+                        pass
                 if r.status_code in (403, 429, 439):
                     _blocked_streak += 1
                     if SPFA_API_KEY:
@@ -6662,9 +6696,14 @@ def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_0
                     _ck_now = _avito_cookies(allow_buy) or {}
                     _body = re.sub(r"\s+", " ", (r.text or "")[:200]).strip()
                     if "IP-адреса" in _body or "too-many-requests" in _body:
-                        # На мобильном прокси бан снимается сменой IP, поэтому
-                        # длинная пауза не нужна — меняем адрес и продолжаем.
-                        _avito_note_rate_limit(90 if AVITO_PROXY_ROTATE_URL else 600)
+                        # 403 = бан комбинации IP+cookies: СОН его не снимает,
+                        # лечит смена комбинации. Пауза нужна только при 429.
+                        if r.status_code == 429:
+                            _avito_note_rate_limit(90 if AVITO_PROXY_ROTATE_URL else 600)
+                        elif AVITO_PROXY_ROTATE_URL:
+                            _rotate_proxy_ip(min_interval=0)   # сразу свежий IP
+                        else:
+                            _avito_note_rate_limit(600)
                     print(f"  [Авито webJSON {_tag}] стр.{p}: HTTP {r.status_code} | "
                           f"cookies={len(_ck_now)} ua=…{_avito_user_agent()[-18:]} "
                           f"тело: {_body[:150]!r}")
