@@ -686,6 +686,11 @@ else:
 # Ключ берём из окружения (SPFA_API_KEY). Сервис поддерживает cookies до 12ч;
 # при блокировке дергаем /unblock/, чтобы обновить их без нового покупки.
 SPFA_API_KEY = os.getenv("SPFA_API_KEY", "").strip()
+# Свои cookies Авито (из браузера) — работает БЕЗ spfa и бесплатно.
+# Формат: строка вида "f=...; ft=...; _avisc=..." (скопировать из DevTools).
+# Вместе с ними желательно задать AVITO_USER_AGENT — тот же, что в браузере.
+AVITO_MANUAL_COOKIE = os.getenv("AVITO_COOKIE", "").strip()
+AVITO_MANUAL_UA = os.getenv("AVITO_USER_AGENT", "").strip()
 _SPFA_BASE = "https://spfa.ru/api"
 _SPFA_COOKIE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".spfa_cookies.json")
 _spfa_state = {"id": None, "cookies": None, "ts": 0.0}
@@ -904,7 +909,7 @@ def _normalize_cookies(raw) -> dict:
 def _avito_user_agent() -> str:
     """User-Agent, под который spfa выдал текущие cookies. Обязателен: Авито
     сверяет UA с фингерпринтом cookies и иначе отдаёт 403/439."""
-    return (_spfa_state.get("user_agent") or
+    return (AVITO_MANUAL_UA or _spfa_state.get("user_agent") or
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
@@ -922,8 +927,15 @@ def _avito_impersonate() -> str:
 
 
 def _avito_cookies(allow_buy: bool = False) -> dict | None:
-    """Действующие cookies Авито. Покупаем новые ТОЛЬКО при allow_buy=True
-    (реальный пользовательский поиск) и если текущие пусты/старше 11 часов."""
+    """Действующие cookies Авито.
+
+    Приоритет: свои cookies из переменной AVITO_COOKIE (бесплатно, не зависят
+    от spfa), затем купленные у spfa. Покупка — только при allow_buy=True.
+    """
+    if AVITO_MANUAL_COOKIE:
+        _mc = _normalize_cookies(AVITO_MANUAL_COOKIE)
+        if _mc:
+            return _mc
     if not SPFA_API_KEY:
         return None
     ck = _spfa_state.get("cookies")
@@ -17998,7 +18010,11 @@ async def main():
         print(f"  [main] _load_price_history: {e}")
     try:
         _spfa_load_disk()
-        if SPFA_API_KEY:
+        if AVITO_MANUAL_COOKIE:
+            _n = len(_normalize_cookies(AVITO_MANUAL_COOKIE))
+            print(f"  [Авито] свои cookies из AVITO_COOKIE: {_n} шт "
+                  f"(spfa не нужен){' + свой UA' if AVITO_MANUAL_UA else ''}")
+        elif SPFA_API_KEY:
             print(f"  [spfa] обход блокировок Авито ВКЛЮЧЁН (ключ задан)")
             # Покупаем cookies на старте, если их нет (0.5₽ раз в 12ч) — иначе
             # первый же поиск Авито упрётся в 403/439.
