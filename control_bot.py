@@ -10190,6 +10190,8 @@ async def _avito_scheduled_fetch_unlocked(
             )
             if pw_result.get("error"):
                 error = pw_result["error"]
+                print(f"=== AVITO РЕЗУЛЬТАТ: playwright ОШИБКА={error} регион={region} ===",
+                      flush=True)
                 # Браузер не смог выйти через прокси (или упёрся в капчу) —
                 # пробуем обычный путь с cookies, чтобы Авито не терялся совсем.
                 try:
@@ -10277,6 +10279,12 @@ async def _avito_scheduled_fetch_unlocked(
                 f"Неизвестный AVITO_PROVIDER={AVITO_PROVIDER!r}"
             )
 
+        # Одна заметная строка с итогом — её легко найти поиском в логах Railway.
+        try:
+            print(f"=== AVITO РЕЗУЛЬТАТ: провайдер={AVITO_PROVIDER} http={http} "
+                  f"объявлений={len(parsed)} регион={region} ===", flush=True)
+        except Exception:
+            pass
         _AVITO_LAST_DIAG["http"] = http
         if http in (403, 429):
             state = _AVITO_PRODUCTION_STATE.record_block(http, now=now)
