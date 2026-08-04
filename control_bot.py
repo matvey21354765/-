@@ -727,8 +727,12 @@ def _avito_note_block() -> bool:
     global _AVITO_BLOCK_STREAK
     _AVITO_BLOCK_STREAK += 1
     if _AVITO_BLOCK_STREAK >= AVITO_MAX_BLOCKS:
-        print(f"  [Авито] {_AVITO_BLOCK_STREAK} блокировок подряд — "
-              f"прекращаю попытки (подсеть забанена, перебор бессмысленен)")
+        # Подсети нужно ДАТЬ ОСТЫТЬ: репутация восстанавливается только когда
+        # запросы прекращаются. Продолжать перебор = держать бан бесконечно.
+        _cool = max(300, int(os.getenv("AVITO_SUBNET_COOLDOWN_SEC", "1800")))
+        _avito_note_rate_limit(_cool)
+        print(f"  [Авито] {_AVITO_BLOCK_STREAK} блокировок подряд — пауза "
+              f"{_cool // 60} мин, чтобы подсеть восстановила репутацию")
         return True
     return False
 
