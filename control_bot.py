@@ -5913,7 +5913,13 @@ def _avito_html_search(region: str, price_min: int = 0, price_max: int = 99_000_
     """
     today = datetime.date.today()
     _brand_path = f"/{brand}" if brand and brand != "any" else ""
-    url = f"https://www.avito.ru/{region}/avtomobili{_brand_path}"
+    # Пробуем НЕСКОЛЬКО точек входа за один заход: мобильная версия обычно
+    # защищена слабее десктопной, у неё другой набор проверок.
+    _urls = [
+        f"https://m.avito.ru/{region}/avtomobili{_brand_path}",
+        f"https://www.avito.ru/{region}/avtomobili{_brand_path}",
+    ]
+    url = _urls[0]
     params: dict = {"cd": 1, "radius": 200, "p": page}
     if price_min > 0:
         params["pmin"] = price_min
@@ -5948,19 +5954,33 @@ def _avito_html_search(region: str, price_min: int = 0, price_max: int = 99_000_
         # Прямой запрос с IP сервера Авито блокирует всегда — только если
         # прокси вообще не настроен.
         _pxs.append(("напрямую", None))
-    for _tag, _px in _pxs:
+    for _entry_url in _urls:
+      url = _entry_url
+      for _tag, _px in _pxs:
         try:
             from curl_cffi import requests as _cffi
             _imp = _avito_impersonate()
             # Браузер сначала открывает главную (получает/освежает сессию),
             # и только потом каталог. Без этого Авито видит «голый» запрос.
+            _is_mobile = url.startswith("https://m.")
+            if _is_mobile:
+                # Мобильной версии нужен мобильный профиль целиком, иначе
+                # несоответствие UA/площадки — сигнал бота.
+                _imp = "chrome131_android"
+                hdrs = dict(hdrs)
+                hdrs["User-Agent"] = (
+                    "Mozilla/5.0 (Linux; Android 13; SM-A536B) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36")
+                hdrs["sec-ch-ua-mobile"] = "?1"
+                hdrs["sec-ch-ua-platform"] = '"Android"'
+                hdrs["Referer"] = "https://m.avito.ru/"
             _sess = _cffi.Session(impersonate=_imp)
             try:
                 if ck:
                     _sess.cookies.update(ck)
                 try:
-                    _sess.get("https://www.avito.ru/", headers=hdrs,
-                              proxies=_px or {}, timeout=8)
+                    _sess.get("https://m.avito.ru/" if _is_mobile else "https://www.avito.ru/",
+                              headers=hdrs, proxies=_px or {}, timeout=8)
                 except Exception:
                     pass
                 r = _sess.get(url, params=params, headers=hdrs,
@@ -5976,9 +5996,10 @@ def _avito_html_search(region: str, price_min: int = 0, price_max: int = 99_000_
                 # Диагностика: Авито в теле 403 обычно пишет причину
                 # (firewall/captcha/ip). Без неё чинить вслепую невозможно.
                 _snippet = re.sub(r"\s+", " ", text[:300]).strip()
-                print(f"  [Авито HTML {_tag}] стр.{page}: HTTP {code} | "
-                      f"imp={_imp} ua=…{_ua[-18:]} cookies={len(ck or {})} "
-                      f"тело: {_snippet[:200]!r}")
+                print(f"  [Авито HTML {_tag}] "
+                      f"{'m.avito' if url.startswith('https://m.') else 'www'} "
+                      f"стр.{page}: HTTP {code} | imp={_imp} cookies={len(ck or {})} "
+                      f"тело: {_snippet[:160]!r}")
                 if "IP-адреса" in text[:2000] or "too-many-requests" in text[:2000]:
                     _avito_note_rate_limit(600)
                 if code in (403, 429, 439) and SPFA_API_KEY:
@@ -5995,7 +6016,8 @@ def _avito_html_search(region: str, price_min: int = 0, price_max: int = 99_000_
                 if items:
                     print(f"  [Авито HTML {_tag}] стр.{page}: разобрано из __initialData__")
             if items:
-                print(f"  [Авито HTML {_tag}] стр.{page}: {len(items)} объявлений ✅")
+                print(f"  [Авито HTML {_tag}] {'m.avito' if url.startswith('https://m.') else 'www'} "
+                      f"стр.{page}: {len(items)} объявлений ✅")
                 _avito_absorb_cookies(r)
                 _spfa_note_cookie_result(True)
                 return items
