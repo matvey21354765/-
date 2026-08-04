@@ -9577,7 +9577,23 @@ def _avito_stat_text(status: dict, count: int) -> str:
         return "🔴 Avito временно ограничил доступ"
     if count:
         return f"🔴 Avito: {count}"
-    return "🔴 Avito: 0"
+    # Показываем ПРИЧИНУ прямо в боте, чтобы не искать её в логах.
+    _reasons = {
+        "captcha": "капча",
+        "blocked": "заблокирован",
+        "proxy_connect_forbidden": "прокси отклонил",
+        "proxy_auth": "ошибка прокси",
+        "no_cookies": "нет cookies",
+        "timeout": "таймаут",
+        "network_error": "сеть",
+        "parse_error": "не распознан ответ",
+    }
+    _why = _reasons.get(str(err or ""), "")
+    if not _why:
+        _why = _reasons.get(str(_AVITO_LAST_DIAG.get("reason") or "")[:40], "")
+    if not _why and _avito_rate_limited():
+        _why = "IP ограничен, пауза"
+    return f"🔴 Avito: 0 ({_why})" if _why else "🔴 Avito: 0"
 
 
 def check_avito_transport_health() -> dict:
@@ -10192,6 +10208,10 @@ async def _avito_scheduled_fetch_unlocked(
                 error = pw_result["error"]
                 print(f"=== AVITO РЕЗУЛЬТАТ: playwright ОШИБКА={error} регион={region} ===",
                       flush=True)
+                _AVITO_LAST_DIAG["reason"] = error
+                with _AVITO_SCHEDULE_LOCK:
+                    entry["error"] = error
+                    _AVITO_STATUS["error"] = error
                 # Браузер не смог выйти через прокси (или упёрся в капчу) —
                 # пробуем обычный путь с cookies, чтобы Авито не терялся совсем.
                 try:
