@@ -703,7 +703,7 @@ def _spfa_request(path: str, payload: dict):
     try:
         from curl_cffi import requests as _cffi
         r = _cffi.post(f"{_SPFA_BASE}{path}", json=payload, headers=hdrs,
-                       timeout=12, proxies=_px or {}, impersonate="chrome124")
+                       timeout=30, proxies=_px or {}, impersonate="chrome124")
         if r.status_code in (200, 202):
             return r.json()
         print(f"  [spfa] {path} curl_cffi: HTTP {r.status_code}")
@@ -713,7 +713,7 @@ def _spfa_request(path: str, payload: dict):
     try:
         import requests as _rq
         r = _rq.post(f"{_SPFA_BASE}{path}", json=payload, headers=hdrs,
-                     timeout=12, proxies=_px or {})
+                     timeout=30, proxies=_px or {})
         if r.status_code in (200, 202):
             return r.json()
         print(f"  [spfa] {path} requests: HTTP {r.status_code} {r.text[:100]}")
@@ -813,6 +813,9 @@ def _avito_cookies_refresh_on_block(allow_buy: bool = False) -> dict | None:
         return ck
     if not allow_buy:
         return ck
+    # Блок при живом поиске: cookies действительно мертвы → берём свежие, даже
+    # если 3-часовой интервал ещё не истёк (0.5₽ дешевле, чем пустая выдача).
+    _spfa_state["buy_ts"] = 0
     return _spfa_fetch(unblock=False, allow_buy=True) or ck
 
 
@@ -5599,7 +5602,8 @@ def _avito_mobile_api_search(region: str, price_min: int = 0, price_max: int = 9
         _pxs = []
         if AVITO_PROXIES and not _proxy_auth_failed:
             _pxs.append(("прокси", _avito_proxies()))
-            _pxs += [("прокси-rot%d" % i, "ROTATE") for i in range(1, 3)]
+            if not SPFA_API_KEY:  # ротация ломает cookies spfa
+                _pxs += [("прокси-rot%d" % i, "ROTATE") for i in range(1, 3)]
         _pxs.append(("напрямую", None))
         got = None
         for _url, _prm in variants:
@@ -5741,10 +5745,14 @@ def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_0
         # Стабильность: пробуем текущий IP, затем НЕСКОЛЬКО свежих IP (ротация) —
         # Авито банит один IP по rate-limit, но пропускает свежий. Прямое соединение
         # (IP сервера) — только как последний резерв.
+        # ВАЖНО: cookies от spfa привязаны к IP, с которого их получили. Смена
+        # IP делает их невалидными (Авито → 403/439). Поэтому при включённом
+        # spfa работаем со СТАБИЛЬНЫМ IP и не ротируем.
         _proxy_order = []
         if AVITO_PROXIES and not _proxy_auth_failed:
             _proxy_order.append(("прокси", _avito_proxies()))
-            _proxy_order += [("прокси-rot%d" % i, "ROTATE") for i in range(1, 3)]
+            if not SPFA_API_KEY:
+                _proxy_order += [("прокси-rot%d" % i, "ROTATE") for i in range(1, 3)]
         _proxy_order.append(("напрямую", None))
         _got = None
         for _tag, _px in _proxy_order:
