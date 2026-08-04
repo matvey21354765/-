@@ -16537,8 +16537,10 @@ async def _send_avito_deal_card(uid: int, it: dict):
     if market:
         lines.append(f"📊 Рынок: {market:,} ₽".replace(",", " "))
     if profit and profit > 0:
-        lines.append(f"💵 Потенциал: +{profit:,} ₽".replace(",", " "))
-    lines.append(f"⭐ DealScore: {deal_score}/100")
+        # «Возможная разница», а не гарантированная прибыль.
+        lines.append(f"💵 Возможная разница: +{profit:,} ₽ (до расходов)".replace(",", " "))
+    # Внутренний рейтинг НЕ показываем пользователю — вместо числа ниже идут
+    # понятные причины (_deal_reasons): цена ниже рынка, свежесть, торг и т.п.
 
     seller_type = it.get("_seller_type")
     if seller_type:
