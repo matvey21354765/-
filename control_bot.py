@@ -723,6 +723,10 @@ def _avito_prerotate_ip() -> None:
     _AVITO_LAST_PREROTATE = now
     if _rotate_proxy_ip(min_interval=0):
         print("  [Авито] взят свежий IP перед запросом")
+        try:
+            _avito_ip_budget_reset()
+        except Exception:
+            pass
 
 
 def _avito_rate_limited() -> bool:
@@ -740,6 +744,91 @@ def _avito_note_rate_limit(seconds: int = 600) -> None:
         _rotate_proxy_ip(min_interval=0)   # освобождаем забаненный адрес
     except Exception:
         pass
+
+
+# ── Темп запросов к Авито ────────────────────────────────────────────
+# Антибот Авито считает не только «кто ты», но и «как часто». Серия запросов
+# без пауз с одного IP — самый заметный признак бота, поэтому:
+#   1) между запросами держим случайную паузу (человек не кликает ровно в такт);
+#   2) на один IP тратим ограниченный бюджет запросов, потом берём свежий.
+try:
+    AVITO_PACE_MIN_MS = max(0, int(os.getenv("AVITO_PACE_MIN_MS", "700")))
+except (TypeError, ValueError):
+    AVITO_PACE_MIN_MS = 700
+try:
+    AVITO_PACE_MAX_MS = max(AVITO_PACE_MIN_MS, int(os.getenv("AVITO_PACE_MAX_MS", "2200")))
+except (TypeError, ValueError):
+    AVITO_PACE_MAX_MS = max(AVITO_PACE_MIN_MS, 2200)
+try:
+    # Сколько запросов разрешаем с одного IP до принудительной ротации.
+    AVITO_IP_BUDGET = max(0, int(os.getenv("AVITO_IP_BUDGET", "12")))
+except (TypeError, ValueError):
+    AVITO_IP_BUDGET = 12
+
+_AVITO_IP_SPENT = 0
+_AVITO_LAST_REQUEST_AT = 0.0
+
+
+def _avito_pace_delay(now: float | None = None, last: float | None = None,
+                      rnd: float = 0.5) -> float:
+    """Сколько секунд нужно подождать перед следующим запросом к Авито.
+
+    Вынесено отдельной чистой функцией, чтобы поведение можно было проверить
+    тестом без сети и без реального сна.
+    """
+    if AVITO_PACE_MAX_MS <= 0:
+        return 0.0
+    now = time.time() if now is None else now
+    last = _AVITO_LAST_REQUEST_AT if last is None else last
+    try:
+        rnd = min(1.0, max(0.0, float(rnd)))
+    except (TypeError, ValueError):
+        rnd = 0.5
+    target = (AVITO_PACE_MIN_MS + (AVITO_PACE_MAX_MS - AVITO_PACE_MIN_MS) * rnd) / 1000.0
+    gap = now - last if last else target
+    return round(max(0.0, target - max(0.0, gap)), 3)
+
+
+def _avito_pace() -> None:
+    """Пауза со случайным разбросом перед очередным запросом к Авито."""
+    global _AVITO_LAST_REQUEST_AT
+    try:
+        import random as _rnd
+        delay = _avito_pace_delay(rnd=_rnd.random())
+        if delay > 0:
+            time.sleep(delay)
+        _AVITO_LAST_REQUEST_AT = time.time()
+    except Exception:
+        pass
+
+
+def _avito_ip_budget_spend(cost: int = 1) -> bool:
+    """Тратит бюджет запросов текущего IP. True — IP пора менять (и сменили)."""
+    global _AVITO_IP_SPENT
+    if AVITO_IP_BUDGET <= 0 or not AVITO_PROXY_ROTATE_URL:
+        return False
+    try:
+        _AVITO_IP_SPENT += max(1, int(cost))
+    except (TypeError, ValueError):
+        _AVITO_IP_SPENT += 1
+    if _AVITO_IP_SPENT < AVITO_IP_BUDGET:
+        return False
+    _AVITO_IP_SPENT = 0
+    try:
+        if _rotate_proxy_ip(min_interval=0):
+            print(f"  [Авито] бюджет IP исчерпан ({AVITO_IP_BUDGET} запр.) — взят свежий IP")
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _avito_ip_budget_reset() -> None:
+    """Сбрасывает счётчик запросов: вызывается после смены IP."""
+    global _AVITO_IP_SPENT
+    _AVITO_IP_SPENT = 0
+
+
 _SPFA_BASE = "https://spfa.ru/api"
 _SPFA_COOKIE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".spfa_cookies.json")
 _spfa_state = {"id": None, "cookies": None, "ts": 0.0}
@@ -5795,22 +5884,137 @@ def _avito_region_loc(region: str) -> int:
     return AVITO_OBLAST_IDS.get(region) or AVITO_LOCATION_IDS.get(region, 637640)
 
 
+# Ключ мобильного приложения Авито (ru.avito.avitomobile). Он зашит в клиент,
+# публично известен и не привязан к аккаунту; при смене его можно переопределить
+# переменной окружения без выката кода.
+AVITO_MOBILE_API_KEY = (os.getenv("AVITO_MOBILE_API_KEY", "").strip()
+                        or "af0deccbgcgidddjgnvljitntccdduijhdinfgjgfjir")
+# Версии мобильного API перебираем от новых к старым: Авито держит несколько
+# поколений одновременно, и старые обычно защищены слабее (их не трогают).
+_AVITO_MOBILE_API_VERSIONS = (16, 15, 13, 11, 9)
+# Внутренний web-JSON каталога. Номер поколения меняется вместе с фронтендом,
+# поэтому пробуем несколько.
+_AVITO_WEBJSON_VERSIONS = (1, 2, 3)
+
+
+def _avito_mobile_api_endpoints() -> list[str]:
+    """URL мобильного API в порядке перебора (новые версии — первыми)."""
+    return [f"https://m.avito.ru/api/{v}/items" for v in _AVITO_MOBILE_API_VERSIONS]
+
+
+def _avito_webjson_endpoints() -> list[str]:
+    """URL внутреннего web-JSON каталога в порядке перебора."""
+    return [f"https://www.avito.ru/web/{v}/js/items" for v in _AVITO_WEBJSON_VERSIONS]
+
+
+def _avito_mobile_headers() -> dict:
+    """Заголовки, которыми ходит официальное Android-приложение Авито.
+
+    Мобильный API не проверяет браузерные cookies, но сверяет набор служебных
+    заголовков приложения: без x-app-version/x-source запрос выглядит как
+    самодельный и чаще ловит 403.
+    """
+    import uuid as _uuid
+    return {
+        "User-Agent": "ru.avito.avitomobile/1010.0 (Android 13; ru_RU; samsung SM-A536B)",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "ru-RU,ru;q=0.9",
+        "Accept-Encoding": "gzip, deflate",
+        "x-app-version": "1010.0",
+        "x-avito-app-version": "1010.0",
+        "x-source": "android",
+        "X-Request-Id": _uuid.uuid4().hex,
+        "Connection": "keep-alive",
+    }
+
+
+def _avito_web_xhr_headers(referer: str) -> dict:
+    """Заголовки XHR-запроса к внутреннему JSON каталога.
+
+    Важно: у fetch/XHR из браузера Sec-Fetch-Dest=empty и Mode=cors (а не
+    navigate, как у страницы). Несовпадение Sec-Fetch-* с типом запроса —
+    дешёвый и надёжный признак бота, который Авито проверяет.
+    """
+    import re as _re
+    _ua = _avito_user_agent()
+    _m = _re.search(r"Chrome/(\d+)", _ua)
+    _cv = _m.group(1) if _m else "124"
+    return {
+        "User-Agent": _ua,  # ОБЯЗАТЕЛЬНО тот же UA, что у cookies
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "x-requested-with": "XMLHttpRequest",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
+        "sec-ch-ua": f'"Chromium";v="{_cv}", "Google Chrome";v="{_cv}", "Not?A_Brand";v="24"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "Origin": "https://www.avito.ru",
+        "Referer": referer,
+        "Connection": "keep-alive",
+    }
+
+
+def _avito_items_from_any_json(data, region: str, today) -> list[dict]:
+    """Объявления из ЛЮБОГО JSON-ответа Авито (web-JSON, мобильный API, blob).
+
+    Сначала известные пути (result.items и т.п.), затем поиск по признакам —
+    так парсер переживает переименование полей при обновлении API.
+    """
+    raw: list = []
+    try:
+        for path in ("result.items", "result.catalog.items", "data.items",
+                     "catalog.items", "items"):
+            got = _deep_get(data, path) if "." in path else (
+                data.get(path) if isinstance(data, dict) else None)
+            if isinstance(got, list) and got:
+                raw = got
+                break
+    except Exception:
+        raw = []
+    if not raw:
+        try:
+            raw = _avito_find_items_in_json(data) or []
+        except Exception:
+            raw = []
+    if not raw:
+        try:
+            raw = _avito_duck_items(data, region, [])
+        except Exception:
+            raw = []
+    out: list[dict] = []
+    seen: set[str] = set()
+    for it in raw:
+        if not isinstance(it, dict):
+            continue
+        # Мобильный API кладёт полезную нагрузку в it["value"].
+        cand = it
+        if isinstance(it.get("value"), dict) and not it.get("title"):
+            cand = {**it["value"], **{k: v for k, v in it.items() if k != "value"}}
+        try:
+            item = _avito_item_from_json(cand, today)
+        except Exception:
+            item = None
+        if not item:
+            continue
+        u = item.get("url", "")
+        if not u or u in seen:
+            continue
+        seen.add(u)
+        out.append(item)
+    return out
+
+
 def _avito_mobile_api_search(region: str, price_min: int = 0, price_max: int = 99_000_000,
                              sort_by_date: bool = False, brand: str = "", pages: int = 3) -> list[dict]:
-    """Мобильный API Авито (m.avito.ru/api/16/items). С российским мобильным IP
+    """Мобильный API Авито (m.avito.ru/api/N/items). С российским мобильным IP
     работает БЕЗ cookies/авторизации — не зависит от spfa. Фильтр по региону и цене."""
-    try:
-        import requests as _req
-    except ImportError:
-        return []
     today = datetime.date.today()
     loc = _avito_region_loc(region)
-    _key = "af0deccbgcgidddjgnvljitntccdduijhdinfgjgfjir"
-    hdrs = {
-        "User-Agent": "ru.avito.avitomobile/18.0 (Android 13; ru_RU)",
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "ru-RU,ru;q=0.9", "x-avito-app-version": "18.0.0",
-    }
+    _key = AVITO_MOBILE_API_KEY
+    hdrs = _avito_mobile_headers()
     results: list[dict] = []
     seen: set[str] = set()
     _brand_l = (brand or "").lower()
@@ -5821,11 +6025,9 @@ def _avito_mobile_api_search(region: str, price_min: int = 0, price_max: int = 9
             base["priceMin"] = price_min
         if price_max < 99_000_000:
             base["priceMax"] = price_max
-        variants = [
-            ("https://m.avito.ru/api/16/items", {**base, "key": _key}),
-            ("https://m.avito.ru/api/15/items", {**base, "key": _key}),
-            ("https://m.avito.ru/api/13/items", {**base, "key": _key}),
-        ]
+        if sort_by_date:
+            base["sort"] = "date"
+        variants = [(u, {**base, "key": _key}) for u in _avito_mobile_api_endpoints()]
         # IP: текущий прокси, затем свежие IP (ротация), затем прямое соединение.
         _pxs = []
         if AVITO_PROXIES and not _proxy_auth_failed:
@@ -5842,20 +6044,31 @@ def _avito_mobile_api_search(region: str, price_min: int = 0, price_max: int = 9
                     _px = _avito_proxies()
                 try:
                     from curl_cffi import requests as _cffi_m
+                    _avito_pace()
+                    # TLS-профиль должен соответствовать мобильному клиенту:
+                    # десктопный Chrome + Android-UA — явное несоответствие.
                     r = _cffi_m.get(_url, params=_prm, headers=hdrs, timeout=10,
                                     proxies=_px or {},
                                     cookies=_avito_cookies() or None,
-                                    impersonate=_avito_impersonate())
+                                    impersonate="chrome131_android")
+                    _avito_ip_budget_spend()
+                    _ver = _url.rsplit("/", 2)[-2]
                     if r.status_code == 200:
                         data = r.json()
-                        raw = (_deep_get(data, "result.items") or _deep_get(data, "result.catalog.items")
-                               or _deep_get(data, "data.items") or data.get("items")
-                               or _avito_find_items_in_json(data))
-                        if raw:
-                            got = raw
+                        parsed_items = _avito_items_from_any_json(data, region, today)
+                        if parsed_items:
+                            got = parsed_items
+                            print(f"  [Авито mobileAPI v{_ver} {_tag}] стр.{p}: "
+                                  f"{len(parsed_items)} объявлений ✅")
                             break
-                    elif r.status_code in (403, 429, 439, 503):
-                        continue
+                        print(f"  [Авито mobileAPI v{_ver} {_tag}] стр.{p}: "
+                              f"HTTP 200, объявления не распознаны")
+                    else:
+                        _body = re.sub(r"\s+", " ", (r.text or "")[:160]).strip()
+                        print(f"  [Авито mobileAPI v{_ver} {_tag}] стр.{p}: "
+                              f"HTTP {r.status_code} тело: {_body!r}")
+                        if r.status_code in (429,) or "too-many-requests" in _body:
+                            _avito_note_rate_limit(90 if AVITO_PROXY_ROTATE_URL else 600)
                 except Exception as e:
                     print(f"  [Авито mobileAPI] стр.{p}: {str(e)[:60]}")
             if got:
@@ -5863,10 +6076,7 @@ def _avito_mobile_api_search(region: str, price_min: int = 0, price_max: int = 9
         if not got:
             break
         _added = 0
-        for it in got:
-            item = _avito_item_from_json(it, today)
-            if not item:
-                continue
+        for item in got:
             u = item.get("url", "")
             if u in seen:
                 continue
@@ -6302,8 +6512,10 @@ def _avito_html_search(region: str, price_min: int = 0, price_max: int = 99_000_
                                   headers=hdrs, proxies=_px or {}, timeout=8)
                     except Exception:
                         pass
+                _avito_pace()
                 r = _sess.get(url, params=params, headers=hdrs,
                               proxies=_px or {}, timeout=10)
+                _avito_ip_budget_spend()
             finally:
                 try:
                     _sess.close()
@@ -6406,12 +6618,7 @@ def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_0
             _params["pmax"] = price_max
         if sort_by_date:
             _params["s"] = 104
-        _hdrs = {
-            "User-Agent": _avito_user_agent(),  # ОБЯЗАТЕЛЬНО тот же UA, что у cookies
-            "Accept": "application/json", "Accept-Language": "ru-RU,ru;q=0.9",
-            "x-requested-with": "XMLHttpRequest",
-            "Referer": f"https://www.avito.ru/{slug}/avtomobili",
-        }
+        _hdrs = _avito_web_xhr_headers(f"https://www.avito.ru/{slug}/avtomobili")
         # Стабильность: пробуем текущий IP, затем НЕСКОЛЬКО свежих IP (ротация) —
         # Авито банит один IP по rate-limit, но пропускает свежий. Прямое соединение
         # (IP сервера) — только как последний резерв.
@@ -6432,16 +6639,22 @@ def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_0
                 if not _rotate_proxy_ip(min_interval=0):
                     continue
                 _px = _avito_proxies()
-            try:
+            for _ep in _avito_webjson_endpoints():
+              try:
                 # curl_cffi с имперсонацией: обычный requests даёт питоновский
                 # TLS-отпечаток, который Авито банит мгновенно.
                 from curl_cffi import requests as _cffi_json
+                _avito_pace()
                 r = _cffi_json.get(
-                    "https://www.avito.ru/web/1/js/items", params=_params,
+                    _ep, params=_params,
                     headers=_hdrs, timeout=8, proxies=_px or {},
                     cookies=_avito_cookies(allow_buy) or None,
                     impersonate=_avito_impersonate(),
                 )
+                _avito_ip_budget_spend()
+                if r.status_code in (404, 410):
+                    # Это поколение API снято — молча пробуем следующее.
+                    continue
                 if r.status_code in (403, 429, 439):
                     _blocked_streak += 1
                     if SPFA_API_KEY:
@@ -6474,9 +6687,12 @@ def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_0
                 _avito_absorb_cookies(r)
                 _spfa_note_cookie_result(True)
                 break
-            except Exception as e:
+              except Exception as e:
                 print(f"  [Авито webJSON {_tag}] стр.{p}: {str(e)[:70]}")
                 continue
+            # Успех или «дело не в IP» — дальше перебирать адреса бессмысленно.
+            if _got or _blocked_streak >= 2:
+                break
         if not _got:
             # JSON-API закрыт (403/439). Cookies от spfa рассчитаны на ОБЫЧНУЮ
             # HTML-страницу (так работает parser_avito), поэтому пробуем её —
@@ -6492,6 +6708,27 @@ def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_0
                         seen.add(_u)
                         results.append(_hit)
                 print(f"  [Авито HTML] стр.{p}: +{len(_html_items)} (всего {len(results)})")
+                continue
+            # Последняя попытка на этой странице — мобильный API приложения.
+            # Он не использует браузерные cookies и живёт по своим лимитам,
+            # поэтому нередко отвечает там, где web-JSON и HTML уже закрыты.
+            try:
+                # Только на первой странице: мобильный API нумерует страницы
+                # сам, повторный вызов вернул бы те же карточки.
+                _mob_items = _avito_mobile_api_search(
+                    region, price_min=price_min, price_max=price_max,
+                    sort_by_date=sort_by_date, brand=brand, pages=1,
+                ) if p == 1 else []
+            except Exception as _e:
+                print(f"  [Авито mobileAPI] стр.{p}: {str(_e)[:70]}")
+                _mob_items = []
+            if _mob_items:
+                for _hit in _mob_items:
+                    _u = _hit.get("url", "")
+                    if _u and _u not in seen:
+                        seen.add(_u)
+                        results.append(_hit)
+                print(f"  [Авито mobileAPI] стр.{p}: +{len(_mob_items)} (всего {len(results)})")
                 continue
             break
         raw = (_got.get("catalog", {}) or {}).get("items", []) or _avito_find_items_in_json(_got)
