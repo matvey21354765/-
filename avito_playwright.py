@@ -219,9 +219,17 @@ class AvitoBrowserManager:
         """Выбирает/парсит прокси. Возвращает True если готов к запуску.
 
         Приоритет:
-        1. Резидентский пул proxys.io (AVITO_PROXY_HOST/PORTS/USERNAME/PASSWORD).
-        2. Legacy AVITO_PROXY_URL только если пул не настроен.
+        1. Явно заданный PROXY_URL/AVITO_PROXY_URL — под него сняты cookies
+           (AVITO_COOKIE), поэтому смешивать с пулом нельзя: другой IP = капча.
+        2. Резидентский пул, если явный URL не задан.
         """
+        if self.proxy_url:
+            try:
+                self._proxy_config = _parse_proxy_url(self.proxy_url)
+                self._current_endpoint = None
+                return True
+            except Exception:
+                pass  # некорректный URL — пробуем пул ниже
         pool = await self._ensure_proxy_pool()
         if pool and pool.configured:
             endpoint = await pool.select_working_proxy()
@@ -521,6 +529,15 @@ class AvitoBrowserManager:
                     meta["chromium_started"] = self._started
                     _log("browser_started", str(self._started))
                     page = await self.new_page()
+                    # Человек сначала открывает главную, потом каталог. Прямой
+                    # заход на страницу поиска — типичный признак бота.
+                    try:
+                        await page.goto("https://www.avito.ru/",
+                                        wait_until="domcontentloaded",
+                                        timeout=min(20, self.navigation_timeout) * 1000)
+                        await page.wait_for_timeout(1500)
+                    except Exception:
+                        pass
                     url = self._build_search_url(city, price_min, price_max, query)
                     resp = await page.goto(
                         url,
