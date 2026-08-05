@@ -513,19 +513,38 @@ class TestOnlyBest(SearchTestBase):
         keys = [x["listing_key"] for x in self.ps.search_listings(1, "fresh", now=self.now)]
         self.assertIn(key, keys)
 
-    def test_listing_without_photo_is_hidden(self):
-        self.market(150_000)
-        key = self.ingest(price=90_000, url="https://drom.ru/nophoto", source="drom",
-                          description=self.GOOD_DESC, _published_ts=self.now - 600)
-        keys = [x["listing_key"] for x in self.ps.search_listings(1, "fresh", now=self.now)]
-        self.assertNotIn(key, keys)
+    def test_incomplete_listing_ranks_below_complete_one(self):
+        """Без фото/описания объявление не выбрасывается, а уходит вниз.
 
-    def test_listing_without_description_is_hidden(self):
+        Фото и описание добираются со страницы объявления уже на выдаче,
+        поэтому жёсткий отсев на этапе отбора оставлял от сотни подходящих
+        машин полтора десятка.
+        """
         self.market(150_000)
-        key = self.ingest(price=90_000, url="https://drom.ru/nodesc", source="drom",
-                          _photo_url="http://a/1.jpg", _published_ts=self.now - 600)
+        thin = self.ingest(price=90_000, url="https://drom.ru/nophoto", source="drom",
+                           _published_ts=self.now - 600)
+        full = self.ingest(price=90_000, url="https://drom.ru/full", source="drom",
+                           _photo_url="http://a/1.jpg", description=self.GOOD_DESC,
+                           _published_ts=self.now - 600)
         keys = [x["listing_key"] for x in self.ps.search_listings(1, "fresh", now=self.now)]
-        self.assertNotIn(key, keys)
+        self.assertIn(thin, keys)
+        self.assertLess(keys.index(full), keys.index(thin))
+
+    def test_good_requires_photo_and_description(self):
+        """Полной карточка считается только с фото, описанием и ценой не выше рынка."""
+        base = {"photo": "http://a/1.jpg", "description": self.GOOD_DESC,
+                "price": 90_000, "market_price": 150_000}
+        self.assertTrue(self.ps.listing_is_good(base))
+        self.assertFalse(self.ps.listing_is_good({**base, "photo": ""}))
+        self.assertFalse(self.ps.listing_is_good({**base, "description": "ВАЗ 2106"}))
+        self.assertFalse(self.ps.listing_is_good({**base, "price": 200_000}))
+
+    def test_listing_without_url_and_data_is_dropped(self):
+        """Ни фото, ни описания, ни ссылки — добирать нечего, показывать нечего."""
+        self.assertFalse(self.ps.listing_is_worth_showing(
+            {"price": 90_000, "market_price": 150_000}))
+        self.assertTrue(self.ps.listing_is_worth_showing(
+            {"price": 90_000, "market_price": 150_000, "url": "https://drom.ru/x"}))
 
     def test_listing_priced_above_market_is_hidden(self):
         self.market(80_000)

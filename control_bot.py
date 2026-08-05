@@ -20382,6 +20382,18 @@ def _published_ts_from_page(text: str, source: str = "") -> float | None:
             ts = _ps.parse_published_ts(_page_date_text(m))
             if ts:
                 return ts
+    # 4. Шапка Auto.ru без опознавательных классов: дата стоит между рейтингом
+    #    модели и счётчиком просмотров, перед номером объявления —
+    #    «Рейтинг модели 3.4 ★ (524)  7 июня  👁 3957 (57 сегодня)  № 1132914646».
+    plain = re.sub(r"<[^>]+>", " ", head[:200_000])
+    anchor = re.search(r"№\s*\d{9,12}", plain)
+    if anchor:
+        before = plain[max(0, anchor.start() - 300):anchor.start()]
+        found = list(_PAGE_DATE_RE.finditer(before))
+        if found:
+            ts = _ps.parse_published_ts(_page_date_text(found[-1]))
+            if ts:
+                return ts
     return None
 
 
@@ -20526,8 +20538,51 @@ def _autoru_photo_from_page(text: str) -> str:
     return ""
 
 
+async def _ps_enrich_from_pages(loop, listings, *, budget: int) -> None:
+    """Заходит на страницы объявлений и добирает фото, описание и дату.
+
+    Дата публикации есть на самих площадках, но в выдаче её отдают не все —
+    поэтому карточка сначала дополняется со страницы объявления и только потом
+    уходит пользователю. Результат сохраняется в пул: следующая страница уже
+    не ходит в сеть.
+    """
+    need = [x for x in listings if x.get("url") and (
+        not _ps.has_photo(x) or not _ps.has_description(x)
+        or not x.get("published_at"))][:max(0, int(budget))]
+    if not need:
+        return
+
+    async def _grab(_l):
+        try:
+            _d = await loop.run_in_executor(
+                None, lambda u=_l.get("url", ""), s=_l.get("source", ""):
+                _fetch_listing_details(u, s))
+        except Exception as _fe:
+            print(f"  [карточка] данные не добрались: {str(_fe)[:60]}")
+            return
+        _photo = _d.get("photo") or ""
+        _desc = _d.get("description") or ""
+        _pub = _d.get("published_at")
+        if _photo and not _ps.has_photo(_l):
+            _l["photo"] = _photo
+        if _desc and not _ps.has_description(_l):
+            _l["description"] = _desc
+        if _pub and not _l.get("published_at"):
+            _l["published_at"] = _pub
+        if _photo or _desc or _pub:
+            await loop.run_in_executor(
+                None, lambda k=_l["listing_key"], p=_photo, d=_desc, t=_pub:
+                _ps.set_pool_details(k, photo=p, description=d, published_at=t))
+
+    try:
+        await asyncio.wait_for(asyncio.gather(*[_grab(x) for x in need]), timeout=30)
+    except asyncio.TimeoutError:
+        print("  [карточка] добор данных не уложился в таймаут")
+
+
 async def _ps_send_category(target, uid: int, category: str, page: int = 0):
-    """Показывает до 10 машин раздела. Данные только из общего пула (без сети)."""
+    """Показывает до 10 машин раздела: сначала добирает данные со страниц
+    объявлений, потом отправляет карточки."""
     _sync_active_search(uid)
     loop = asyncio.get_running_loop()
     if category != "saved" and not await loop.run_in_executor(
@@ -20538,8 +20593,13 @@ async def _ps_send_category(target, uid: int, category: str, page: int = 0):
         return
     page = max(0, int(page))
     offset = page * _ps.PAGE_SIZE
-    items = await loop.run_in_executor(
-        None, lambda: _ps.search_listings(uid, category, offset=offset))
+    # Берём запас кандидатов: часть отсеется после того, как бот сходит на
+    # страницы объявлений и станет видно, у кого нет ни фото, ни описания.
+    _pool = await loop.run_in_executor(
+        None, lambda: _ps.search_listings(
+            uid, category, offset=offset, limit=_ps.PAGE_SIZE * 2))
+    items = _pool[:_ps.PAGE_SIZE]
+    _spare = _pool[_ps.PAGE_SIZE:]
     total = await loop.run_in_executor(
         None, lambda: _ps.category_total(uid, category))
     title = _PS_CATS.get(category, category)
@@ -20559,37 +20619,12 @@ async def _ps_send_category(target, uid: int, category: str, page: int = 0):
     # Фото, описание и дату публикации добираем ДО отправки и параллельно:
     # одним запросом на объявление, а не тремя, и результат сохраняем в пул,
     # чтобы следующая страница уже не ходила в сеть.
-    _photo_budget = int(os.getenv("PS_PHOTO_FETCH_PER_PAGE", str(_ps.PAGE_SIZE)))
-    _need_details = [x for x in items if x.get("url") and (
-        not _ps.photo_of(x) or not (x.get("description") or "").strip()
-        or not x.get("published_at"))][:_photo_budget]
-    if _need_details:
-        async def _grab(_l):
-            try:
-                _d = await loop.run_in_executor(
-                    None, lambda u=_l.get("url", ""), s=_l.get("source", ""):
-                    _fetch_listing_details(u, s))
-            except Exception as _fe:
-                print(f"  [карточка] данные не добрались: {str(_fe)[:60]}")
-                return
-            _photo = _d.get("photo") or ""
-            _desc = _d.get("description") or ""
-            _pub = _d.get("published_at")
-            if _photo and not _ps.photo_of(_l):
-                _l["photo"] = _photo
-            if _desc and not (_l.get("description") or "").strip():
-                _l["description"] = _desc
-            if _pub and not _l.get("published_at"):
-                _l["published_at"] = _pub
-            if _photo or _desc or _pub:
-                await loop.run_in_executor(
-                    None, lambda k=_l["listing_key"], p=_photo, d=_desc, t=_pub:
-                    _ps.set_pool_details(k, photo=p, description=d, published_at=t))
-        try:
-            await asyncio.wait_for(
-                asyncio.gather(*[_grab(x) for x in _need_details]), timeout=25)
-        except asyncio.TimeoutError:
-            print("  [карточка] добор данных не уложился в таймаут")
+    _photo_budget = int(os.getenv("PS_PHOTO_FETCH_PER_PAGE", str(_ps.PAGE_SIZE * 2)))
+    await _ps_enrich_from_pages(loop, items + _spare, budget=_photo_budget)
+    # После захода на страницы видно, у кого действительно есть фото, описание
+    # и дата: полные карточки поднимаем наверх и добираем ими страницу.
+    _ranked = sorted(items + _spare, key=_ps.listing_rank)
+    items = _ranked[:_ps.PAGE_SIZE]
     for lst in items:
         key = lst["listing_key"]
         try:
@@ -20979,6 +21014,11 @@ async def _ps_new_listing_loop():
                     items = await loop.run_in_executor(
                         None, lambda u=uid: _ps.search_listings(
                             u, "fresh", limit=PS_FRESH_NOTIFY_PER_CYCLE * 3))
+                    # Сначала заходим на страницу объявления за фото, описанием
+                    # и датой публикации — уведомление уходит уже полным.
+                    await _ps_enrich_from_pages(
+                        loop, items, budget=PS_FRESH_NOTIFY_PER_CYCLE * 3)
+                    items.sort(key=_ps.listing_rank)
                     sent = 0
                     for lst in items:
                         if sent >= PS_FRESH_NOTIFY_PER_CYCLE:

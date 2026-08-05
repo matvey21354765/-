@@ -382,3 +382,39 @@ def test_failure_on_later_page_keeps_earlier_pages(tmp_path, monkeypatch):
         provider_factory=FlakyProvider, db_path=tmp_path / "flaky.db")
     result = obj.collect_group(search())
     assert len(result["items"]) == arc.REST_APP_RESULT_LIMIT
+
+
+def test_wide_window_reads_more_pages_than_the_monitor(tmp_path, monkeypatch):
+    """Лента /api/ads общая по стране: в суточном окне город находится не в
+    первых 50 объявлениях, из-за чего в выдаче стояло «Avito: 0»."""
+    PagedProvider.calls = 0
+    PagedProvider.pages_seen = []
+    PagedProvider.total_pages = 12
+    monkeypatch.setattr(arc, "REST_APP_MAX_PAGES", 2)
+    monkeypatch.setattr(arc, "REST_APP_MAX_PAGES_WIDE", 10)
+    monkeypatch.setattr(arc, "save_avito_history", lambda item: {"status": "new"})
+    monkeypatch.setattr(arc, "save_safe_rest_app_sample", lambda payload: None)
+    obj = arc.RestAppCollector(
+        provider_factory=PagedProvider, db_path=tmp_path / "wide.db")
+    try:
+        obj.collect_group({**search(), "last_m": 1440})
+        assert PagedProvider.pages_seen == list(range(1, 11))
+    finally:
+        PagedProvider.total_pages = 3
+
+
+def test_monitor_window_keeps_the_short_page_budget(tmp_path, monkeypatch):
+    PagedProvider.calls = 0
+    PagedProvider.pages_seen = []
+    PagedProvider.total_pages = 12
+    monkeypatch.setattr(arc, "REST_APP_MAX_PAGES", 2)
+    monkeypatch.setattr(arc, "REST_APP_MAX_PAGES_WIDE", 10)
+    monkeypatch.setattr(arc, "save_avito_history", lambda item: {"status": "new"})
+    monkeypatch.setattr(arc, "save_safe_rest_app_sample", lambda payload: None)
+    obj = arc.RestAppCollector(
+        provider_factory=PagedProvider, db_path=tmp_path / "narrow.db")
+    try:
+        obj.collect_group({**search(), "last_m": 3})
+        assert PagedProvider.pages_seen == [1, 2]
+    finally:
+        PagedProvider.total_pages = 3

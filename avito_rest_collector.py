@@ -41,6 +41,13 @@ REST_APP_CACHE_TTL_SECONDS = _env_int("REST_APP_CACHE_TTL_SECONDS", 55)
 # в потолок «50 максимум», коллектор дочитывает следующие страницы, пока они
 # приходят заполненными.
 REST_APP_MAX_PAGES = _env_int("REST_APP_MAX_PAGES", 6)
+# Лента /api/ads общая по стране, поэтому в окне мониторинга (3 минуты) на
+# конкретный город приходится единицы объявлений, а в ручном поиске (сутки) —
+# сотни, и они не помещаются в шесть страниц. Отсюда «Avito: 0» в городах:
+# до Перми выдача просто не доходила. Широкое окно читаем глубже.
+REST_APP_MAX_PAGES_WIDE = _env_int("REST_APP_MAX_PAGES_WIDE", 30)
+#: Окно (минуты), начиная с которого запрос считается «широким».
+REST_APP_WIDE_WINDOW_MINUTES = _env_int("REST_APP_WIDE_WINDOW_MINUTES", 60)
 REST_APP_DAILY_SOFT_LIMIT = _env_int("REST_APP_DAILY_SOFT_LIMIT", 8000)
 REST_APP_DAILY_HARD_LIMIT = _env_int("REST_APP_DAILY_HARD_LIMIT", 9500)
 REST_APP_DEGRADED_SECONDS = _env_int("REST_APP_DEGRADED_SECONDS", 600)
@@ -220,7 +227,9 @@ class RestAppCollector:
         pages_read = 0
         payload: Any = None
         raw_type = ""
-        max_pages = max(1, REST_APP_MAX_PAGES)
+        max_pages = max(1, REST_APP_MAX_PAGES_WIDE
+                        if minutes >= REST_APP_WIDE_WINDOW_MINUTES
+                        else REST_APP_MAX_PAGES)
         for page in range(1, max_pages + 1):
             params = dict(base_params)
             if page > 1:

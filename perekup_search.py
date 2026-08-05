@@ -905,21 +905,50 @@ MIN_DESCRIPTION_CHARS = 25
 MARKET_CALC_BUDGET = 300
 
 
-def listing_is_good(listing: dict) -> bool:
-    """Годится ли объявление для выдачи «только лучшее».
+def has_photo(listing: dict) -> bool:
+    return bool(photo_of(listing) or (listing.get("photo") or ""))
 
-    Три требования, по которым перекуп и принимает решение: живое фото,
-    человеческое описание и цена ниже рынка. Без любого из них карточка
-    бесполезна — раньше такие уходили пользователю пустыми.
-    """
-    if not photo_of(listing) and not (listing.get("photo") or ""):
-        return False
+
+def has_description(listing: dict) -> bool:
     desc = " ".join(str(listing.get("description") or "").split())
-    if len(desc) < MIN_DESCRIPTION_CHARS:
-        return False
+    return len(desc) >= MIN_DESCRIPTION_CHARS
+
+
+def not_above_market(listing: dict) -> bool:
+    """Цена не выше известного рынка. Неизвестный рынок не считается минусом.
+
+    Требовать «строго ниже рынка» на этапе отбора нельзя: рынок известен не по
+    каждой модели, и жёсткое условие выкидывало из выдачи почти всё — из 134
+    подходящих объявлений до пользователя доходило 17.
+    """
     market = int(listing.get("market_price") or 0)
     price = int(listing.get("price") or 0)
-    return bool(market and price and market > price)
+    if not market or not price:
+        return True
+    return price < market
+
+
+def listing_is_good(listing: dict) -> bool:
+    """Полностью годная карточка: фото, описание и цена не выше рынка.
+
+    Применяется на выдаче — после того, как бот сходил на страницу объявления
+    и добрал фото, описание и дату публикации.
+    """
+    return has_photo(listing) and has_description(listing) and not_above_market(listing)
+
+
+def listing_is_worth_showing(listing: dict) -> bool:
+    """Стоит ли вообще брать объявление в кандидаты.
+
+    Фото и описание к этому моменту могут быть ещё не добраны со страницы,
+    поэтому здесь отсекается только заведомо пустое (ни фото, ни описания и
+    даже ссылки нет, по которой их можно достать) и дороже рынка.
+    """
+    if not not_above_market(listing):
+        return False
+    if has_photo(listing) or has_description(listing):
+        return True
+    return bool(listing.get("url"))
 
 
 def _ensure_market(listing: dict, budget: list[int]) -> dict:
@@ -966,7 +995,7 @@ def _pool_candidates(user_id: int, category: str, now: float,
             # Рынок считаем только для уже отобранных — это локальный SQL,
             # но на 4000 строк он всё равно был бы лишней работой.
             _ensure_market(d, budget)
-            if not listing_is_good(d):
+            if not listing_is_worth_showing(d):
                 continue
         out.append(d)
     return out
@@ -982,12 +1011,26 @@ def search_listings(user_id: int, category: str, *, offset: int = 0,
     if category == "price_drop":
         return price_drop_feed(user_id, limit=limit, offset=offset, now=now)
     out = _pool_candidates(user_id, category, now, only_best=only_best)
-    # Лучшее — вперёд: сначала самая большая разница с рынком.
-    out.sort(key=lambda d: (
-        -(int(d.get("market_price") or 0) - int(d.get("price") or 0)),
-        -float(d.get("published_at") or d.get("first_seen_at") or 0),
-    ))
+    out.sort(key=listing_rank)
     return out[offset:offset + limit]
+
+
+def listing_rank(listing: dict) -> tuple:
+    """Порядок выдачи: полные карточки ниже рынка — первыми.
+
+    Сортируем так, чтобы наверх поднимались объявления с фото, описанием и
+    наибольшей разницей с рынком, а неполные не терялись совсем, а уходили
+    вниз списка.
+    """
+    market = int(listing.get("market_price") or 0)
+    price = int(listing.get("price") or 0)
+    gain = (market - price) if (market and price and market > price) else 0
+    return (
+        0 if listing_is_good(listing) else 1,
+        0 if has_photo(listing) else 1,
+        -gain,
+        -float(listing.get("published_at") or listing.get("first_seen_at") or 0),
+    )
 
 
 def category_total(user_id: int, category: str, now: float | None = None) -> int:
