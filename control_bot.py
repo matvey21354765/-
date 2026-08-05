@@ -833,10 +833,13 @@ def _avito_budget_sec() -> float:
     выдача обрывается и пользователь видит «Avito: 0», хотя объявления уже
     разобраны — поэтому обход укладывается в бюджет и отдаёт собранное.
     """
+    # 120 секунд — это примерно десять страниц с человеческими паузами. Меньше
+    # брать нельзя: Авито успевал разобрать объявления, но не успевал их отдать,
+    # и поиск показывал «Avito: 0».
     try:
-        return max(10.0, float(os.getenv("AVITO_BUDGET_SEC", "45")))
+        return max(10.0, float(os.getenv("AVITO_BUDGET_SEC", "120")))
     except (TypeError, ValueError):
-        return 45.0
+        return 120.0
 
 
 def _avito_pace() -> None:
@@ -7384,9 +7387,10 @@ class Setup(StatesGroup):
     region = State()
     price_min = State()
     price_max = State()
-    # Новые шаги мастера: год выпуска, состояние, подтверждение.
+    # Новые шаги мастера: год выпуска, состояние, площадки, подтверждение.
     year = State()
     condition = State()
+    sources = State()
     confirm = State()
     year_manual = State()
 
@@ -13131,9 +13135,10 @@ class Setup(StatesGroup):
     region = State()
     price_min = State()
     price_max = State()
-    # Новые шаги мастера: год выпуска, состояние, подтверждение.
+    # Новые шаги мастера: год выпуска, состояние, площадки, подтверждение.
     year = State()
     condition = State()
+    sources = State()
     confirm = State()
     year_manual = State()
 
@@ -15849,9 +15854,78 @@ def _setup_summary_text(d: dict) -> str:
         f"🚗 {what}\n"
         f"📅 {years}\n"
         f"🔧 {cond}\n"
-        "🌐 Все доступные площадки\n\n"
+        f"🌐 {_sources_summary(d.get('sources') or [])}\n\n"
         "Всё верно?"
     )
+
+
+def _sources_summary(sources: list) -> str:
+    """Строка о выбранных площадках для экрана подтверждения."""
+    chosen = [s for s in (sources or []) if s in ALL_SOURCES]
+    if not chosen or len(chosen) == len(ALL_SOURCES):
+        return "Все доступные площадки"
+    return "Площадки: " + ", ".join(
+        SOURCE_NAMES.get(s, s) for s in ALL_SOURCES if s in chosen)
+
+
+def _setup_sources_keyboard(chosen: list) -> InlineKeyboardMarkup:
+    """Выбор площадок внутри мастера поиска (до запуска)."""
+    picked = [s for s in (chosen or []) if s in ALL_SOURCES] or list(ALL_SOURCES)
+    rows = []
+    for src in ALL_SOURCES:
+        if src not in SOURCE_NAMES:
+            continue
+        mark = "✅" if src in picked else "☐"
+        rows.append([InlineKeyboardButton(
+            text=f"{mark} {SOURCE_NAMES[src]}", callback_data=f"sw_src|{src}")])
+    rows.append([
+        InlineKeyboardButton(text="🌐 Все площадки", callback_data="sw_src|all"),
+        InlineKeyboardButton(text="✅ Готово", callback_data="sw_src|done"),
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _setup_ask_sources(target, state: FSMContext):
+    """Шаг выбора площадок. Раньше мастер молча брал все и писал «Все
+    доступные площадки», хотя выбор был спрятан в настройках."""
+    await state.set_state(Setup.sources)
+    d = await state.get_data()
+    chosen = d.get("sources") or list(ALL_SOURCES)
+    await state.update_data(sources=list(chosen))
+    await target.answer(
+        "🌐 Где искать?\n\n"
+        "Отметьте площадки — чем их больше, тем дольше поиск, "
+        "но и вариантов больше.",
+        reply_markup=_setup_sources_keyboard(chosen),
+    )
+
+
+@dp.callback_query(F.data.startswith("sw_src|"), Setup.sources)
+async def cb_setup_sources(cb: CallbackQuery, state: FSMContext):
+    action = cb.data.split("|", 1)[1]
+    d = await state.get_data()
+    chosen = [s for s in (d.get("sources") or list(ALL_SOURCES)) if s in ALL_SOURCES]
+    if action == "all":
+        chosen = list(ALL_SOURCES)
+    elif action == "done":
+        await cb.answer()
+        await _setup_ask_confirm(cb.message, state)
+        return
+    elif action in ALL_SOURCES:
+        if action in chosen:
+            if len(chosen) == 1:
+                await cb.answer("Оставьте хотя бы одну площадку", show_alert=True)
+                return
+            chosen.remove(action)
+        else:
+            chosen.append(action)
+    await state.update_data(sources=chosen)
+    await cb.answer()
+    try:
+        await cb.message.edit_reply_markup(
+            reply_markup=_setup_sources_keyboard(chosen))
+    except Exception:
+        pass
 
 
 async def _setup_ask_confirm(target, state: FSMContext):
@@ -15861,9 +15935,16 @@ async def _setup_ask_confirm(target, state: FSMContext):
         _setup_summary_text(d),
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✅ Запустить поиск", callback_data="sw_start")],
+            [InlineKeyboardButton(text="🌐 Площадки", callback_data="sw_edit_sources")],
             [InlineKeyboardButton(text="✏️ Изменить", callback_data="change_settings")],
         ]),
     )
+
+
+@dp.callback_query(F.data == "sw_edit_sources")
+async def cb_setup_edit_sources(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    await _setup_ask_sources(cb.message, state)
 
 
 @dp.callback_query(F.data.startswith("sw_year|"), Setup.year)
@@ -15896,7 +15977,9 @@ async def msg_setup_year_manual(msg: Message, state: FSMContext):
 async def cb_setup_condition(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
     await state.update_data(condition=cb.data.split("|", 1)[1])
-    await _setup_ask_confirm(cb.message, state)
+    # Площадки спрашиваем до подтверждения: выбор влияет и на выдачу, и на
+    # время поиска, а раньше он был спрятан в настройках.
+    await _setup_ask_sources(cb.message, state)
 
 
 @dp.callback_query(F.data == "sw_start")
@@ -15917,6 +16000,10 @@ async def cb_setup_start(cb: CallbackQuery, state: FSMContext):
         "year_max": int(d.get("year_max", 0) or 0),
         "condition": d.get("condition", "any"),
     })
+    # Площадки из мастера: пустой список означает «все» (см. _get_enabled_sources).
+    _picked = [s for s in (d.get("sources") or []) if s in ALL_SOURCES]
+    if _picked:
+        settings["sources"] = _picked
     save_settings(uid, settings)
     await state.clear()
     try:
@@ -18182,7 +18269,12 @@ async def do_search_for_user(uid: int, reply_to, *, send_cards: bool = True,
     enabled_sources = _get_enabled_sources(s)
 
     src_labels = " ".join(SOURCE_TAGS.get(src, src) for src in enabled_sources)
-    await reply_to.answer(f"🔍 Ищу в {region_name} и области ({pmin:,}–{pmax:,} ₽)\n{src_labels}")
+    # Авито обходится многостранично и не спеша (иначе бан по IP), поэтому
+    # поиск занимает до двух минут. Честно предупреждаем, чтобы ожидание не
+    # выглядело зависанием.
+    await reply_to.answer(
+        f"🔍 Ищу в {region_name} и области ({pmin:,}–{pmax:,} ₽)\n{src_labels}\n\n"
+        "⏳ Обхожу площадки постранично — это займёт до 2 минут.")
 
     skipped = load_skipped(uid)
     seen = load_seen(uid)
@@ -18215,15 +18307,15 @@ async def do_search_for_user(uid: int, reply_to, *, send_cards: bool = True,
     except (TypeError, ValueError):
         _tmul = 1.0
     source_timeouts = {
-        "drom": int(30 * _tmul),
-        "autoru": int(45 * _tmul),   # 8 страниц по ~2.2 МБ
+        "drom": int(45 * _tmul),
+        "autoru": int(70 * _tmul),   # 8 страниц по ~2.2 МБ
         # Авито: бюджет самого парсера (AVITO_BUDGET_SEC) плюс запас на
         # ротацию IP и разбор. Таймаут обязан быть больше бюджета, иначе
         # поиск обрывает уже собранные объявления и показывает «Avito: 0».
-        "avito": int(max(75, _avito_budget_sec() + 30) * _tmul),
-        "youla": int(20 * _tmul),
-        "vk": int(20 * _tmul),
-        "tg": int(20 * _tmul),
+        "avito": int(max(90, _avito_budget_sec() + 40) * _tmul),
+        "youla": int(30 * _tmul),
+        "vk": int(30 * _tmul),
+        "tg": int(30 * _tmul),
     }
 
     async def _run_source(src: str):

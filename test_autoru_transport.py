@@ -610,15 +610,15 @@ def test_avito_budget_is_smaller_than_the_search_timeout():
     """Парсер обязан уложиться в ожидание поиска, иначе выдача обрывается
     и пользователь видит «Avito: 0» при разобранных объявлениях."""
     budget = cb._avito_budget_sec()
-    assert budget >= 10
-    assert max(75, budget + 30) > budget
+    assert budget >= 120
+    assert max(90, budget + 40) > budget
 
 
 def test_avito_budget_reads_env(monkeypatch):
     monkeypatch.setenv("AVITO_BUDGET_SEC", "90")
     assert cb._avito_budget_sec() == 90
     monkeypatch.setenv("AVITO_BUDGET_SEC", "мусор")
-    assert cb._avito_budget_sec() == 45
+    assert cb._avito_budget_sec() == 120        # значение по умолчанию
     monkeypatch.setenv("AVITO_BUDGET_SEC", "1")
     assert cb._avito_budget_sec() == 10          # ниже минимума не опускаемся
 
