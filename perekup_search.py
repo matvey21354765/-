@@ -1038,6 +1038,34 @@ def normalize_region(value: str) -> str:
     return low
 
 
+# Города, чей субъект — край (остальные считаем областью). Республики и
+# города федерального значения обрабатываются отдельно.
+_KRAI_CITIES = {
+    "perm", "krasnodar", "krasnoyarsk", "stavropol", "barnaul", "habarovsk",
+    "vladivostok", "chita", "petropavlovsk_kamchatskiy", "birobidzhan",
+}
+_REPUBLIC_CITIES = {
+    "kazan", "ufa", "mahachkala", "grozny", "vladikavkaz", "nalchik",
+    "cheboksary", "izhevsk", "saransk", "yoshkar_ola", "syktyvkar",
+    "petrozavodsk", "elista", "abakan", "kyzyl", "gorno_altaysk",
+    "ulan_ude", "yakutsk", "maykop", "cherkessk",
+}
+
+
+def _region_suffix(slug: str) -> str:
+    """Подпись «и край / и область / и республика» к городу поиска."""
+    low = (slug or "").strip().lower()
+    if not low:
+        return ""
+    if low in ("moscow", "spb", "sankt-peterburg", "saint_petersburg"):
+        return " и область"
+    if low in _KRAI_CITIES:
+        return " и край"
+    if low in _REPUBLIC_CITIES:
+        return " и республика"
+    return " и область"
+
+
 def format_summary(user_id: int, now: float | None = None) -> str:
     """Главный экран поиска — сводка вместо десятков карточек."""
     s = get_active_search(user_id)
@@ -1049,6 +1077,9 @@ def format_summary(user_id: int, now: float | None = None) -> str:
     where = region_label(s.get("region") or "") or "не указан"
     if s.get("regions"):
         where += " и " + ", ".join(region_label(r) for r in s["regions"])
+    else:
+        # Поиск идёт по всему субъекту, а не только по городу, — так и пишем.
+        where += _region_suffix(s.get("region") or "")
     brands = s.get("brands") or []
     what = "Все машины" if not brands else ", ".join(brands).title()
     if s.get("model"):

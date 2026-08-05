@@ -20,12 +20,15 @@ from avito_duff_provider import (
 
 
 ROOT = Path(__file__).resolve().parent
-INITIAL_HTML = (ROOT / "data" / "vless_avito_response.html").read_text(
-    encoding="utf-8", errors="replace"
-)
-CANONICAL_HTML = (
-    ROOT / "data" / "vless_avito_canonical_response.html"
-).read_text(encoding="utf-8", errors="replace")
+# Фикстуры-страницы лежат в data/ и в репозиторий не коммитятся (там реальные
+# ответы Авито). Без них тест пропускаем, а не роняем весь прогон.
+_INITIAL_PATH = ROOT / "data" / "vless_avito_response.html"
+_CANONICAL_PATH = ROOT / "data" / "vless_avito_canonical_response.html"
+if not (_INITIAL_PATH.exists() and _CANONICAL_PATH.exists()):
+    import unittest as _ut
+    raise _ut.SkipTest("нет фикстур data/vless_avito_*.html — тест пропущен")
+INITIAL_HTML = _INITIAL_PATH.read_text(encoding="utf-8", errors="replace")
+CANONICAL_HTML = _CANONICAL_PATH.read_text(encoding="utf-8", errors="replace")
 
 
 class FakeResponse:
