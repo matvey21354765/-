@@ -7130,6 +7130,11 @@ class Setup(StatesGroup):
     region = State()
     price_min = State()
     price_max = State()
+    # Новые шаги мастера: год выпуска, состояние, подтверждение.
+    year = State()
+    condition = State()
+    confirm = State()
+    year_manual = State()
 
 
 class TrackBrand(StatesGroup):
@@ -12722,6 +12727,11 @@ class Setup(StatesGroup):
     region = State()
     price_min = State()
     price_max = State()
+    # Новые шаги мастера: год выпуска, состояние, подтверждение.
+    year = State()
+    condition = State()
+    confirm = State()
+    year_manual = State()
 
 
 class TrackBrand(StatesGroup):
@@ -15042,23 +15052,193 @@ async def cb_price_range(cb: CallbackQuery, state: FSMContext):
     category = data.get("category", "all")
     brand = data.get("brand", "")
     damaged = data.get("damaged", False)
-    settings = load_settings(cb.from_user.id)
-    settings.update({"region": region, "price_min": pmin, "price_max": pmax, "category": category, "brand": brand, "damaged": damaged})
-    save_settings(cb.from_user.id, settings)
-    await state.clear()
-    region_name = REGIONS.get(region, region)
-    cat_label = CATEGORY_LABELS.get(category, category)
-    brand_label = f" · {brand.capitalize()}" if brand else ""
-    await cb.message.answer(
-        f"✅ Настройки сохранены!\n\n"
-        f"📍 Регион: {region_name}\n"
-        f"🔍 Категория: {cat_label}{brand_label}\n"
-        f"💰 Бюджет: {pmin:,} – {pmax:,} ₽\n\n"
-        f"Нажми кнопку чтобы найти авто:",
+    await state.update_data(price_min=pmin, price_max=pmax, region=region,
+                            category=category, brand=brand, damaged=damaged)
+    await _setup_ask_year(cb.message, state)
+
+
+
+# ── Мастер поиска: шаги «год», «состояние», подтверждение, запуск ─────
+async def _setup_ask_year(target, state: FSMContext):
+    """Шаг 4: год выпуска."""
+    await state.set_state(Setup.year)
+    await target.answer(
+        "📅 Какой год выпуска?",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔍 Найти авто", callback_data="do_search")],
-        ])
+            [InlineKeyboardButton(text="Любой", callback_data="sw_year|0"),
+             InlineKeyboardButton(text="От 2000", callback_data="sw_year|2000")],
+            [InlineKeyboardButton(text="От 2010", callback_data="sw_year|2010"),
+             InlineKeyboardButton(text="Указать диапазон", callback_data="sw_year|manual")],
+        ]),
     )
+
+
+async def _setup_ask_condition(target, state: FSMContext):
+    """Шаг 5: состояние. Важно для машин до 100-300 тысяч."""
+    await state.set_state(Setup.condition)
+    await target.answer(
+        "🔧 Какое состояние рассматривать?\n\n"
+        "Из выдачи всегда исключаются: на запчасти, без документов, разбор, "
+        "аренда, выкуп и не-автомобили.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ На ходу", callback_data="sw_cond|running")],
+            [InlineKeyboardButton(text="🟡 Можно с вложениями", callback_data="sw_cond|repair")],
+            [InlineKeyboardButton(text="☑️ Оба варианта", callback_data="sw_cond|any")],
+        ]),
+    )
+
+
+def _setup_summary_text(d: dict) -> str:
+    """Экран подтверждения перед запуском поиска."""
+    region = d.get("region", "")
+    _rn = REGIONS.get(region, region)
+    try:
+        _suffix = _ps._region_suffix(region)
+    except Exception:
+        _suffix = ""
+    pmin = int(d.get("price_min", 0) or 0)
+    pmax = int(d.get("price_max", 0) or 0)
+    if pmax and pmax < 99_000_000:
+        budget = f"До {pmax:,} ₽".replace(",", " ")
+        if pmin:
+            budget = f"{pmin:,} – {pmax:,} ₽".replace(",", " ")
+    else:
+        budget = "Без ограничения"
+    brand = (d.get("brand") or "").strip()
+    what = brand.title() if brand else "Все марки"
+    y1 = int(d.get("year_min", 0) or 0)
+    y2 = int(d.get("year_max", 0) or 0)
+    if y1 and y2:
+        years = f"{y1}–{y2}"
+    elif y1:
+        years = f"от {y1}"
+    else:
+        years = "Любой год"
+    cond = {"running": "Только на ходу",
+            "repair": "Можно с вложениями",
+            "any": "На ходу и с вложениями"}.get(d.get("condition") or "any",
+                                                "На ходу и с вложениями")
+    return (
+        "🎯 Новый поиск\n\n"
+        f"📍 {_rn}{_suffix}\n"
+        f"💰 {budget}\n"
+        f"🚗 {what}\n"
+        f"📅 {years}\n"
+        f"🔧 {cond}\n"
+        "🌐 Все доступные площадки\n\n"
+        "Всё верно?"
+    )
+
+
+async def _setup_ask_confirm(target, state: FSMContext):
+    await state.set_state(Setup.confirm)
+    d = await state.get_data()
+    await target.answer(
+        _setup_summary_text(d),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Запустить поиск", callback_data="sw_start")],
+            [InlineKeyboardButton(text="✏️ Изменить", callback_data="change_settings")],
+        ]),
+    )
+
+
+@dp.callback_query(F.data.startswith("sw_year|"), Setup.year)
+async def cb_setup_year(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    val = cb.data.split("|", 1)[1]
+    if val == "manual":
+        await state.set_state(Setup.year_manual)
+        await cb.message.answer("📅 Введи диапазон годов, например: 2005-2015")
+        return
+    await state.update_data(year_min=int(val or 0), year_max=0)
+    await _setup_ask_condition(cb.message, state)
+
+
+@dp.message(Setup.year_manual)
+async def msg_setup_year_manual(msg: Message, state: FSMContext):
+    _nums = re.findall(r"(19|20)\d{2}", msg.text or "")
+    _years = [int((msg.text or "")[m.start():m.start() + 4])
+              for m in re.finditer(r"(?:19|20)\d{2}", msg.text or "")]
+    if not _years:
+        await msg.answer("Не понял год. Пример: 2005-2015")
+        return
+    y1 = min(_years)
+    y2 = max(_years) if len(_years) > 1 else 0
+    await state.update_data(year_min=y1, year_max=y2)
+    await _setup_ask_condition(msg, state)
+
+
+@dp.callback_query(F.data.startswith("sw_cond|"), Setup.condition)
+async def cb_setup_condition(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    await state.update_data(condition=cb.data.split("|", 1)[1])
+    await _setup_ask_confirm(cb.message, state)
+
+
+@dp.callback_query(F.data == "sw_start")
+async def cb_setup_start(cb: CallbackQuery, state: FSMContext):
+    """Сохраняем поиск и сразу показываем сводку по уже собранной базе."""
+    await cb.answer()
+    uid = cb.from_user.id
+    d = await state.get_data()
+    settings = load_settings(uid)
+    settings.update({
+        "region": d.get("region", "ekaterinburg"),
+        "price_min": int(d.get("price_min", 0) or 0),
+        "price_max": int(d.get("price_max", 0) or 0),
+        "category": d.get("category", "all"),
+        "brand": d.get("brand", ""),
+        "damaged": bool(d.get("damaged")),
+        "year_min": int(d.get("year_min", 0) or 0),
+        "year_max": int(d.get("year_max", 0) or 0),
+        "condition": d.get("condition", "any"),
+    })
+    save_settings(uid, settings)
+    await state.clear()
+    try:
+        _sync_active_search(uid, settings)
+    except Exception as e:
+        print(f"  [мастер] не удалось сохранить поиск: {str(e)[:80]}")
+    await _ps_send_start_screen(cb.message, uid)
+
+
+async def _ps_send_start_screen(target, uid: int):
+    """Экран после запуска: сводка по категориям + клавиатура разделов."""
+    try:
+        counts = _ps.category_counts(uid)
+    except Exception:
+        counts = {k: 0 for k in ("fresh", "today", "days3", "price_drop",
+                                 "bargain", "saved")}
+    total = counts.get("fresh", 0) + counts.get("today", 0) + counts.get("days3", 0)
+    lines = ["✅ Поиск запущен", ""]
+    if total:
+        lines.append(f"Нашёл подходящих объявлений: {total}")
+        lines.append("")
+    else:
+        lines.append("Собираю объявления — первые появятся в течение пары минут.")
+        lines.append("")
+    lines += [
+        f"🚨 Кто быстрее — {counts.get('fresh', 0)}",
+        f"🔥 Новые сегодня — {counts.get('today', 0)}",
+        f"📅 До 3 дней — {counts.get('days3', 0)}",
+        f"🤝 Простор для торга — {counts.get('bargain', 0)}",
+        f"📉 Снизили цену — {counts.get('price_drop', 0)}",
+    ]
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"🚨 Кто быстрее ({counts.get('fresh', 0)})",
+                              callback_data="pd_cat|fresh|0"),
+         InlineKeyboardButton(text=f"🔥 Новые сегодня ({counts.get('today', 0)})",
+                              callback_data="pd_cat|today|0")],
+        [InlineKeyboardButton(text=f"📅 До 3 дней ({counts.get('days3', 0)})",
+                              callback_data="pd_cat|days3|0"),
+         InlineKeyboardButton(text=f"📉 Снизили цену ({counts.get('price_drop', 0)})",
+                              callback_data="pd_cat|price_drop|0")],
+        [InlineKeyboardButton(text="🤝 Простор для торга", callback_data="pd_cat|bargain|0"),
+         InlineKeyboardButton(text="⭐ Сохранённые", callback_data="pd_cat|saved|0")],
+        [InlineKeyboardButton(text="⚡ Включить мониторинг", callback_data="notify_toggle")],
+        [InlineKeyboardButton(text="⚙️ Изменить поиск", callback_data="change_settings")],
+    ])
+    await target.answer("\n".join(lines), reply_markup=kb)
 
 
 @dp.callback_query(F.data == "price_manual", Setup.price_min)
