@@ -5514,6 +5514,38 @@ def scrape_youla(region: str, pages: int = 4, price_min: int = 0,
     }
     seen_ids: set[str] = set()
 
+    def _youla_best_photo(images) -> str:
+        """Самое крупное фото объявления Юлы.
+
+        В images лежат несколько размеров; первый попавшийся часто оказывается
+        превью на 90 пикселей, и в карточке был серый прямоугольник.
+        """
+        if not isinstance(images, (list, tuple)):
+            return ""
+        best, best_w = "", -1
+        for img in images:
+            if isinstance(img, str):
+                if img.startswith("http") and best_w < 0:
+                    best, best_w = img, 0
+                continue
+            if not isinstance(img, dict):
+                continue
+            for key in ("url", "big", "original", "large", "medium", "src"):
+                url = img.get(key)
+                if not isinstance(url, str) or not url.startswith("http"):
+                    continue
+                width = 0
+                try:
+                    width = int(img.get("width") or 0)
+                except (TypeError, ValueError):
+                    width = 0
+                if not width:
+                    width = {"original": 4, "big": 3, "large": 3,
+                             "url": 2, "medium": 1, "src": 1}.get(key, 0)
+                if width > best_w:
+                    best, best_w = url, width
+        return best
+
     def _youla_specs(product: dict) -> tuple[str, str, int]:
         """Достаёт марку, модель и год из меняющейся структуры API Юлы."""
         found: dict[str, str] = {}
@@ -5595,7 +5627,7 @@ def scrape_youla(region: str, pages: int = 4, price_min: int = 0,
                 _u = it.get("url", "")
                 item_url = ("https://youla.ru" + _u) if _u.startswith("/") else (_u or it.get("short_url", ""))
                 imgs = it.get("images") or []
-                photo_url = imgs[0].get("url", "") if imgs else ""
+                photo_url = _youla_best_photo(imgs)
                 dp = it.get("date_published") or 0
                 days = max(0, int((now_ts - dp) // 86400)) if dp else 0
                 loc = it.get("location") or {}
@@ -8525,6 +8557,7 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
         # считаем «сегодня». Так не показываем ложное «сегодня» на старых.
         _days = 0
         _date_known = False
+        _published_ts = None
         _ts = (it.get("sortTimeStamp") or it.get("time") or
                it.get("addDate") or it.get("closingDate") or
                it.get("statsUpdateDate") or 0)
@@ -8534,6 +8567,10 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
                 _posted = datetime.datetime.fromtimestamp(_ts_sec).date()
                 _days = max(0, (today - _posted).days)
                 _date_known = True
+                # Точный момент публикации, а не только число суток: у
+                # сегодняшних объявлений _days_on_site = 0, и карточка писала
+                # «площадка не указала дату», хотя время у Авито есть.
+                _published_ts = _ps.parse_published_ts(_ts_sec)
         except Exception:
             _days = 0
 
@@ -8545,6 +8582,7 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
             "_photos": len(_images_list) if isinstance(_images_list, list) else 0,
             "_days_on_site": _days,
             "_date_known": _date_known,
+            "_published_ts": _published_ts,
             "description": _desc_raw[:400],
             "_desc_synthetic": _desc_synthetic,
             "seller": seller_name, "_photo_url": photo_url,
@@ -20399,6 +20437,7 @@ def _ps_summary_text(uid: int) -> str:
 
 def _ps_summary_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎯 Что открыть сейчас", callback_data="pd_recommend")],
         [InlineKeyboardButton(text="🚨 Кто быстрее", callback_data="pd_cat|fresh|0"),
          InlineKeyboardButton(text="🔥 Новые сегодня", callback_data="pd_cat|today|0")],
         [InlineKeyboardButton(text="📅 До 3 дней", callback_data="pd_cat|days3|0"),
@@ -20654,6 +20693,79 @@ def _autoru_photo_from_page(text: str) -> str:
     return ""
 
 
+#: Проверенные ссылки на фото: url → (годится, когда проверяли).
+_PHOTO_CHECK_CACHE: dict[str, tuple[bool, float]] = {}
+_PHOTO_CHECK_TTL = 3600.0
+
+
+def _photo_is_loadable(url: str) -> bool:
+    """Отдаёт ли ссылка настоящую картинку.
+
+    Telegram не считает ошибкой недоступное фото: он показывает серый
+    прямоугольник с крестиком, и карточка выглядит сломанной. Поэтому ссылку
+    проверяем сами и, если она не отдаёт картинку, отправляем карточку
+    текстом или берём другое фото.
+    """
+    url = (url or "").strip()
+    if not url.startswith("http"):
+        return False
+    now = time.time()
+    cached = _PHOTO_CHECK_CACHE.get(url)
+    if cached and now - cached[1] < _PHOTO_CHECK_TTL:
+        return cached[0]
+    ok = False
+    try:
+        import requests as _req
+        _hdrs = {"User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                "Chrome/124.0.0.0 Safari/537.36")}
+        r = _req.get(url, timeout=6, headers=_hdrs, stream=True)
+        ctype = str(r.headers.get("Content-Type") or "").lower()
+        length = int(r.headers.get("Content-Length") or 0)
+        # Заглушки площадок весят сотни байт — настоящее фото машины больше.
+        ok = r.status_code == 200 and ctype.startswith("image/") and \
+            (length == 0 or length > 3000)
+        r.close()
+    except Exception as exc:                       # noqa: BLE001
+        print(f"  [фото] {url[:60]}: {type(exc).__name__}")
+        ok = False
+    _PHOTO_CHECK_CACHE[url] = (ok, now)
+    if len(_PHOTO_CHECK_CACHE) > 5000:
+        _PHOTO_CHECK_CACHE.clear()
+    return ok
+
+
+async def _ps_usable_photo(loop, listing: dict) -> str:
+    """Ссылка на фото, которая точно откроется. Пустая строка — фото нет.
+
+    Если сохранённое фото не грузится, бот идёт на страницу объявления за
+    новым: фото — главное в карточке, и лучше потратить запрос, чем показать
+    крестик.
+    """
+    photo = _ps.photo_of(listing) or str(listing.get("photo") or "")
+    if photo and await loop.run_in_executor(None, lambda u=photo: _photo_is_loadable(u)):
+        return photo
+    if photo:
+        print(f"  [фото] битая ссылка, идём за новой: {photo[:70]}")
+    url = str(listing.get("url") or "")
+    if not url:
+        return ""
+    try:
+        details = await loop.run_in_executor(
+            None, lambda u=url, s=listing.get("source", ""): _fetch_listing_details(u, s))
+    except Exception:
+        return ""
+    fresh = details.get("photo") or ""
+    if fresh and fresh != photo and await loop.run_in_executor(
+            None, lambda u=fresh: _photo_is_loadable(u)):
+        listing["photo"] = fresh
+        await loop.run_in_executor(
+            None, lambda k=listing.get("listing_key", ""), p=fresh:
+            _ps.set_pool_photo(k, p))
+        return fresh
+    return ""
+
+
 async def _ps_enrich_from_pages(loop, listings, *, budget: int) -> None:
     """Заходит на страницы объявлений и добирает фото, описание и дату.
 
@@ -20759,10 +20871,11 @@ async def _ps_send_category(target, uid: int, category: str, page: int = 0):
             text = _ps.format_card(lst, category=None if category == "saved" else category)
         saved = await loop.run_in_executor(None, lambda k=key: _ps.is_saved(uid, k))
         _kb = _ps_card_keyboard(uid, key, category=category, page=page, saved=saved)
-        _photo = _ps.photo_of(lst)
+        # Фото проверяем ДО отправки: Telegram молча показывает крестик вместо
+        # недоступной картинки, и карточка выглядит сломанной.
+        _photo = await _ps_usable_photo(loop, lst)
         _sent = False
         if _photo:
-            # Фото объявления — как в обычной выдаче бота.
             try:
                 await target.answer_photo(_photo, caption=text[:1024], reply_markup=_kb)
                 _sent = True
@@ -20780,6 +20893,63 @@ async def _ps_send_category(target, uid: int, category: str, page: int = 0):
 async def cb_ps_sections(cb: CallbackQuery):
     await cb.answer()
     await _ps_send_start_screen(cb.message, cb.from_user.id)
+
+
+async def _ps_send_recommendations(target, uid: int, *, prefix: str = "") -> int:
+    """Экран «что открыть прямо сейчас»: три машины и по одной причине к каждой.
+
+    Пользователю не нужно самому решать, в какой раздел заглянуть — бот
+    показывает лучшее из всех разделов сразу, с готовым объяснением.
+    """
+    _sync_active_search(uid)
+    loop = asyncio.get_running_loop()
+    items = await loop.run_in_executor(
+        None, lambda: _ps.recommendations(uid, limit=3))
+    if not items:
+        await target.answer(
+            (prefix + "\n\n" if prefix else "")
+            + "🎯 Пока нечего рекомендовать — бот продолжает искать.",
+            reply_markup=_ps_summary_keyboard())
+        return 0
+    # Фото и описание добираем со страниц: рекомендация без картинки бесполезна.
+    await _ps_enrich_from_pages(loop, items, budget=len(items))
+    text = _ps.format_recommendations(items)
+    if prefix:
+        text = f"{prefix}\n\n{text}"
+    rows = []
+    for i, d in enumerate(items, 1):
+        rows.append([InlineKeyboardButton(
+            text=f"{i}. {(d.get('title') or 'Открыть')[:28]}",
+            callback_data=f"pd_open|{_ps.short_id(d['listing_key'])}")])
+    rows.append([InlineKeyboardButton(text="🔙 Все разделы", callback_data="pd_sections")])
+    await target.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+                        disable_web_page_preview=True)
+    # Сами карточки — следом, с фото и кнопками.
+    for d in items:
+        key = d["listing_key"]
+        card = _ps.format_card(d, reasons=[d.get("_reason", "")] if d.get("_reason") else None)
+        kb = _ps_card_keyboard(uid, key)
+        photo = await _ps_usable_photo(loop, d)
+        if photo:
+            try:
+                await target.answer_photo(photo, caption=card[:1024], reply_markup=kb)
+                continue
+            except Exception as exc:
+                print(f"  [рекомендации] фото не отправилось: {str(exc)[:60]}")
+        await target.answer(card, reply_markup=kb, disable_web_page_preview=True)
+    return len(items)
+
+
+@dp.callback_query(F.data == "pd_recommend")
+async def cb_ps_recommend(cb: CallbackQuery):
+    await cb.answer()
+    await _ps_send_recommendations(cb.message, cb.from_user.id)
+
+
+@dp.message(Command("recommend"))
+@dp.message(F.text == "🎯 Что открыть сейчас")
+async def cmd_ps_recommend(msg: Message):
+    await _ps_send_recommendations(msg, msg.from_user.id)
 
 
 @dp.message(F.text == "🚨 Кто быстрее")
@@ -21155,7 +21325,7 @@ async def _ps_new_listing_loop():
                             continue
                         text = _ps.format_new_listing_notification(lst)
                         kb = _ps_card_keyboard(uid, key)
-                        photo = _ps.photo_of(lst)
+                        photo = await _ps_usable_photo(loop, lst)
                         _delivered = False
                         if photo:
                             try:
@@ -21176,6 +21346,99 @@ async def _ps_new_listing_loop():
             raise
         except Exception as e:
             print(f"  [поиск] ошибка цикла новых: {str(e)[:120]}")
+
+
+#: Через сколько часов молчания напоминать о себе результатами поиска.
+try:
+    PS_COMEBACK_AFTER_HOURS = max(1, int(os.getenv("PS_COMEBACK_AFTER_HOURS", "8")))
+except (TypeError, ValueError):
+    PS_COMEBACK_AFTER_HOURS = 8
+#: Дольше этого молчания человек уже не «ушёл искать», а просто не пользуется.
+try:
+    PS_COMEBACK_MAX_HOURS = max(24, int(os.getenv("PS_COMEBACK_MAX_HOURS", "168")))
+except (TypeError, ValueError):
+    PS_COMEBACK_MAX_HOURS = 168
+
+
+def _ps_last_activity(uid: int) -> float:
+    """Когда пользователь последний раз писал боту."""
+    try:
+        u = _USER_REGISTRY.get(str(uid)) or {}
+        return float(u.get("last_seen") or u.get("first_seen") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+async def _ps_comeback_loop():
+    """Напоминает о себе тем, кто заходил и ничего не выбрал.
+
+    Человек открывает бота, не находит подходящего и уходит. Раньше вернуть
+    его могло только его собственное желание. Теперь, когда появляются
+    стоящие варианты, бот сам присылает короткий список: что открыть и
+    почему. Одно напоминание в сутки, только по делу и не в тихие часы.
+    """
+    await asyncio.sleep(600)
+    print("  [поиск] цикл напоминаний о новых вариантах запущен")
+    while True:
+        try:
+            await asyncio.sleep(1800)
+            loop = asyncio.get_running_loop()
+            now = time.time()
+            searches = await loop.run_in_executor(None, _ps.all_active_searches)
+            for s in searches:
+                uid = int(s["user_id"])
+                try:
+                    if _subscription_info(uid)["ended"]:
+                        continue
+                    prefs = await loop.run_in_executor(None, lambda u=uid: _ps.get_prefs(u))
+                    if not prefs.get("instant_notify"):
+                        continue
+                    if await loop.run_in_executor(None, lambda u=uid: _ps.in_quiet_hours(u)):
+                        continue
+                    silent_hours = (now - _ps_last_activity(uid)) / 3600.0
+                    if not (PS_COMEBACK_AFTER_HOURS <= silent_hours <= PS_COMEBACK_MAX_HOURS):
+                        continue
+                    items = await loop.run_in_executor(
+                        None, lambda u=uid: _ps.recommendations(u, limit=3))
+                    if not items:
+                        continue
+                    # Одно напоминание в сутки: подпись включает дату и состав.
+                    day = datetime.datetime.fromtimestamp(
+                        now, datetime.timezone(datetime.timedelta(hours=3))
+                    ).strftime("%Y-%m-%d")
+                    sig = f"{day}:" + ",".join(x["listing_key"] for x in items)
+                    if not await loop.run_in_executor(
+                            None, lambda u=uid, g=sig:
+                            _ps.notify_once(u, "comeback", "comeback", g)):
+                        continue
+                    await _ps_send_recommendations(
+                        _PsChatTarget(uid), uid,
+                        prefix="👋 Пока вас не было, появились варианты по вашему поиску:")
+                    await asyncio.sleep(0.1)
+                except Exception as e:
+                    print(f"  [поиск] напоминание uid={uid}: {str(e)[:80]}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"  [поиск] ошибка цикла напоминаний: {str(e)[:120]}")
+
+
+class _PsChatTarget:
+    """Переходник: даёт `.answer()`/`.answer_photo()` для отправки в чат по uid.
+
+    Экран рекомендаций пишется в ответ на сообщение, а фоновому циклу отвечать
+    не на что — так один и тот же код работает и там, и там.
+    """
+
+    def __init__(self, chat_id: int):
+        self.chat_id = int(chat_id)
+
+    async def answer(self, text: str, **kwargs):
+        kwargs.pop("parse_mode", None)
+        return await bot.send_message(self.chat_id, text, **kwargs)
+
+    async def answer_photo(self, photo, caption: str = "", **kwargs):
+        return await bot.send_photo(self.chat_id, photo, caption=caption, **kwargs)
 
 
 async def _ps_saved_events_loop():
@@ -21744,6 +22007,7 @@ async def main():
             loop.create_task(_ps_new_listing_loop())
             loop.create_task(_ps_saved_events_loop())
             loop.create_task(_ps_reports_loop())
+            loop.create_task(_ps_comeback_loop())
             print("  [поиск] постоянный поиск и отчёты запущены")
         except Exception as _e:
             print(f"  [поиск] не запущен: {str(_e)[:80]}")

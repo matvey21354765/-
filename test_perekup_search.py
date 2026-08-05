@@ -358,7 +358,8 @@ class TestCardAndSummary(SearchTestBase):
         self.assertNotIn("DealScore", card)
         self.assertIn("18 минут назад", card)
         self.assertIn("Рынок Авито", card)
-        self.assertIn("Почему показали", card)
+        # Блок «Почему показали» убран — он повторял шапку и цену.
+        self.assertNotIn("Почему показали", card)
 
     def test_card_starts_with_publish_date(self):
         """Дата публикации — в первой строке, а не «N дн назад» по данным бота."""
@@ -613,3 +614,82 @@ class TestMarketFallback(SearchTestBase):
         card = self.ps.format_card(lst, now=self.now)
         self.assertIn("Рынок площадок", card)
         self.assertIn("Дешевле рынка на 40%", card)
+
+
+class TestRecommendations(SearchTestBase):
+    """Экран «что открыть прямо сейчас»."""
+
+    GOOD_DESC = "Один хозяин, вложений не требует, салон чистый, резина новая"
+
+    def setUp(self):
+        super().setUp()
+        self.ps.save_search(1, region="perm", price_max=300_000)
+        for i in range(4):
+            self.ingest(price=150_000, url=f"https://avito.ru/ref/{i}",
+                        title="ВАЗ-2114, 2008", source="avito",
+                        _photo_url="http://a/r.jpg", description=self.GOOD_DESC,
+                        _published_ts=self.now - 7200)
+
+    def test_freshest_cheapest_comes_first(self):
+        self.ingest(price=140_000, url="https://drom.ru/meh", source="drom",
+                    _photo_url="http://a/1.jpg", description=self.GOOD_DESC,
+                    _published_ts=self.now - 20 * 3600)
+        best = self.ingest(price=60_000, url="https://drom.ru/top", source="drom",
+                           _photo_url="http://a/2.jpg", description=self.GOOD_DESC,
+                           _published_ts=self.now - 600)
+        rec = self.ps.recommendations(1, limit=3, now=self.now)
+        self.assertTrue(rec)
+        self.assertEqual(rec[0]["listing_key"], best)
+
+    def test_every_recommendation_explains_itself(self):
+        self.ingest(price=60_000, url="https://drom.ru/top", source="drom",
+                    _photo_url="http://a/2.jpg", description=self.GOOD_DESC,
+                    _published_ts=self.now - 600)
+        for row in self.ps.recommendations(1, limit=3, now=self.now):
+            self.assertTrue(row["_reason"].strip())
+
+    def test_reason_names_the_gain_and_freshness(self):
+        lst = {"price": 60_000, "market_price": 200_000,
+               "published_at": self.now - 720, "first_seen_at": self.now,
+               "listing_key": "r1", "title": "x", "description": ""}
+        reason = self.ps.recommendation_reason(lst, self.now)
+        self.assertIn("12 минут назад", reason)
+        self.assertIn("Ниже рынка", reason)
+
+    def test_price_drop_wins_over_plain_freshness(self):
+        lst = {"price": 100_000, "market_price": 0, "drops_count": 2,
+               "published_at": self.now - 3600, "listing_key": "r2",
+               "title": "x", "description": ""}
+        self.assertIn("снижена", self.ps.recommendation_reason(lst, self.now))
+
+    def test_screen_lists_numbered_cars(self):
+        self.ingest(price=60_000, url="https://drom.ru/top", source="drom",
+                    _photo_url="http://a/2.jpg", description=self.GOOD_DESC,
+                    _published_ts=self.now - 600)
+        text = self.ps.format_recommendations(
+            self.ps.recommendations(1, limit=3, now=self.now), self.now)
+        self.assertIn("Что рекомендую открыть прямо сейчас", text)
+        self.assertIn("1. ", text)
+
+    def test_empty_screen_says_so(self):
+        self.assertIn("Пока нечего рекомендовать",
+                      self.ps.format_recommendations([], self.now))
+
+
+class TestCardWithoutWhyBlock(SearchTestBase):
+    def test_card_has_no_why_block(self):
+        lst = {"title": "ВАЗ-2114", "price": 90_000, "market_price": 150_000,
+               "market_sample": 9, "listing_key": "k", "description": "",
+               "published_at": self.now - 600, "first_seen_at": self.now}
+        card = self.ps.format_card(lst, now=self.now)
+        self.assertNotIn("Почему показали", card)
+        self.assertNotIn("подходит под поиск", card)
+
+    def test_explicit_reason_is_still_shown(self):
+        """Рекомендации передают свою причину — её печатаем."""
+        lst = {"title": "ВАЗ-2114", "price": 90_000, "listing_key": "k",
+               "description": "", "published_at": self.now - 600,
+               "first_seen_at": self.now}
+        card = self.ps.format_card(lst, now=self.now,
+                                   reasons=["Ниже рынка на ~60 000 ₽."])
+        self.assertIn("Ниже рынка на ~60 000 ₽.", card)

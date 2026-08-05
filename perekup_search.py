@@ -1033,6 +1033,121 @@ def listing_rank(listing: dict) -> tuple:
     )
 
 
+# ──────────────────────────────────────────────────────────────────────
+# Рекомендации: что открыть прямо сейчас
+# ──────────────────────────────────────────────────────────────────────
+#: Насколько дешевле рынка, чтобы это стоило называть выгодой.
+RECOMMEND_MIN_GAIN = 20_000
+#: Свежесть, при которой объявление стоит открыть первым (часы).
+RECOMMEND_FRESH_HOURS = 6
+
+
+def recommendation_reason(listing: dict, now: float | None = None) -> str:
+    """Одна строка: почему именно эту машину стоит открыть сейчас."""
+    now = time.time() if now is None else float(now)
+    market = int(listing.get("market_price") or 0)
+    price = int(listing.get("price") or 0)
+    gain = market - price if (market and price and market > price) else 0
+    hours, exact = listing_age_hours(listing, now)
+    drops = int(listing.get("drops_count") or 0)
+
+    if drops >= 2:
+        return f"Цена снижена {drops}-й раз — продавец торопится."
+    if drops == 1:
+        return "Цена снижена — продавец готов торговаться."
+    if exact and hours < 1:
+        base = f"Опубликована {max(1, int(hours * 60))} минут назад."
+    elif exact and hours < RECOMMEND_FRESH_HOURS:
+        base = f"Опубликована {int(hours)} ч назад."
+    else:
+        base = ""
+    if gain >= RECOMMEND_MIN_GAIN:
+        gain_text = f"Ниже рынка на ~{fmt_money(gain)}."
+        return f"{base} {gain_text}".strip()
+    if base:
+        return base
+    if gain > 0:
+        return f"Ниже рынка на ~{fmt_money(gain)}."
+    if _BARGAIN_RE.search(f"{listing.get('title','')} {listing.get('description','')}"):
+        return "Продавец указал торг."
+    return "Подходит под ваш поиск."
+
+
+def _recommend_score(listing: dict, now: float) -> float:
+    """Чем выше, тем раньше показываем. Свежесть + выгода + снижения цены."""
+    market = int(listing.get("market_price") or 0)
+    price = int(listing.get("price") or 0)
+    gain = market - price if (market and price and market > price) else 0
+    hours, exact = listing_age_hours(listing, now)
+    score = 0.0
+    if market and price:
+        score += min(60.0, gain * 100.0 / market)       # доля выгоды, до 60
+    if exact:
+        if hours < 1:
+            score += 40
+        elif hours < RECOMMEND_FRESH_HOURS:
+            score += 30
+        elif hours < TODAY_HOURS:
+            score += 15
+    score += min(30, int(listing.get("drops_count") or 0) * 15)
+    if has_photo(listing):
+        score += 10
+    if has_description(listing):
+        score += 5
+    return score
+
+
+def recommendations(user_id: int, *, limit: int = 3,
+                    now: float | None = None) -> list[dict]:
+    """Что открыть прямо сейчас: лучшее из всех разделов одним списком.
+
+    Пользователю не нужно самому решать, в какой раздел заглянуть: бот сам
+    поднимает наверх свежие машины ниже рынка и те, где продавец снизил цену.
+    К каждой возвращается готовая строка-объяснение в поле _reason.
+    """
+    now = time.time() if now is None else float(now)
+    pool: dict[str, dict] = {}
+    for cat in ("fresh", "today", "days3", "bargain"):
+        for d in _pool_candidates(user_id, cat, now):
+            pool.setdefault(d["listing_key"], d)
+    # Снижения цены — отдельный сигнал: их в разделах по возрасту может не быть.
+    for d in price_drop_feed(user_id, limit=50, now=now):
+        row = pool.get(d["listing_key"]) or d
+        row["drops_count"] = max(int(row.get("drops_count") or 0), 1)
+        drop = int(d.get("drop") or 0)
+        if drop:
+            row.setdefault("drop", drop)
+        pool[d["listing_key"]] = row
+    if not pool:
+        return []
+    ranked = sorted(pool.values(), key=lambda d: -_recommend_score(d, now))
+    out = []
+    for d in ranked[:max(1, int(limit))]:
+        d["_reason"] = recommendation_reason(d, now)
+        out.append(d)
+    return out
+
+
+def format_recommendations(items: Iterable[dict], now: float | None = None) -> str:
+    """Экран «что открыть прямо сейчас»: номер, машина, цена, одна причина."""
+    now = time.time() if now is None else float(now)
+    items = list(items)
+    if not items:
+        return ("🎯 Пока нечего рекомендовать\n\n"
+                "Бот собирает объявления постоянно — загляните чуть позже.")
+    lines = ["🎯 Что рекомендую открыть прямо сейчас", ""]
+    for i, d in enumerate(items, 1):
+        title = d.get("title") or "Автомобиль"
+        year = int(d.get("year") or 0)
+        if year and str(year) not in title:
+            title = f"{title}, {year}"
+        lines.append(f"{i}. {title}")
+        lines.append(f"   {fmt_money(int(d.get('price') or 0))}")
+        lines.append(f"   {d.get('_reason') or recommendation_reason(d, now)}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
 def category_total(user_id: int, category: str, now: float | None = None) -> int:
     """Сколько всего машин в разделе — нужно для кнопок «Ещё N» / «Назад»."""
     now = time.time() if now is None else float(now)
@@ -1362,11 +1477,13 @@ def format_card(listing: dict, *, category: str = "", now: float | None = None,
         _desc = " ".join(_desc.split())
         lines.append("")
         lines.append(f"📝 {_desc[:300]}" + ("…" if len(_desc) > 300 else ""))
-    why = list(reasons or why_shown(listing, category=cat, now=now))
+    # Блок «Почему показали» убран: он повторял то, что и так видно по шапке
+    # и цене, и занимал место в карточке. reasons оставлен для вызовов, где
+    # причина действительно нужна (рекомендации, уведомления).
+    why = list(reasons or ())
     if why:
         lines.append("")
-        lines.append("Почему показали:")
-        lines += [f"• {r};" for r in why[:-1]] + [f"• {why[-1]}."]
+        lines += [f"• {r}" for r in why]
     return "\n".join(lines)
 
 

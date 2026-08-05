@@ -532,3 +532,72 @@ def test_direct_search_runs_when_feed_is_thin(monkeypatch):
     out = cb._avito_direct_region_search(
         "perm", price_min=0, price_max=100, sort_by_date=True, brand="any")
     assert out and out[0]["url"] == "https://avito.ru/1"
+
+
+# ── Фото: проверка ссылки перед отправкой ────────────────────────────
+
+
+def test_photo_url_checked_before_sending(monkeypatch):
+    """Telegram не считает ошибкой недоступное фото — показывает крестик."""
+    cb._PHOTO_CHECK_CACHE.clear()
+
+    class _Resp:
+        def __init__(self, status, ctype, length):
+            self.status_code, self.headers = status, {
+                "Content-Type": ctype, "Content-Length": str(length)}
+
+        def close(self):
+            pass
+
+    import requests
+    cases = {
+        "https://ok/photo.jpg": _Resp(200, "image/jpeg", 40000),
+        "https://gone/photo.jpg": _Resp(404, "text/html", 500),
+        "https://stub/photo.jpg": _Resp(200, "image/gif", 120),
+        "https://page/photo.jpg": _Resp(200, "text/html", 40000),
+    }
+    monkeypatch.setattr(requests, "get", lambda url, **kw: cases[url])
+    assert cb._photo_is_loadable("https://ok/photo.jpg")
+    assert not cb._photo_is_loadable("https://gone/photo.jpg")
+    assert not cb._photo_is_loadable("https://stub/photo.jpg")
+    assert not cb._photo_is_loadable("https://page/photo.jpg")
+    assert not cb._photo_is_loadable("")
+
+
+def test_photo_check_is_cached(monkeypatch):
+    cb._PHOTO_CHECK_CACHE.clear()
+    calls = []
+
+    class _Resp:
+        status_code = 200
+        headers = {"Content-Type": "image/jpeg", "Content-Length": "40000"}
+
+        def close(self):
+            pass
+
+    import requests
+    monkeypatch.setattr(requests, "get",
+                        lambda url, **kw: calls.append(url) or _Resp())
+    for _ in range(3):
+        cb._photo_is_loadable("https://ok/photo.jpg")
+    assert len(calls) == 1
+
+
+def test_youla_picks_the_largest_photo():
+    """Первый кадр в images часто превью на 90 пикселей."""
+    import inspect
+    src = inspect.getsource(cb.scrape_youla)
+    assert "_youla_best_photo(imgs)" in src
+
+
+# ── Авито: точный момент публикации ──────────────────────────────────
+
+
+def test_avito_listing_keeps_the_exact_publish_moment():
+    """sortTimeStamp разбирался только в сутки: у сегодняшних объявлений
+    выходило «площадка не указала дату»."""
+    import perekup_search as ps
+    now = __import__("time").time()
+    item = {"_published_ts": ps.parse_published_ts(now - 900)}
+    assert ps.published_at(item)
+    assert abs(ps.published_at(item) - (now - 900)) < 5
