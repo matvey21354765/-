@@ -826,6 +826,19 @@ def _avito_pace_delay(now: float | None = None, last: float | None = None,
     return round(max(0.0, target - max(0.0, gap)), 3)
 
 
+def _avito_budget_sec() -> float:
+    """Сколько секунд парсер Авито может тратить на обход страниц.
+
+    Живой поиск ждёт источник ограниченное время. Если парсер выйдет за него,
+    выдача обрывается и пользователь видит «Avito: 0», хотя объявления уже
+    разобраны — поэтому обход укладывается в бюджет и отдаёт собранное.
+    """
+    try:
+        return max(10.0, float(os.getenv("AVITO_BUDGET_SEC", "45")))
+    except (TypeError, ValueError):
+        return 45.0
+
+
 def _avito_pace() -> None:
     """Пауза со случайным разбросом перед очередным запросом к Авито."""
     global _AVITO_LAST_REQUEST_AT
@@ -7453,10 +7466,19 @@ def _avito_legacy_fetch(region: str, price_min: int = 0, price_max: int = 99_000
     # В рабочей июльской версии Авито качался НЕСКОЛЬКИМИ страницами (pages=5) —
     # одна страница даёт ~50 объявлений, этого мало для выдачи.
     _max_pages = max(1, int(os.getenv("AVITO_PAGES", "10")))
+    # Бюджет времени. Десять страниц с паузами и повторами легко перебирают
+    # таймаут живого поиска, и тогда пользователь видит «Avito: 0», хотя
+    # объявления уже разобраны. Лучше отдать то, что успели собрать.
+    _budget = _avito_budget_sec()
+    _started = time.time()
     # Одна страница 429/пустышка — не повод бросать пагинацию: следующий запрос
     # часто проходит. Останавливаемся только после двух промахов подряд.
     _miss = 0
     for _p in range(page, page + _max_pages):
+        if out and (time.time() - _started) >= _budget:
+            print(f"  [Авито legacy] бюджет {_budget:.0f}с исчерпан на стр.{_p} — "
+                  f"отдаём {len(out)} объявлений")
+            break
         _priceless = False
         text = _try_fetch(_build_url(_p, with_price=True))
         if not text:
@@ -14838,6 +14860,182 @@ async def cb_broadcast(cb: CallbackQuery):
     )
 
 
+# ── Рассылка по расписанию ───────────────────────────────────────────
+_SCHEDULED_BROADCASTS_FILE = USERS_DIR / "scheduled_broadcasts.json"
+
+#: Анонс большого обновления. Отправляется один раз, в указанный момент.
+_UPDATE_ANNOUNCEMENT_ID = "update-2026-08-06"
+_UPDATE_ANNOUNCEMENT_AT = datetime.datetime(
+    2026, 8, 6, 10, 0, tzinfo=datetime.timezone(datetime.timedelta(hours=3))
+).timestamp()
+_UPDATE_ANNOUNCEMENT_TEXT = (
+    "🔥 Большое обновление PerekupDrive\n\n"
+    "Мы полностью переработали логику поиска автомобилей. "
+    "Теперь бот — это не просто список объявлений, а полноценный помощник "
+    "для поиска выгодных вариантов.\n\n"
+    "Что изменилось:\n"
+    "🚨 Кто быстрее — самые свежие объявления, которые только появились.\n"
+    "🔥 Новые сегодня — все интересные машины за текущий день.\n"
+    "📉 Снизили цену — бот сам отслеживает снижение стоимости.\n"
+    "🤝 Простор для торга — объявления, где продавец уже готов двигаться по цене.\n"
+    "⭐ Сохранённые — сохраняйте интересные машины, и бот будет сообщать, если:\n"
+    "• снизилась цена;\n"
+    "• объявление появилось повторно;\n"
+    "• найден похожий вариант дешевле.\n\n"
+    "Мы также обновили общую систему поиска, фильтрацию и скорость обработки "
+    "объявлений.\n\n"
+    "🎁 В честь обновления\n"
+    "Для всех новых пользователей открыт 3-дневный бесплатный доступ ко всем "
+    "возможностям бота. После окончания пробного периода сервис перейдёт на "
+    "платную подписку.\n"
+    "Если давно хотели попробовать — сейчас самое подходящее время.\n\n"
+    "👇 Запускайте бота и тестируйте обновлённый поиск. 🚗💰"
+)
+#: Насколько поздно ещё допустимо отправить пропущенную рассылку (часы).
+#: Если бот лежал дольше — анонс не уходит, чтобы не прийти среди ночи.
+_SCHEDULED_BROADCAST_GRACE_HOURS = 12
+
+
+def _load_scheduled_broadcasts() -> list[dict]:
+    try:
+        if _SCHEDULED_BROADCASTS_FILE.exists():
+            data = json.loads(_SCHEDULED_BROADCASTS_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                return [x for x in data if isinstance(x, dict)]
+    except Exception as e:
+        print(f"  [рассылка] не прочитал расписание: {str(e)[:80]}")
+    return []
+
+
+def _save_scheduled_broadcasts(rows: list[dict]) -> None:
+    try:
+        _SCHEDULED_BROADCASTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _SCHEDULED_BROADCASTS_FILE.write_text(
+            json.dumps(rows, ensure_ascii=False, indent=1), encoding="utf-8")
+    except Exception as e:
+        print(f"  [рассылка] не сохранил расписание: {str(e)[:80]}")
+
+
+def schedule_broadcast(broadcast_id: str, send_at: float, text: str) -> bool:
+    """Ставит рассылку в расписание. Повторный вызов с тем же id ничего не меняет."""
+    rows = _load_scheduled_broadcasts()
+    if any(str(r.get("id")) == broadcast_id for r in rows):
+        return False
+    rows.append({"id": broadcast_id, "send_at": float(send_at),
+                 "text": text, "sent_at": None})
+    _save_scheduled_broadcasts(rows)
+    return True
+
+
+def due_broadcasts(rows: list[dict], now: float,
+                   grace_hours: int = _SCHEDULED_BROADCAST_GRACE_HOURS) -> list[dict]:
+    """Рассылки, которым пора уйти: время наступило и опоздание в пределах окна."""
+    out = []
+    for row in rows:
+        if row.get("sent_at"):
+            continue
+        try:
+            at = float(row.get("send_at") or 0)
+        except (TypeError, ValueError):
+            continue
+        if at <= 0 or now < at:
+            continue
+        if now - at > grace_hours * 3600:
+            continue
+        out.append(row)
+    return out
+
+
+async def _scheduled_broadcast_loop():
+    """Отправляет запланированные рассылки всем пользователям бота."""
+    await asyncio.sleep(60)
+    schedule_broadcast(_UPDATE_ANNOUNCEMENT_ID, _UPDATE_ANNOUNCEMENT_AT,
+                       _UPDATE_ANNOUNCEMENT_TEXT)
+    while True:
+        try:
+            await asyncio.sleep(60)
+            rows = _load_scheduled_broadcasts()
+            due = due_broadcasts(rows, time.time())
+            if not due:
+                continue
+            for row in due:
+                uids = _all_user_ids()
+                sent = failed = blocked = 0
+                print(f"  [рассылка] {row['id']}: отправляю {len(uids)} пользователям")
+                for uid in uids:
+                    try:
+                        await bot.send_message(uid, row["text"],
+                                               disable_web_page_preview=True)
+                        sent += 1
+                    except Exception as e:
+                        es = str(e).lower()
+                        if ("blocked" in es or "deactivated" in es
+                                or "chat not found" in es):
+                            blocked += 1
+                        else:
+                            failed += 1
+                    await asyncio.sleep(0.05)   # ~20 сообщений/сек
+                row["sent_at"] = time.time()
+                _save_scheduled_broadcasts(rows)
+                print(f"  [рассылка] {row['id']}: доставлено {sent}, "
+                      f"заблокировали {blocked}, ошибок {failed}")
+                for aid in ADMIN_IDS:
+                    try:
+                        await bot.send_message(
+                            aid,
+                            f"✅ Плановая рассылка «{row['id']}» отправлена.\n\n"
+                            f"📨 Доставлено: {_fmt_n(sent)}\n"
+                            f"🚫 Заблокировали бота: {_fmt_n(blocked)}\n"
+                            f"⚠️ Ошибок: {_fmt_n(failed)}\n"
+                            f"👥 Всего: {_fmt_n(len(uids))}")
+                    except Exception:
+                        pass
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"  [рассылка] ошибка планировщика: {str(e)[:120]}")
+
+
+@dp.message(Command("scheduled"))
+async def cmd_scheduled_broadcasts(msg: Message):
+    """Список плановых рассылок (админ)."""
+    if msg.from_user.id not in ADMIN_IDS:
+        return
+    rows = _load_scheduled_broadcasts()
+    if not rows:
+        await msg.answer("Плановых рассылок нет.")
+        return
+    msk = datetime.timezone(datetime.timedelta(hours=3))
+    lines = ["🗓 <b>Плановые рассылки</b>", ""]
+    for r in rows:
+        when = datetime.datetime.fromtimestamp(
+            float(r.get("send_at") or 0), msk).strftime("%d.%m.%Y %H:%M МСК")
+        state = ("отправлена" if r.get("sent_at") else "ждёт отправки")
+        lines.append(f"• <code>{r.get('id')}</code> — {when} — {state}")
+    lines.append("")
+    lines.append("Отменить: <code>/scheduled_cancel ID</code>")
+    await msg.answer("\n".join(lines), parse_mode="HTML")
+
+
+@dp.message(Command("scheduled_cancel"))
+async def cmd_scheduled_cancel(msg: Message):
+    """Отменяет плановую рассылку по её id (админ)."""
+    if msg.from_user.id not in ADMIN_IDS:
+        return
+    parts = (msg.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await msg.answer("Формат: <code>/scheduled_cancel ID</code>", parse_mode="HTML")
+        return
+    target = parts[1].strip()
+    rows = _load_scheduled_broadcasts()
+    left = [r for r in rows if str(r.get("id")) != target]
+    if len(left) == len(rows):
+        await msg.answer("Такой рассылки нет.")
+        return
+    _save_scheduled_broadcasts(left)
+    await msg.answer(f"❌ Рассылка «{target}» отменена.")
+
+
 async def _admin_report_scheduler():
     """В 00:00 МСК — итоги завершившегося дня; по понедельникам — «Неделя».
     Раздел «Сегодня» обнуляется в полночь МСК (счёт по МСК-дню).
@@ -18019,7 +18217,10 @@ async def do_search_for_user(uid: int, reply_to, *, send_cards: bool = True,
     source_timeouts = {
         "drom": int(30 * _tmul),
         "autoru": int(45 * _tmul),   # 8 страниц по ~2.2 МБ
-        "avito": int(75 * _tmul),    # 5 страниц + возможная ротация IP
+        # Авито: бюджет самого парсера (AVITO_BUDGET_SEC) плюс запас на
+        # ротацию IP и разбор. Таймаут обязан быть больше бюджета, иначе
+        # поиск обрывает уже собранные объявления и показывает «Avito: 0».
+        "avito": int(max(75, _avito_budget_sec() + 30) * _tmul),
         "youla": int(20 * _tmul),
         "vk": int(20 * _tmul),
         "tg": int(20 * _tmul),
@@ -19551,36 +19752,80 @@ async def _price_watch_loop():
             print(f"  [наблюдение] ошибка цикла: {str(e)[:120]}")
 
 
+def _access_left_seconds(uid: int) -> tuple[float, bool]:
+    """(сколько секунд доступа осталось, платная ли подписка)."""
+    s = load_settings(uid)
+    until = float(s.get("subscription_until", 0) or 0)
+    now = time.time()
+    if until > now:
+        return until - now, True
+    t = _trial_info(uid)
+    return max(0.0, float(t["ends_at"]) - now), False
+
+
+#: Пороги напоминаний в часах. Тест короткий (3 дня), поэтому «за 3 дня»
+#: сработало бы в первый же час — напоминаем за сутки и за шесть часов.
+_ACCESS_REMINDERS = (
+    (72, "3 дня"),
+    (24, "1 день"),
+    (6, "6 часов"),
+)
+
+
 async def _trial_notification_loop():
-    """Раз в 6 часов напоминает пользователям о скором окончании теста (за 3 и за 1 день)."""
+    """Напоминает о скором окончании доступа — и теста, и платной подписки.
+
+    Проверка раз в час: при трёхдневном тесте шаг в шесть часов пропускал
+    последние часы, а платная подписка не отслеживалась вовсе.
+    """
     global _registry_dirty
     while True:
         try:
-            await asyncio.sleep(6 * 3600)
+            await asyncio.sleep(3600)
             for uid, u in dict(_USER_REGISTRY).items():
                 try:
-                    info = _trial_info(int(uid))
-                    if info["ended"]:
+                    uid_int = int(uid)
+                    left, is_paid = _access_left_seconds(uid_int)
+                    if left <= 0:
                         continue
-                    dleft = info["days_left"]
+                    hours_left = left / 3600.0
                     notified = u.setdefault("trial_notified", [])
-                    for threshold in (3, 1):
-                        if dleft == threshold and threshold not in notified:
-                            try:
-                                await bot.send_message(
-                                    int(uid),
-                                    f"⏳ *До конца тестового периода осталось {dleft} дн.*\n\n"
-                                    f"Бот нашёл для вас выгодные авто ниже рынка. "
-                                    f"Оформите подписку, чтобы не прервать поиск и "
-                                    f"продолжать получать уведомления о новых объявлениях.",
-                                    parse_mode="Markdown",
-                                )
-                                notified.append(threshold)
-                                _registry_dirty = True
-                            except Exception:
-                                pass
+                    for threshold, human in _ACCESS_REMINDERS:
+                        marker = f"{'sub' if is_paid else 'trial'}:{threshold}"
+                        if hours_left > threshold or marker in notified:
+                            continue
+                        # Старый формат отметок (числа) — чтобы уже
+                        # предупреждённые не получили напоминание повторно.
+                        if not is_paid and threshold // 24 in notified:
+                            notified.append(marker)
+                            continue
+                        what = "подписка" if is_paid else "тестовый период"
+                        head = (f"⏳ <b>{what.capitalize()} заканчивается через "
+                                f"{human}</b>")
+                        if hours_left <= 6:
+                            head = (f"⏳ <b>{what.capitalize()} заканчивается "
+                                    f"сегодня</b>")
+                        try:
+                            await bot.send_message(
+                                uid_int,
+                                f"{head}\n\n"
+                                "После окончания поиск, мониторинг и уведомления "
+                                "о выгодных авто отключатся.\n\n"
+                                + _referral_discount_note(uid_int)
+                                + "Продлите доступ, чтобы не потерять свежие "
+                                  "объявления.",
+                                parse_mode="HTML",
+                                reply_markup=_subscription_keyboard(uid_int),
+                            )
+                            notified.append(marker)
+                            _registry_dirty = True
+                        except Exception:
+                            pass
+                        break
                 except Exception:
                     pass
+        except asyncio.CancelledError:
+            raise
         except Exception:
             pass
 
@@ -22011,6 +22256,11 @@ async def main():
             print("  [поиск] постоянный поиск и отчёты запущены")
         except Exception as _e:
             print(f"  [поиск] не запущен: {str(_e)[:80]}")
+        try:
+            loop.create_task(_scheduled_broadcast_loop())
+            print("  [рассылка] планировщик рассылок запущен")
+        except Exception as _e:
+            print(f"  [рассылка] планировщик не запущен: {str(_e)[:80]}")
         print("  [тест] цикл уведомлений о конце теста запущен")
         await _diag("циклы созданы")
 

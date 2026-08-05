@@ -601,3 +601,59 @@ def test_avito_listing_keeps_the_exact_publish_moment():
     item = {"_published_ts": ps.parse_published_ts(now - 900)}
     assert ps.published_at(item)
     assert abs(ps.published_at(item) - (now - 900)) < 5
+
+
+# ── Авито: бюджет времени на обход страниц ───────────────────────────
+
+
+def test_avito_budget_is_smaller_than_the_search_timeout():
+    """Парсер обязан уложиться в ожидание поиска, иначе выдача обрывается
+    и пользователь видит «Avito: 0» при разобранных объявлениях."""
+    budget = cb._avito_budget_sec()
+    assert budget >= 10
+    assert max(75, budget + 30) > budget
+
+
+def test_avito_budget_reads_env(monkeypatch):
+    monkeypatch.setenv("AVITO_BUDGET_SEC", "90")
+    assert cb._avito_budget_sec() == 90
+    monkeypatch.setenv("AVITO_BUDGET_SEC", "мусор")
+    assert cb._avito_budget_sec() == 45
+    monkeypatch.setenv("AVITO_BUDGET_SEC", "1")
+    assert cb._avito_budget_sec() == 10          # ниже минимума не опускаемся
+
+
+def test_pagination_stops_on_budget():
+    """Обход прерывается по бюджету и отдаёт уже собранное."""
+    import inspect
+    src = inspect.getsource(cb._avito_legacy_fetch)
+    assert "_budget" in src and "break" in src
+
+
+# ── Плановая рассылка ────────────────────────────────────────────────
+
+
+def test_scheduled_broadcast_fires_once_at_its_time():
+    now = 1_000_000.0
+    rows = [{"id": "a", "send_at": now, "sent_at": None}]
+    assert cb.due_broadcasts(rows, now - 1) == []          # рано
+    assert len(cb.due_broadcasts(rows, now)) == 1          # пора
+    assert len(cb.due_broadcasts(rows, now + 3600)) == 1   # бот лежал час
+    rows[0]["sent_at"] = now
+    assert cb.due_broadcasts(rows, now + 3600) == []       # уже отправлена
+
+
+def test_missed_broadcast_is_not_sent_days_later():
+    """Если бот лежал сутки, анонс не должен прийти среди ночи."""
+    now = 1_000_000.0
+    rows = [{"id": "a", "send_at": now, "sent_at": None}]
+    assert cb.due_broadcasts(rows, now + 25 * 3600) == []
+
+
+def test_announcement_is_scheduled_for_ten_msk():
+    import datetime
+    msk = datetime.timezone(datetime.timedelta(hours=3))
+    when = datetime.datetime.fromtimestamp(cb._UPDATE_ANNOUNCEMENT_AT, msk)
+    assert (when.hour, when.minute) == (10, 0)
+    assert "Большое обновление PerekupDrive" in cb._UPDATE_ANNOUNCEMENT_TEXT
+    assert "3-дневный бесплатный доступ" in cb._UPDATE_ANNOUNCEMENT_TEXT

@@ -157,5 +157,47 @@ class TestTrialTexts(unittest.TestCase):
         self.assertIn("дня бесплатно", src)
 
 
+class TestAccessExpiryReminders(TrialBase):
+    """Напоминания о скором конце доступа — и теста, и платной подписки."""
+
+    def test_free_access_is_three_days(self):
+        self.register(9_000_020)
+        info = cb._trial_info(9_000_020)
+        self.assertEqual(cb.TRIAL_DAYS, 3)
+        self.assertEqual(info["total"], 3)
+        self.assertFalse(info["ended"])
+
+    def test_trial_left_seconds_counted_from_start(self):
+        uid = 9_000_021
+        self.register(uid)
+        cb._USER_REGISTRY[str(uid)]["trial_start"] = int(time.time()) - 2 * 86400
+        left, is_paid = cb._access_left_seconds(uid)
+        self.assertFalse(is_paid)
+        self.assertAlmostEqual(left / 3600.0, 24, delta=1)
+
+    def test_paid_subscription_is_tracked_too(self):
+        """Раньше напоминания были только про тест, подписка кончалась молча."""
+        uid = 9_000_022
+        self.register(uid)
+        s = cb.load_settings(uid)
+        s["subscription_until"] = time.time() + 5 * 3600
+        s["subscription_type"] = "month"
+        cb.save_settings(uid, s)
+        try:
+            left, is_paid = cb._access_left_seconds(uid)
+            self.assertTrue(is_paid)
+            self.assertAlmostEqual(left / 3600.0, 5, delta=0.1)
+        finally:
+            s["subscription_until"] = 0
+            cb.save_settings(uid, s)
+
+    def test_thresholds_fit_a_three_day_trial(self):
+        """Порог «за 3 дня» на трёхдневном тесте сработал бы в первый час."""
+        hours = [h for h, _ in cb._ACCESS_REMINDERS]
+        self.assertIn(24, hours)
+        self.assertIn(6, hours)
+        self.assertEqual(sorted(hours, reverse=True), hours)
+
+
 if __name__ == "__main__":
     unittest.main()
