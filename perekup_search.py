@@ -373,7 +373,9 @@ def ingest_listing(item: dict, now: float | None = None) -> dict:
             normalize_region(str(item.get("region") or "")),
             parse_brand(title), parse_model(title),
             parse_year(item), int(item.get("mileage") or 0), detect_condition(item),
-            str(item.get("description") or "")[:1000], str(item.get("photo") or ""),
+            str(item.get("description") or "")[:1000],
+            str(item.get("_photo_url") or item.get("photo_url")
+                or item.get("photo") or ""),
         )
         if row is None:
             conn.execute(
@@ -960,6 +962,28 @@ def _category_icon(cat: str) -> str:
             "price_drop": "📉"}.get(cat, "🚗")
 
 
+def _published_label(listing: dict) -> str:
+    """«вчера в 20:29» / «4 августа в 13:05» — когда объявление выложено."""
+    ts = listing.get("published_at") or 0
+    try:
+        ts = float(ts or 0)
+    except (TypeError, ValueError):
+        return ""
+    if ts <= 0:
+        return ""
+    from datetime import datetime, timedelta, timezone
+    tz = timezone(timedelta(hours=3))          # МСК
+    dt = datetime.fromtimestamp(ts, tz)
+    today = datetime.now(tz).date()
+    _months = ("января", "февраля", "марта", "апреля", "мая", "июня", "июля",
+               "августа", "сентября", "октября", "ноября", "декабря")
+    if dt.date() == today:
+        return f"сегодня в {dt:%H:%M}"
+    if dt.date() == today - timedelta(days=1):
+        return f"вчера в {dt:%H:%M}"
+    return f"{dt.day} {_months[dt.month - 1]} в {dt:%H:%M}"
+
+
 def format_card(listing: dict, *, category: str = "", now: float | None = None,
                 reasons: Iterable[str] | None = None) -> str:
     """Карточка машины в формате ТЗ (без DealScore)."""
@@ -967,7 +991,14 @@ def format_card(listing: dict, *, category: str = "", now: float | None = None,
     cat = category or category_of(listing, now) or "today"
     price = int(listing.get("price") or 0)
     market = int(listing.get("market_price") or 0)
-    lines = [f"{_category_icon(cat)} {age_label(listing, now)}", ""]
+    _src = str(listing.get("source") or "").lower()
+    _src_label = {"avito": "🔴 Avito", "drom": "🔵 Дром", "autoru": "🟠 Auto.ru",
+                  "youla": "🟡 Юла", "vk": "📘 ВКонтакте",
+                  "tg": "✈️ Telegram", "tg_channel": "📢 TG-канал"}.get(_src, "")
+    _head = f"{_category_icon(cat)} {age_label(listing, now)}"
+    if _src_label:
+        _head += f"  ·  {_src_label}"
+    lines = [_head, ""]
     year = int(listing.get("year") or 0)
     title = listing.get("title") or "Автомобиль"
     lines.append(f"{title}" + (f", {year}" if year and str(year) not in title else ""))
@@ -984,7 +1015,15 @@ def format_card(listing: dict, *, category: str = "", now: float | None = None,
     region = region_label(listing.get("region") or "")
     if region:
         lines.append(f"📍 {region}")
+    _pub = _published_label(listing)
+    if _pub:
+        lines.append(f"🕒 Опубликовано: {_pub}")
     lines.append(f"🔧 По описанию: {condition_text(listing.get('condition') or '')}")
+    _desc = (listing.get("description") or "").strip()
+    if _desc:
+        _desc = " ".join(_desc.split())
+        lines.append("")
+        lines.append(f"📝 {_desc[:300]}" + ("…" if len(_desc) > 300 else ""))
     why = list(reasons or why_shown(listing, category=cat, now=now))
     if why:
         lines.append("")

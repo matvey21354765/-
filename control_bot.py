@@ -8091,7 +8091,13 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
         # пробуем достать её из заголовка ("…, 450 000 ₽"), и только если и там
         # нет — отбрасываем.
         if not price_int:
-            _pt = parse_price(title)
+            # ВАЖНО: в заголовке Авито есть ПРОБЕГ («…, 2001, битый, 95 000 км»),
+            # и обычный parse_price брал его за цену. Здесь принимаем число
+            # ТОЛЬКО если рядом стоит ₽/руб, иначе объявление отбрасываем.
+            _pm = re.search(
+                r"(?<!\d)(\d{1,3}(?:[\s\u00a0.,]\d{3})+|\d{4,9})\s*(?:₽|руб)",
+                title, re.IGNORECASE)
+            _pt = int(re.sub(r"\D", "", _pm.group(1))) if _pm else 0
             if _pt and 10_000 <= _pt <= 99_000_000:
                 price_int = _pt
                 price_str = f"{_pt:,} ₽".replace(",", " ")
@@ -19966,11 +19972,19 @@ async def _ps_send_category(target, uid: int, category: str, page: int = 0):
         else:
             text = _ps.format_card(lst, category=None if category == "saved" else category)
         saved = await loop.run_in_executor(None, lambda k=key: _ps.is_saved(uid, k))
-        await target.answer(
-            text,
-            reply_markup=_ps_card_keyboard(uid, key, category=category, page=page, saved=saved),
-            disable_web_page_preview=True,
-        )
+        _kb = _ps_card_keyboard(uid, key, category=category, page=page, saved=saved)
+        _photo = (lst.get("photo") or lst.get("photo_url")
+                  or lst.get("_photo_url") or "")
+        _sent = False
+        if _photo:
+            # Фото объявления — как в обычной выдаче бота.
+            try:
+                await target.answer_photo(_photo, caption=text[:1024], reply_markup=_kb)
+                _sent = True
+            except Exception as _pe:
+                print(f"  [карточка] фото не отправилось: {str(_pe)[:60]}")
+        if not _sent:
+            await target.answer(text, reply_markup=_kb, disable_web_page_preview=True)
         await asyncio.sleep(0.03)
 
 
