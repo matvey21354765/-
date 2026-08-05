@@ -1588,11 +1588,40 @@ def user_dir(uid: int) -> Path:
     return d
 
 
+# «Без ограничения» по цене во всём проекте кодируется этим значением:
+# площадки добавляют фильтр price_to только когда price_max < NO_PRICE_LIMIT.
+NO_PRICE_LIMIT = 99_000_000
+
+
+def normalize_budget(s: dict) -> dict:
+    """Чинит бюджет вида 0–0, при котором in_price_range отсекал ВСЕ объявления.
+
+    Пользователь, введя «0» как максимум (или пропустив шаг), имел в виду
+    «без ограничения», а не «ничего не показывать».
+    """
+    try:
+        pmin = int(s.get("price_min") or 0)
+    except (TypeError, ValueError):
+        pmin = 0
+    try:
+        pmax = int(s.get("price_max") or 0)
+    except (TypeError, ValueError):
+        pmax = 0
+    if pmax <= 0 or pmax < pmin:
+        pmax = NO_PRICE_LIMIT
+    s["price_min"] = max(0, pmin)
+    s["price_max"] = pmax
+    return s
+
+
 def load_settings(uid: int) -> dict:
     f = user_dir(uid) / "settings.json"
     if f.exists():
         try:
-            return json.loads(f.read_text(encoding="utf-8"))
+            s = json.loads(f.read_text(encoding="utf-8"))
+            # Нормализуем на чтении: чинит и уже сохранённые «сломанные» бюджеты,
+            # не переписывая файл пользователя.
+            return normalize_budget(s) if isinstance(s, dict) else s
         except Exception:
             pass
     return {}
@@ -15049,7 +15078,7 @@ async def fsm_price_min(msg: Message, state: FSMContext):
     await msg.answer(
         f"✅ Минимальная цена: {pmin:,} ₽\n\n"
         f"💰 Теперь введи максимальную цену\n"
-        f"(например: 1000000):"
+        f"(например: 1000000, или 0 — без ограничения):"
     )
     await state.set_state(Setup.price_max)
 
@@ -15057,7 +15086,9 @@ async def fsm_price_min(msg: Message, state: FSMContext):
 @dp.message(Setup.price_max)
 async def fsm_price_max(msg: Message, state: FSMContext):
     digits = re.sub(r"[^\d]", "", msg.text or "")
-    pmax = int(digits) if digits else 99_000_000
+    pmax = int(digits) if digits else NO_PRICE_LIMIT
+    # «0», пустой ввод или максимум ниже минимума = «без ограничения».
+    # Раньше это давало бюджет 0–0, и in_price_range отсекал вообще всё.
     data = await state.get_data()
     region = data.get("region", "ekaterinburg")
     pmin = data.get("price_min", 0)
@@ -15070,9 +15101,13 @@ async def fsm_price_max(msg: Message, state: FSMContext):
         "region": region, "price_min": pmin, "price_max": pmax,
         "category": category, "brand": brand, "damaged": damaged,
     })
+    normalize_budget(s)
+    pmin, pmax = s["price_min"], s["price_max"]
     save_settings(msg.from_user.id, s)
     await state.clear()
 
+    budget_line = ("без ограничения" if pmax >= NO_PRICE_LIMIT
+                   else f"{pmin:,} – {pmax:,} ₽".replace(",", " "))
     region_name = REGIONS.get(region, region)
     cat_label = CATEGORY_LABELS.get(category, category)
     brand_label = f" · {brand.capitalize()}" if brand else ""
@@ -15080,12 +15115,11 @@ async def fsm_price_max(msg: Message, state: FSMContext):
         f"✅ Поиск сохранён!\n\n"
         f"📍 Регион: {region_name}\n"
         f"🔍 Категория: {cat_label}{brand_label}\n"
-        f"💰 Бюджет: {pmin:,} – {pmax:,} ₽\n"
+        f"💰 Бюджет: {budget_line}\n"
         f"🔧 Состояние: {'можно с вложениями' if s.get('damaged') else 'на ходу'}\n"
-        f"📅 Годы: {s.get('year_min') or 'любые'}–{s.get('year_max') or ''}\n\n"
+        f"📅 Годы: {'любые' if not s.get('year_min') else 'от ' + str(s['year_min'])}\n\n"
         f"Поиск теперь обслуживается постоянно: объявления собираются в фоне "
-        f"и раскладываются по разделам."
-        .replace(",", " "),
+        f"и раскладываются по разделам.",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🔧 Состояние: на ходу",
                                   callback_data="pd_cond|running"),

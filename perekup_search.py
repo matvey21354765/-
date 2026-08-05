@@ -79,6 +79,9 @@ _NOT_RUNNING_RE = re.compile(
 )
 _BARGAIN_RE = re.compile(r"(торг|уступ|срочно|обмен)", re.IGNORECASE)
 
+# «Без ограничения» по цене (та же константа, что и в control_bot.NO_PRICE_LIMIT)
+NO_PRICE_LIMIT = 99_000_000
+
 MIN_MARKET_SAMPLE = 5          # меньше — оценка «предварительная»
 MARKET_YEAR_TOLERANCE = 1
 MARKET_OUTLIER_LOW = 0.45      # отсечь аномально дешёвые (битые/запчасти)
@@ -367,7 +370,8 @@ def ingest_listing(item: dict, now: float | None = None) -> dict:
         title = str(item.get("title") or "")[:300]
         vals = (
             str(item.get("source") or ""), title, str(item.get("url") or ""), price,
-            str(item.get("region") or ""), parse_brand(title), parse_model(title),
+            normalize_region(str(item.get("region") or "")),
+            parse_brand(title), parse_model(title),
             parse_year(item), int(item.get("mileage") or 0), detect_condition(item),
             str(item.get("description") or "")[:1000], str(item.get("photo") or ""),
         )
@@ -570,11 +574,14 @@ def matches_search(listing: dict, search: dict) -> bool:
         return False
     if search.get("price_min") and price < int(search["price_min"]):
         return False
-    if search.get("price_max") and price > int(search["price_max"]):
+    _pmax = int(search.get("price_max") or 0)
+    if 0 < _pmax < NO_PRICE_LIMIT and price > _pmax:
         return False
 
-    regions = [r for r in ([search.get("region")] + list(search.get("regions") or [])) if r]
-    if regions and listing.get("region") and listing["region"] not in regions:
+    regions = [normalize_region(r)
+               for r in ([search.get("region")] + list(search.get("regions") or [])) if r]
+    lst_region = normalize_region(listing.get("region") or "")
+    if regions and lst_region and lst_region not in regions:
         return False
 
     brands = [b for b in (search.get("brands") or []) if b and b != "all"]
@@ -1012,13 +1019,33 @@ def region_label(slug: str) -> str:
     return REGION_NAMES.get((slug or "").strip().lower(), slug or "")
 
 
+def normalize_region(value: str) -> str:
+    """Приводит регион к slug'у.
+
+    Источники отдают регион по-разному: одни — slug ('ekaterinburg'), другие —
+    человеческое имя ('Екатеринбург'). Без приведения к одному виду фильтр
+    поиска молча отсекал половину объявлений.
+    """
+    v = (value or "").strip()
+    if not v:
+        return ""
+    low = v.lower()
+    if low in REGION_NAMES:
+        return low
+    for slug, name in REGION_NAMES.items():
+        if name.strip().lower() == low:
+            return slug
+    return low
+
+
 def format_summary(user_id: int, now: float | None = None) -> str:
     """Главный экран поиска — сводка вместо десятков карточек."""
     s = get_active_search(user_id)
     counts = category_counts(user_id, now)
     if not s:
         return "🎯 Активного поиска нет. Нажмите «🔍 Найти авто», чтобы создать."
-    budget = fmt_money(s["price_max"]) if s.get("price_max") else "без ограничения"
+    pmax = int(s.get("price_max") or 0)
+    budget = f"до {fmt_money(pmax)}" if 0 < pmax < NO_PRICE_LIMIT else "без ограничения по цене"
     where = region_label(s.get("region") or "") or "не указан"
     if s.get("regions"):
         where += " и " + ", ".join(region_label(r) for r in s["regions"])
@@ -1027,7 +1054,7 @@ def format_summary(user_id: int, now: float | None = None) -> str:
     if s.get("model"):
         what = s["model"].title()
     return (
-        f"🎯 {what} до {budget}\n"
+        f"🎯 {what} {budget}\n"
         f"📍 {where}\n\n"
         f"🚨 Кто быстрее — {counts['fresh']}\n"
         f"🔥 Новые сегодня — {counts['today']}\n"

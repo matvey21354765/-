@@ -99,6 +99,40 @@ class TestPaidAccess(TrialBase):
         self.assertIsNotNone(cb._ps.get_active_search(uid))
 
 
+class TestBudgetNormalization(unittest.TestCase):
+    """Бюджет 0–0 отсекал ВСЕ объявления (in_price_range: 0 <= p <= 0)."""
+
+    def test_zero_max_means_no_limit(self):
+        s = cb.normalize_budget({"price_min": 0, "price_max": 0})
+        self.assertEqual(s["price_max"], cb.NO_PRICE_LIMIT)
+
+    def test_missing_max_means_no_limit(self):
+        self.assertEqual(cb.normalize_budget({})["price_max"], cb.NO_PRICE_LIMIT)
+
+    def test_max_below_min_means_no_limit(self):
+        s = cb.normalize_budget({"price_min": 500_000, "price_max": 100})
+        self.assertEqual(s["price_max"], cb.NO_PRICE_LIMIT)
+
+    def test_real_budget_untouched(self):
+        s = cb.normalize_budget({"price_min": 100_000, "price_max": 300_000})
+        self.assertEqual((s["price_min"], s["price_max"]), (100_000, 300_000))
+
+    def test_broken_budget_repaired_on_load(self):
+        uid = 9_000_020
+        cb.save_settings(uid, {"region": "ekaterinburg", "price_min": 0, "price_max": 0})
+        try:
+            self.assertEqual(cb.load_settings(uid)["price_max"], cb.NO_PRICE_LIMIT)
+        finally:
+            cb.save_settings(uid, {})
+
+    def test_listings_pass_filter_with_no_limit(self):
+        s = cb.normalize_budget({"price_min": 0, "price_max": 0})
+        item = {"_price_int": 2_348_000, "price": "2 348 000", "title": "OMODA C5, 2026"}
+        self.assertTrue(cb.in_price_range(item, s["price_min"], s["price_max"]))
+        # тот же товар при бюджете 0–0 раньше отсекался
+        self.assertFalse(cb.in_price_range(item, 0, 0))
+
+
 class TestTrialTexts(unittest.TestCase):
     def test_ui_texts_show_three_days(self):
         from pathlib import Path

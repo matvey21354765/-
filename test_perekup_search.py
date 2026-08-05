@@ -111,6 +111,32 @@ class TestSearchAndFilters(SearchTestBase):
         self.assertFalse(self.ps.matches_search({**base, "year": 2001}, s))
         self.assertFalse(self.ps.matches_search({**base, "condition": "repair"}, s))
 
+    def test_region_name_and_slug_match(self):
+        """Источники отдают регион и slug'ом, и человеческим именем."""
+        self.ps.REGION_NAMES.update({"ekaterinburg": "Екатеринбург"})
+        try:
+            self.ps.save_search(20, region="ekaterinburg", price_max=200_000)
+            key = self.ingest(price=100_000, region="Екатеринбург",
+                              url="https://avito.ru/e/1", _published_ts=self.now - 600)
+            lst = self.ps.get_pool_listing(key)
+            self.assertEqual(lst["region"], "ekaterinburg")
+            self.assertTrue(self.ps.matches_search(lst, self.ps.get_active_search(20)))
+            self.assertEqual(self.ps.category_counts(20, self.now)["fresh"], 1)
+        finally:
+            self.ps.REGION_NAMES.clear()
+
+    def test_no_price_limit_shows_expensive_cars(self):
+        self.ps.save_search(21, region="perm", price_max=self.ps.NO_PRICE_LIMIT)
+        self.ingest(price=4_300_000, url="https://avito.ru/exp/1",
+                    title="Jeep Wrangler, 2020", _published_ts=self.now - 600)
+        self.assertEqual(self.ps.category_counts(21, self.now)["fresh"], 1)
+
+    def test_zero_price_max_means_no_limit(self):
+        self.ps.save_search(22, region="perm", price_max=0)
+        self.ingest(price=4_300_000, url="https://avito.ru/exp/2",
+                    title="Jeep Wrangler, 2020", _published_ts=self.now - 600)
+        self.assertEqual(self.ps.category_counts(22, self.now)["fresh"], 1)
+
     def test_listings_and_counts_use_pool_not_network(self):
         self.ps.save_search(7, region="perm", price_max=200_000)
         self.ingest(price=100_000, url="https://avito.ru/car/a", _published_ts=self.now - 600)
