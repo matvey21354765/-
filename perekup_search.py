@@ -389,7 +389,7 @@ def ingest_listing(item: dict, now: float | None = None) -> dict:
         title = str(item.get("title") or "")[:300]
         vals = (
             str(item.get("source") or ""), title, str(item.get("url") or ""), price,
-            normalize_region(str(item.get("region") or "")),
+            normalize_region(_region_of_item(item)),
             parse_brand(title), parse_model(title),
             parse_year(item), int(item.get("mileage") or 0), detect_condition(item),
             str(item.get("description") or "")[:1000],
@@ -613,8 +613,11 @@ def matches_search(listing: dict, search: dict) -> bool:
     regions = [normalize_region(r)
                for r in ([search.get("region")] + list(search.get("regions") or [])) if r]
     lst_region = normalize_region(listing.get("region") or "")
-    if regions and lst_region and lst_region not in regions:
-        return False
+    if regions:
+        if not lst_region:
+            return False          # регион неизвестен — не подсовываем чужой город
+        if lst_region not in regions and not _same_oblast(lst_region, regions):
+            return False
 
     brands = [b for b in (search.get("brands") or []) if b and b != "all"]
     if brands and (listing.get("brand") or "") not in brands:
@@ -1103,6 +1106,43 @@ REGION_NAMES: dict[str, str] = {}
 def region_label(slug: str) -> str:
     """Человеческое имя региона (заполняется ботом из REGIONS)."""
     return REGION_NAMES.get((slug or "").strip().lower(), slug or "")
+
+
+_URL_REGION_RE = re.compile(
+    r"(?:avito\.ru|drom\.ru|youla\.ru|auto\.ru)/([a-z0-9_\-]+)/", re.IGNORECASE)
+
+
+# Города, относящиеся к области поиска: заполняется из control_bot
+# (OBLAST_CITY_SLUGS[<область>] = {города}). Пока пусто — работает точное
+# совпадение, что безопаснее, чем пропускать чужие регионы.
+OBLAST_CITIES: dict[str, set] = {}
+
+
+def _same_oblast(city: str, wanted: list) -> bool:
+    """True, если город входит в область одного из искомых регионов."""
+    for w in wanted:
+        if city in OBLAST_CITIES.get(w, ()):  # noqa: SIM118
+            return True
+    return False
+
+
+def _region_of_item(item: dict) -> str:
+    """Регион объявления: явное поле → город из URL → регион поиска.
+
+    Без последнего шага объявления из городов области (Невьянск в Свердловской)
+    оставались без региона и проходили ЛЮБОЙ фильтр, из-за чего в выдаче
+    Екатеринбурга появлялись машины из других областей.
+    """
+    for k in ("region", "_search_region", "_region"):
+        v = str(item.get(k) or "").strip()
+        if v:
+            return v
+    m = _URL_REGION_RE.search(str(item.get("url") or ""))
+    if m:
+        slug = m.group(1).lower()
+        if slug not in ("all", "rossiya", "moskva_i_mo"):
+            return slug
+    return ""
 
 
 def normalize_region(value: str) -> str:

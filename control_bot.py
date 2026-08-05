@@ -2277,6 +2277,9 @@ def _liquidity_note(item: dict) -> str:
     return " · ".join(parts)
 
 
+_CURRENT_SEARCH_REGION = ""
+
+
 def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
                           avito_only_median: bool = False) -> list[dict]:
     """
@@ -2468,6 +2471,12 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
             try:
                 # Централизованный пул: одно объявление — одна запись, все
                 # пользователи читают её локальными фильтрами (без своих запросов).
+                # Регион поиска фиксируем, чтобы города области не оставались
+                # без региона и не попадали в выдачу других областей.
+                if not it.get("region") and not it.get("_search_region"):
+                    _rh = globals().get("_CURRENT_SEARCH_REGION") or ""
+                    if _rh:
+                        it["_search_region"] = _rh
                 _ev = _ps.ingest_listing(it)
                 if _ev.get("event") == "price_drop":
                     it["_price_drop"] = _ev.get("drop", 0)
@@ -15279,10 +15288,15 @@ async def _ps_run_and_split(target, uid: int):
     except Exception as e:
         print(f"  [мастер] поиск не удался: {type(e).__name__}: {str(e)[:120]}")
     ingested = 0
+    _reg_hint = (load_settings(uid) or {}).get("region", "")
     for it in found:
         if it.get("_market_ref_only"):
             continue
         try:
+            # Объявление получено для конкретного региона поиска — фиксируем это,
+            # иначе города области остаются без региона и проходят чужие фильтры.
+            if _reg_hint and not it.get("region"):
+                it["_search_region"] = _reg_hint
             _ps.ingest_listing(it)
             ingested += 1
         except Exception as e:
@@ -17998,6 +18012,7 @@ async def do_search_for_user(uid: int, reply_to, *, send_cards: bool = True,
         _sample = [(i.get("title","")[:30], i.get("price",""), i.get("_price_int",0)) for i in _bad_price[:5]]
         print(f"  [фильтр] вне бюджета примеры: {_sample}")
     # Фильтр по категории и марке (также убирает скутеры/мото)
+    globals()["_CURRENT_SEARCH_REGION"] = region
     suitable = _filter_by_category(suitable, category, brand)
     print(f"  [фильтр] после category({category}/{brand}): {len(suitable)}")
 
