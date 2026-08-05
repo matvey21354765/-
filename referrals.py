@@ -638,9 +638,23 @@ def get_discount_for_user(uid: int, plan_key: str) -> dict:
 # ──────────────────────────────────────────────────────────────────────
 # Счета для оплаты
 # ──────────────────────────────────────────────────────────────────────
-def create_invoice(uid: int, plan_key: str, label: str) -> dict:
-    """Создаёт счёт со скидкой (если применима). Возвращает суммы."""
-    price = get_discount_for_user(uid, plan_key)
+def create_invoice(uid: int, plan_key: str, label: str,
+                   price: Optional[dict] = None) -> dict:
+    """Создаёт счёт со скидкой (если применима). Возвращает суммы.
+
+    price — готовые суммы от вызывающего кода. Нужен, чтобы в счёт попала
+    ровно та цена, которую пользователь видел на кнопке: иначе оплата уходит
+    на одну сумму, а сверка в webhook ждёт другую и платёж не засчитывается.
+    """
+    if price is None:
+        price = get_discount_for_user(uid, plan_key)
+    else:
+        price = {
+            "original": int(price.get("original") or 0),
+            "discount": int(price.get("discount") or 0),
+            "final": int(price.get("final") or 0),
+            "discount_type": price.get("discount_type"),
+        }
     with _transaction() as conn:
         cur = conn.cursor()
         if _DB_IS_SQLITE:

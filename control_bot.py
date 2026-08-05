@@ -13015,7 +13015,24 @@ from aiogram import BaseMiddleware
 from aiogram.types import TelegramObject, Update
 
 class SubscriptionMiddleware(BaseMiddleware):
-    """Регистрирует пользователя и закрывает функции бота после окончания доступа."""
+    """Регистрирует пользователя и закрывает функции бота после окончания доступа.
+
+    Вход, покупка и приглашение друзей доступны всегда: приглашение — способ
+    вернуть доступ бесплатно, и раньше человек без подписки не мог даже взять
+    свою реферальную ссылку — экран упирался в тот же пейволл.
+    """
+
+    ALLOWED_COMMANDS = ("/start", "/subscribe", "/promo", "/invite", "/reflink")
+    ALLOWED_CALLBACKS = (
+        "sub_plan|", "pay|", "check_payment|", "promo|", "promo_help",
+        "yoomoney|", "subscription", "open_subscription", "open_subscribe",
+        "ref_stats", "ref_terms", "ref_back", "ref_share",
+    )
+    ALLOWED_TEXTS = frozenset({
+        "💎 Подписка", "💎 Купить подписку", "💎 Выбрать тариф",
+        "🤝 Пригласить друга", "☎️ Поддержка",
+    })
+
     async def __call__(self, handler, event: TelegramObject, data: dict):
         user = getattr(event, "from_user", None)
         try:
@@ -13038,33 +13055,21 @@ class SubscriptionMiddleware(BaseMiddleware):
         # Команды и кнопки, необходимые для входа и покупки, доступны всегда.
         text = (getattr(event, "text", None) or "").strip()
         callback_data = (getattr(event, "data", None) or "").strip()
-        allowed_commands = ("/start", "/subscribe", "/promo")
-        allowed_callbacks = (
-            "sub_plan|", "pay|", "check_payment|", "promo|", "promo_help",
-            "yoomoney|", "subscription", "open_subscription", "open_subscribe",
-        )
-        if text.startswith(allowed_commands) or text in {"💎 Подписка", "💎 Купить подписку", "💎 Выбрать тариф"}:
+        if text.startswith(self.ALLOWED_COMMANDS) or text in self.ALLOWED_TEXTS:
             return await handler(event, data)
-        if callback_data.startswith(allowed_callbacks):
+        if callback_data.startswith(self.ALLOWED_CALLBACKS):
             return await handler(event, data)
 
         if _subscription_info(user.id)["ended"]:
             message = getattr(event, "message", None)
             target = message if message is not None else event
-            offer = (
-                "🔒 <b>Доступ к PerekupDrive приостановлен</b>\n\n"
-                "Ваш 7-дневный тестовый период или оплаченная подписка завершились. "
-                "Поиск, мониторинг и инструменты анализа временно недоступны.\n\n"
-                "Продлите доступ — и бот снова будет круглосуточно отслеживать новые "
-                "объявления и сразу сообщать о выгодных автомобилях."
-            )
             try:
                 if isinstance(event, CallbackQuery):
                     await event.answer("Для продолжения работы продлите подписку", show_alert=True)
                 await target.answer(
-                    offer,
+                    _paywall_text(user.id),
                     parse_mode="HTML",
-                    reply_markup=_subscription_keyboard(),
+                    reply_markup=_subscription_keyboard(user.id, expired=True),
                 )
             except Exception:
                 pass
@@ -13375,9 +13380,10 @@ async def cb_check_subscription(cb: CallbackQuery):
 @dp.message(Command("start"))
 async def cmd_start(msg: Message, state: FSMContext):
     await state.clear()
-    if not await _check_and_gate(msg):
-        return
     analytics.track("start", uid=msg.from_user.id, username=msg.from_user.username)
+    # Приглашение засчитывается ДО проверки доступа: раньше пользователь с
+    # закончившимся периодом переходил по ссылке друга, /start молча обрывался,
+    # и ни привязка, ни скидка не появлялись.
     # Handle referral parameter
     text_parts = (msg.text or "").split()
     if len(text_parts) > 1:
@@ -13418,10 +13424,32 @@ async def cmd_start(msg: Message, state: FSMContext):
                             await bot.send_message(inviter_uid, _txt, parse_mode="Markdown")
                         except Exception:
                             pass
-                    # Единое приветствие отправляется ниже. Не дублируем его для
-                    # пользователей, пришедших по реферальной ссылке.
+                    # Приглашённому сразу показываем, что именно он получил.
+                    # Обещание «скидка 10% по ссылке» раньше нигде не всплывало:
+                    # человек видел обычные 349/999 и уходил.
+                    _note = _referral_discount_note(msg.from_user.id)
+                    if _note:
+                        try:
+                            await msg.answer(
+                                "🤝 <b>Ты пришёл по приглашению друга</b>\n\n" + _note
+                                + "Скидка уже привязана к аккаунту — она применится "
+                                  "автоматически при оплате.",
+                                parse_mode="HTML",
+                                reply_markup=_subscription_keyboard(msg.from_user.id),
+                            )
+                        except Exception:
+                            pass
             except Exception:
                 pass
+    # Доступ закончился: показываем условия продления (с личной скидкой),
+    # а не молчим — раньше /start у таких пользователей не отвечал вообще.
+    if not await _check_and_gate(msg):
+        await msg.answer(
+            _paywall_text(msg.from_user.id),
+            parse_mode="HTML",
+            reply_markup=_subscription_keyboard(msg.from_user.id, expired=True),
+        )
+        return
     # Источник истины реферальной системы — referrals.py/БД. Старый JSON-реестр
     # здесь не создаём: две независимые записи приводили к разным счётчикам.
     s = load_settings(msg.from_user.id)
@@ -14095,20 +14123,97 @@ async def notify_admins_subscription(uid: int, username: str, plan: str, amount:
 
 
 # ── Подписка: ЮMoney, промокоды и поддержка ──────────────────────
-def _subscription_keyboard() -> InlineKeyboardMarkup:
+def _plan_price(uid: int | None, plan_key: str) -> dict:
+    """Цена тарифа для КОНКРЕТНОГО пользователя — одна на весь бот.
+
+    Реферальная скидка 10% раньше появлялась только в тексте счёта: на экране
+    подписки и в пейволле стояла полная цена, и человек, пришедший по ссылке
+    друга, обещанной скидки просто не видел. Теперь любая цена в интерфейсе
+    считается здесь, поэтому кнопка, экран подписки и счёт не могут разойтись.
+
+    Ключи совпадают с referrals.get_discount_for_user: original / discount /
+    final / discount_type.
+    """
+    plan = SUBSCRIPTION_PLANS.get(plan_key)
+    original = int(plan["amount"]) if plan else 0
+    plain = {"original": original, "discount": 0, "final": original,
+             "discount_type": None}
+    if not uid or not plan:
+        return plain
+    try:
+        price = referrals.get_discount_for_user(int(uid), plan_key)
+    except Exception as e:                       # БД рефералов недоступна
+        print(f"  [подписка] скидка для {uid} не посчиталась: {str(e)[:80]}")
+        return plain
+    if not price or price.get("discount_type") != "referral":
+        return plain
+    # Прайс тарифов живёт в SUBSCRIPTION_PLANS. Если таблица скидок с ним
+    # разошлась, доверяем тарифу и пересчитываем скидку по ставке — иначе
+    # пользователь увидит одну цену, а счёт выставится на другую.
+    if int(price.get("original") or 0) != original:
+        discount = int(round(original * referrals.REFERRAL_DISCOUNT_RATE))
+    else:
+        discount = int(price.get("discount") or 0)
+    discount = max(0, min(discount, original))
+    return {"original": original, "discount": discount,
+            "final": original - discount, "discount_type": "referral"}
+
+
+def _plan_button_text(uid: int | None, plan_key: str) -> str:
+    price = _plan_price(uid, plan_key)
+    title = SUBSCRIPTION_PLANS[plan_key]["title"]
+    if price["discount"] > 0:
+        return f"💳 {title} — {price['final']} ₽ (вместо {price['original']} ₽)"
+    return f"💳 {title} — {price['final']} ₽"
+
+
+def _referral_discount_note(uid: int | None, *, with_prices: bool = True) -> str:
+    """Строка о действующей скидке приглашённого — или пусто."""
+    if not uid:
+        return ""
+    prices = {k: _plan_price(uid, k) for k in SUBSCRIPTION_PLANS}
+    if not any(p["discount"] > 0 for p in prices.values()):
+        return ""
+    pct = int(round(referrals.REFERRAL_DISCOUNT_RATE * 100))
+    note = f"🎁 <b>Скидка {pct}% по приглашению друга</b>\n"
+    if with_prices:
+        note += " · ".join(
+            f"{SUBSCRIPTION_PLANS[k]['title']} — {p['final']} ₽ вместо {p['original']} ₽"
+            for k, p in prices.items() if p["discount"] > 0
+        ) + "\n"
+    return note + "Действует на первую подписку.\n\n"
+
+
+def _paywall_text(uid: int | None = None) -> str:
+    """Экран «доступ приостановлен» — с личной ценой пользователя."""
+    return (
+        "🔒 <b>Доступ к PerekupDrive приостановлен</b>\n\n"
+        "Ваш 7-дневный тестовый период или оплаченная подписка завершились. "
+        "Поиск, мониторинг и инструменты анализа временно недоступны.\n\n"
+        + _referral_discount_note(uid)
+        + "Продлите доступ — и бот снова будет круглосуточно отслеживать новые "
+        "объявления и сразу сообщать о выгодных автомобилях.\n\n"
+        "🤝 Или пригласите друга: за каждого оплатившего — бонусные дни."
+    )
+
+
+def _subscription_keyboard(uid: int | None = None, *, expired: bool = False) -> InlineKeyboardMarkup:
     rows = []
     if YOOMONEY_WALLET:
-        for key, plan in SUBSCRIPTION_PLANS.items():
+        for key in SUBSCRIPTION_PLANS:
             rows.append([InlineKeyboardButton(
-                text=f"💳 {plan['title']} — {plan['amount']} ₽",
+                text=_plan_button_text(uid, key),
                 callback_data=f"yoomoney|{key}",
             )])
     rows.extend([
         [InlineKeyboardButton(text="🎁 Пригласить друга", callback_data="ref_stats")],
         [InlineKeyboardButton(text="🎁 Ввести промокод", callback_data="promo_help")],
         [InlineKeyboardButton(text="☎️ Поддержка", url="https://t.me/durunegonim")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="pd_summary")],
     ])
+    # У пользователя без доступа «Назад» вело в закрытый раздел и возвращало
+    # тот же пейволл — кнопку показываем только тем, кому есть куда вернуться.
+    if not expired:
+        rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="pd_summary")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -14140,16 +14245,26 @@ async def cmd_subscribe(msg: Message):
     except Exception:
         active_searches = 0
     mon = "включён" if load_settings(uid).get("monitor_enabled") else "выключен"
+    _week = _plan_price(uid, "week")
+    _month = _plan_price(uid, "month")
+
+    def _price_line(icon: str, title: str, price: dict) -> str:
+        if price["discount"] > 0:
+            return (f"{icon} {title} — <b>{price['final']} ₽</b> "
+                    f"<s>{price['original']} ₽</s>")
+        return f"{icon} {title} — {price['final']} ₽"
+
     await msg.answer(
         "💎 <b>Подписка</b>\n\n"
         f"Текущий статус: {status}\n"
         f"Действует до: {until}\n"
         f"Активных поисков: {active_searches}\n"
         f"Мониторинг: {mon}\n\n"
-        "📅 Неделя — 349 ₽\n🗓 Месяц — 999 ₽\n\n"
+        + _referral_discount_note(uid, with_prices=False)
+        + f"{_price_line('📅', 'Неделя', _week)}\n{_price_line('🗓', 'Месяц', _month)}\n\n"
         "После подтверждения ЮMoney доступ включится автоматически.\n"
         "Промокод активируется командой <code>/promo КОД</code>.",
-        parse_mode="HTML", reply_markup=_subscription_keyboard(),
+        parse_mode="HTML", reply_markup=_subscription_keyboard(uid, expired=info["ended"]),
     )
 
 
@@ -14161,11 +14276,24 @@ async def cb_yoomoney(cb: CallbackQuery):
         await cb.answer("Оплата временно не настроена", show_alert=True); return
     uid = cb.from_user.id
     label = f"sub_{uid}_{plan_key}_{int(time.time())}"
-    price = referrals.create_invoice(uid, plan_key, label)
+    # Счёт выставляется ровно по той цене, которую человек видел на кнопке.
+    price = _plan_price(uid, plan_key)
+    try:
+        referrals.create_invoice(uid, plan_key, label, price)
+    except Exception as e:
+        # Без БД рефералов счёт всё равно должен выставиться — по полной цене,
+        # иначе webhook не найдёт счёт и не сверит сумму.
+        print(f"  [подписка] счёт не записан для {uid}: {str(e)[:80]}")
+        price = _plan_price(None, plan_key)
     sum_amount = price["final"]
     discount_note = ""
     if price["discount"] > 0:
-        discount_note = f"\n🎁 Применена реферальная скидка {price['discount']} ₽ (итого {sum_amount} ₽ вместо {plan['amount']} ₽)."
+        discount_note = (
+            f"\n\n🎁 Реферальная скидка "
+            f"{int(round(referrals.REFERRAL_DISCOUNT_RATE * 100))}% применена: "
+            f"{sum_amount} ₽ вместо {price['original']} ₽ "
+            f"(выгода {price['discount']} ₽)."
+        )
     params = {
         "receiver": YOOMONEY_WALLET, "quickpay-form": "button",
         "paymentType": "AC", "sum": str(sum_amount), "label": label,
@@ -19602,9 +19730,10 @@ async def _global_monitor_loop():
                                     "Ваш тестовый период или подписка завершились. "
                                     "Новые объявления больше не отслеживаются.\n\n"
                                     "Продлите доступ, чтобы снова получать выгодные предложения "
-                                    "сразу после их публикации.",
+                                    "сразу после их публикации.\n\n"
+                                    + _referral_discount_note(uid),
                                     parse_mode="HTML",
-                                    reply_markup=_subscription_keyboard(),
+                                    reply_markup=_subscription_keyboard(uid, expired=True),
                                 )
                             except Exception:
                                 pass
