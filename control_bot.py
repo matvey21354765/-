@@ -15199,7 +15199,33 @@ async def cb_setup_start(cb: CallbackQuery, state: FSMContext):
         _sync_active_search(uid, settings)
     except Exception as e:
         print(f"  [мастер] не удалось сохранить поиск: {str(e)[:80]}")
-    await _ps_send_start_screen(cb.message, uid)
+    await _ps_run_and_split(cb.message, uid)
+
+
+async def _ps_run_and_split(target, uid: int):
+    """Запускает обычный поиск и раскладывает найденное по разделам.
+
+    Сам поиск — тот же, что и раньше (do_search_for_user): те же площадки,
+    фильтры и оценка рынка. Отличие в подаче: карточки не сыплются пачкой,
+    а объявления попадают в общий пул и делятся по критериям
+    (кто быстрее / новые сегодня / до 3 дней / торг / снизили цену).
+    """
+    found: list[dict] = []
+    try:
+        found = await do_search_for_user(uid, target, send_cards=False, force=True) or []
+    except Exception as e:
+        print(f"  [мастер] поиск не удался: {type(e).__name__}: {str(e)[:120]}")
+    ingested = 0
+    for it in found:
+        if it.get("_market_ref_only"):
+            continue
+        try:
+            _ps.ingest_listing(it)
+            ingested += 1
+        except Exception as e:
+            print(f"  [мастер] пул: {str(e)[:80]}")
+    print(f"  [мастер] в пул разделов добавлено {ingested} из {len(found)}")
+    await _ps_send_start_screen(target, uid)
 
 
 async def _ps_send_start_screen(target, uid: int):
@@ -15215,7 +15241,8 @@ async def _ps_send_start_screen(target, uid: int):
         lines.append(f"Нашёл подходящих объявлений: {total}")
         lines.append("")
     else:
-        lines.append("Собираю объявления — первые появятся в течение пары минут.")
+        lines.append("Пока подходящих объявлений нет — бот продолжит собирать "
+                     "их и пришлёт, как только появятся.")
         lines.append("")
     lines += [
         f"🚨 Кто быстрее — {counts.get('fresh', 0)}",
@@ -17390,7 +17417,15 @@ def _scrape_avito_expanded(
     )
 
 
-async def do_search_for_user(uid: int, reply_to):
+async def do_search_for_user(uid: int, reply_to, *, send_cards: bool = True,
+                             force: bool = False):
+    """Собирает объявления по настройкам пользователя.
+
+    send_cards=False — карточки не отправляются, объявления только возвращаются
+    (их раскладывает по разделам постоянный поиск).
+    force=True — игнорируем антиспам-кулдаун (запуск поиска из мастера).
+    Возвращает список найденных объявлений (или None, если поиск не состоялся).
+    """
     # Обязательная подписка на канал отключена — поиск доступен всем.
     s = load_settings(uid)
     if not s.get("region"):
@@ -17401,7 +17436,7 @@ async def do_search_for_user(uid: int, reply_to):
     now_ts = time.time()
     last = _last_search_at.get(uid, 0)
     wait_left = SEARCH_COOLDOWN_SEC - (now_ts - last)
-    if wait_left > 0:
+    if wait_left > 0 and not force:
         await reply_to.answer(f"⏳ Подожди {int(wait_left) + 1} сек перед новым поиском.")
         return
     _last_search_at[uid] = now_ts
@@ -18083,8 +18118,9 @@ async def do_search_for_user(uid: int, reply_to):
                 )
                 _search_cache[uid] = fallback_items
                 _save_cache(uid, fallback_items)
-                await send_batch(reply_to.chat.id, uid, 0)
-                return
+                if send_cards:
+                    await send_batch(reply_to.chat.id, uid, 0)
+                return fallback_items
             hint_parts.append(
                 f"⚠️ Найдено {len(without_cat_filter)} объявлений, но все отфильтрованы по категории «{cat_label} · {brand.capitalize()}».\n"
                 f"Попробуй изменить категорию в /settings или выбрать «🚗 Все автомобили»."
@@ -18262,7 +18298,9 @@ async def do_search_for_user(uid: int, reply_to):
     # Статус trial показывается в приветствии и разделе подписки, а не
     # дублируется перед каждой поисковой выдачей.
     await reply_to.answer(_msg, parse_mode="Markdown")
-    await send_batch(reply_to.chat.id, uid, 0)
+    if send_cards:
+        await send_batch(reply_to.chat.id, uid, 0)
+    return suitable
 
 
 @dp.callback_query(F.data.startswith("page|"))
