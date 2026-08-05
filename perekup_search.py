@@ -351,6 +351,25 @@ def published_at(item: dict) -> float | None:
 # ──────────────────────────────────────────────────────────────────────
 # Пул объявлений
 # ──────────────────────────────────────────────────────────────────────
+def photo_of(item: dict) -> str:
+    """Фото объявления. Скраперы пишут его в разные ключи — проверяем все."""
+    for k in ("_photo_url", "photo_url", "photo", "image", "image_url", "img"):
+        v = item.get(k)
+        if isinstance(v, str) and v.startswith("http"):
+            return v
+    for k in ("photos", "images", "_photos_urls"):
+        v = item.get(k)
+        if isinstance(v, (list, tuple)):
+            for el in v:
+                if isinstance(el, str) and el.startswith("http"):
+                    return el
+                if isinstance(el, dict):
+                    for vv in el.values():
+                        if isinstance(vv, str) and vv.startswith("http"):
+                            return vv
+    return ""
+
+
 def ingest_listing(item: dict, now: float | None = None) -> dict:
     """Кладёт объявление в общий пул и фиксирует событие цены.
 
@@ -374,8 +393,7 @@ def ingest_listing(item: dict, now: float | None = None) -> dict:
             parse_brand(title), parse_model(title),
             parse_year(item), int(item.get("mileage") or 0), detect_condition(item),
             str(item.get("description") or "")[:1000],
-            str(item.get("_photo_url") or item.get("photo_url")
-                or item.get("photo") or ""),
+            photo_of(item),
         )
         if row is None:
             conn.execute(
@@ -387,14 +405,26 @@ def ingest_listing(item: dict, now: float | None = None) -> dict:
             )
         else:
             conn.execute(
+                # Пустое фото/описание при повторном обходе НЕ должно затирать
+                # уже сохранённое: иначе у части карточек пропадает картинка.
                 """UPDATE listing_pool SET source=?, title=?, url=?, price=?, region=?,
-                       brand=?, model=?, year=?, mileage=?, condition=?, description=?,
-                       photo=?, published_at=COALESCE(?, published_at),
+                       brand=?, model=?, year=?, mileage=?, condition=?,
+                       description=COALESCE(NULLIF(?,''), description),
+                       photo=COALESCE(NULLIF(?,''), photo),
+                       published_at=COALESCE(?, published_at),
                        last_seen_at=?, status='active'
                  WHERE listing_key=?""",
                 vals + (pub, now, key),
             )
     return event
+
+
+def set_pool_photo(key: str, photo: str) -> None:
+    """Запоминает фото объявления (добор по ссылке — один раз на объявление)."""
+    if not key or not photo:
+        return
+    with _conn() as conn:
+        conn.execute("UPDATE listing_pool SET photo=? WHERE listing_key=?", (photo, key))
 
 
 def get_pool_listing(key: str) -> dict | None:
@@ -636,10 +666,17 @@ def age_label(listing: dict, now: float | None = None) -> str:
 
 
 def category_of(listing: dict, now: float | None = None) -> str:
-    """Раздел объявления: fresh / today / days3 / bargain / '' (не показываем)."""
-    hours, _ = listing_age_hours(listing, now)
+    """Раздел объявления: fresh / today / days3 / bargain / '' (не показываем).
+
+    «Кто быстрее» — только объявления с ИЗВЕСТНЫМ временем публикации: если
+    площадка его не отдала, возраст считается от момента, когда бот впервые
+    увидел объявление, и все свежесобранные машины валились в «Кто быстрее»
+    («2 минут назад (бот впервые увидел)»), а «Новые сегодня» оставался пустым.
+    Такие объявления идут в «Новые сегодня» / «До 3 дней».
+    """
+    hours, exact = listing_age_hours(listing, now)
     if hours < FRESH_HOURS:
-        return "fresh"
+        return "fresh" if exact else "today"
     if hours < TODAY_HOURS:
         return "today"
     if hours < DAYS3_HOURS:
@@ -719,6 +756,16 @@ def search_listings(user_id: int, category: str, *, offset: int = 0,
             continue
         out.append(d)
     return out[offset:offset + limit]
+
+
+def category_total(user_id: int, category: str, now: float | None = None) -> int:
+    """Сколько всего машин в разделе — нужно для кнопок «Ещё N» / «Назад»."""
+    now = time.time() if now is None else float(now)
+    if category == "saved":
+        return len(saved_cars(user_id))
+    if category == "price_drop":
+        return len(price_drop_feed(user_id, limit=4000, now=now))
+    return int(category_counts(user_id, now).get(category, 0))
 
 
 def category_counts(user_id: int, now: float | None = None) -> dict:

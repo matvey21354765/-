@@ -7859,14 +7859,36 @@ def _avito_extract_links(text: str, slug: str) -> list[str]:
 
 def _avito_price_from_item(it: dict) -> tuple[str, int]:
     """Извлекает цену из объекта Авито. Возвращает (строка, число)."""
+    # Пробег («247 652 км») никогда не должен попасть в цену: из-за этого
+    # карточки показывали пробег вместо цены, а объявления без цены в карточке
+    # выбрасывались целиком (в выдаче оставалось 1-2 объявления с Авито).
+    def _is_mileage(text: str) -> bool:
+        return bool(re.search(r"\d\s*(?:км|km)\b", str(text), re.IGNORECASE))
+
+    _BAD_KEYS = ("mileage", "пробег", "km", "year", "год", "engine", "volume",
+                 "power", "id", "count", "views")
+
     def _find_price_in_obj(obj, depth=0):
-        if depth > 5 or not isinstance(obj, dict):
+        if depth > 6:
+            return "", 0
+        if isinstance(obj, list):
+            for el in obj:
+                r_str, r_int = _find_price_in_obj(el, depth + 1)
+                if r_int:
+                    return r_str, r_int
+            return "", 0
+        if not isinstance(obj, dict):
+            return "", 0
+        # Параметр с пробегом/годом выглядит как цена ({"value": 247652}) —
+        # такие объекты пропускаем целиком.
+        _own = " ".join(str(obj.get(k) or "") for k in ("title", "name", "type", "key"))
+        if any(b in _own.lower() for b in _BAD_KEYS):
             return "", 0
         # Текстовое значение цены — проверяем ПЕРВЫМ (сохраняем форматирование)
         # string/fullString — формат веб-JSON API Авито (/web/1/js/items)
         for text_key in ("valueText", "text", "label", "displayValue", "fullString", "string"):
             t = obj.get(text_key)
-            if t and isinstance(t, str):
+            if t and isinstance(t, str) and not _is_mileage(t):
                 digits = re.sub(r"[^\d]", "", t)
                 if digits and 5_000 < int(digits) < 99_000_000:
                     return t, int(digits)
@@ -7876,9 +7898,12 @@ def _avito_price_from_item(it: dict) -> tuple[str, int]:
             if v and isinstance(v, (int, float)) and 5_000 < v < 99_000_000:
                 text_v = obj.get("valueText") or obj.get("text") or f"{int(v):,} ₽".replace(",", " ")
                 return str(text_v), int(v)
-        # Рекурсия в под-объекты
+        # Рекурсия в под-объекты И в списки (новый формат каталога Авито держит
+        # цену в списках: params/badges/priceBadges — раньше их не смотрели).
         for k, v in obj.items():
-            if isinstance(v, dict):
+            if any(b in k.lower() for b in _BAD_KEYS):
+                continue
+            if isinstance(v, (dict, list)):
                 r_str, r_int = _find_price_in_obj(v, depth + 1)
                 if r_int:
                     return r_str, r_int
@@ -7906,22 +7931,39 @@ def _avito_price_from_item(it: dict) -> tuple[str, int]:
                 return r_str, r_int
     # Deep search: некоторые форматы хранят цену не в стандартных ключах
     def _deep_price_search(obj, depth=0):
-        if depth > 8 or not isinstance(obj, dict):
+        if depth > 8:
             return "", 0
+        if isinstance(obj, list):
+            for el in obj:
+                rs, ri = _deep_price_search(el, depth + 1)
+                if ri:
+                    return rs, ri
+            return "", 0
+        if not isinstance(obj, dict):
+            return "", 0
+        # Параметр вида {"title": "Цена", "valueText": "74 000 ₽"}: имя цены
+        # лежит в ЗНАЧЕНИИ, а не в ключе — по ключам такое не найти.
+        _label = " ".join(str(obj.get(k) or "") for k in ("title", "name", "type", "key")).lower()
+        if _label and any(x in _label for x in ("цена", "price", "стоим")):
+            rs, ri = _find_price_in_obj(obj, 0)
+            if ri:
+                return rs, ri
         for k, v in obj.items():
             lk = k.lower()
+            if any(x in lk for x in ("mileage", "пробег", "year", "год")):
+                continue
             if any(x in lk for x in ("price", "cost", "amount", "sum", "стоим", "цен")):
                 if isinstance(v, (int, float)) and 5_000 < v < 99_000_000:
                     return f"{int(v):,} ₽".replace(",", " "), int(v)
-                if isinstance(v, str):
+                if isinstance(v, str) and not _is_mileage(v):
                     d = re.sub(r"[^\d]", "", v)
                     if d and 5_000 < int(d) < 99_000_000:
                         return v, int(d)
-                if isinstance(v, dict):
+                if isinstance(v, (dict, list)):
                     rs, ri = _find_price_in_obj(v, 0)
                     if ri:
                         return rs, ri
-            elif isinstance(v, dict):
+            elif isinstance(v, (dict, list)):
                 rs, ri = _deep_price_search(v, depth + 1)
                 if ri:
                     return rs, ri
@@ -8098,10 +8140,25 @@ def _avito_item_from_json(it: dict, today) -> dict | None:
                 r"(?<!\d)(\d{1,3}(?:[\s\u00a0.,]\d{3})+|\d{4,9})\s*(?:₽|руб)",
                 title, re.IGNORECASE)
             _pt = int(re.sub(r"\D", "", _pm.group(1))) if _pm else 0
+            if not _pt:
+                # Последний шанс: «74 000 ₽» где-нибудь в самом объекте
+                # (описание, бейджи, подписи) — так объявление не теряется.
+                try:
+                    _blob = json.dumps(it, ensure_ascii=False)
+                except Exception:
+                    _blob = str(it)
+                for _bm in re.finditer(
+                        r"(?<!\d)(\d{1,3}(?:[\s .,]\d{3})+|\d{4,9})\s*(?:₽|руб)",
+                        _blob, re.IGNORECASE):
+                    _cand = int(re.sub(r"\D", "", _bm.group(1)))
+                    if 10_000 <= _cand <= 99_000_000:
+                        _pt = _cand
+                        break
             if _pt and 10_000 <= _pt <= 99_000_000:
                 price_int = _pt
                 price_str = f"{_pt:,} ₽".replace(",", " ")
             else:
+                print(f"  [item] DROPPED (нет цены): title={title[:40]!r}")
                 return None
 
         mileage = 0
@@ -19927,11 +19984,68 @@ def _ps_card_keyboard(uid: int, key: str, *, category: str = "", page: int = 0,
             callback_data=f"pd_save|{sid}"),
         InlineKeyboardButton(text="🚫 Скрыть", callback_data=f"pd_hide|{sid}"),
     ]
+    # Навигация по страницам живёт в отдельном сообщении под страницей
+    # (_ps_nav_keyboard) — на каждой карточке она только мешала.
     rows = [[InlineKeyboardButton(text="🌐 Открыть", callback_data=f"pd_open|{sid}")], row2]
-    if category:
-        rows.append([InlineKeyboardButton(
-            text="➡️ Следующая", callback_data=f"pd_cat|{category}|{page + 1}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _ps_nav_keyboard(category: str, page: int, shown: int, total: int) -> InlineKeyboardMarkup:
+    """Кнопки под страницей раздела: назад / ещё N / все разделы."""
+    left = max(0, total - (page * _ps.PAGE_SIZE + shown))
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(
+            text="⬅️ Назад", callback_data=f"pd_cat|{category}|{page - 1}"))
+    if left > 0:
+        nav.append(InlineKeyboardButton(
+            text=f"➡️ Показать ещё ({left})",
+            callback_data=f"pd_cat|{category}|{page + 1}"))
+    rows = [nav] if nav else []
+    rows.append([InlineKeyboardButton(text="🔙 Все разделы", callback_data="pd_sections")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _fetch_listing_photo(url: str) -> str:
+    """Достаёт фото объявления по его ссылке (og:image) — для карточек,
+    которым площадка не отдала картинку в выдаче."""
+    if not url or not url.startswith("http"):
+        return ""
+    try:
+        import requests as _req
+    except ImportError:
+        return ""
+    _hdrs = {
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                       "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
+        "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+        "Accept-Language": "ru-RU,ru;q=0.9",
+    }
+    try:
+        _px = _avito_proxies() if "avito.ru" in url else None
+        r = _req.get(url, timeout=6, headers=_hdrs, proxies=_px or {})
+        if r.status_code != 200:
+            return ""
+        m = re.search(
+            r'<meta[^>]+(?:property|name)=["\']og:image["\'][^>]+content=["\']([^"\']+)',
+            r.text or "", re.I)
+        if not m:
+            m = re.search(
+                r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\']og:image',
+                r.text or "", re.I)
+        if not m:
+            return ""
+        _u = m.group(1).replace("\\/", "/")
+        if _u.startswith("//"):
+            _u = "https:" + _u
+        _lo = _u.lower()
+        if not _lo.startswith("http"):
+            return ""
+        if any(x in _lo for x in ("logo", "placeholder", "stub", "noimage", "favicon")):
+            return ""
+        return _u
+    except Exception:
+        return ""
 
 
 async def _ps_send_category(target, uid: int, category: str, page: int = 0):
@@ -19944,17 +20058,27 @@ async def _ps_send_category(target, uid: int, category: str, page: int = 0):
             "🎯 Активного поиска пока нет.\n"
             "Нажмите «🔍 Найти авто» — зададим город, бюджет и марки один раз.")
         return
-    offset = max(0, int(page)) * _ps.PAGE_SIZE
+    page = max(0, int(page))
+    offset = page * _ps.PAGE_SIZE
     items = await loop.run_in_executor(
         None, lambda: _ps.search_listings(uid, category, offset=offset))
+    total = await loop.run_in_executor(
+        None, lambda: _ps.category_total(uid, category))
     title = _PS_CATS.get(category, category)
     if not items:
-        await target.answer(
-            f"{title}: пока пусто.\n"
-            "Бот собирает объявления постоянно — загляните чуть позже."
-            if page == 0 else f"{title}: это была последняя страница.")
+        if page == 0:
+            await target.answer(
+                f"{title}: пока пусто.\n"
+                "Бот собирает объявления постоянно — загляните чуть позже.",
+                reply_markup=_ps_summary_keyboard())
+        else:
+            await target.answer(
+                f"{title}: показаны все машины ({total}).",
+                reply_markup=_ps_nav_keyboard(category, page, 0, total))
         return
-    await target.answer(f"{title} — страница {page + 1}")
+    _pages = max(1, -(-total // _ps.PAGE_SIZE)) if total else page + 1
+    await target.answer(f"{title} — страница {page + 1} из {_pages} (всего {total})")
+    _photo_budget = int(os.getenv("PS_PHOTO_FETCH_PER_PAGE", "5"))
     for lst in items:
         key = lst["listing_key"]
         try:
@@ -19973,8 +20097,21 @@ async def _ps_send_category(target, uid: int, category: str, page: int = 0):
             text = _ps.format_card(lst, category=None if category == "saved" else category)
         saved = await loop.run_in_executor(None, lambda k=key: _ps.is_saved(uid, k))
         _kb = _ps_card_keyboard(uid, key, category=category, page=page, saved=saved)
-        _photo = (lst.get("photo") or lst.get("photo_url")
-                  or lst.get("_photo_url") or "")
+        _photo = _ps.photo_of(lst)
+        if not _photo and _photo_budget > 0:
+            # Фото не сохранилось при сборе (площадка отдала карточку без
+            # картинки) — добираем его по ссылке объявления, чтобы карточки
+            # не выглядели «через одну». Не больше нескольких добора на
+            # страницу, иначе выдача будет ждать сеть.
+            _photo_budget -= 1
+            try:
+                _photo = await loop.run_in_executor(
+                    None, lambda u=lst.get("url", ""): _fetch_listing_photo(u))
+                if _photo:
+                    await loop.run_in_executor(
+                        None, lambda k=key, p=_photo: _ps.set_pool_photo(k, p))
+            except Exception as _fe:
+                print(f"  [карточка] фото не добралось: {str(_fe)[:60]}")
         _sent = False
         if _photo:
             # Фото объявления — как в обычной выдаче бота.
@@ -19986,6 +20123,15 @@ async def _ps_send_category(target, uid: int, category: str, page: int = 0):
         if not _sent:
             await target.answer(text, reply_markup=_kb, disable_web_page_preview=True)
         await asyncio.sleep(0.03)
+    await target.answer(
+        f"{title}: показано {offset + len(items)} из {total}",
+        reply_markup=_ps_nav_keyboard(category, page, len(items), total))
+
+
+@dp.callback_query(F.data == "pd_sections")
+async def cb_ps_sections(cb: CallbackQuery):
+    await cb.answer()
+    await _ps_send_start_screen(cb.message, cb.from_user.id)
 
 
 @dp.message(F.text == "🚨 Кто быстрее")

@@ -90,6 +90,60 @@ class TestAgeCategories(SearchTestBase):
         self.assertIn("18 минут назад", self.ps.age_label(lst, self.now))
 
 
+    def test_unknown_publish_time_goes_to_today_not_fresh(self):
+        """Без времени публикации объявление не «Кто быстрее»: возраст считается
+        от первого показа, и раньше вся свежесобранная база валилась в fresh,
+        а «Новые сегодня» оставался пустым."""
+        lst = {"published_at": None, "first_seen_at": self.now - 120,
+               "listing_key": "u1", "title": "x", "description": ""}
+        self.assertEqual(self.ps.category_of(lst, self.now), "today")
+
+    def test_unknown_publish_time_older_than_day_is_days3(self):
+        lst = {"published_at": None, "first_seen_at": self.now - 30 * 3600,
+               "listing_key": "u2", "title": "x", "description": ""}
+        self.assertEqual(self.ps.category_of(lst, self.now), "days3")
+
+    def test_known_publish_time_still_fresh(self):
+        lst = {"published_at": self.now - 600, "first_seen_at": self.now,
+               "listing_key": "u3", "title": "x", "description": ""}
+        self.assertEqual(self.ps.category_of(lst, self.now), "fresh")
+
+
+class TestPhotos(SearchTestBase):
+    def test_photo_of_reads_every_scraper_key(self):
+        self.assertEqual(self.ps.photo_of({"_photo_url": "http://a/1.jpg"}), "http://a/1.jpg")
+        self.assertEqual(self.ps.photo_of({"image": "http://a/2.jpg"}), "http://a/2.jpg")
+        self.assertEqual(self.ps.photo_of({"photos": ["http://a/3.jpg"]}), "http://a/3.jpg")
+        self.assertEqual(self.ps.photo_of({"images": [{"640x480": "http://a/4.jpg"}]}),
+                         "http://a/4.jpg")
+        self.assertEqual(self.ps.photo_of({"photo": "/local/none.jpg"}), "")
+
+    def test_photo_survives_repeat_ingest_without_photo(self):
+        key = self.ingest(_photo_url="http://a/1.jpg")
+        self.ps.ingest_listing(self.item(), now=self.now)   # повтор без фото
+        self.assertEqual(self.ps.get_pool_listing(key)["photo"], "http://a/1.jpg")
+
+    def test_set_pool_photo_saves_fetched_photo(self):
+        key = self.ingest()
+        self.ps.set_pool_photo(key, "http://a/9.jpg")
+        self.assertEqual(self.ps.get_pool_listing(key)["photo"], "http://a/9.jpg")
+
+
+class TestPagination(SearchTestBase):
+    def test_category_total_counts_all_pages(self):
+        self.ps.save_search(1, region="perm", price_max=200_000)
+        for i in range(23):
+            self.ps.ingest_listing(
+                self.item(price=100_000 + i, url=f"https://avito.ru/car/{i}",
+                          published_at=self.now - 600),
+                now=self.now)
+        total = self.ps.category_total(1, "fresh", self.now)
+        self.assertEqual(total, 23)
+        self.assertEqual(len(self.ps.search_listings(1, "fresh", now=self.now)), 10)
+        self.assertEqual(
+            len(self.ps.search_listings(1, "fresh", offset=20, now=self.now)), 3)
+
+
 class TestSearchAndFilters(SearchTestBase):
     def test_single_active_search(self):
         self.ps.save_search(1, region="perm", price_max=100_000)
