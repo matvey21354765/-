@@ -1211,10 +1211,31 @@ _last_ip_rotate_ts = 0.0
 # IP, но чистые РФ SOCKS5/резидентные IP обычно пропускает. Формат каждого:
 #   socks5://user:pass@host:port  (или http://...). Список через запятую в
 #   переменной AUTORU_PROXIES; ниже — дефолтные РФ-прокси пользователя.
-_AUTORU_PROXIES_DEFAULT: list[str] = []
-# Legacy pools are intentionally disabled. Auto.ru has exactly two routes:
-# explicit AUTORU_PROXY_URL or a direct connection.
-AUTORU_PROXIES: list[str] = []
+# Пул РФ SOCKS5 из версии, работавшей месяц (03.07.2026). Это ДРУГОЙ класс
+# адресов, чем мобильная подсеть: чистые российские IP, которые Авито и Яндекс
+# обычно пропускают. Задаётся переменной RU_SOCKS_PROXIES (через запятую),
+# иначе берутся дефолтные из рабочей версии.
+_AUTORU_PROXIES_DEFAULT: list[str] = [
+    "socks5://hZoswb:f3dQZ6@193.187.144.4:8000",
+    "socks5://GPL5xs:mM4GHB@193.31.101.131:9928",
+    "socks5://xZ6MTF:9XEWJd@217.29.53.106:10248",
+]
+AUTORU_PROXIES: list[str] = [
+    p.strip() for p in os.getenv(
+        "RU_SOCKS_PROXIES", ",".join(_AUTORU_PROXIES_DEFAULT)
+    ).split(",") if p.strip()
+]
+
+
+def _ru_socks_proxy_dicts() -> "list[dict]":
+    """РФ SOCKS5-прокси для Авито. socks5:// → socks5h://, чтобы DNS резолвился
+    НА СТОРОНЕ прокси (в России) — иначе иностранный резолвинг выдаёт бота."""
+    out = []
+    for p in AUTORU_PROXIES:
+        if p.startswith("socks5://"):
+            p = "socks5h://" + p[len("socks5://"):]
+        out.append({"http": p, "https": p})
+    return out
 
 def _autoru_proxy_dicts() -> "list[dict]":
     """Список proxy-словарей для requests/curl_cffi из пула Auto.ru.
@@ -7382,6 +7403,10 @@ def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_0
         if AVITO_PROXIES and not _proxy_auth_failed:
             _proxy_order.append(("прокси", _avito_proxies()))
             _proxy_order += [("прокси-rot%d" % i, "ROTATE") for i in range(1, 3)]
+        # РФ SOCKS5 из рабочей версии: другой класс адресов, чем мобильная
+        # подсеть. Если она сожжена — эти IP могут пройти.
+        for _i, _rp in enumerate(_ru_socks_proxy_dicts(), 1):
+            _proxy_order.append((f"РФ-socks{_i}", _rp))
         if not _proxy_order:   # прокси не настроен — только тогда напрямую
             _proxy_order.append(("напрямую", None))
         _got = None
