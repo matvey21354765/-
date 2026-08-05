@@ -404,3 +404,73 @@ def test_offer_keeps_exact_publish_moment_and_real_photo():
     assert item["_published_ts"]
     # Время публикации известно точно — карточка покажет дату, а не «N дн назад».
     assert cb._ps.published_at(item) == item["_published_ts"]
+
+
+# ── Разбор карточек выдачи Auto.ru ───────────────────────────────────
+
+
+def _sample_cards():
+    import datetime
+    with open("autoru.html", encoding="utf-8", errors="replace") as fh:
+        return cb._autoru_parse_html(fh.read(), datetime.date.today())
+
+
+def test_every_card_of_the_page_is_parsed():
+    """Цена размечена по-разному, и по одному классу терялось 34 карточки из 37."""
+    from bs4 import BeautifulSoup
+    with open("autoru.html", encoding="utf-8", errors="replace") as fh:
+        html = fh.read()
+    on_page = len(BeautifulSoup(html, "html.parser").select('[data-seo="listing-item"]'))
+    assert len(_sample_cards()) == on_page
+
+
+def test_cards_carry_description_and_price():
+    cards = _sample_cards()
+    assert all(c["description"] for c in cards)
+    assert all(c["_price_int"] >= 10_000 for c in cards)
+
+
+def test_mileage_is_not_glued_to_the_year():
+    """«2025 6 900 км» — жадный шаблон давал пробег 20 256 900."""
+    assert cb._autoru_mileage_from_text("Автомат 2025 6 900 км") == 6900
+    assert cb._autoru_mileage_from_text("Lada 2109 272 137 км") == 272137
+    assert cb._autoru_mileage_from_text("Новый автомобиль") == 0
+
+
+def test_current_photo_cdn_is_accepted():
+    """Auto.ru отдаёт фото с avatars.avto.ru — не только с mds.yandex.net."""
+    assert cb._autoru_photo_ok(
+        "https://avatars.avto.ru/get-autoru-vos/18031053/abc/456x342")
+    assert cb._autoru_photo_ok(
+        "https://avatars.mds.yandex.net/get-autoru-vos/1/2/1200x900")
+    assert not cb._autoru_photo_ok("https://yastatic.net/s3/logo.png")
+
+
+# ── Дата публикации со страницы объявления ───────────────────────────
+
+
+def _msk(ts):
+    """Даты площадок — московские, сравнивать их надо в МСК."""
+    import datetime
+    return datetime.datetime.fromtimestamp(
+        ts, datetime.timezone(datetime.timedelta(hours=3)))
+
+
+def test_publish_date_read_from_page_markup():
+    page = ('<div class="CardHead__creationDate">27 июня 2025</div>'
+            '<div>306 (3 сегодня)</div>')
+    ts = cb._published_ts_from_page(page, "autoru")
+    assert ts
+    assert _msk(ts).strftime("%d.%m.%Y") == "27.06.2025"
+
+
+def test_publish_date_prefers_machine_readable_markup():
+    page = '<meta property="article:published_time" content="2025-07-02T18:30:00+03:00">'
+    ts = cb._published_ts_from_page(page, "drom")
+    assert _msk(ts).strftime("%d.%m.%Y") == "02.07.2025"
+
+
+def test_publish_date_from_platform_json_keys():
+    assert cb._published_ts_from_page('{"sortTimeStamp":1751000000000}', "avito")
+    assert cb._published_ts_from_page('{"date_published":1751000000}', "youla")
+    assert cb._published_ts_from_page("<html>ничего</html>", "autoru") is None

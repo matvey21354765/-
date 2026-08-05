@@ -45,8 +45,12 @@ class TestTrialLength(TrialBase):
         self.assertEqual(cb._USER_REGISTRY["9000003"]["trial_start"], start - 5 * 86400)
         self.assertTrue(cb._trial_info(9_000_003)["ended"])
 
-    def test_existing_trial_not_cut_short(self):
-        """Пользователь, начавший тест по старым правилам, сохраняет свои дни."""
+    def test_trial_length_is_the_same_for_everyone(self):
+        """Тест единый для всех: у давно зарегистрированных тоже TRIAL_DAYS.
+
+        Раньше пользователи, пришедшие до перехода на короткий тест, держали
+        семь дней, и рядом жили аккаунты с разным сроком.
+        """
         cb._USER_REGISTRY["9000004"] = {
             "first_seen": int(time.time()) - 4 * 86400,
             "trial_start": int(time.time()) - 4 * 86400,
@@ -54,8 +58,19 @@ class TestTrialLength(TrialBase):
         }
         self.register(9_000_004)
         info = cb._trial_info(9_000_004)
-        self.assertEqual(info["total"], cb.LEGACY_TRIAL_DAYS)
-        self.assertFalse(info["ended"])
+        self.assertEqual(info["total"], cb.TRIAL_DAYS)
+        self.assertEqual(cb.TRIAL_DAYS, 3)
+
+    def test_stored_longer_trial_is_shortened(self):
+        """Сохранённые 7 дней не поднимают срок выше общего."""
+        cb._USER_REGISTRY["9000006"] = {
+            "first_seen": int(time.time()),
+            "trial_start": int(time.time()),
+            "trial_days": 7,
+            "searches": 0,
+        }
+        self.register(9_000_006)
+        self.assertEqual(cb._trial_info(9_000_006)["total"], cb.TRIAL_DAYS)
 
     def test_referral_bonus_days_add_on_top(self):
         self.register(9_000_005)

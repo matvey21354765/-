@@ -9,9 +9,14 @@ from pathlib import Path
 
 
 class SearchTestBase(unittest.TestCase):
+    #: Отбор «только лучшие» (фото + описание + ниже рынка) проверяется
+    #: отдельным классом; тесты фильтров и разделов работают без него.
+    only_best = False
+
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         os.environ["PEREKUP_DB_PATH"] = str(Path(self._tmp.name) / "s.db")
+        os.environ["PS_ONLY_BEST"] = "1" if self.only_best else "0"
         import perekup_tracking
         importlib.reload(perekup_tracking)
         import perekup_search
@@ -22,6 +27,7 @@ class SearchTestBase(unittest.TestCase):
         self.now = time.time()
 
     def tearDown(self):
+        os.environ.pop("PS_ONLY_BEST", None)
         self._tmp.cleanup()
 
     def item(self, price=100_000, url="https://avito.ru/car/1", source="avito",
@@ -478,3 +484,113 @@ class TestEndToEnd(SearchTestBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestOnlyBest(SearchTestBase):
+    """Выдача «только лучшее»: фото + описание + цена ниже рынка."""
+
+    only_best = True
+
+    GOOD_DESC = "Один хозяин, вложений не требует, салон чистый, резина новая"
+
+    def setUp(self):
+        super().setUp()
+        self.ps.save_search(1, region="perm", price_max=300_000)
+
+    def market(self, price, n=4):
+        """Наполняет пул эталоном Авито, чтобы рынок был известен."""
+        for i in range(n):
+            self.ingest(price=price, url=f"https://avito.ru/ref/{i}",
+                        title="ВАЗ-2114, 2008", source="avito",
+                        _photo_url="http://a/r.jpg", description=self.GOOD_DESC,
+                        _published_ts=self.now - 3600)
+
+    def test_listing_with_photo_description_and_gain_is_shown(self):
+        self.market(150_000)
+        key = self.ingest(price=90_000, url="https://drom.ru/good", source="drom",
+                          _photo_url="http://a/good.jpg", description=self.GOOD_DESC,
+                          _published_ts=self.now - 600)
+        keys = [x["listing_key"] for x in self.ps.search_listings(1, "fresh", now=self.now)]
+        self.assertIn(key, keys)
+
+    def test_listing_without_photo_is_hidden(self):
+        self.market(150_000)
+        key = self.ingest(price=90_000, url="https://drom.ru/nophoto", source="drom",
+                          description=self.GOOD_DESC, _published_ts=self.now - 600)
+        keys = [x["listing_key"] for x in self.ps.search_listings(1, "fresh", now=self.now)]
+        self.assertNotIn(key, keys)
+
+    def test_listing_without_description_is_hidden(self):
+        self.market(150_000)
+        key = self.ingest(price=90_000, url="https://drom.ru/nodesc", source="drom",
+                          _photo_url="http://a/1.jpg", _published_ts=self.now - 600)
+        keys = [x["listing_key"] for x in self.ps.search_listings(1, "fresh", now=self.now)]
+        self.assertNotIn(key, keys)
+
+    def test_listing_priced_above_market_is_hidden(self):
+        self.market(80_000)
+        key = self.ingest(price=200_000, url="https://drom.ru/pricey", source="drom",
+                          _photo_url="http://a/2.jpg", description=self.GOOD_DESC,
+                          _published_ts=self.now - 600)
+        keys = [x["listing_key"] for x in self.ps.search_listings(1, "fresh", now=self.now)]
+        self.assertNotIn(key, keys)
+
+    def test_counts_match_what_is_shown(self):
+        """Счётчик раздела и его содержимое считаются по одним правилам."""
+        self.market(150_000)
+        self.ingest(price=90_000, url="https://drom.ru/g1", source="drom",
+                    _photo_url="http://a/1.jpg", description=self.GOOD_DESC,
+                    _published_ts=self.now - 600)
+        self.ingest(price=95_000, url="https://drom.ru/bad", source="drom",
+                    _published_ts=self.now - 600)
+        counts = self.ps.category_counts(1, self.now)
+        shown = self.ps.search_listings(1, "fresh", now=self.now)
+        self.assertEqual(counts["fresh"], len(shown))
+
+    def test_biggest_gain_comes_first(self):
+        self.market(200_000)
+        self.ingest(price=150_000, url="https://drom.ru/small", source="drom",
+                    _photo_url="http://a/1.jpg", description=self.GOOD_DESC,
+                    _published_ts=self.now - 600)
+        best = self.ingest(price=60_000, url="https://drom.ru/big", source="drom",
+                           _photo_url="http://a/2.jpg", description=self.GOOD_DESC,
+                           _published_ts=self.now - 900)
+        shown = self.ps.search_listings(1, "fresh", now=self.now)
+        self.assertEqual(shown[0]["listing_key"], best)
+
+    def test_flag_off_shows_everything(self):
+        self.market(150_000)
+        key = self.ingest(price=90_000, url="https://drom.ru/plain", source="drom",
+                          _published_ts=self.now - 600)
+        keys = [x["listing_key"] for x in
+                self.ps.search_listings(1, "fresh", now=self.now, only_best=False)]
+        self.assertIn(key, keys)
+
+
+class TestMarketFallback(SearchTestBase):
+    """Рынок считается по всем площадкам, когда объявлений Авито нет."""
+
+    def test_market_from_other_sources_when_avito_empty(self):
+        for i, price in enumerate((140_000, 150_000, 160_000)):
+            self.ingest(price=price, url=f"https://drom.ru/m{i}", source="drom",
+                        title="ВАЗ-2114, 2008")
+        res = self.ps.market_price("vaz", "vaz 2114", 2008, "perm")
+        self.assertEqual(res["basis"], "all")
+        self.assertEqual(res["price"], 150_000)
+
+    def test_avito_wins_when_it_has_data(self):
+        self.ingest(price=100_000, url="https://avito.ru/m1", source="avito",
+                    title="ВАЗ-2114, 2008")
+        self.ingest(price=900_000, url="https://drom.ru/m2", source="drom",
+                    title="ВАЗ-2114, 2008")
+        res = self.ps.market_price("vaz", "vaz 2114", 2008, "perm")
+        self.assertEqual(res["basis"], "avito")
+        self.assertEqual(res["price"], 100_000)
+
+    def test_card_names_the_basis_of_the_estimate(self):
+        lst = {"title": "ВАЗ-2114", "price": 90_000, "market_price": 150_000,
+               "market_sample": 9, "market_basis": "all", "listing_key": "k",
+               "description": "", "first_seen_at": self.now}
+        card = self.ps.format_card(lst, now=self.now)
+        self.assertIn("Рынок площадок", card)
+        self.assertIn("Дешевле рынка на 40%", card)

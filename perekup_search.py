@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import time
@@ -141,6 +142,10 @@ def init_db() -> None:
                 status TEXT DEFAULT 'active'
             )
         """)
+        # Чем считался рынок: 'avito' или 'all' (когда объявлений Авито нет).
+        _pool_cols = {r[1] for r in cur.execute("PRAGMA table_info(listing_pool)")}
+        if "market_basis" not in _pool_cols:
+            cur.execute("ALTER TABLE listing_pool ADD COLUMN market_basis TEXT")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_pool_seen ON listing_pool(last_seen_at)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_pool_model ON listing_pool(brand, model, year)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_pool_region ON listing_pool(region, price)")
@@ -333,7 +338,9 @@ _MONTHS_RU = {
 _REL_RE = re.compile(
     r"(\d+)\s*(секунд|минут|час|сут|дн|день|недел|месяц)[а-яё]*\s*назад", re.I)
 _TIME_RE = re.compile(r"(\d{1,2}):(\d{2})")
-_DAY_MONTH_RE = re.compile(r"(\d{1,2})\s+([а-яё]{3,})", re.I)
+# «27 июня» и «27 июня 2025»: на странице объявления год пишут у прошлогодних,
+# и без него дата уезжала на год вперёд.
+_DAY_MONTH_RE = re.compile(r"(\d{1,2})\s+([а-яё]{3,})(?:\s+(20\d{2}))?", re.I)
 
 
 def parse_published_ts(value: Any, now: float | None = None) -> float | None:
@@ -413,12 +420,15 @@ def parse_published_ts(value: Any, now: float | None = None) -> float | None:
         day = int(dm.group(1))
         mon = _MONTHS_RU.get(dm.group(2)[:3])
         if mon and 1 <= day <= 31:
-            year = today.year
+            explicit_year = int(dm.group(3)) if dm.group(3) else 0
+            year = explicit_year or today.year
             try:
                 d = datetime(year, mon, day, hh, mm, tzinfo=MSK)
             except ValueError:
                 return None
-            if d.timestamp() > now + 86400:      # декабрьские даты в январе
+            # Декабрьские даты в январе относятся к прошлому году. Явный год
+            # с площадки правкам не подлежит.
+            if not explicit_year and d.timestamp() > now + 86400:
                 d = d.replace(year=year - 1)
             return _ok(d.timestamp())
     return None
@@ -523,6 +533,32 @@ def set_pool_photo(key: str, photo: str) -> None:
         conn.execute("UPDATE listing_pool SET photo=? WHERE listing_key=?", (photo, key))
 
 
+def set_pool_details(key: str, *, photo: str = "", description: str = "",
+                     published_at: float | None = None) -> None:
+    """Сохраняет данные, добранные со страницы объявления.
+
+    Пустые значения не затирают уже сохранённые: добор идёт по одному
+    объявлению за раз и не должен обнулять то, что площадка отдала раньше.
+    """
+    if not key:
+        return
+    sets, args = [], []
+    if photo:
+        sets.append("photo=COALESCE(NULLIF(photo,''), ?)")
+        args.append(photo)
+    if description:
+        sets.append("description=COALESCE(NULLIF(description,''), ?)")
+        args.append(str(description)[:1000])
+    if published_at:
+        sets.append("published_at=COALESCE(published_at, ?)")
+        args.append(float(published_at))
+    if not sets:
+        return
+    with _conn() as conn:
+        conn.execute(f"UPDATE listing_pool SET {', '.join(sets)} WHERE listing_key=?",
+                     (*args, key))
+
+
 def get_pool_listing(key: str) -> dict | None:
     with _conn() as conn:
         row = conn.execute("SELECT * FROM listing_pool WHERE listing_key=?", (key,)).fetchone()
@@ -553,8 +589,11 @@ def _region_scope(region: str) -> list[str]:
 
 
 def avito_market_price(brand: str, model: str, year: int, region: str = "",
-                       condition: str = "") -> dict:
-    """Медиана очищенных похожих объявлений Авито.
+                       condition: str = "", sources: Iterable[str] = ("avito",)) -> dict:
+    """Медиана очищенных похожих объявлений.
+
+    sources — площадки-эталоны. По умолчанию Авито; market_price() переходит на
+    все площадки, когда объявлений Авито в пуле нет.
 
     Возвращает {"price": int, "sample": int, "preliminary": bool}.
     """
@@ -566,8 +605,12 @@ def avito_market_price(brand: str, model: str, year: int, region: str = "",
     y_hi = year + MARKET_YEAR_TOLERANCE if year else 9999
     scope = _region_scope(region)
     sql = ["SELECT listing_key, title, description, price, region, condition",
-           "FROM listing_pool WHERE source='avito' AND price > 0 AND brand=?"]
+           "FROM listing_pool WHERE price > 0 AND brand=?"]
     args: list[Any] = [brand]
+    src_list = [s for s in (sources or ()) if s]
+    if src_list:
+        sql.append("AND source IN (%s)" % ",".join("?" * len(src_list)))
+        args += src_list
     if model:
         sql.append("AND model=?")
         args.append(model)
@@ -608,18 +651,35 @@ def avito_market_price(brand: str, model: str, year: int, region: str = "",
     }
 
 
+def market_price(brand: str, model: str, year: int, region: str = "",
+                 condition: str = "") -> dict:
+    """Рыночная цена: сперва по Авито, при пустой выборке — по всем площадкам.
+
+    Раньше рынок считался только по Авито. Когда Авито ничего не отдаёт (а это
+    штатная ситуация — блокировки, лимиты), рынок оставался неизвестным у всей
+    выдачи, и «ниже рынка» было не с чем сравнивать. Дром/Auto.ru/Юла в пуле
+    уже есть — по ним и считаем, честно помечая основу оценки.
+    """
+    res = avito_market_price(brand, model, year, region, condition, ("avito",))
+    if int(res.get("sample") or 0) > 0:
+        return {**res, "basis": "avito"}
+    res = avito_market_price(brand, model, year, region, condition, ())
+    return {**res, "basis": "all" if int(res.get("sample") or 0) else ""}
+
+
 def refresh_market_price(key: str) -> dict:
-    """Пересчитывает и сохраняет avito_market_price для объявления из пула."""
+    """Пересчитывает и сохраняет рыночную цену для объявления из пула."""
     lst = get_pool_listing(key)
     if not lst:
-        return {"price": 0, "sample": 0, "preliminary": True}
-    res = avito_market_price(lst.get("brand", ""), lst.get("model", ""),
-                             int(lst.get("year") or 0), lst.get("region", ""),
-                             lst.get("condition", ""))
+        return {"price": 0, "sample": 0, "preliminary": True, "basis": ""}
+    res = market_price(lst.get("brand", ""), lst.get("model", ""),
+                       int(lst.get("year") or 0), lst.get("region", ""),
+                       lst.get("condition", ""))
     with _conn() as conn:
         conn.execute(
-            "UPDATE listing_pool SET market_price=?, market_sample=? WHERE listing_key=?",
-            (int(res["price"]), int(res["sample"]), key),
+            "UPDATE listing_pool SET market_price=?, market_sample=?, market_basis=? "
+            "WHERE listing_key=?",
+            (int(res["price"]), int(res["sample"]), res.get("basis") or "", key),
         )
     return res
 
@@ -827,23 +887,72 @@ def hide_listing(user_id: int, key: str, now: float | None = None) -> None:
         )
 
 
-def search_listings(user_id: int, category: str, *, offset: int = 0,
-                    limit: int = PAGE_SIZE, now: float | None = None) -> list[dict]:
-    """Локальная выдача по активному поиску пользователя (без сети)."""
-    now = time.time() if now is None else float(now)
-    if category == "saved":
-        return saved_cars(user_id)[offset:offset + limit]
-    if category == "price_drop":
-        return price_drop_feed(user_id, limit=limit, offset=offset, now=now)
+# ──────────────────────────────────────────────────────────────────────
+# Отбор «только лучшие»
+# ──────────────────────────────────────────────────────────────────────
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+#: Показывать только объявления с фото, описанием и ценой ниже рынка.
+ONLY_BEST = _env_flag("PS_ONLY_BEST", True)
+#: Короче этого описание считается отсутствующим («ВАЗ 2106, 1996» — не описание).
+MIN_DESCRIPTION_CHARS = 25
+#: Сколько рыночных цен досчитывать за один проход (SQL по локальному пулу).
+MARKET_CALC_BUDGET = 300
+
+
+def listing_is_good(listing: dict) -> bool:
+    """Годится ли объявление для выдачи «только лучшее».
+
+    Три требования, по которым перекуп и принимает решение: живое фото,
+    человеческое описание и цена ниже рынка. Без любого из них карточка
+    бесполезна — раньше такие уходили пользователю пустыми.
+    """
+    if not photo_of(listing) and not (listing.get("photo") or ""):
+        return False
+    desc = " ".join(str(listing.get("description") or "").split())
+    if len(desc) < MIN_DESCRIPTION_CHARS:
+        return False
+    market = int(listing.get("market_price") or 0)
+    price = int(listing.get("price") or 0)
+    return bool(market and price and market > price)
+
+
+def _ensure_market(listing: dict, budget: list[int]) -> dict:
+    """Досчитывает рыночную цену объявления, если её ещё не считали."""
+    if listing.get("market_price") is not None and int(listing.get("market_price") or 0):
+        return listing
+    if int(listing.get("market_sample") or 0) > 0 or budget[0] <= 0:
+        return listing
+    budget[0] -= 1
+    try:
+        res = refresh_market_price(listing.get("listing_key") or "")
+    except Exception:
+        return listing
+    listing["market_price"] = int(res.get("price") or 0)
+    listing["market_sample"] = int(res.get("sample") or 0)
+    listing["market_basis"] = res.get("basis") or ""
+    return listing
+
+
+def _pool_candidates(user_id: int, category: str, now: float,
+                     *, only_best: bool | None = None) -> list[dict]:
+    """Объявления пула, подходящие под активный поиск и раздел."""
     search = get_active_search(user_id)
     if not search:
         return []
+    strict = ONLY_BEST if only_best is None else bool(only_best)
     hidden = _hidden_keys(user_id)
     with _conn() as conn:
         rows = conn.execute(
             """SELECT * FROM listing_pool WHERE status='active' AND price > 0
                 ORDER BY COALESCE(published_at, first_seen_at) DESC LIMIT 4000"""
         ).fetchall()
+    budget = [MARKET_CALC_BUDGET]
     out = []
     for r in rows:
         d = dict(r)
@@ -853,7 +962,31 @@ def search_listings(user_id: int, category: str, *, offset: int = 0,
             continue
         if category_of(d, now) != category:
             continue
+        if strict:
+            # Рынок считаем только для уже отобранных — это локальный SQL,
+            # но на 4000 строк он всё равно был бы лишней работой.
+            _ensure_market(d, budget)
+            if not listing_is_good(d):
+                continue
         out.append(d)
+    return out
+
+
+def search_listings(user_id: int, category: str, *, offset: int = 0,
+                    limit: int = PAGE_SIZE, now: float | None = None,
+                    only_best: bool | None = None) -> list[dict]:
+    """Локальная выдача по активному поиску пользователя (без сети)."""
+    now = time.time() if now is None else float(now)
+    if category == "saved":
+        return saved_cars(user_id)[offset:offset + limit]
+    if category == "price_drop":
+        return price_drop_feed(user_id, limit=limit, offset=offset, now=now)
+    out = _pool_candidates(user_id, category, now, only_best=only_best)
+    # Лучшее — вперёд: сначала самая большая разница с рынком.
+    out.sort(key=lambda d: (
+        -(int(d.get("market_price") or 0) - int(d.get("price") or 0)),
+        -float(d.get("published_at") or d.get("first_seen_at") or 0),
+    ))
     return out[offset:offset + limit]
 
 
@@ -868,23 +1001,16 @@ def category_total(user_id: int, category: str, now: float | None = None) -> int
 
 
 def category_counts(user_id: int, now: float | None = None) -> dict:
-    """Счётчики для главного экрана поиска."""
+    """Счётчики для главного экрана поиска.
+
+    Считаются по тем же правилам, что и выдача: иначе в разделе значилось бы
+    87 машин, а открывалось три.
+    """
     now = time.time() if now is None else float(now)
     counts = {c: 0 for c in CATEGORIES}
-    search = get_active_search(user_id)
-    if search:
-        hidden = _hidden_keys(user_id)
-        with _conn() as conn:
-            rows = conn.execute(
-                "SELECT * FROM listing_pool WHERE status='active' AND price > 0 LIMIT 4000"
-            ).fetchall()
-        for r in rows:
-            d = dict(r)
-            if d["listing_key"] in hidden or not matches_search(d, search):
-                continue
-            cat = category_of(d, now)
-            if cat in counts:
-                counts[cat] += 1
+    for cat in ("fresh", "today", "days3", "bargain"):
+        if cat in counts:
+            counts[cat] = len(_pool_candidates(user_id, cat, now))
     counts["price_drop"] = len(price_drop_feed(user_id, limit=500, now=now))
     counts["saved"] = len(saved_cars(user_id))
     return counts
@@ -1167,10 +1293,15 @@ def format_card(listing: dict, *, category: str = "", now: float | None = None,
     lines.append(f"Цена: {fmt_money(price)}")
     if market:
         approx = "≈" if int(listing.get("market_sample") or 0) >= MIN_MARKET_SAMPLE else "≈~"
-        lines.append(f"Рынок Авито: {approx}{fmt_money(market)}")
+        # Основа оценки называется честно: Авито или все площадки сразу.
+        _basis = "Рынок Авито" if (listing.get("market_basis") or "avito") == "avito" \
+            else "Рынок площадок"
+        lines.append(f"{_basis}: {approx}{fmt_money(market)}")
         diff = market - price
         if diff > 0:
             lines.append(f"Разница: ≈{fmt_money(diff)}")
+            if price:
+                lines.append(f"Дешевле рынка на {int(round(diff * 100 / market))}%")
         if int(listing.get("market_sample") or 0) < MIN_MARKET_SAMPLE:
             lines.append("Оценка предварительная — мало похожих объявлений")
     lines.append("")

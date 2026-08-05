@@ -677,6 +677,30 @@ def create_invoice(uid: int, plan_key: str, label: str,
     return price
 
 
+def find_open_invoice(uid: int, plan_key: str) -> Optional[dict]:
+    """Последний НЕоплаченный счёт пользователя по тарифу.
+
+    Каждое нажатие на тариф раньше создавало новый label, то есть новую
+    платёжную ссылку. Со скидкой это означало сколько угодно ссылок на
+    льготную цену. Повторное нажатие теперь отдаёт ту же ссылку, а оплата
+    её закрывает — скидочной ссылкой можно заплатить один раз.
+    """
+    with _read_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(f"""
+            SELECT * FROM referral_invoices
+            WHERE uid = {_ph(1)} AND plan_key = {_ph(1)}
+              AND (paid IS NULL OR paid = FALSE)
+            ORDER BY created_at DESC
+            LIMIT 1
+        """, (int(uid), plan_key))
+        row = cur.fetchone()
+        if not row:
+            return None
+        cols = [desc[0] for desc in cur.description]
+        return _row_to_dict(row, cols)
+
+
 def get_invoice(label: str) -> Optional[dict]:
     """Возвращает счёт по label для сверки в webhook."""
     with _read_conn() as conn:

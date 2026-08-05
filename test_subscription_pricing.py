@@ -131,3 +131,50 @@ class TestPaywallShowsDiscount(PricingTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestOneTimeDiscountLink(PricingTestCase):
+    """Скидочной ссылкой можно заплатить один раз."""
+
+    def test_repeated_clicks_reuse_the_same_link(self):
+        uid = self.invited()
+        price = cb._plan_price(uid, "week")
+        referrals.create_invoice(uid, "week", "sub_2_week_100", price)
+        again = referrals.find_open_invoice(uid, "week")
+        self.assertEqual(again["label"], "sub_2_week_100")
+        self.assertEqual(again["final_amount"], price["final"])
+
+    def test_paid_link_is_not_offered_again(self):
+        uid = self.invited()
+        price = cb._plan_price(uid, "week")
+        referrals.create_invoice(uid, "week", "sub_2_week_100", price)
+        referrals.mark_invoice_paid("sub_2_week_100")
+        self.assertIsNone(referrals.find_open_invoice(uid, "week"))
+
+    def test_next_invoice_after_payment_is_full_price(self):
+        uid = self.invited()
+        price = cb._plan_price(uid, "week")
+        referrals.create_invoice(uid, "week", "sub_2_week_100", price)
+        referrals.mark_invoice_paid("sub_2_week_100")
+        referrals.record_payment(uid, "week", "op-77", price["original"],
+                                 price["final"], price["discount"], "referral")
+        after = cb._plan_price(uid, "week")
+        self.assertEqual(after["discount"], 0)
+        self.assertEqual(after["final"], cb.SUBSCRIPTION_PLANS["week"]["amount"])
+
+    def test_second_reward_is_not_granted_for_the_same_user(self):
+        """Даже если оплатить дважды, реферер получает награду один раз."""
+        uid = self.invited()
+        price = cb._plan_price(uid, "month")
+        first = referrals.record_payment(uid, "month", "op-1", price["original"],
+                                         price["final"], price["discount"], "referral")
+        second = referrals.record_payment(uid, "month", "op-2",
+                                          price["original"], price["final"], 0, None)
+        self.assertTrue(first["ok"])
+        self.assertFalse(second["ok"])
+        self.assertEqual(second["reason"], "first_payment_already_recorded")
+
+    def test_open_invoice_is_per_plan(self):
+        uid = self.invited()
+        referrals.create_invoice(uid, "week", "sub_2_week_1", cb._plan_price(uid, "week"))
+        self.assertIsNone(referrals.find_open_invoice(uid, "month"))

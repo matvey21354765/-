@@ -3040,7 +3040,10 @@ def _autoru_cffi_fetch(region: str, price_min: int, price_max: int,
 
 # Заглушки Auto.ru/Яндекса: og:image страницы без фото — это фирменный
 # логотип «Я», а не машина. Такие ссылки нельзя показывать в карточке.
-_AUTORU_PHOTO_HOSTS = ("avatars.mds.yandex.net", "avatars.mdst.yandex.net")
+# avatars.avto.ru — текущий CDN карточек Auto.ru, mds.yandex.net остаётся у
+# старых объявлений. Оба должны проходить, иначе фото просто пропадают.
+_AUTORU_PHOTO_HOSTS = ("avatars.avto.ru", "avatars.mds.yandex.net",
+                       "avatars.mdst.yandex.net")
 _AUTORU_PHOTO_REJECT = (
     "/get-verba/", "yastatic.net", "/share", "sharing", "og-image", "og_image",
     "default", "stub", "placeholder", "no-photo", "nophoto", "noimage",
@@ -3082,6 +3085,69 @@ def _autoru_photo_from_list(photos_list) -> str:
                 if isinstance(entry.get(key), str):
                     candidates.append(entry[key])
         for raw in candidates:
+            url = (raw or "").strip().replace("\\/", "/")
+            if url.startswith("//"):
+                url = "https:" + url
+            if _autoru_photo_ok(url):
+                return url
+    return ""
+
+
+# Пробег пишется группами по три («6 900 км»), а слева от него в карточке
+# стоит год. Жадный шаблон склеивал их в «20256900», поэтому число
+# разбирается именно как группы разрядов.
+_AUTORU_MILEAGE_RE = re.compile(
+    r"(?<!\d)(\d{1,3}(?:[\s\u00a0]\d{3})+|\d{1,7})\s*км\b", re.IGNORECASE)
+
+
+def _autoru_mileage_from_text(text: str) -> int:
+    """Пробег из текста карточки («6 900 км»). 0 — если не указан."""
+    m = _AUTORU_MILEAGE_RE.search(text or "")
+    if not m:
+        return 0
+    digits = re.sub(r"\D", "", m.group(1))
+    value = int(digits) if digits else 0
+    return value if 0 < value < 2_000_000 else 0
+
+
+_AUTORU_PRICE_RE = re.compile(r"(\d{1,3}(?:[\s ]\d{3})+)\s*₽")
+
+
+def _autoru_card_price(card) -> int:
+    """Цена из карточки выдачи Auto.ru.
+
+    Разметка цены отличается от карточки к карточке: «справедливая цена»
+    подсвечена одним классом, обычная — другим. Пока разбирался только
+    подсвеченный вариант, из выдачи молча пропадало большинство объявлений
+    (на живой странице — 34 из 37).
+    """
+    for selector in ('[class*="ListingItemUniversalPrice__highlighted"]',
+                     '[class*="ListingItemUniversalPrice__title"]',
+                     '[class*="ListingItemPrice__content"]',
+                     '[class*="ListingItemUniversalPrice"]'):
+        node = card.select_one(selector)
+        if not node:
+            continue
+        value = parse_price(node.get_text(" ", strip=True)) or 0
+        if value >= 10_000:
+            return value
+    m = _AUTORU_PRICE_RE.search(card.get_text(" ", strip=True))
+    if m:
+        digits = re.sub(r"\D", "", m.group(1))
+        value = int(digits) if digits else 0
+        if value >= 10_000:
+            return value
+    return 0
+
+
+def _autoru_card_photo(card) -> str:
+    """Фото из карточки выдачи Auto.ru: src, data-src или самый крупный srcset."""
+    for img in card.select("img"):
+        candidates = [img.get(k, "") for k in ("src", "data-src", "data-original")]
+        for key in ("srcset", "data-srcset"):
+            candidates += [x.strip().split()[0]
+                           for x in (img.get(key) or "").split(",") if x.strip()]
+        for raw in reversed(candidates):        # srcset идёт от мелких к крупным
             url = (raw or "").strip().replace("\\/", "/")
             if url.startswith("//"):
                 url = "https:" + url
@@ -3215,26 +3281,35 @@ def _autoru_parse_html(text: str, today) -> list[dict]:
         for card in soup.select('[data-seo="listing-item"]'):
             link = card.select_one('a[href*="auto.ru/cars/"][href*="/sale/"]')
             title_node = card.select_one(".ListingItemTitle__link") or link
-            price_node = card.select_one('[class*="ListingItemUniversalPrice__highlighted"]')
-            if not link or not title_node or not price_node:
+            if not link or not title_node:
                 continue
             item_url = str(link.get("href") or "").strip()
             title = title_node.get_text(" ", strip=True)
-            price_val = parse_price(price_node.get_text(" ", strip=True)) or 0
+            price_val = _autoru_card_price(card)
             if not item_url or not title or price_val < 10_000:
                 continue
-            image_node = card.select_one("img[src]")
-            photo_url = str(image_node.get("src") or "") if image_node else ""
-            if photo_url.startswith("//"):
-                photo_url = "https:" + photo_url
-            year_match = re.search(r"\b(19[5-9]\d|20[0-3]\d)\b", card.get_text(" ", strip=True))
+            photo_url = _autoru_card_photo(card)
+            card_text = card.get_text(" ", strip=True)
+            year_match = re.search(r"\b(19[5-9]\d|20[0-3]\d)\b", card_text)
+            # Описание, пробег и характеристики есть прямо в карточке выдачи —
+            # раньше они выбрасывались, и объявление уходило пользователю
+            # пустым: без описания и с пробегом 0.
+            desc_node = card.select_one('[class*="ListingItemUniversal__description"]')
+            desc = ""
+            if desc_node:
+                desc = re.sub(r"\s+", " ", desc_node.get_text(" ", strip=True))
+            if not desc:
+                specs = [s.get_text(" ", strip=True) for s in
+                         card.select('[class*="ListingItemUniversalSpecs__spec"]')]
+                desc = ", ".join(dict.fromkeys(x for x in specs if x))
+            mileage = _autoru_mileage_from_text(card_text)
             item = {
                 "source": "autoru", "title": title,
                 "price": f"{price_val:,} ₽".replace(",", " "),
                 "url": item_url, "date": str(today),
                 "_photos": 1 if photo_url else 0, "_days_on_site": 0,
-                "description": "", "seller": "", "_photo_url": photo_url,
-                "_price_int": price_val,
+                "description": desc[:400], "seller": "", "_photo_url": photo_url,
+                "_price_int": price_val, "mileage": mileage,
                 "_year": int(year_match.group(1)) if year_match else 0,
             }
             item["_hot_score"] = hot_score(item)
@@ -14188,7 +14263,7 @@ def _paywall_text(uid: int | None = None) -> str:
     """Экран «доступ приостановлен» — с личной ценой пользователя."""
     return (
         "🔒 <b>Доступ к PerekupDrive приостановлен</b>\n\n"
-        "Ваш 7-дневный тестовый период или оплаченная подписка завершились. "
+        f"Ваш {TRIAL_DAYS}-дневный тестовый период или оплаченная подписка завершились. "
         "Поиск, мониторинг и инструменты анализа временно недоступны.\n\n"
         + _referral_discount_note(uid)
         + "Продлите доступ — и бот снова будет круглосуточно отслеживать новые "
@@ -14275,15 +14350,23 @@ async def cb_yoomoney(cb: CallbackQuery):
     if not plan or not YOOMONEY_WALLET:
         await cb.answer("Оплата временно не настроена", show_alert=True); return
     uid = cb.from_user.id
-    label = f"sub_{uid}_{plan_key}_{int(time.time())}"
     # Счёт выставляется ровно по той цене, которую человек видел на кнопке.
     price = _plan_price(uid, plan_key)
+    label = ""
     try:
+        # Одна ссылка на тариф, пока она не оплачена. Иначе каждое нажатие
+        # плодило новую скидочную ссылку, и по каждой можно было заплатить.
+        open_invoice = referrals.find_open_invoice(uid, plan_key)
+        if open_invoice and int(open_invoice.get("final_amount") or 0) == price["final"]:
+            label = str(open_invoice["label"])
+        else:
+            label = f"sub_{uid}_{plan_key}_{int(time.time())}"
         referrals.create_invoice(uid, plan_key, label, price)
     except Exception as e:
         # Без БД рефералов счёт всё равно должен выставиться — по полной цене,
         # иначе webhook не найдёт счёт и не сверит сумму.
         print(f"  [подписка] счёт не записан для {uid}: {str(e)[:80]}")
+        label = label or f"sub_{uid}_{plan_key}_{int(time.time())}"
         price = _plan_price(None, plan_key)
     sum_amount = price["final"]
     discount_note = ""
@@ -14292,7 +14375,8 @@ async def cb_yoomoney(cb: CallbackQuery):
             f"\n\n🎁 Реферальная скидка "
             f"{int(round(referrals.REFERRAL_DISCOUNT_RATE * 100))}% применена: "
             f"{sum_amount} ₽ вместо {price['original']} ₽ "
-            f"(выгода {price['discount']} ₽)."
+            f"(выгода {price['discount']} ₽).\n"
+            "Ссылка одноразовая: скидка действует на одну оплату."
         )
     params = {
         "receiver": YOOMONEY_WALLET, "quickpay-form": "button",
@@ -14460,6 +14544,13 @@ async def _yoomoney_webhook(request):
     original_amount = invoice["original_amount"] if invoice else expected_amount
     discount_amount = invoice["discount_amount"] if invoice else 0
     applied_discount_type = invoice["applied_discount_type"] if invoice else None
+    # Скидочная ссылка одноразовая. Повторная оплата по уже закрытому счёту
+    # проходит как обычная: вторая скидка не засчитывается и реферальная
+    # награда не начисляется. Сумму к сверке НЕ поднимаем — иначе человек
+    # заплатит по своей же ссылке и не получит доступ.
+    if invoice and invoice.get("paid") and discount_amount:
+        print(f"  [подписка] повторная оплата по закрытой скидочной ссылке {label}")
+        discount_amount, applied_discount_type = 0, None
     received = int(float(form.get("withdraw_amount") or form.get("amount") or 0))
     if received < expected_amount:
         return web.Response(status=400, text="amount mismatch")
@@ -16972,9 +17063,11 @@ def _env_trial_days() -> int:
 
 TRIAL_DAYS = _env_trial_days()
 
-# Срок теста, действовавший до перехода на 3 дня. Нужен только для того, чтобы
-# у уже зарегистрированных пользователей доступ не обрезался задним числом.
-LEGACY_TRIAL_DAYS = 7
+# Раньше у ранее зарегистрированных сохранялся старый семидневный тест, и
+# рядом жили пользователи с разным сроком. Тест единый для всех — TRIAL_DAYS;
+# сохранённое значение больше него не поднимает срок (бонусные дни за
+# приглашённых по-прежнему прибавляются сверху).
+LEGACY_TRIAL_DAYS = TRIAL_DAYS
 
 
 def _register_user(
@@ -16995,8 +17088,8 @@ def _register_user(
         u["trial_start"] = now
     # Срок теста фиксируется в момент старта: смена TRIAL_DAYS не обрезает
     # доступ тем, кто уже начал пробный период по старым правилам.
-    if "trial_days" not in u:
-        u["trial_days"] = TRIAL_DAYS if _is_new else LEGACY_TRIAL_DAYS
+    if "trial_days" not in u or int(u.get("trial_days") or 0) > TRIAL_DAYS:
+        u["trial_days"] = TRIAL_DAYS
     # Бонусные дни (за рефералов) прибавляются к тесту
     if "bonus_days" not in u:
         u["bonus_days"] = 0
@@ -17037,7 +17130,7 @@ def _trial_info(uid: int) -> dict:
     u = _USER_REGISTRY.get(str(uid)) or {}
     start = u.get("trial_start") or u.get("first_seen") or int(time.time())
     bonus = int(u.get("bonus_days", 0) or 0)
-    base = int(u.get("trial_days") or 0) or (TRIAL_DAYS if not u else LEGACY_TRIAL_DAYS)
+    base = min(int(u.get("trial_days") or 0) or TRIAL_DAYS, TRIAL_DAYS)
     total = base + bonus
     elapsed_days = (int(time.time()) - start) / 86400.0
     days_left = int(total - elapsed_days)
@@ -20233,22 +20326,102 @@ def _ps_nav_keyboard(category: str, page: int, shown: int, total: int) -> Inline
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _fetch_listing_photo(url: str) -> str:
-    """Достаёт фото объявления по его ссылке — для карточек, которым площадка
-    не отдала картинку в выдаче.
+_RU_MONTHS_LONG = ("января", "февраля", "марта", "апреля", "мая", "июня", "июля",
+                   "августа", "сентября", "октября", "ноября", "декабря")
+# «2 июля», «27 июня 2025» — так площадки пишут дату публикации на странице
+# объявления. Дата есть у всех, просто её никто не забирал.
+_PAGE_DATE_RE = re.compile(
+    r"\b(\d{1,2})\s+(" + "|".join(_RU_MONTHS_LONG) + r")(?:\s+(20\d{2}))?"
+    r"(?:\s*,?\s*(\d{1,2}):(\d{2}))?", re.IGNORECASE)
 
-    Для Auto.ru одного og:image мало: на странице объявления без фото и на
-    капче Яндекс отдаёт фирменную заглушку с логотипом «Я», и она попадала в
-    карточку вместо машины. Поэтому og:image проверяется по хосту фото-CDN, а
-    при неудаче фото ищется в JSON страницы.
+
+def _published_ts_from_page(text: str, source: str = "") -> float | None:
+    """Момент публикации со страницы объявления.
+
+    Порядок: машинные форматы (JSON-LD, meta, JSON площадки) → человеческая
+    дата рядом со счётчиком просмотров. Первое надёжнее, второе есть всегда.
     """
+    if not text:
+        return None
+    # 1. Общие машинные форматы.
+    for pattern in (
+        r'"datePublished"\s*:\s*"([^"]{8,40})"',
+        r'<meta[^>]+property=["\']article:published_time["\'][^>]+content=["\']([^"\']+)',
+        r'<time[^>]+datetime=["\']([^"\']{8,40})',
+    ):
+        m = re.search(pattern, text, re.I)
+        if m:
+            ts = _ps.parse_published_ts(m.group(1))
+            if ts:
+                return ts
+    # 2. Ключи конкретных площадок в JSON страницы.
+    _keys_by_source = {
+        "autoru": (r'"create_?[dD]ate"\s*:\s*"?(\d{10,13}|[\d\-:.TZ+ ]{10,32})',
+                   r'"creationDate"\s*:\s*"?([^",}]{8,32})'),
+        "avito":  (r'"sortTimeStamp"\s*:\s*(\d{10,13})',
+                   r'"publishedAt"\s*:\s*"?([^",}]{8,32})'),
+        "youla":  (r'"date_published"\s*:\s*(\d{10,13})',),
+        "drom":   (r'"datePublished"\s*:\s*"([^"]{8,40})"',),
+    }
+    for pattern in _keys_by_source.get(source, ()):
+        m = re.search(pattern, text)
+        if m:
+            ts = _ps.parse_published_ts(m.group(1))
+            if ts:
+                return ts
+    # 3. Человеческая дата в шапке объявления («2 июля», «27 июня»).
+    head = text[:400_000]
+    for marker in ("CardHead__creationDate", "creationDate", "item-view/item-date",
+                   "Опубликовано", "Размещено"):
+        idx = head.find(marker)
+        if idx == -1:
+            continue
+        chunk = re.sub(r"<[^>]+>", " ", head[idx:idx + 600])
+        m = _PAGE_DATE_RE.search(chunk)
+        if m:
+            ts = _ps.parse_published_ts(_page_date_text(m))
+            if ts:
+                return ts
+    return None
+
+
+def _page_date_text(m: "re.Match") -> str:
+    """Собирает «27 июня 14:05» из разобранных групп для parse_published_ts."""
+    day, month, year, hh, mm = m.groups()
+    out = f"{day} {month}"
+    if year:
+        out += f" {year}"
+    if hh and mm:
+        out += f" {hh}:{mm}"
+    return out
+
+
+def _fetch_listing_details(url: str, source: str = "") -> dict:
+    """Достаёт со страницы объявления то, чего не было в выдаче: фото, описание
+    и дату публикации.
+
+    Дата публикации есть на самих площадках, просто в выдаче её отдают не все —
+    из-за этого карточки писали «площадка не указала дату». Здесь она берётся
+    со страницы объявления вместе с фото и описанием, одним запросом.
+
+    Для Auto.ru одного og:image мало: на странице без фото и на капче Яндекс
+    отдаёт фирменную заглушку с логотипом «Я», поэтому ссылка проверяется по
+    хосту фото-CDN, а при неудаче фото ищется в JSON страницы.
+    """
+    empty = {"photo": "", "description": "", "published_at": None}
     if not url or not url.startswith("http"):
-        return ""
+        return empty
     try:
         import requests as _req
     except ImportError:
-        return ""
-    _is_autoru = "auto.ru" in url
+        return empty
+    source = (source or "").lower()
+    if not source:
+        for name in ("avito", "autoru", "drom", "youla"):
+            if name in url or (name == "autoru" and "auto.ru" in url):
+                source = name
+                break
+    _is_autoru = source == "autoru" or "auto.ru" in url
     _hdrs = {
         "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
@@ -20261,14 +20434,14 @@ def _fetch_listing_photo(url: str) -> str:
             _px = _autoru_proxy_dict() or _px
             _timeout = autoru_timeout()
         else:
-            _timeout = 6
+            _timeout = 8
         r = _req.get(url, timeout=_timeout, headers=_hdrs, proxies=_px or {})
         if r.status_code != 200:
-            return ""
+            return empty
         _text = r.text or ""
         if _is_autoru and autoru_captcha_detected(r.status_code, str(r.url), _text):
-            # Капча отдаёт валидный og:image с логотипом — фото тут нет.
-            return ""
+            # Капча отдаёт валидный og:image с логотипом — данных тут нет.
+            return empty
         m = re.search(
             r'<meta[^>]+(?:property|name)=["\']og:image["\'][^>]+content=["\']([^"\']+)',
             _text, re.I)
@@ -20291,9 +20464,26 @@ def _fetch_listing_photo(url: str) -> str:
                 _u = ""
         if not _u and _is_autoru:
             _u = _autoru_photo_from_page(_text)
-        return _u
+        desc = ""
+        dm = re.search(
+            r'<meta[^>]+(?:property|name)=["\']og:description["\'][^>]+content=["\']([^"\']{20,})',
+            _text, re.I)
+        if dm:
+            desc = re.sub(r"\s+", " ", _html_unescape(dm.group(1))).strip()[:400]
+        return {"photo": _u, "description": desc,
+                "published_at": _published_ts_from_page(_text, source)}
     except Exception:
-        return ""
+        return empty
+
+
+def _html_unescape(value: str) -> str:
+    import html as _html
+    return _html.unescape(value or "")
+
+
+def _fetch_listing_photo(url: str) -> str:
+    """Совместимая обёртка: только фото объявления."""
+    return _fetch_listing_details(url).get("photo", "")
 
 
 def _autoru_photo_from_page(text: str) -> str:
@@ -20324,6 +20514,7 @@ def _autoru_photo_from_page(text: str) -> str:
     # Запасной путь: любой размер фото из JSON, затем любой файл на фото-CDN.
     for pattern in (
         r'"(?:1200x900n?|832x624n?|456x342n?)"\s*:\s*"((?:https?:)?//[^"]{15,})"',
+        r'((?:https?:)?//avatars\.avto\.ru/get-autoru[^"\'<\s\\]{10,})',
         r'"((?:https?:)?//avatars\.mdst?\.yandex\.net/get-autoru[^"]{10,})"',
         r'"((?:https?:)?//avatars\.mdst?\.yandex\.net/[^"]{10,})"',
     ):
@@ -20365,27 +20556,40 @@ async def _ps_send_category(target, uid: int, category: str, page: int = 0):
         return
     _pages = max(1, -(-total // _ps.PAGE_SIZE)) if total else page + 1
     await target.answer(f"{title} — страница {page + 1} из {_pages} (всего {total})")
-    # Фото добираем ДО отправки и параллельно: раньше лимит был 5 на страницу,
-    # поэтому часть карточек уходила без картинки.
+    # Фото, описание и дату публикации добираем ДО отправки и параллельно:
+    # одним запросом на объявление, а не тремя, и результат сохраняем в пул,
+    # чтобы следующая страница уже не ходила в сеть.
     _photo_budget = int(os.getenv("PS_PHOTO_FETCH_PER_PAGE", str(_ps.PAGE_SIZE)))
-    _need_photo = [x for x in items if not _ps.photo_of(x) and x.get("url")][:_photo_budget]
-    if _need_photo:
+    _need_details = [x for x in items if x.get("url") and (
+        not _ps.photo_of(x) or not (x.get("description") or "").strip()
+        or not x.get("published_at"))][:_photo_budget]
+    if _need_details:
         async def _grab(_l):
             try:
-                _u = await loop.run_in_executor(
-                    None, lambda u=_l.get("url", ""): _fetch_listing_photo(u))
+                _d = await loop.run_in_executor(
+                    None, lambda u=_l.get("url", ""), s=_l.get("source", ""):
+                    _fetch_listing_details(u, s))
             except Exception as _fe:
-                print(f"  [карточка] фото не добралось: {str(_fe)[:60]}")
+                print(f"  [карточка] данные не добрались: {str(_fe)[:60]}")
                 return
-            if _u:
-                _l["photo"] = _u
+            _photo = _d.get("photo") or ""
+            _desc = _d.get("description") or ""
+            _pub = _d.get("published_at")
+            if _photo and not _ps.photo_of(_l):
+                _l["photo"] = _photo
+            if _desc and not (_l.get("description") or "").strip():
+                _l["description"] = _desc
+            if _pub and not _l.get("published_at"):
+                _l["published_at"] = _pub
+            if _photo or _desc or _pub:
                 await loop.run_in_executor(
-                    None, lambda k=_l["listing_key"], p=_u: _ps.set_pool_photo(k, p))
+                    None, lambda k=_l["listing_key"], p=_photo, d=_desc, t=_pub:
+                    _ps.set_pool_details(k, photo=p, description=d, published_at=t))
         try:
             await asyncio.wait_for(
-                asyncio.gather(*[_grab(x) for x in _need_photo]), timeout=20)
+                asyncio.gather(*[_grab(x) for x in _need_details]), timeout=25)
         except asyncio.TimeoutError:
-            print("  [карточка] добор фото не уложился в таймаут")
+            print("  [карточка] добор данных не уложился в таймаут")
     for lst in items:
         key = lst["listing_key"]
         try:
