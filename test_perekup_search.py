@@ -89,6 +89,31 @@ class TestAgeCategories(SearchTestBase):
         self.assertNotIn("впервые увидел", self.ps.age_label(lst, self.now))
         self.assertIn("18 минут назад", self.ps.age_label(lst, self.now))
 
+    def test_published_ts_from_strings(self):
+        """Площадки отдают время публикации текстом/ISO — оно должно парситься,
+        иначе в карточке показывается момент, когда объявление увидел бот."""
+        p = self.ps.parse_published_ts
+        self.assertAlmostEqual(p("2 часа назад", self.now), self.now - 7200, delta=2)
+        self.assertAlmostEqual(p("30 минут назад", self.now), self.now - 1800, delta=2)
+        self.assertIsNotNone(p("Сегодня 12:30", self.now))
+        self.assertIsNotNone(p("вчера в 20:29", self.now))
+        self.assertIsNotNone(p("5 августа в 13:05", self.now))
+        self.assertIsNotNone(p("2024-05-01T10:00:00Z", self.now + 0))
+        self.assertIsNone(p("", self.now))
+        self.assertIsNone(p(None, self.now))
+        # миллисекунды и секунды одинаковы
+        self.assertEqual(p(1_700_000_000_000, self.now), p(1_700_000_000, self.now))
+
+    def test_ingest_keeps_publish_time_from_string(self):
+        self.ps.ingest_listing({
+            "source": "avito", "title": "Lada 2107, 2005", "url": "http://a/1",
+            "_price_int": 100000, "published_at": "2 часа назад",
+        }, now=self.now)
+        row = self.ps.get_pool_listing(
+            self.ps._pt.listing_key({"url": "http://a/1", "source": "avito"}))
+        self.assertIsNotNone(row["published_at"])
+        self.assertAlmostEqual(row["published_at"], self.now - 7200, delta=60)
+
 
     def test_unknown_publish_time_goes_to_today_not_fresh(self):
         """Без времени публикации объявление не «Кто быстрее»: возраст считается

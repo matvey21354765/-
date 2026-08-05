@@ -326,17 +326,111 @@ def is_junk(item: dict) -> bool:
     return bool(_JUNK_RE.search(f"{item.get('title','')} {item.get('description','')}"))
 
 
+_MONTHS_RU = {
+    "янв": 1, "фев": 2, "мар": 3, "апр": 4, "мая": 5, "май": 5, "июн": 6,
+    "июл": 7, "авг": 8, "сен": 9, "окт": 10, "ноя": 11, "дек": 12,
+}
+_REL_RE = re.compile(
+    r"(\d+)\s*(секунд|минут|час|сут|дн|день|недел|месяц)[а-яё]*\s*назад", re.I)
+_TIME_RE = re.compile(r"(\d{1,2}):(\d{2})")
+_DAY_MONTH_RE = re.compile(r"(\d{1,2})\s+([а-яё]{3,})", re.I)
+
+
+def parse_published_ts(value: Any, now: float | None = None) -> float | None:
+    """Момент публикации из значения любого вида (ts, ISO-строка, «вчера в 20:29»).
+
+    Площадки отдают время публикации кто как: Авито — текстом («Сегодня 12:30»,
+    «5 августа 12:30», «2 часа назад»), REST-провайдеры — ISO-строкой или
+    миллисекундами. Раньше принимались только числа, поэтому у большинства
+    объявлений published_at оставался пустым и в карточке показывалось время,
+    когда объявление увидел бот.
+    """
+    now = time.time() if now is None else float(now)
+    if value is None or isinstance(value, bool):
+        return None
+
+    def _ok(ts: float) -> float | None:
+        # Отсекаем мусор: будущее дальше суток и всё старше 10 лет.
+        if ts > now + 86400 or ts < now - 10 * 365 * 86400:
+            return None
+        return min(ts, now)
+
+    if isinstance(value, (int, float)):
+        ts = float(value)
+        if ts > 100_000_000_000:      # миллисекунды
+            ts /= 1000.0
+        return _ok(ts) if ts > 1_000_000_000 else None
+
+    if not isinstance(value, str):
+        return None
+    s = value.strip()
+    if not s:
+        return None
+
+    # Чистое число строкой
+    try:
+        return parse_published_ts(float(s), now)
+    except ValueError:
+        pass
+
+    # ISO / «YYYY-MM-DD HH:MM:SS»
+    iso = s.replace("Z", "+00:00").replace("/", "-")
+    if len(iso) >= 8 and iso[:4].isdigit():
+        try:
+            dt = datetime.fromisoformat(iso.replace(" ", "T", 1) if " " in iso[:19] else iso)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=MSK)
+            return _ok(dt.timestamp())
+        except ValueError:
+            pass
+
+    low = s.lower()
+
+    m = _REL_RE.search(low)
+    if m:
+        n = int(m.group(1))
+        unit = m.group(2)
+        mult = {"секунд": 1, "минут": 60, "час": 3600, "сут": 86400, "дн": 86400,
+                "день": 86400, "недел": 604800, "месяц": 2592000}[unit]
+        return _ok(now - n * mult)
+
+    tm = _TIME_RE.search(low)
+    hh, mm = (int(tm.group(1)), int(tm.group(2))) if tm else (0, 0)
+    if hh > 23 or mm > 59:
+        hh, mm = 0, 0
+    today = datetime.fromtimestamp(now, MSK).date()
+
+    def _at(d) -> float | None:
+        return _ok(datetime(d.year, d.month, d.day, hh, mm, tzinfo=MSK).timestamp())
+
+    if "сегодня" in low:
+        return _at(today)
+    if "вчера" in low:
+        return _at(today - timedelta(days=1))
+
+    dm = _DAY_MONTH_RE.search(low)
+    if dm:
+        day = int(dm.group(1))
+        mon = _MONTHS_RU.get(dm.group(2)[:3])
+        if mon and 1 <= day <= 31:
+            year = today.year
+            try:
+                d = datetime(year, mon, day, hh, mm, tzinfo=MSK)
+            except ValueError:
+                return None
+            if d.timestamp() > now + 86400:      # декабрьские даты в январе
+                d = d.replace(year=year - 1)
+            return _ok(d.timestamp())
+    return None
+
+
 def published_at(item: dict) -> float | None:
     """Момент публикации (ts) или None, если площадка его не отдала."""
-    for k in ("_published_ts", "published_at", "_published_at"):
-        v = item.get(k)
-        if v:
-            try:
-                v = float(v)
-                if v > 1_000_000_000:
-                    return v
-            except (TypeError, ValueError):
-                pass
+    for k in ("_published_ts", "published_at", "_published_at", "sortTimeStamp",
+              "sort_time", "publishedAt", "time", "_time", "date_published"):
+        ts = parse_published_ts(item.get(k))
+        if ts:
+            return ts
     days = item.get("_days_on_site")
     if days is not None:
         try:

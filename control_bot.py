@@ -20093,7 +20093,27 @@ async def _ps_send_category(target, uid: int, category: str, page: int = 0):
         return
     _pages = max(1, -(-total // _ps.PAGE_SIZE)) if total else page + 1
     await target.answer(f"{title} — страница {page + 1} из {_pages} (всего {total})")
-    _photo_budget = int(os.getenv("PS_PHOTO_FETCH_PER_PAGE", "5"))
+    # Фото добираем ДО отправки и параллельно: раньше лимит был 5 на страницу,
+    # поэтому часть карточек уходила без картинки.
+    _photo_budget = int(os.getenv("PS_PHOTO_FETCH_PER_PAGE", str(_ps.PAGE_SIZE)))
+    _need_photo = [x for x in items if not _ps.photo_of(x) and x.get("url")][:_photo_budget]
+    if _need_photo:
+        async def _grab(_l):
+            try:
+                _u = await loop.run_in_executor(
+                    None, lambda u=_l.get("url", ""): _fetch_listing_photo(u))
+            except Exception as _fe:
+                print(f"  [карточка] фото не добралось: {str(_fe)[:60]}")
+                return
+            if _u:
+                _l["photo"] = _u
+                await loop.run_in_executor(
+                    None, lambda k=_l["listing_key"], p=_u: _ps.set_pool_photo(k, p))
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*[_grab(x) for x in _need_photo]), timeout=20)
+        except asyncio.TimeoutError:
+            print("  [карточка] добор фото не уложился в таймаут")
     for lst in items:
         key = lst["listing_key"]
         try:
@@ -20113,20 +20133,6 @@ async def _ps_send_category(target, uid: int, category: str, page: int = 0):
         saved = await loop.run_in_executor(None, lambda k=key: _ps.is_saved(uid, k))
         _kb = _ps_card_keyboard(uid, key, category=category, page=page, saved=saved)
         _photo = _ps.photo_of(lst)
-        if not _photo and _photo_budget > 0:
-            # Фото не сохранилось при сборе (площадка отдала карточку без
-            # картинки) — добираем его по ссылке объявления, чтобы карточки
-            # не выглядели «через одну». Не больше нескольких добора на
-            # страницу, иначе выдача будет ждать сеть.
-            _photo_budget -= 1
-            try:
-                _photo = await loop.run_in_executor(
-                    None, lambda u=lst.get("url", ""): _fetch_listing_photo(u))
-                if _photo:
-                    await loop.run_in_executor(
-                        None, lambda k=key, p=_photo: _ps.set_pool_photo(k, p))
-            except Exception as _fe:
-                print(f"  [карточка] фото не добралось: {str(_fe)[:60]}")
         _sent = False
         if _photo:
             # Фото объявления — как в обычной выдаче бота.
