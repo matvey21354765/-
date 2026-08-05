@@ -474,3 +474,61 @@ def test_publish_date_from_platform_json_keys():
     assert cb._published_ts_from_page('{"sortTimeStamp":1751000000000}', "avito")
     assert cb._published_ts_from_page('{"date_published":1751000000}', "youla")
     assert cb._published_ts_from_page("<html>ничего</html>", "autoru") is None
+
+
+# ── Фото не должно быть превью или огрызком ссылки ───────────────────
+
+
+def test_escaped_json_photo_url_is_not_truncated():
+    """В JSON страницы слэши экранированы; обрыв ссылки давал битое фото."""
+    page = (r'{"small":"\/\/avatars.avto.ru\/get-autoru-vos\/476\/abc\/small",'
+            r'"1200x900":"\/\/avatars.avto.ru\/get-autoru-vos\/476\/abc\/1200x900"}')
+    assert cb._autoru_photo_from_page(page) == (
+        "https://avatars.avto.ru/get-autoru-vos/476/abc/1200x900")
+
+
+def test_preview_sizes_are_rejected():
+    """Рядом с фото Auto.ru лежит размытое превью — в карточку идёт снимок."""
+    for thumb in ("small", "thumb_m", "preview", "92x69", "120x90"):
+        assert not cb._autoru_photo_ok(
+            f"https://avatars.avto.ru/get-autoru-vos/1/2/{thumb}"), thumb
+    assert cb._autoru_photo_ok("https://avatars.avto.ru/get-autoru-vos/1/2/1200x900")
+
+
+def test_publish_moment_comes_from_the_offer_json():
+    """Дата берётся из объекта самого объявления, а не по позиции в тексте."""
+    ts = cb._autoru_published_ts({"additional_info": {"creation_date": "1759264644446"}})
+    assert ts and _msk(ts).strftime("%d.%m.%Y") == "30.09.2025"
+    assert cb._autoru_published_ts({}) is None
+    assert cb._autoru_published_ts({"created": "2026-07-02T10:00:00Z"})
+
+
+# ── Авито: добор настоящим поиском, когда лента пуста по городу ──────
+
+
+def test_region_hits_counted_by_city_name():
+    items = [{"location": "Пермский край, Пермь", "city": "Пермь"},
+             {"location": "Москва", "city": "Москва"}]
+    assert cb._avito_region_hits(items, "perm") == 1
+    assert cb._avito_region_hits(items, "moscow") == 1
+
+
+def test_direct_search_skipped_while_rate_limited(monkeypatch):
+    """Правило WORKING_CONFIG: под ограничением IP не жжём запросами."""
+    monkeypatch.setattr(cb, "_avito_rate_limited", lambda: True)
+    called = []
+    monkeypatch.setattr(cb, "_avito_webjson_search",
+                        lambda *a, **k: called.append(1) or [{"url": "x"}])
+    assert cb._avito_direct_region_search(
+        "perm", price_min=0, price_max=100, sort_by_date=True, brand="") == []
+    assert not called
+
+
+def test_direct_search_runs_when_feed_is_thin(monkeypatch):
+    monkeypatch.setattr(cb, "_avito_rate_limited", lambda: False)
+    monkeypatch.setattr(cb, "_spfa_user_search_active", lambda: False)
+    monkeypatch.setattr(cb, "_avito_webjson_search",
+                        lambda *a, **k: [{"url": "https://avito.ru/1"}])
+    out = cb._avito_direct_region_search(
+        "perm", price_min=0, price_max=100, sort_by_date=True, brand="any")
+    assert out and out[0]["url"] == "https://avito.ru/1"

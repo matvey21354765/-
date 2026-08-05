@@ -3049,14 +3049,22 @@ _AUTORU_PHOTO_REJECT = (
     "default", "stub", "placeholder", "no-photo", "nophoto", "noimage",
     "logo", "favicon", "apple-touch", "auto-ru-logo", "brand", "icon",
 )
+# Превью-размеры: Auto.ru отдаёт их рядом с полными, и в карточку уходила
+# размытая заглушка вместо фотографии. Проверяется последний сегмент пути —
+# именно он и есть размер («…/abc/thumb_m», «…/abc/1200x900»).
+_AUTORU_PHOTO_THUMBS = ("small", "thumb", "preview", "mobile",
+                        "92x69", "120x90", "148x110", "blur")
 
 
 def _autoru_photo_ok(url: str) -> bool:
-    """True только для реального фото объявления Auto.ru."""
+    """True только для реального фото объявления Auto.ru (не превью)."""
     lo = (url or "").strip().lower()
     if not lo.startswith(("http://", "https://")):
         return False
     if not any(host in lo for host in _AUTORU_PHOTO_HOSTS):
+        return False
+    size = lo.rstrip("/").rsplit("/", 1)[-1].split("?", 1)[0]
+    if any(size.startswith(t) for t in _AUTORU_PHOTO_THUMBS):
         return False
     return not any(bad in lo for bad in _AUTORU_PHOTO_REJECT)
 
@@ -3138,6 +3146,27 @@ def _autoru_card_price(card) -> int:
         if value >= 10_000:
             return value
     return 0
+
+
+def _autoru_published_ts(offer: dict) -> float | None:
+    """Момент публикации объявления Auto.ru из его JSON.
+
+    Auto.ru хранит его в additional_info.creation_date (миллисекунды). Ключ
+    называется по-разному в зависимости от версии ответа, поэтому проверяем
+    все известные варианты — но только внутри объекта самого объявления.
+    """
+    if not isinstance(offer, dict):
+        return None
+    add = offer.get("additional_info") or offer.get("additionalInfo") or {}
+    for source in (add, offer):
+        if not isinstance(source, dict):
+            continue
+        for key in ("creation_date", "creationDate", "created", "create_date",
+                    "fresh_date", "freshDate"):
+            ts = _ps.parse_published_ts(source.get(key))
+            if ts:
+                return ts
+    return None
 
 
 def _autoru_card_photo(card) -> str:
@@ -3470,10 +3499,16 @@ def _autoru_parse_html(text: str, today) -> list[dict]:
             # Описание / пробег
             mileage = (vi.get("state") or {}).get("mileage", 0)
             desc = f"{year} г., {mileage:,} км".replace(",", " ") if year or mileage else ""
+            # Момент публикации лежит в самом объекте объявления — здесь он
+            # разобран как JSON, а не угадан по позиции в тексте страницы.
+            _pub = _autoru_published_ts(obj)
             item = {
                 "source": "autoru", "title": title, "price": price_str,
                 "url": url, "date": str(today),
-                "_photos": 1 if photo_url else 0, "_days_on_site": 0,
+                "_photos": 1 if photo_url else 0,
+                "_days_on_site": (max(0, int((time.time() - _pub) // 86400))
+                                  if _pub else 0),
+                "_published_ts": _pub,
                 "description": desc, "seller": "", "_photo_url": photo_url,
                 "_price_int": price_val, "_year": year, "mileage": mileage,
             }
@@ -3525,10 +3560,17 @@ def _autoru_parse_html(text: str, today) -> list[dict]:
             photo_url = "https:" + photo_url
         desc_m = re.search(r'"description"\s*:\s*"([^"]{10,400})"', text[max(0,m.start()-2000):m.end()+3000])
         desc = desc_m.group(1).replace("\\n", " ").strip() if desc_m else ""
+        # Дата берётся только из блока ЭТОГО объявления: искать её по всей
+        # странице нельзя — попадёт чужая.
+        _pub_m = re.search(r'"creation_date"\s*:\s*"?(\d{10,13})', ctx)
+        _pub = _ps.parse_published_ts(_pub_m.group(1)) if _pub_m else None
         item = {
             "source": "autoru", "title": title, "price": price_str,
             "url": item_url, "date": str(today),
-            "_photos": 1 if photo_url else 0, "_days_on_site": 0,
+            "_photos": 1 if photo_url else 0,
+            "_days_on_site": (max(0, int((time.time() - _pub) // 86400))
+                              if _pub else 0),
+            "_published_ts": _pub,
             "description": desc, "seller": "", "_photo_url": photo_url,
             "_price_int": price_val,
         }
@@ -11447,6 +11489,28 @@ def _avito_cached_result(
             f"cached_result_returned={len(adapted)} search_key={search['search_id']}",
             flush=True,
         )
+        # Лента Rest-App — «новое по всей РФ» без фильтра по региону: после
+        # отбора по городу от неё остаются единицы, а то и ноль (это записано
+        # и в WORKING_CONFIG.md как известное ограничение). Настоящий поиск
+        # Авито — webJSON с locationId. Дочитываем им, когда по городу пусто.
+        _city_hits = _avito_region_hits(adapted, region)
+        if _city_hits < AVITO_MIN_REGION_ITEMS:
+            print(
+                f"[AVITO PIPELINE] rest_app дал {_city_hits} по региону {region} "
+                f"(< {AVITO_MIN_REGION_ITEMS}) — идём настоящим поиском webJSON",
+                flush=True,
+            )
+            _direct = _avito_direct_region_search(
+                region, price_min=price_min, price_max=price_max,
+                sort_by_date=sort_by_date, brand=brand,
+            )
+            if _direct:
+                _known = {str(x.get("url") or "") for x in adapted}
+                adapted += [x for x in _direct if str(x.get("url") or "") not in _known]
+                print(
+                    f"[AVITO PIPELINE] webJSON добавил {len(_direct)}, "
+                    f"итого {len(adapted)}", flush=True,
+                )
         return adapted
     key = _avito_schedule_key(region, price_min, price_max, sort_by_date, brand)
     entry = _avito_schedule_entry(key)
@@ -11548,6 +11612,56 @@ def _avito_cached_result(
             entry["items"] = list(persisted)
             entry["cache_meta"] = dict(cache_meta)
     return list(persisted)
+
+
+#: Сколько объявлений по городу должна дать лента Rest-App, чтобы не идти
+#: настоящим поиском Авито. Ниже порога выдача по региону практически пуста.
+try:
+    AVITO_MIN_REGION_ITEMS = max(0, int(os.getenv("AVITO_MIN_REGION_ITEMS", "10")))
+except (TypeError, ValueError):
+    AVITO_MIN_REGION_ITEMS = 10
+
+
+def _avito_region_hits(items: list[dict], region: str) -> int:
+    """Сколько объявлений ленты реально относится к искомому городу/области."""
+    names = {
+        str(REGIONS.get(region, region) or "").strip().lower(),
+        str(REST_APP_REGION_NAMES.get(region, "") or "").strip().lower(),
+        str(region or "").strip().lower(),
+    }
+    names = {n for n in names if n}
+    if not names:
+        return len(items)
+    hits = 0
+    for item in items:
+        where = f"{item.get('location', '')} {item.get('city', '')}".lower()
+        if any(n in where for n in names):
+            hits += 1
+    return hits
+
+
+def _avito_direct_region_search(region: str, *, price_min: int, price_max: int,
+                                sort_by_date: bool, brand: str) -> list[dict]:
+    """Настоящий поиск Авито по региону (webJSON с locationId).
+
+    Бережём IP по правилам WORKING_CONFIG.md: при активном ограничении не
+    ходим вовсе, глубина берётся из AVITO_PAGES.
+    """
+    if _avito_rate_limited():
+        print("[AVITO PIPELINE] пауза после ограничения — прямой поиск пропущен",
+              flush=True)
+        return []
+    try:
+        return _avito_webjson_search(
+            region, price_min=price_min, price_max=price_max,
+            sort_by_date=sort_by_date,
+            brand="" if brand == "any" else brand,
+            pages=int(os.getenv("AVITO_PAGES", "10")),
+            allow_buy=_spfa_user_search_active(),
+        ) or []
+    except Exception as exc:                       # noqa: BLE001
+        print(f"[AVITO PIPELINE] прямой поиск не удался: {str(exc)[:90]}", flush=True)
+        return []
 
 
 def _adapt_duff_listing(item: dict, today: datetime.date) -> dict:
@@ -20523,15 +20637,17 @@ def _autoru_photo_from_page(text: str) -> str:
             if photo:
                 return photo
         break
-    # Запасной путь: любой размер фото из JSON, затем любой файл на фото-CDN.
+    # Запасной путь: сперва крупные размеры из JSON, потом любой файл на
+    # фото-CDN. В JSON слэши экранированы (`\/`), и шаблон, обрывавшийся на
+    # обратном слэше, отдавал огрызок ссылки — Telegram показывал битое фото.
     for pattern in (
-        r'"(?:1200x900n?|832x624n?|456x342n?)"\s*:\s*"((?:https?:)?//[^"]{15,})"',
-        r'((?:https?:)?//avatars\.avto\.ru/get-autoru[^"\'<\s\\]{10,})',
-        r'"((?:https?:)?//avatars\.mdst?\.yandex\.net/get-autoru[^"]{10,})"',
+        r'"(?:1200x900n?|832x624n?|456x342n?)"\s*:\s*"((?:https?:)?(?:\\?/)[^"]{15,})"',
+        r'((?:https?:)?(?:\\?/){2}avatars\.avto\.ru(?:\\?/)get-autoru[^"\'<\s]{10,})',
+        r'((?:https?:)?(?:\\?/){2}avatars\.mdst?\.yandex\.net(?:\\?/)get-autoru[^"\'<\s]{10,})',
         r'"((?:https?:)?//avatars\.mdst?\.yandex\.net/[^"]{10,})"',
     ):
         for m in re.finditer(pattern, text):
-            raw = m.group(1).replace("\\/", "/")
+            raw = m.group(1).replace("\\/", "/").replace("\\", "")
             candidate = ("https:" + raw) if raw.startswith("//") else raw
             if _autoru_photo_ok(candidate):
                 return candidate
