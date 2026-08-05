@@ -347,3 +347,60 @@ def test_current_ssr_listing_card_is_parsed_without_inline_json():
     assert items[0]["_price_int"] == 95000
     assert items[0]["title"] == "Lada Granta"
     assert items[0]["_photo_url"] == "https://avatars.avto.ru/car.jpg"
+
+
+# ── Фото и дата публикации Auto.ru ───────────────────────────────────
+
+
+def test_yandex_share_stub_is_not_accepted_as_car_photo():
+    """og:image страницы без фото — логотип «Я», а не машина."""
+    assert not cb._autoru_photo_ok("https://yastatic.net/s3/home/logo.png")
+    assert not cb._autoru_photo_ok(
+        "https://avatars.mds.yandex.net/get-verba/share/og-image.png")
+    assert not cb._autoru_photo_ok("https://auto.ru/apple-touch-icon.png")
+    assert cb._autoru_photo_ok(
+        "https://avatars.mds.yandex.net/get-autoru-vos/1/2/1200x900")
+
+
+def test_photo_read_from_every_autoru_shape():
+    from_sizes = cb._autoru_photo_from_list(
+        [{"sizes": {"456x342": "//avatars.mds.yandex.net/get-autoru-vos/a/b/456x342"}}])
+    assert from_sizes.startswith("https://avatars.mds.yandex.net/")
+    assert cb._autoru_photo_from_list(
+        ["//avatars.mds.yandex.net/get-autoru-all/x/y/1200x900"])
+    assert cb._autoru_photo_from_list(
+        [{"url": "https://avatars.mds.yandex.net/get-autoru-vos/x/y/full"}])
+    # Заглушка вместо фото — пусто, чтобы карточка ушла без картинки.
+    assert cb._autoru_photo_from_list([{"sizes": {"456x342": "//yastatic.net/logo.png"}}]) == ""
+    assert cb._autoru_photo_from_list(None) == ""
+
+
+def test_photo_recovered_from_page_json_when_og_image_is_a_stub():
+    page = 'x window.__INITIAL_STATE__={"card":{"photos":[{"sizes":{"1200x900":' \
+           '"//avatars.mds.yandex.net/get-autoru-vos/q/w/1200x900"}}]}}</script>'
+    assert cb._autoru_photo_from_page(page) == (
+        "https://avatars.mds.yandex.net/get-autoru-vos/q/w/1200x900")
+    # Регексный запасной путь, если __INITIAL_STATE__ не разобрался.
+    raw = 'noise "832x624":"//avatars.mds.yandex.net/get-autoru-all/e/r/832x624" noise'
+    assert cb._autoru_photo_from_page(raw).endswith("832x624")
+    assert cb._autoru_photo_from_page("<html>no photos here</html>") == ""
+
+
+def test_offer_keeps_exact_publish_moment_and_real_photo():
+    import datetime
+
+    offers = {"offers": [{
+        "vehicle_info": {"mark_info": {"name": "Opel"},
+                         "model_info": {"name": "Omega"}},
+        "documents": {"year": 1984},
+        "price_info": {"price": 77300},
+        "url": "https://auto.ru/cars/used/sale/1",
+        "photos": [{"sizes": {
+            "1200x900": "//avatars.mds.yandex.net/get-autoru-vos/a/b/1200x900"}}],
+        "additional_info": {"creation_date": "2026-08-04T13:05:00Z"},
+    }]}
+    item = cb._autoru_parse_offers(offers, datetime.date(2026, 8, 5))[0]
+    assert item["_photo_url"].startswith("https://avatars.mds.yandex.net/")
+    assert item["_published_ts"]
+    # Время публикации известно точно — карточка покажет дату, а не «N дн назад».
+    assert cb._ps.published_at(item) == item["_published_ts"]

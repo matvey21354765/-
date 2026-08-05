@@ -354,6 +354,38 @@ class TestCardAndSummary(SearchTestBase):
         self.assertIn("Рынок Авито", card)
         self.assertIn("Почему показали", card)
 
+    def test_card_starts_with_publish_date(self):
+        """Дата публикации — в первой строке, а не «N дн назад» по данным бота."""
+        key = self.ingest(price=85_000, _published_ts=self.now - 8 * 86400)
+        lst = self.ps.get_pool_listing(key)
+        head = self.ps.format_card(lst, now=self.now).splitlines()[0]
+        self.assertIn("Опубликовано:", head)
+        self.assertIn("8 дн назад", head)
+        self.assertNotIn("впервые увидел", head)
+
+    def test_card_says_when_platform_gave_no_date(self):
+        key = self.ingest(price=85_000)
+        lst = self.ps.get_pool_listing(key)
+        card = self.ps.format_card(lst, now=self.now)
+        self.assertIn("площадка не указала дату", card)
+        self.assertIn("впервые увидел", card.splitlines()[0])
+
+    def test_publish_head_uses_platform_keys(self):
+        """Юла/ВК/Auto.ru отдают момент публикации своими ключами."""
+        for field in ("date_published", "creation_date", "created_at"):
+            with self.subTest(field=field):
+                self.assertAlmostEqual(
+                    self.ps.published_at({field: self.now - 3600}),
+                    self.now - 3600, delta=2)
+
+    def test_new_listing_notification_without_market_price(self):
+        """«Кто быстрее» уходит клиенту и когда рынок неизвестен."""
+        key = self.ingest(price=85_000, _published_ts=self.now - 300)
+        lst = self.ps.get_pool_listing(key)
+        text = self.ps.format_new_listing_notification(lst, self.now)
+        self.assertIn("Опубликовано:", text)
+        self.assertIn("только что появилось", text)
+
     def test_summary_lists_all_sections(self):
         self.ps.save_search(6, region="perm", price_max=100_000)
         text = self.ps.format_summary(6, self.now)

@@ -37,7 +37,10 @@ def _env_int(name: str, default: int, minimum: int = 1) -> int:
 REST_REQUEST_INTERVAL = _env_int("REST_REQUEST_INTERVAL", 60)
 REST_APP_LAST_MINUTES = _env_int("REST_APP_LAST_MINUTES", 3)
 REST_APP_CACHE_TTL_SECONDS = _env_int("REST_APP_CACHE_TTL_SECONDS", 55)
-REST_APP_MAX_PAGES = _env_int("REST_APP_MAX_PAGES", 1)
+# Одна страница /api/ads — это 50 объявлений. Чтобы выдача Авито не упиралась
+# в потолок «50 максимум», коллектор дочитывает следующие страницы, пока они
+# приходят заполненными.
+REST_APP_MAX_PAGES = _env_int("REST_APP_MAX_PAGES", 6)
 REST_APP_DAILY_SOFT_LIMIT = _env_int("REST_APP_DAILY_SOFT_LIMIT", 8000)
 REST_APP_DAILY_HARD_LIMIT = _env_int("REST_APP_DAILY_HARD_LIMIT", 9500)
 REST_APP_DEGRADED_SECONDS = _env_int("REST_APP_DEGRADED_SECONDS", 600)
@@ -175,21 +178,35 @@ class RestAppCollector:
             return 120
         return REST_REQUEST_INTERVAL
 
-    def _record_request(self, key: str, status: str) -> None:
+    def _record_request(self, key: str, status: str, count: int = 1) -> None:
+        """Пишет в дневной счётчик по строке на КАЖДЫЙ реальный вызов API.
+
+        Один сбор данных теперь читает несколько страниц, и без учёта страниц
+        дневной бюджет Rest-App был бы посчитан в разы меньше фактического.
+        """
         with self._connect() as db:
-            db.execute(
-                "INSERT INTO rest_app_requests VALUES(?, ?, ?)",
-                (self.now(), key, status),
-            )
+            for _ in range(max(1, int(count))):
+                db.execute(
+                    "INSERT INTO rest_app_requests VALUES(?, ?, ?)",
+                    (self.now(), key, status),
+                )
 
     def _fetch(self, search: dict[str, Any]) -> tuple[list[dict], dict[str, Any]]:
+        """Забирает объявления Авито постранично.
+
+        /api/ads отдаёт максимум 50 объявлений за запрос — это размер страницы,
+        а не весь улов. Пока читалась только первая страница, выдача Авито
+        упиралась в потолок «50 объявлений», хотя за окно попадало больше.
+        Идём по страницам, пока площадка отдаёт полную страницу и не кончился
+        лимит REST_APP_MAX_PAGES.
+        """
         provider = self.provider_factory()
         minutes = int(search.get("last_m") or REST_APP_LAST_MINUTES)
         # REST-App /api/ads is confirmed in production with date1/date2.
         # region_id/last_m return HTTP 200 with an empty data list for this
         # account, so region remains a grouping/local-matching dimension only.
         moscow_now = datetime.now(timezone(timedelta(hours=3))).replace(tzinfo=None)
-        params: dict[str, Any] = {
+        base_params: dict[str, Any] = {
             "category_id": str(search.get("category_id") or CAR_CATEGORY_ID),
             "sort": "desc",
             "limit": REST_APP_RESULT_LIMIT,
@@ -198,36 +215,75 @@ class RestAppCollector:
             ),
             "date2": moscow_now.strftime("%Y-%m-%d %H:%M:%S"),
         }
-        print(
-            "[Avito RestApp] request_started category_id=9 page=1 "
-            f"requested_limit={REST_APP_RESULT_LIMIT} retry=false",
-            flush=True,
-        )
-        payload = provider._post("ads", params)
-        save_safe_rest_app_sample(payload)
-        shape = describe_rest_app_payload(payload)
-        raw = extract_rest_app_items(payload)
-        raw_type = str(shape["nested_items_path"] or shape["top_level_type"])
-        response_line = (
-            "[REST-APP RESPONSE] "
-            f"status={provider.last_diagnostics.get('http') or 200} "
-            f"raw_items_count={len(raw)} category_id={params['category_id']} "
-            f"requested_limit={params['limit']} "
-            f"nested_items_path={shape['nested_items_path'] or 'unexpected'}"
-        )
-        print(response_line, flush=True)
-        logging.getLogger(__name__).info(
-            "[REST-APP RESPONSE] status=%s raw_items_count=%d category_id=%s "
-            "category_name=Автомобили nested_items_path=%s",
-            provider.last_diagnostics.get("http") or 200, len(raw),
-            params["category_id"], shape["nested_items_path"] or "unexpected",
-        )
-        if not shape["nested_items_path"] and not isinstance(payload, list):
-            return [], {
-                "status": "unexpected_payload_shape", "http": 200,
-                "raw_count": 0, "normalized_count": 0,
-                "failed_count": 0, "raw_type": raw_type,
-            }
+
+        raw: list[dict] = []
+        pages_read = 0
+        payload: Any = None
+        raw_type = ""
+        max_pages = max(1, REST_APP_MAX_PAGES)
+        for page in range(1, max_pages + 1):
+            params = dict(base_params)
+            if page > 1:
+                params["page"] = page
+            print(
+                f"[Avito RestApp] request_started category_id={params['category_id']} "
+                f"page={page} requested_limit={REST_APP_RESULT_LIMIT} retry=false",
+                flush=True,
+            )
+            try:
+                payload = provider._post("ads", params)
+            except Exception as exc:                       # noqa: BLE001
+                # Обрыв на 3-й странице не должен обнулять две прочитанных:
+                # отдаём, что уже собрали, и помечаем частичный ответ.
+                print(
+                    f"[Avito RestApp] page={page} прервана: "
+                    f"{type(exc).__name__}: {str(exc)[:120]}",
+                    flush=True,
+                )
+                if page == 1:
+                    raise
+                break
+            if page == 1:
+                save_safe_rest_app_sample(payload)
+            shape = describe_rest_app_payload(payload)
+            page_raw = extract_rest_app_items(payload)
+            if page == 1:
+                raw_type = str(shape["nested_items_path"] or shape["top_level_type"])
+                if not shape["nested_items_path"] and not isinstance(payload, list):
+                    print(
+                        "[REST-APP RESPONSE] "
+                        f"status={provider.last_diagnostics.get('http') or 200} "
+                        f"raw_items_count=0 category_id={params['category_id']} "
+                        f"requested_limit={params['limit']} "
+                        "nested_items_path=unexpected",
+                        flush=True,
+                    )
+                    return [], {
+                        "status": "unexpected_payload_shape", "http": 200,
+                        "raw_count": 0, "normalized_count": 0,
+                        "failed_count": 0, "raw_type": raw_type, "pages": 1,
+                    }
+            pages_read = page
+            raw.extend(page_raw)
+            print(
+                "[REST-APP RESPONSE] "
+                f"status={provider.last_diagnostics.get('http') or 200} "
+                f"raw_items_count={len(page_raw)} page={page} "
+                f"category_id={params['category_id']} "
+                f"requested_limit={params['limit']} "
+                f"nested_items_path={shape['nested_items_path'] or 'unexpected'}",
+                flush=True,
+            )
+            logging.getLogger(__name__).info(
+                "[REST-APP RESPONSE] status=%s raw_items_count=%d page=%d "
+                "category_id=%s category_name=Автомобили nested_items_path=%s",
+                provider.last_diagnostics.get("http") or 200, len(page_raw), page,
+                params["category_id"], shape["nested_items_path"] or "unexpected",
+            )
+            # Неполная страница = объявления кончились, дальше идти незачем.
+            if len(page_raw) < REST_APP_RESULT_LIMIT:
+                break
+
         normalized, normalize_diag = normalize_rest_app_items_with_diagnostics(raw)
         unique: dict[str, dict] = {}
         for item in normalized:
@@ -239,6 +295,7 @@ class RestAppCollector:
         )
         print(
             "[AVITO NORMALIZER] "
+            f"pages={pages_read} raw_count={len(raw)} "
             f"normalized_count={len(normalized)} "
             f"failed_count={normalize_diag['failed_count']}",
             flush=True,
@@ -248,13 +305,14 @@ class RestAppCollector:
             len(normalized), len(items), len(normalized) - len(items),
         )
         return items, {
-            "status": payload.get("status"),
+            "status": payload.get("status") if isinstance(payload, dict) else "ok",
             "http": int(provider.last_diagnostics.get("http") or 200),
             "raw_count": len(raw),
             "normalized_count": len(items),
             "failed_count": normalize_diag["failed_count"],
             "normalization_failures": normalize_diag["failures"],
             "raw_type": raw_type,
+            "pages": pages_read,
         }
 
     def _load_recent_items(self, limit: int = 5000) -> list[dict[str, Any]]:
@@ -383,7 +441,7 @@ class RestAppCollector:
             elif items:
                 with self._lock:
                     self._degraded_until.pop(key, None)
-            self._record_request(key, status)
+            self._record_request(key, status, int(meta.get("pages") or 1))
             self._last_request_at = self.now()
             new_items, _ = self._store_and_analyze(items)
             if searches:

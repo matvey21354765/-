@@ -427,7 +427,9 @@ def parse_published_ts(value: Any, now: float | None = None) -> float | None:
 def published_at(item: dict) -> float | None:
     """Момент публикации (ts) или None, если площадка его не отдала."""
     for k in ("_published_ts", "published_at", "_published_at", "sortTimeStamp",
-              "sort_time", "publishedAt", "time", "_time", "date_published"):
+              "sort_time", "publishedAt", "time", "_time", "date_published",
+              "datePublished", "creation_date", "creationDate", "created_at",
+              "createdAt", "publish_date", "publishDate", "_date_published"):
         ts = parse_published_ts(item.get(k))
         if ts:
             return ts
@@ -1106,7 +1108,7 @@ def _category_icon(cat: str) -> str:
             "price_drop": "📉"}.get(cat, "🚗")
 
 
-def _published_label(listing: dict) -> str:
+def _published_label(listing: dict, now: float | None = None) -> str:
     """«вчера в 20:29» / «4 августа в 13:05» — когда объявление выложено."""
     ts = listing.get("published_at") or 0
     try:
@@ -1118,7 +1120,8 @@ def _published_label(listing: dict) -> str:
     from datetime import datetime, timedelta, timezone
     tz = timezone(timedelta(hours=3))          # МСК
     dt = datetime.fromtimestamp(ts, tz)
-    today = datetime.now(tz).date()
+    today = datetime.fromtimestamp(
+        time.time() if now is None else float(now), tz).date()
     _months = ("января", "февраля", "марта", "апреля", "мая", "июня", "июля",
                "августа", "сентября", "октября", "ноября", "декабря")
     if dt.date() == today:
@@ -1126,6 +1129,21 @@ def _published_label(listing: dict) -> str:
     if dt.date() == today - timedelta(days=1):
         return f"вчера в {dt:%H:%M}"
     return f"{dt.day} {_months[dt.month - 1]} в {dt:%H:%M}"
+
+
+def published_head(listing: dict, now: float | None = None) -> str:
+    """Первая строка карточки: когда объявление реально выложено на площадке.
+
+    Раньше в шапке стоял возраст, посчитанный от момента, когда объявление
+    увидел бот («8 дн назад»), а точная дата публикации пряталась ниже. Для
+    перекупа важна именно дата публикации, поэтому она идёт первой, а возраст
+    остаётся рядом в скобках. Если площадка дату не отдала — показываем
+    прежний возраст с пометкой.
+    """
+    pub = _published_label(listing, now)
+    if not pub:
+        return age_label(listing, now)
+    return f"Опубликовано: {pub} ({age_label(listing, now)})"
 
 
 def format_card(listing: dict, *, category: str = "", now: float | None = None,
@@ -1139,7 +1157,7 @@ def format_card(listing: dict, *, category: str = "", now: float | None = None,
     _src_label = {"avito": "🔴 Avito", "drom": "🔵 Дром", "autoru": "🟠 Auto.ru",
                   "youla": "🟡 Юла", "vk": "📘 ВКонтакте",
                   "tg": "✈️ Telegram", "tg_channel": "📢 TG-канал"}.get(_src, "")
-    _head = f"{_category_icon(cat)} {age_label(listing, now)}"
+    _head = f"{_category_icon(cat)} {published_head(listing, now)}"
     if _src_label:
         _head += f"  ·  {_src_label}"
     lines = [_head, ""]
@@ -1159,9 +1177,11 @@ def format_card(listing: dict, *, category: str = "", now: float | None = None,
     region = region_label(listing.get("region") or "")
     if region:
         lines.append(f"📍 {region}")
-    _pub = _published_label(listing)
-    if _pub:
-        lines.append(f"🕒 Опубликовано: {_pub}")
+    # Дата публикации уже стоит в шапке — здесь она нужна только тогда,
+    # когда площадка её не отдала: иначе клиент не поймёт, что «N дн назад» —
+    # это возраст по данным бота, а не время выкладки объявления.
+    if not _published_label(listing, now):
+        lines.append("🕒 Опубликовано: площадка не указала дату")
     lines.append(f"🔧 По описанию: {condition_text(listing.get('condition') or '')}")
     _desc = (listing.get("description") or "").strip()
     if _desc:
@@ -1329,8 +1349,13 @@ def format_new_listing_notification(listing: dict, now: float | None = None) -> 
         lines.append(f"Рынок Авито: ≈{fmt_money(market)}")
         if market > price:
             lines.append(f"Разница: ≈{fmt_money(market - price)}")
-    lines.append(f"Опубликовано {age_label(listing, now)}")
-    lines += ["", "Почему прислали:", "• свежее объявление;"]
+    lines.append(f"🕒 {published_head(listing, now)}")
+    region = region_label(listing.get("region") or "")
+    if region:
+        lines.append(f"📍 {region}")
+    if listing.get("url"):
+        lines.append(str(listing["url"]))
+    lines += ["", "Почему прислали:", "• только что появилось на площадке;"]
     if market and market > price:
         lines.append("• цена ниже похожих вариантов;")
     lines.append("• подходит под ваши фильтры.")

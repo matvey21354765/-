@@ -313,3 +313,72 @@ def test_manual_search_uses_accumulated_database_before_api(tmp_path, monkeypatc
     assert result
     assert FakeProvider.calls == before
     assert obj.last_diagnostics["db_hit"] is True
+
+
+class PagedProvider:
+    """Отдаёт полные страницы по 50 объявлений — как настоящий /api/ads."""
+
+    calls = 0
+    pages_seen = []
+    total_pages = 3
+
+    def __init__(self):
+        self.last_diagnostics = {"http": 200}
+
+    def _post(self, endpoint, params):
+        type(self).calls += 1
+        page = int(params.get("page") or 1)
+        type(self).pages_seen.append(page)
+        if page > self.total_pages:
+            return {"status": "ok", "data": []}
+        size = arc.REST_APP_RESULT_LIMIT if page < self.total_pages else 7
+        return {"status": "ok", "data": [{
+            "Id": f"ad-{page}-{i}", "title": "Lada Granta 2015",
+            "price": "99999", "region": "Краснодарский край",
+            "city": "Краснодар", "marka": "Lada", "model": "Granta",
+            "time": "2026-08-02 10:00:00", "url": f"https://example/ad-{page}-{i}",
+            "params": [{"name": "Год выпуска", "value": "2015"}],
+        } for i in range(size)]}
+
+
+def test_full_page_makes_collector_read_the_next_one(tmp_path, monkeypatch):
+    """Потолок «50 объявлений» — это размер страницы, а не весь улов."""
+    PagedProvider.calls = 0
+    PagedProvider.pages_seen = []
+    monkeypatch.setattr(arc, "save_avito_history", lambda item: {"status": "new"})
+    monkeypatch.setattr(arc, "save_safe_rest_app_sample", lambda payload: None)
+    obj = arc.RestAppCollector(
+        provider_factory=PagedProvider, db_path=tmp_path / "paged.db")
+    result = obj.collect_group(search())
+    expected = arc.REST_APP_RESULT_LIMIT * 2 + 7
+    assert len(result["items"]) == expected
+    assert PagedProvider.pages_seen == [1, 2, 3]
+
+
+def test_pagination_stops_at_max_pages(tmp_path, monkeypatch):
+    PagedProvider.calls = 0
+    PagedProvider.pages_seen = []
+    monkeypatch.setattr(arc, "REST_APP_MAX_PAGES", 2)
+    monkeypatch.setattr(arc, "save_avito_history", lambda item: {"status": "new"})
+    monkeypatch.setattr(arc, "save_safe_rest_app_sample", lambda payload: None)
+    obj = arc.RestAppCollector(
+        provider_factory=PagedProvider, db_path=tmp_path / "paged2.db")
+    obj.collect_group(search())
+    assert PagedProvider.pages_seen == [1, 2]
+
+
+def test_failure_on_later_page_keeps_earlier_pages(tmp_path, monkeypatch):
+    """Обрыв на третьей странице не должен обнулять две прочитанных."""
+    monkeypatch.setattr(arc, "save_avito_history", lambda item: {"status": "new"})
+    monkeypatch.setattr(arc, "save_safe_rest_app_sample", lambda payload: None)
+
+    class FlakyProvider(PagedProvider):
+        def _post(self, endpoint, params):
+            if int(params.get("page") or 1) >= 2:
+                raise TimeoutError("upstream detail")
+            return super()._post(endpoint, params)
+
+    obj = arc.RestAppCollector(
+        provider_factory=FlakyProvider, db_path=tmp_path / "flaky.db")
+    result = obj.collect_group(search())
+    assert len(result["items"]) == arc.REST_APP_RESULT_LIMIT

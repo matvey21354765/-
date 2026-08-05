@@ -1187,7 +1187,9 @@ AUTORU_API_TOKEN = os.getenv("AUTORU_API_TOKEN", "")
 AUTORU_PROXY_URL = os.getenv("AUTORU_PROXY_URL", "").strip()
 from autoru_transport import (
     AutoRuResult,
+    autoru_captcha_detected,
     autoru_items_from_result,
+    autoru_timeout,
     await_autoru_result,
     autoru_proxies,
     get_autoru_transport,
@@ -2815,6 +2817,9 @@ def scrape_drom(region: str, pages: int = 15, price_min: int = 0, price_max: int
                     date_text = date_el.get_text(strip=True) if date_el else ""
                     date = parse_ru_date(date_text)
                     days = max(0, (today - date).days) if date else 0
+                    # «Вчера, 14:22» / «28 июля 20:23» — берём и время тоже,
+                    # чтобы в карточке стояла реальная дата публикации.
+                    published_ts = _ps.parse_published_ts(date_text)
 
                     photo_el = card.select_one("span[data-ftid='bull_images-count']")
                     photos_str = photo_el.get_text() if photo_el else ""
@@ -2898,6 +2903,7 @@ def scrape_drom(region: str, pages: int = 15, price_min: int = 0, price_max: int
                             "date": str(date) if date else date_text,
                             "_photos": photos,
                             "_days_on_site": days,
+                            "_published_ts": published_ts,
                             "description": desc,
                             "seller": seller,
                             "_photo_url": photo_url,
@@ -3032,6 +3038,58 @@ def _autoru_cffi_fetch(region: str, price_min: int, price_max: int,
     return []
 
 
+# Заглушки Auto.ru/Яндекса: og:image страницы без фото — это фирменный
+# логотип «Я», а не машина. Такие ссылки нельзя показывать в карточке.
+_AUTORU_PHOTO_HOSTS = ("avatars.mds.yandex.net", "avatars.mdst.yandex.net")
+_AUTORU_PHOTO_REJECT = (
+    "/get-verba/", "yastatic.net", "/share", "sharing", "og-image", "og_image",
+    "default", "stub", "placeholder", "no-photo", "nophoto", "noimage",
+    "logo", "favicon", "apple-touch", "auto-ru-logo", "brand", "icon",
+)
+
+
+def _autoru_photo_ok(url: str) -> bool:
+    """True только для реального фото объявления Auto.ru."""
+    lo = (url or "").strip().lower()
+    if not lo.startswith(("http://", "https://")):
+        return False
+    if not any(host in lo for host in _AUTORU_PHOTO_HOSTS):
+        return False
+    return not any(bad in lo for bad in _AUTORU_PHOTO_REJECT)
+
+
+def _autoru_photo_from_list(photos_list) -> str:
+    """Фото из блока photos объявления Auto.ru.
+
+    Auto.ru отдаёт фото по-разному: словарём размеров, плоской строкой или
+    ключом с протоколом-относительной ссылкой. Раньше читался только один
+    формат, поэтому у части объявлений фото не находилось и в карточку
+    попадала og:image-заглушка с логотипом.
+    """
+    if not isinstance(photos_list, (list, tuple)):
+        return ""
+    _sizes = ("1200x900", "1200x900n", "832x624", "832x624n", "456x342",
+              "456x342n", "320x240", "full", "orig")
+    for entry in photos_list:
+        candidates: list[str] = []
+        if isinstance(entry, str):
+            candidates.append(entry)
+        elif isinstance(entry, dict):
+            sizes = entry.get("sizes") if isinstance(entry.get("sizes"), dict) else {}
+            candidates += [sizes[k] for k in _sizes if isinstance(sizes.get(k), str)]
+            candidates += [v for v in sizes.values() if isinstance(v, str)]
+            for key in ("url", "src", "original", "full"):
+                if isinstance(entry.get(key), str):
+                    candidates.append(entry[key])
+        for raw in candidates:
+            url = (raw or "").strip().replace("\\/", "/")
+            if url.startswith("//"):
+                url = "https:" + url
+            if _autoru_photo_ok(url):
+                return url
+    return ""
+
+
 def _autoru_parse_offers(data: dict, today) -> list[dict]:
     """Парсит список объявлений из JSON Auto.ru."""
     results = []
@@ -3087,19 +3145,31 @@ def _autoru_parse_offers(data: dict, today) -> list[dict]:
             seller_type = str(offer.get("seller_type") or offer.get("sellerType") or "").upper()
             if seller_type == "COMMERCIAL":
                 continue
-            photos_list = offer.get("photos") or (vehicle.get("state") or {}).get("image_urls") or []
-            photo_url = ""
-            if photos_list:
-                sizes = photos_list[0].get("sizes", {})
-                photo_url = sizes.get("1200x900") or sizes.get("832x624") or sizes.get("456x342") or ""
+            photos_list = (
+                offer.get("photos")
+                or (vehicle.get("state") or {}).get("image_urls")
+                or (offer.get("state") or {}).get("image_urls")
+                or []
+            )
+            photo_url = _autoru_photo_from_list(photos_list)
             days = 0
-            date_str = offer.get("additional_info", {}).get("creation_date", "")
+            published_ts = None
+            _add = offer.get("additional_info") or offer.get("additionalInfo") or {}
+            date_str = (
+                _add.get("creation_date") or _add.get("creationDate")
+                or offer.get("created") or offer.get("creation_date") or ""
+            )
             if date_str:
+                # Auto.ru отдаёт полный момент публикации (или мс с эпохи).
+                # Раньше из него брались только сутки, поэтому в карточке
+                # стояло «N дн назад» вместо реальной даты и времени.
+                published_ts = _ps.parse_published_ts(date_str)
                 try:
-                    dt = datetime.datetime.fromisoformat(date_str[:10]).date()
+                    dt = datetime.datetime.fromisoformat(str(date_str)[:10]).date()
                     days = max(0, (today - dt).days)
                 except Exception:
-                    pass
+                    if published_ts:
+                        days = max(0, int((time.time() - published_ts) // 86400))
             desc = offer.get("description", "")[:300]
             tech = vehicle.get("tech_param", {})
             if tech and not desc:
@@ -3114,6 +3184,8 @@ def _autoru_parse_offers(data: dict, today) -> list[dict]:
                     "description": desc, "seller": "", "_photo_url": photo_url,
                     "_price_int": price_int,
                 }
+                if published_ts:
+                    item["_published_ts"] = published_ts
                 item["_hot_score"] = hot_score(item)
                 results.append(item)
         except Exception:
@@ -5140,11 +5212,15 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
                         found_new = True
                         # Дата
                         days = 0
+                        published_ts = None
                         time_el = msg_el.select_one("time[datetime]")
                         if time_el:
+                            _raw_dt = time_el.get("datetime", "")
+                            # Telegram отдаёт полный ISO-момент публикации.
+                            published_ts = _ps.parse_published_ts(_raw_dt)
                             try:
                                 from datetime import datetime as _dt2
-                                post_date = _dt2.fromisoformat(time_el.get("datetime", "")[:10]).date()
+                                post_date = _dt2.fromisoformat(_raw_dt[:10]).date()
                                 days = max(0, (today_d - post_date).days)
                             except Exception:
                                 pass
@@ -5171,6 +5247,7 @@ def scrape_tg_channels(region: str, price_min: int, price_max: int) -> list[dict
                             "_seller_url": f"https://t.me/{channel}",
                             "_year": int(year_m.group(1)) if year_m else 0,
                             "_days_on_site": days,
+                            "_published_ts": published_ts,
                             "_no_price": price == 0,
                         })
                     before_id = min_id
@@ -5411,6 +5488,9 @@ def scrape_youla(region: str, pages: int = 4, price_min: int = 0,
                     "_price_int": price_rub,
                     "url": item_url, "date": str(today - datetime.timedelta(days=days)),
                     "_days_on_site": days, "_date_known": True,
+                    # Юла отдаёт точный момент публикации. Без него карточка
+                    # показывала «N дн назад» и выдуманное время суток.
+                    "_published_ts": int(dp) if dp else None,
                     "_photo_url": photo_url, "_photos": len(imgs),
                     "description": (it.get("description") or "")[:400],
                     "seller": loc.get("city_name", ""), "mileage": 0,
@@ -5677,6 +5757,8 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
         # Дата
         import datetime as _dt
         days = 0
+        # ВК отдаёт unix-время поста — это и есть момент публикации.
+        published_ts = _ps.parse_published_ts(post.get("date"))
         if post.get("date"):
             try:
                 post_date = _dt.datetime.fromtimestamp(post["date"]).date()
@@ -5706,6 +5788,7 @@ def scrape_vk_groups(region: str, price_min: int, price_max: int) -> list[dict]:
             "_phone": _phone,
             "_year": int(year_m.group(1)) if year_m else 0,
             "_days_on_site": days,
+            "_published_ts": published_ts,
             "_no_price": price == 0,
         }
 
@@ -20022,14 +20105,21 @@ def _ps_nav_keyboard(category: str, page: int, shown: int, total: int) -> Inline
 
 
 def _fetch_listing_photo(url: str) -> str:
-    """Достаёт фото объявления по его ссылке (og:image) — для карточек,
-    которым площадка не отдала картинку в выдаче."""
+    """Достаёт фото объявления по его ссылке — для карточек, которым площадка
+    не отдала картинку в выдаче.
+
+    Для Auto.ru одного og:image мало: на странице объявления без фото и на
+    капче Яндекс отдаёт фирменную заглушку с логотипом «Я», и она попадала в
+    карточку вместо машины. Поэтому og:image проверяется по хосту фото-CDN, а
+    при неудаче фото ищется в JSON страницы.
+    """
     if not url or not url.startswith("http"):
         return ""
     try:
         import requests as _req
     except ImportError:
         return ""
+    _is_autoru = "auto.ru" in url
     _hdrs = {
         "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
@@ -20038,29 +20128,82 @@ def _fetch_listing_photo(url: str) -> str:
     }
     try:
         _px = _avito_proxies() if "avito.ru" in url else None
-        r = _req.get(url, timeout=6, headers=_hdrs, proxies=_px or {})
+        if _is_autoru:
+            _px = _autoru_proxy_dict() or _px
+            _timeout = autoru_timeout()
+        else:
+            _timeout = 6
+        r = _req.get(url, timeout=_timeout, headers=_hdrs, proxies=_px or {})
         if r.status_code != 200:
+            return ""
+        _text = r.text or ""
+        if _is_autoru and autoru_captcha_detected(r.status_code, str(r.url), _text):
+            # Капча отдаёт валидный og:image с логотипом — фото тут нет.
             return ""
         m = re.search(
             r'<meta[^>]+(?:property|name)=["\']og:image["\'][^>]+content=["\']([^"\']+)',
-            r.text or "", re.I)
+            _text, re.I)
         if not m:
             m = re.search(
                 r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\']og:image',
-                r.text or "", re.I)
-        if not m:
-            return ""
-        _u = m.group(1).replace("\\/", "/")
-        if _u.startswith("//"):
-            _u = "https:" + _u
-        _lo = _u.lower()
-        if not _lo.startswith("http"):
-            return ""
-        if any(x in _lo for x in ("logo", "placeholder", "stub", "noimage", "favicon")):
-            return ""
+                _text, re.I)
+        _u = ""
+        if m:
+            _u = m.group(1).replace("\\/", "/")
+            if _u.startswith("//"):
+                _u = "https:" + _u
+            _lo = _u.lower()
+            if not _lo.startswith("http"):
+                _u = ""
+            elif any(x in _lo for x in ("logo", "placeholder", "stub", "noimage",
+                                        "favicon", "apple-touch", "yastatic.net")):
+                _u = ""
+            elif _is_autoru and not _autoru_photo_ok(_u):
+                _u = ""
+        if not _u and _is_autoru:
+            _u = _autoru_photo_from_page(_text)
         return _u
     except Exception:
         return ""
+
+
+def _autoru_photo_from_page(text: str) -> str:
+    """Фото объявления Auto.ru из JSON страницы, когда og:image — заглушка."""
+    for marker in ("window.__INITIAL_STATE__=", "window.__INITIAL_STATE__ ="):
+        idx = text.find(marker)
+        if idx == -1:
+            continue
+        brace = text.find("{", idx)
+        if brace == -1:
+            continue
+        end = text.find("</script>", brace)
+        chunk = text[brace:end].rstrip("; \n\r") if end != -1 else text[brace:brace + 800_000]
+        try:
+            state = json.loads(chunk)
+        except Exception:
+            break
+        offer = (
+            _deep_get(state, "card")
+            or _deep_get(state, "offer")
+            or ((_deep_get(state, "listing.data.offers") or [{}]) or [{}])[0]
+        )
+        if isinstance(offer, dict):
+            photo = _autoru_photo_from_list(offer.get("photos") or [])
+            if photo:
+                return photo
+        break
+    # Запасной путь: любой размер фото из JSON, затем любой файл на фото-CDN.
+    for pattern in (
+        r'"(?:1200x900n?|832x624n?|456x342n?)"\s*:\s*"((?:https?:)?//[^"]{15,})"',
+        r'"((?:https?:)?//avatars\.mdst?\.yandex\.net/get-autoru[^"]{10,})"',
+        r'"((?:https?:)?//avatars\.mdst?\.yandex\.net/[^"]{10,})"',
+    ):
+        for m in re.finditer(pattern, text):
+            raw = m.group(1).replace("\\/", "/")
+            candidate = ("https:" + raw) if raw.startswith("//") else raw
+            if _autoru_photo_ok(candidate):
+                return candidate
+    return ""
 
 
 async def _ps_send_category(target, uid: int, category: str, page: int = 0):
@@ -20470,10 +20613,21 @@ async def cb_ps_reports(cb: CallbackQuery):
 
 
 # ── Фоновые циклы постоянного поиска ─────────────────────────────────
+#: Сколько «Кто быстрее» отправлять одному пользователю за один проход цикла.
+PS_FRESH_NOTIFY_PER_CYCLE = max(1, int(os.getenv("PS_FRESH_NOTIFY_PER_CYCLE", "5")))
+
+
 async def _ps_new_listing_loop():
-    """Мгновенные уведомления о действительно важных новых машинах."""
+    """Мгновенные уведомления по разделу «🚨 Кто быстрее».
+
+    Раньше сюда попадали только машины дешевле рынка, а рынок известен далеко
+    не всегда — из-за этого раздел наполнялся, а клиенту не приходило ничего.
+    Теперь уведомление уходит по любому свежему объявлению, подходящему под
+    поиск: смысл раздела — успеть первым, а оценка рынка добавляется в текст,
+    когда она есть.
+    """
     await asyncio.sleep(120)
-    print("  [поиск] цикл уведомлений о новых подходящих авто запущен")
+    print("  [поиск] цикл уведомлений «Кто быстрее» запущен")
     while True:
         try:
             await asyncio.sleep(180)
@@ -20490,26 +20644,42 @@ async def _ps_new_listing_loop():
                     if await loop.run_in_executor(None, lambda u=uid: _ps.in_quiet_hours(u)):
                         continue
                     items = await loop.run_in_executor(
-                        None, lambda u=uid: _ps.search_listings(u, "fresh", limit=5))
+                        None, lambda u=uid: _ps.search_listings(
+                            u, "fresh", limit=PS_FRESH_NOTIFY_PER_CYCLE * 3))
+                    sent = 0
                     for lst in items:
+                        if sent >= PS_FRESH_NOTIFY_PER_CYCLE:
+                            break
                         key = lst["listing_key"]
-                        mk = await loop.run_in_executor(
-                            None, lambda k=key: _ps.refresh_market_price(k))
-                        lst["market_price"] = mk["price"]
-                        lst["market_sample"] = mk["sample"]
-                        # Важное событие: свежая машина ниже рынка.
-                        if not (mk["price"] and mk["price"] > int(lst.get("price") or 0)):
-                            continue
+                        try:
+                            mk = await loop.run_in_executor(
+                                None, lambda k=key: _ps.refresh_market_price(k))
+                            lst["market_price"] = mk["price"]
+                            lst["market_sample"] = mk["sample"]
+                        except Exception:
+                            pass
                         sig = _ps.new_listing_signature(key, int(lst.get("price") or 0))
                         ok = await loop.run_in_executor(
                             None, lambda u=uid, k=key, g=sig:
                             _ps.notify_once(u, "new_listing", k, g))
                         if not ok:
                             continue
-                        await bot.send_message(
-                            uid, _ps.format_new_listing_notification(lst),
-                            reply_markup=_ps_card_keyboard(uid, key),
-                            disable_web_page_preview=True)
+                        text = _ps.format_new_listing_notification(lst)
+                        kb = _ps_card_keyboard(uid, key)
+                        photo = _ps.photo_of(lst)
+                        _delivered = False
+                        if photo:
+                            try:
+                                await bot.send_photo(uid, photo, caption=text[:1024],
+                                                     reply_markup=kb)
+                                _delivered = True
+                            except Exception as _pe:
+                                print(f"  [поиск] фото уведомления: {str(_pe)[:60]}")
+                        if not _delivered:
+                            await bot.send_message(
+                                uid, text, reply_markup=kb,
+                                disable_web_page_preview=True)
+                        sent += 1
                         await asyncio.sleep(0.05)
                 except Exception as e:
                     print(f"  [поиск] уведомление uid={uid}: {str(e)[:80]}")
