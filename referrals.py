@@ -1002,7 +1002,7 @@ def format_invite_screen(uid: int, bot_username: str) -> dict:
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📤 Поделиться", url=f"https://t.me/share/url?url={link}&text={urllib.parse.quote(share_text)}")],
-        [InlineKeyboardButton(text="📊 Моя статистика", callback_data="ref_stats")],
+        [InlineKeyboardButton(text="📊 Мои приглашения", callback_data="ref_stats")],
         [InlineKeyboardButton(text="ℹ️ Условия", callback_data="ref_terms")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="ref_back")],
     ])

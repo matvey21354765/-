@@ -29,6 +29,7 @@ load_dotenv()
 
 from avito_provider_config import get_avito_provider
 import perekup_tracking as _track
+import perekup_search as _ps
 
 AVITO_PROVIDER = get_avito_provider()
 AVITO_ENABLED = AVITO_PROVIDER != "disabled"
@@ -2436,7 +2437,9 @@ def rank_by_market_price(items: list[dict], ref_items: list[dict] | None = None,
         # предыдущую/минимальную цену, число снижений и повторные размещения.
         if p > 0:
             try:
-                _ev = _track.record_listing(it)
+                # Централизованный пул: одно объявление — одна запись, все
+                # пользователи читают её локальными фильтрами (без своих запросов).
+                _ev = _ps.ingest_listing(it)
                 if _ev.get("event") == "price_drop":
                     it["_price_drop"] = _ev.get("drop", 0)
                     it["_price_drop_pct"] = _ev.get("drop_pct", 0.0)
@@ -12899,30 +12902,26 @@ def id_to_url(sid: str) -> str:
     return _id_to_url.get(sid, sid)
 
 
+# Главное меню: один активный поиск + его разделы. Редкие функции убраны в
+# «⚙️ Настройки», старые callback_data и текстовые команды сохранены как алиасы.
+_MAIN_ROWS = [
+    [KeyboardButton(text="🔍 Найти авто")],
+    [KeyboardButton(text="🚨 Кто быстрее"), KeyboardButton(text="🔥 Новые сегодня")],
+    [KeyboardButton(text="📉 Снизили цену"), KeyboardButton(text="🤝 Простор для торга")],
+    [KeyboardButton(text="⭐ Сохранённые"), KeyboardButton(text="⚡ Мониторинг")],
+    [KeyboardButton(text="📊 Сегодня"), KeyboardButton(text="💎 Подписка")],
+    [KeyboardButton(text="🤝 Пригласить друга"), KeyboardButton(text="⚙️ Настройки")],
+]
+
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="🔍 Найти авто"), KeyboardButton(text="🌐 Глобальный поиск")],
-        [KeyboardButton(text="🆕 Новые сегодня"), KeyboardButton(text="🎯 Следить за маркой")],
-        [KeyboardButton(text="🔔 Уведомления"), KeyboardButton(text="🚗 Мой гараж")],
-        [KeyboardButton(text="💼 Мои сделки"), KeyboardButton(text="⚙️ Настройки")],
-        [KeyboardButton(text="💎 Подписка"), KeyboardButton(text="❓ Помощь")],
-        [KeyboardButton(text="🤝 Пригласить друга"), KeyboardButton(text="♻️ Сбросить историю")],
-    ],
+    keyboard=[list(r) for r in _MAIN_ROWS],
     resize_keyboard=True,
     persistent=True,
 )
 
 # Клавиатура админа = обычная + строка «📊 Статистика»
 _ADMIN_KEYBOARD = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="🔍 Найти авто"), KeyboardButton(text="🌐 Глобальный поиск")],
-        [KeyboardButton(text="🆕 Новые сегодня"), KeyboardButton(text="🎯 Следить за маркой")],
-        [KeyboardButton(text="🔔 Уведомления"), KeyboardButton(text="🚗 Мой гараж")],
-        [KeyboardButton(text="💼 Мои сделки"), KeyboardButton(text="⚙️ Настройки")],
-        [KeyboardButton(text="💎 Подписка"), KeyboardButton(text="📊 Статистика")],
-        [KeyboardButton(text="❓ Помощь")],
-        [KeyboardButton(text="🤝 Пригласить друга"), KeyboardButton(text="♻️ Сбросить историю")],
-    ],
+    keyboard=[list(r) for r in _MAIN_ROWS] + [[KeyboardButton(text="📊 Статистика")]],
     resize_keyboard=True,
     persistent=True,
 )
@@ -13235,12 +13234,13 @@ async def cmd_start(msg: Message, state: FSMContext):
     name = msg.from_user.first_name or "друг"
     is_new_user = not s.get("region")
     if is_new_user:
-        # Фиксируем trial_start сразу, чтобы бейдж считал свежие 7 дней
+        # Фиксируем trial_start сразу, чтобы бейдж считал свежий тестовый период
         _register_user(msg.from_user.id, msg.from_user.username, False)
+        _t = _trial_info(msg.from_user.id)
         _subscription_line = (
             "🎁 *Тестовый период активирован*\n"
-            "⏳ Осталось 7 из 7 дней\n"
-            "🟢🟢🟢🟢🟢🟢🟢"
+            f"⏳ {_t['total']} дня бесплатно — до {_t['ends_at_msk']}\n"
+            + "🟢" * min(10, _t["total"])
         )
     else:
         _subscription_line = _subscription_badge(msg.from_user.id)
@@ -13910,8 +13910,10 @@ def _subscription_keyboard() -> InlineKeyboardMarkup:
                 callback_data=f"yoomoney|{key}",
             )])
     rows.extend([
+        [InlineKeyboardButton(text="🎁 Пригласить друга", callback_data="ref_stats")],
         [InlineKeyboardButton(text="🎁 Ввести промокод", callback_data="promo_help")],
         [InlineKeyboardButton(text="☎️ Поддержка", url="https://t.me/durunegonim")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="pd_summary")],
     ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -13919,8 +13921,37 @@ def _subscription_keyboard() -> InlineKeyboardMarkup:
 @dp.message(Command("subscribe"))
 @dp.message(F.text.in_({"💎 Подписка", "💎 Купить подписку", "💎 Выбрать тариф"}))
 async def cmd_subscribe(msg: Message):
+    """Экран подписки. Платёжная логика, тарифы и история оплат не меняются —
+    обновлено только отображение статуса."""
+    uid = msg.from_user.id
+    info = _subscription_info(uid)
+    if info["is_paid"]:
+        status = "активна"
+    elif info["ended"]:
+        status = "закончилась"
+    else:
+        status = "пробный период"
+    try:
+        until = _trial_info(uid)["ends_at_msk"]
+        if info["is_paid"]:
+            s = load_settings(uid)
+            until = datetime.datetime.fromtimestamp(
+                float(s.get("subscription_until", 0) or 0),
+                datetime.timezone(datetime.timedelta(hours=3)),
+            ).strftime("%d.%m.%Y %H:%M МСК")
+    except Exception:
+        until = "—"
+    try:
+        active_searches = 1 if _ps.get_active_search(uid) else 0
+    except Exception:
+        active_searches = 0
+    mon = "включён" if load_settings(uid).get("monitor_enabled") else "выключен"
     await msg.answer(
-        "💎 <b>Тарифы и доступ</b>\n\n"
+        "💎 <b>Подписка</b>\n\n"
+        f"Текущий статус: {status}\n"
+        f"Действует до: {until}\n"
+        f"Активных поисков: {active_searches}\n"
+        f"Мониторинг: {mon}\n\n"
         "📅 Неделя — 349 ₽\n🗓 Месяц — 999 ₽\n\n"
         "После подтверждения ЮMoney доступ включится автоматически.\n"
         "Промокод активируется командой <code>/promo КОД</code>.",
@@ -15046,15 +15077,26 @@ async def fsm_price_max(msg: Message, state: FSMContext):
     cat_label = CATEGORY_LABELS.get(category, category)
     brand_label = f" · {brand.capitalize()}" if brand else ""
     await msg.answer(
-        f"✅ Настройки сохранены!\n\n"
+        f"✅ Поиск сохранён!\n\n"
         f"📍 Регион: {region_name}\n"
         f"🔍 Категория: {cat_label}{brand_label}\n"
-        f"💰 Бюджет: {pmin:,} – {pmax:,} ₽\n\n"
-        f"Нажми кнопку чтобы найти авто:",
+        f"💰 Бюджет: {pmin:,} – {pmax:,} ₽\n"
+        f"🔧 Состояние: {'можно с вложениями' if s.get('damaged') else 'на ходу'}\n"
+        f"📅 Годы: {s.get('year_min') or 'любые'}–{s.get('year_max') or ''}\n\n"
+        f"Поиск теперь обслуживается постоянно: объявления собираются в фоне "
+        f"и раскладываются по разделам."
+        .replace(",", " "),
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔍 Найти авто", callback_data="do_search")],
+            [InlineKeyboardButton(text="🔧 Состояние: на ходу",
+                                  callback_data="pd_cond|running"),
+             InlineKeyboardButton(text="🔧 Можно с вложениями",
+                                  callback_data="pd_cond|any")],
+            [InlineKeyboardButton(text="📅 Годы", callback_data="pd_years")],
+            [InlineKeyboardButton(text="✅ Показать результаты", callback_data="pd_summary")],
         ])
     )
+    # Один активный поиск на пользователя — сразу зеркалим в постоянное хранилище.
+    _sync_active_search(msg.from_user.id, s)
 
 
 # ── FSM: кнопки «Назад» ──────────────────────────────────────────
@@ -15099,8 +15141,10 @@ async def cb_setup_back_to_price(cb: CallbackQuery, state: FSMContext):
 
 
 @dp.message(Command("settings"))
-@dp.message(F.text == "⚙️ Настройки")
+@dp.message(F.text == "🛠 Изменить поиск")
 async def cmd_settings(msg: Message, state: FSMContext):
+    """Мастер настройки поиска (город, бюджет, марки). Точка входа —
+    «🔍 Найти авто» и кнопка «Изменить поиск»; /settings сохранён как алиас."""
     await state.clear()
     await msg.answer(_subscription_badge(msg.from_user.id), parse_mode="Markdown")
     await msg.answer("🔍 Шаг 1/4: Что ищем?", reply_markup=category_keyboard())
@@ -15152,7 +15196,28 @@ def _get_enabled_sources(s: dict) -> list[str]:
 
 @dp.message(Command("search"))
 @dp.message(F.text == "🔍 Найти авто")
-async def cmd_search(msg: Message):
+async def cmd_search(msg: Message, state: FSMContext = None):
+    """Главный экран постоянного поиска: сводка по разделам, а не десятки карточек.
+
+    Сеть здесь не дёргается — источники наполняют общий пул централизованно,
+    пользователь видит результат из локального кэша.
+    """
+    uid = msg.from_user.id
+    s = load_settings(uid)
+    if not s.get("region"):
+        await msg.answer("Сначала настроим поиск — это займёт меньше минуты 👇")
+        if state is not None:
+            await cmd_settings(msg, state)
+        else:
+            await msg.answer("Открой /settings, чтобы задать город и бюджет.")
+        return
+    _sync_active_search(uid, s)
+    await msg.answer(_ps_summary_text(uid), reply_markup=_ps_summary_keyboard())
+
+
+@dp.message(F.text == "🌐 Площадки поиска")
+async def cmd_pick_sources(msg: Message):
+    """Ручной выбор площадок (перенесено в «⚙️ Настройки»)."""
     uid = msg.from_user.id
     s = load_settings(uid)
     if not s.get("region"):
@@ -16364,8 +16429,23 @@ _USER_REGISTRY: "dict[str, dict]" = {}
 _registry_dirty = False
 _registry_new_user = False  # появился НОВЫЙ пользователь → бэкап в ближайшую минуту
 
-# Длительность бесплатного тестового периода (дней)
-TRIAL_DAYS = 7
+# Длительность бесплатного тестового периода (дней).
+# ЕДИНСТВЕННАЯ настройка срока: переопределяется переменной окружения TRIAL_DAYS.
+# Применяется только к НОВЫМ тестовым периодам; оплаченные подписки и уже
+# начатые тесты пересчитываются по сохранённому в реестре trial_days.
+def _env_trial_days() -> int:
+    try:
+        v = int(os.getenv("TRIAL_DAYS", "3") or 3)
+    except ValueError:
+        v = 3
+    return max(1, v)
+
+
+TRIAL_DAYS = _env_trial_days()
+
+# Срок теста, действовавший до перехода на 3 дня. Нужен только для того, чтобы
+# у уже зарегистрированных пользователей доступ не обрезался задним числом.
+LEGACY_TRIAL_DAYS = 7
 
 
 def _register_user(
@@ -16384,6 +16464,10 @@ def _register_user(
     # Тестовый период отсчитываем от момента первого появления пользователя
     if "trial_start" not in u:
         u["trial_start"] = now
+    # Срок теста фиксируется в момент старта: смена TRIAL_DAYS не обрезает
+    # доступ тем, кто уже начал пробный период по старым правилам.
+    if "trial_days" not in u:
+        u["trial_days"] = TRIAL_DAYS if _is_new else LEGACY_TRIAL_DAYS
     # Бонусные дни (за рефералов) прибавляются к тесту
     if "bonus_days" not in u:
         u["bonus_days"] = 0
@@ -16424,15 +16508,22 @@ def _trial_info(uid: int) -> dict:
     u = _USER_REGISTRY.get(str(uid)) or {}
     start = u.get("trial_start") or u.get("first_seen") or int(time.time())
     bonus = int(u.get("bonus_days", 0) or 0)
-    total = TRIAL_DAYS + bonus
+    base = int(u.get("trial_days") or 0) or (TRIAL_DAYS if not u else LEGACY_TRIAL_DAYS)
+    total = base + bonus
     elapsed_days = (int(time.time()) - start) / 86400.0
     days_left = int(total - elapsed_days)
+    ends_at = start + total * 86400
     return {
         "days_left": max(0, days_left),
         "total": total,
         "ended": days_left <= 0,
         "start": start,
         "bonus": bonus,
+        "ends_at": ends_at,
+        # Точное окончание в МСК — часовой пояс проекта (см. perekup_tracking._today)
+        "ends_at_msk": datetime.datetime.fromtimestamp(
+            ends_at, datetime.timezone(datetime.timedelta(hours=3))
+        ).strftime("%d.%m.%Y %H:%M МСК"),
     }
 
 
@@ -18496,16 +18587,17 @@ async def cmd_help(msg: Message):
         "и показывает выгодные варианты первыми.\n\n"
         "ℹ️ Avito временно отключён до подключения полноценного источника данных.\n\n"
         "📌 *Кнопки меню:*\n"
-        "🔍 *Найти авто* — поиск по всем выбранным площадкам; ниже рынка идут первыми\n"
-        "🌐 *Глобальный поиск* — поиск по барахолкам ВК и Telegram\n"
-        "🆕 *Новые сегодня* — только свежие объявления за 24 часа, ниже рынка\n"
-        "🎯 *Следить за маркой* — мониторинг конкретной марки/модели\n"
-        "🔔 *Уведомления* — авто-мониторинг: бот сам пришлёт новое выгодное авто "
-        "(проверяет каждые 2 минуты, свежие объявления долетают за ~10 минут)\n"
-        "🚗 *Мой гараж* — сохранённые объявления (кнопка ⭐ Сохранить)\n"
-        "💼 *Мои сделки* — учёт купленных авто: вложено / продано / *прибыль / ROI / срок продажи* (для перекупа)\n"
-        "⚙️ *Настройки* — город, бюджет, категория, площадки\n"
-        "♻️ *Сбросить историю* — показать все объявления заново\n\n"
+        "🔍 *Найти авто* — один постоянный поиск: город, бюджет, марки. Дальше бот "
+        "сам собирает объявления и раскладывает их по разделам\n"
+        "🚨 *Кто быстрее* — объявления моложе 2 часов\n"
+        "🔥 *Новые сегодня* — от 2 до 24 часов\n"
+        "📉 *Снизили цену* — события снижения цены\n"
+        "🤝 *Простор для торга* — старше 3 дней, где есть повод торговаться\n"
+        "⭐ *Сохранённые* — сохранение сразу включает наблюдение за ценой\n"
+        "⚡ *Мониторинг* — уведомления по активному поиску и тихие часы\n"
+        "📊 *Сегодня* — ваши личные итоги дня\n"
+        "💎 *Подписка* · 🤝 *Пригласить друга* · ⚙️ *Настройки* (площадки, отчёты, "
+        "сделки, помощь, сброс истории)\n\n"
         "📌 *Значки на карточке:*\n"
         "🚦 Светофор выгодности: 🟢 выгодно и чисто · 🟡 нейтрально · 🔴 дорого/риск\n"
         "🔻 рынок ~X₽ (−Y%) — цена ниже рыночной на Y%\n"
@@ -18621,36 +18713,35 @@ async def _price_watch_loop():
                 viewed_ts = await loop.run_in_executor(
                     None, lambda u=w["user_id"], k=key: _track.has_viewed(u, k)
                 )
-                lines = [
-                    "📉 Машина, которую вы смотрели, подешевела",
-                    "",
-                    f"{st.get('title') or w.get('title') or 'Автомобиль'}",
-                    "",
-                    f"Было: {base:,} ₽".replace(",", " "),
-                    f"Стало: {cur:,} ₽".replace(",", " "),
-                    "",
-                    f"Снижение: {drop:,} ₽ (-{pct}%)".replace(",", " "),
-                ]
+                _saved = await loop.run_in_executor(
+                    None, lambda u=w["user_id"], k=key: next(
+                        (c for c in _ps.saved_cars(u) if c["listing_key"] == k), None)
+                )
+                text = _ps.format_price_drop_notification(
+                    {"title": st.get("title") or w.get("title") or "Автомобиль"},
+                    base, cur,
+                    saved_at=(_saved or {}).get("saved_at") or w.get("created_at"),
+                    drops_count=drops_n,
+                )
+                extra = []
                 if viewed_ts:
                     d = int((time.time() - float(viewed_ts)) / 86400)
-                    lines.append(f"Вы открывали её: {d} дн. назад" if d else "Вы открывали её сегодня")
+                    extra.append(f"Вы открывали её: {d} дн. назад" if d else "Вы открывали её сегодня")
                 if days_sale:
-                    lines.append(f"В продаже: {days_sale} дн.")
-                if drops_n > 1:
-                    lines.append(f"Цена снижалась: {drops_n} раза")
-                lines += ["", "Что изменилось:", "• продавец снизил цену"]
-                if drops_n > 1:
-                    lines.append("• снижает уже не первый раз — вероятно, готов торговаться")
+                    extra.append(f"В продаже: {days_sale} дн.")
+                if pct:
+                    extra.append(f"Это -{pct}% от прежней цены.")
+                lines = [text] + ([""] + extra if extra else [])
                 _url = st.get("url") or w.get("url") or ""
-                _sid = url_to_id(_url) if _url else ""
+                _pd_sid = _ps.short_id(key)
                 _rows = []
                 if _url:
-                    _rows.append([InlineKeyboardButton(text="🌐 Открыть объявление", url=_url)])
-                if _sid:
-                    _rows.append([
-                        InlineKeyboardButton(text="📞 Позвонил", callback_data=f"called|{_sid}|{w['user_id']}"),
-                        InlineKeyboardButton(text="🔕 Не следить", callback_data=f"unwatch|{_sid}|{w['user_id']}"),
-                    ])
+                    _rows.append([InlineKeyboardButton(text="🌐 Открыть",
+                                                       callback_data=f"pd_open|{_pd_sid}")])
+                _rows.append([
+                    InlineKeyboardButton(text="🗑 Удалить из сохранённых",
+                                         callback_data=f"pd_unsave|{_pd_sid}"),
+                ])
                 try:
                     await bot.send_message(
                         w["user_id"], "\n".join(lines),
@@ -19500,6 +19591,607 @@ async def cmd_invite(msg: Message):
     await msg.answer(screen["text"], parse_mode="HTML", reply_markup=screen["keyboard"])
 
 
+# ══════════════════════════════════════════════════════════════════════
+# Постоянный поиск: разделы, карточки, сохранение, мониторинг, отчёты
+# ══════════════════════════════════════════════════════════════════════
+_PS_CATS = {
+    "fresh": "🚨 Кто быстрее",
+    "today": "🔥 Новые сегодня",
+    "days3": "📅 До 3 дней",
+    "bargain": "🤝 Простор для торга",
+    "price_drop": "📉 Снизили цену",
+    "saved": "⭐ Сохранённые",
+}
+
+
+# Человеческие названия регионов для карточек и сводки постоянного поиска.
+try:
+    _ps.REGION_NAMES.update({k.lower(): v for k, v in REGIONS.items()})
+except Exception:
+    pass
+
+
+def _sync_active_search(uid: int, s: dict | None = None) -> dict | None:
+    """Переносит настройки пользователя в постоянный поиск (одна активная запись).
+
+    Старая структура settings.json остаётся источником правды для существующих
+    экранов — здесь только зеркалим её в user_searches, чтобы фоновый монитор
+    и локальные разделы работали без сетевых запросов.
+    """
+    s = s if s is not None else load_settings(uid)
+    if not s.get("region"):
+        return None
+    brand = (s.get("brand") or "").strip().lower()
+    cur = _ps.get_active_search(uid)
+    want = {
+        "region": s.get("region", ""),
+        "regions": list(s.get("monitor_regions") or []),
+        "price_min": int(s.get("price_min", 0) or 0),
+        "price_max": int(s.get("price_max", 0) or 0),
+        "brands": [brand] if brand else [],
+        "model": s.get("model", "") or "",
+        "year_min": int(s.get("year_min", 0) or 0),
+        "year_max": int(s.get("year_max", 0) or 0),
+        "condition": "any" if s.get("damaged") else (s.get("condition") or "any"),
+        "sources": _get_enabled_sources(s),
+    }
+    if cur and all(cur.get(k) == v for k, v in want.items()):
+        return cur
+    try:
+        _ps.save_search(uid, **want)
+    except Exception as e:
+        print(f"  [поиск] не удалось сохранить активный поиск: {str(e)[:80]}")
+    return _ps.get_active_search(uid)
+
+
+def _ps_summary_text(uid: int) -> str:
+    return _ps.format_summary(uid)
+
+
+def _ps_summary_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🚨 Кто быстрее", callback_data="pd_cat|fresh|0"),
+         InlineKeyboardButton(text="🔥 Новые сегодня", callback_data="pd_cat|today|0")],
+        [InlineKeyboardButton(text="📅 До 3 дней", callback_data="pd_cat|days3|0"),
+         InlineKeyboardButton(text="📉 Снизили цену", callback_data="pd_cat|price_drop|0")],
+        [InlineKeyboardButton(text="🤝 Простор для торга", callback_data="pd_cat|bargain|0"),
+         InlineKeyboardButton(text="⭐ Сохранённые", callback_data="pd_cat|saved|0")],
+        [InlineKeyboardButton(text="🛠 Изменить поиск", callback_data="pd_edit_search")],
+    ])
+
+
+def _ps_card_keyboard(uid: int, key: str, *, category: str = "", page: int = 0,
+                      saved: bool = False) -> InlineKeyboardMarkup:
+    sid = _ps.short_id(key)
+    row2 = [
+        InlineKeyboardButton(
+            text="⭐ Сохранено" if saved else "⭐ Сохранить",
+            callback_data=f"pd_save|{sid}"),
+        InlineKeyboardButton(text="🚫 Скрыть", callback_data=f"pd_hide|{sid}"),
+    ]
+    rows = [[InlineKeyboardButton(text="🌐 Открыть", callback_data=f"pd_open|{sid}")], row2]
+    if category:
+        rows.append([InlineKeyboardButton(
+            text="➡️ Следующая", callback_data=f"pd_cat|{category}|{page + 1}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _ps_send_category(target, uid: int, category: str, page: int = 0):
+    """Показывает до 10 машин раздела. Данные только из общего пула (без сети)."""
+    _sync_active_search(uid)
+    loop = asyncio.get_running_loop()
+    if category != "saved" and not await loop.run_in_executor(
+            None, lambda: _ps.get_active_search(uid)):
+        await target.answer(
+            "🎯 Активного поиска пока нет.\n"
+            "Нажмите «🔍 Найти авто» — зададим город, бюджет и марки один раз.")
+        return
+    offset = max(0, int(page)) * _ps.PAGE_SIZE
+    items = await loop.run_in_executor(
+        None, lambda: _ps.search_listings(uid, category, offset=offset))
+    title = _PS_CATS.get(category, category)
+    if not items:
+        await target.answer(
+            f"{title}: пока пусто.\n"
+            "Бот собирает объявления постоянно — загляните чуть позже."
+            if page == 0 else f"{title}: это была последняя страница.")
+        return
+    await target.answer(f"{title} — страница {page + 1}")
+    for lst in items:
+        key = lst["listing_key"]
+        try:
+            if not lst.get("market_price"):
+                mk = await loop.run_in_executor(None, lambda k=key: _ps.refresh_market_price(k))
+                lst["market_price"] = mk["price"]
+                lst["market_sample"] = mk["sample"]
+        except Exception:
+            pass
+        if category == "price_drop":
+            text = (f"📉 {lst.get('title')}\n"
+                    f"Было: {_ps.fmt_money(lst.get('drop_from'))}\n"
+                    f"Стало: {_ps.fmt_money(lst.get('drop_to'))}\n"
+                    f"Снижение: {_ps.fmt_money(lst.get('drop'))}")
+        else:
+            text = _ps.format_card(lst, category=None if category == "saved" else category)
+        saved = await loop.run_in_executor(None, lambda k=key: _ps.is_saved(uid, k))
+        await target.answer(
+            text,
+            reply_markup=_ps_card_keyboard(uid, key, category=category, page=page, saved=saved),
+            disable_web_page_preview=True,
+        )
+        await asyncio.sleep(0.03)
+
+
+@dp.message(F.text == "🚨 Кто быстрее")
+async def cmd_ps_fresh(msg: Message):
+    await _ps_send_category(msg, msg.from_user.id, "fresh", 0)
+
+
+@dp.message(F.text == "🔥 Новые сегодня")
+async def cmd_ps_today(msg: Message):
+    await _ps_send_category(msg, msg.from_user.id, "today", 0)
+
+
+@dp.message(F.text == "📉 Снизили цену")
+async def cmd_ps_drops(msg: Message):
+    await _ps_send_category(msg, msg.from_user.id, "price_drop", 0)
+
+
+@dp.message(F.text == "🤝 Простор для торга")
+async def cmd_ps_bargain(msg: Message):
+    await _ps_send_category(msg, msg.from_user.id, "bargain", 0)
+
+
+@dp.message(F.text == "⭐ Сохранённые")
+async def cmd_ps_saved(msg: Message):
+    await _ps_send_category(msg, msg.from_user.id, "saved", 0)
+
+
+@dp.callback_query(F.data.startswith("pd_cat|"))
+async def cb_ps_category(cb: CallbackQuery):
+    await cb.answer()
+    _, cat, page = (cb.data.split("|") + ["0"])[:3]
+    await _ps_send_category(cb.message, cb.from_user.id, cat, int(page or 0))
+
+
+@dp.callback_query(F.data == "pd_summary")
+async def cb_ps_summary(cb: CallbackQuery):
+    await cb.answer()
+    _sync_active_search(cb.from_user.id)
+    await cb.message.answer(_ps_summary_text(cb.from_user.id),
+                            reply_markup=_ps_summary_keyboard())
+
+
+@dp.callback_query(F.data == "pd_edit_search")
+async def cb_ps_edit_search(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    await cmd_settings(cb.message, state)
+
+
+@dp.callback_query(F.data.startswith("pd_cond|"))
+async def cb_ps_condition(cb: CallbackQuery):
+    """Состояние: на ходу / можно с вложениями."""
+    mode = cb.data.split("|", 1)[1]
+    uid = cb.from_user.id
+    s = load_settings(uid)
+    s["condition"] = "running" if mode == "running" else "any"
+    s["damaged"] = mode != "running"
+    save_settings(uid, s)
+    _sync_active_search(uid, s)
+    await cb.answer("Состояние: на ходу" if mode == "running" else "Состояние: можно с вложениями")
+
+
+@dp.callback_query(F.data == "pd_years")
+async def cb_ps_years(cb: CallbackQuery):
+    await cb.answer()
+    rows = [[InlineKeyboardButton(text=f"от {y}", callback_data=f"pd_year|min|{y}")]
+            for y in (2000, 2005, 2010, 2015)]
+    rows.append([InlineKeyboardButton(text="Любые годы", callback_data="pd_year|min|0")])
+    await cb.message.answer("📅 Диапазон годов выпуска:",
+                            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+
+@dp.callback_query(F.data.startswith("pd_year|"))
+async def cb_ps_year_set(cb: CallbackQuery):
+    _, side, year = cb.data.split("|")
+    uid = cb.from_user.id
+    s = load_settings(uid)
+    s["year_min" if side == "min" else "year_max"] = int(year)
+    save_settings(uid, s)
+    _sync_active_search(uid, s)
+    await cb.answer("Готово" if int(year) else "Годы: любые")
+
+
+@dp.callback_query(F.data.startswith("pd_open|"))
+async def cb_ps_open(cb: CallbackQuery):
+    """«Открыть» — сначала фиксируем интерес, потом даём ссылку и предлагаем сохранить."""
+    sid = cb.data.split("|", 1)[1]
+    uid = cb.from_user.id
+    loop = asyncio.get_running_loop()
+    key = await loop.run_in_executor(None, lambda: _ps.key_by_short_id(sid))
+    lst = await loop.run_in_executor(None, lambda: _ps.get_pool_listing(key)) if key else None
+    if not lst:
+        await cb.answer("Объявление больше недоступно")
+        return
+    await cb.answer()
+    await loop.run_in_executor(None, lambda: _ps.record_interest(uid, key))
+    saved = await loop.run_in_executor(None, lambda: _ps.is_saved(uid, key))
+    rows = []
+    if lst.get("url"):
+        rows.append([InlineKeyboardButton(text="🌐 Перейти на площадку", url=lst["url"])])
+    rows.append([
+        InlineKeyboardButton(
+            text="⭐ Сохранено" if saved else "⭐ Сохранить и следить",
+            callback_data=f"pd_save|{sid}"),
+        InlineKeyboardButton(text="Нет", callback_data="pd_dismiss"),
+    ])
+    await cb.message.answer(
+        f"{lst.get('title')}\nЦена: {_ps.fmt_money(lst.get('price'))}\n\n"
+        "Сохранить машину и следить за изменениями?",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+        disable_web_page_preview=True,
+    )
+
+
+@dp.callback_query(F.data == "pd_dismiss")
+async def cb_ps_dismiss(cb: CallbackQuery):
+    await cb.answer("Ок, не сохраняю")
+
+
+@dp.callback_query(F.data.startswith("pd_save|"))
+async def cb_ps_save(cb: CallbackQuery):
+    """Сохранение = автоматическое наблюдение (отдельной кнопки «Следить» нет)."""
+    sid = cb.data.split("|", 1)[1]
+    uid = cb.from_user.id
+    loop = asyncio.get_running_loop()
+    key = await loop.run_in_executor(None, lambda: _ps.key_by_short_id(sid))
+    if not key:
+        await cb.answer("Объявление больше недоступно")
+        return
+    created = await loop.run_in_executor(None, lambda: _ps.save_car(uid, key))
+    await cb.answer("⭐ Сохранено. Слежу за ценой, снятием и повторным размещением"
+                    if created else "Уже сохранено — слежу за изменениями")
+
+
+@dp.callback_query(F.data.startswith("pd_unsave|"))
+async def cb_ps_unsave(cb: CallbackQuery):
+    sid = cb.data.split("|", 1)[1]
+    uid = cb.from_user.id
+    loop = asyncio.get_running_loop()
+    key = await loop.run_in_executor(None, lambda: _ps.key_by_short_id(sid))
+    if key:
+        await loop.run_in_executor(None, lambda: _ps.unsave_car(uid, key))
+    await cb.answer("🗑 Удалено из сохранённых")
+
+
+@dp.callback_query(F.data.startswith("pd_hide|"))
+async def cb_ps_hide(cb: CallbackQuery):
+    sid = cb.data.split("|", 1)[1]
+    uid = cb.from_user.id
+    loop = asyncio.get_running_loop()
+    key = await loop.run_in_executor(None, lambda: _ps.key_by_short_id(sid))
+    if key:
+        await loop.run_in_executor(None, lambda: _ps.hide_listing(uid, key))
+    await cb.answer("🚫 Скрыто — больше не покажу")
+
+
+# ── ⚡ Мониторинг ─────────────────────────────────────────────────────
+def _ps_monitor_keyboard(s: dict, prefs: dict) -> InlineKeyboardMarkup:
+    on = bool(s.get("monitor_enabled"))
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔕 Выключить" if on else "🔔 Включить",
+                              callback_data="notify_toggle")],
+        [InlineKeyboardButton(
+            text=("🌙 Мгновенные: выкл" if not prefs.get("instant_notify") else "🌙 Мгновенные: вкл"),
+            callback_data="pd_pref|instant_notify")],
+        [InlineKeyboardButton(text="⚙️ Подробные настройки уведомлений",
+                              callback_data="notify_settings")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="pd_summary")],
+    ])
+
+
+@dp.message(F.text == "⚡ Мониторинг")
+async def cmd_ps_monitoring(msg: Message):
+    uid = msg.from_user.id
+    s = load_settings(uid)
+    if not s.get("region"):
+        await msg.answer("Сначала создайте поиск: «🔍 Найти авто».")
+        return
+    search = _sync_active_search(uid, s)
+    prefs = _ps.get_prefs(uid)
+    counts = _ps.category_counts(uid)
+    on = "включён" if s.get("monitor_enabled") else "выключен"
+    await msg.answer(
+        "⚡ *Мониторинг*\n\n"
+        f"Статус: {on}\n"
+        f"Активных поисков: {1 if search else 0}\n"
+        f"Тихие часы: {prefs['quiet_from']}:00–{prefs['quiet_to']}:00 МСК\n"
+        f"Новых за 24 ч: {counts['fresh'] + counts['today']}\n\n"
+        "Бот проверяет площадки постоянно и присылает только реальные события: "
+        "новую подходящую машину, снижение цены, снятие и повторное размещение.",
+        parse_mode="Markdown",
+        reply_markup=_ps_monitor_keyboard(s, prefs),
+    )
+
+
+@dp.callback_query(F.data.startswith("pd_pref|"))
+async def cb_ps_pref(cb: CallbackQuery):
+    field = cb.data.split("|", 1)[1]
+    uid = cb.from_user.id
+    prefs = _ps.get_prefs(uid)
+    _ps.set_pref(uid, field, 0 if prefs.get(field) else 1)
+    await cb.answer("Готово")
+
+
+# ── 📊 Сегодня ────────────────────────────────────────────────────────
+@dp.message(F.text == "📊 Сегодня")
+async def cmd_ps_today_report(msg: Message):
+    uid = msg.from_user.id
+    _sync_active_search(uid)
+    loop = asyncio.get_running_loop()
+    rep = await loop.run_in_executor(None, lambda: _ps.evening_report(uid))
+    if not rep:
+        await msg.answer(
+            "📊 Сегодня событий пока нет.\n"
+            "Как только появятся подходящие машины — покажу их здесь.")
+        return
+    await msg.answer(rep["text"], reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🚨 Кто быстрее", callback_data="pd_cat|fresh|0"),
+         InlineKeyboardButton(text="📉 Снизили цену", callback_data="pd_cat|price_drop|0")],
+    ]))
+
+
+# ── ⚙️ Настройки (редкие функции) ────────────────────────────────────
+def _ps_settings_keyboard(uid: int) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text="🛠 Изменить поиск", callback_data="pd_edit_search")],
+        [InlineKeyboardButton(text="🌐 Площадки", callback_data="pd_sources")],
+        [InlineKeyboardButton(text="🌙 Тихие часы", callback_data="pd_quiet")],
+        [InlineKeyboardButton(text="📨 Отчёты", callback_data="pd_reports")],
+        [InlineKeyboardButton(text="❓ Помощь", callback_data="pd_help")],
+        [InlineKeyboardButton(text="♻️ Сбросить историю", callback_data="pd_reset_ask")],
+    ]
+    # «Мои сделки» — рабочая функция с данными пользователя: из главного меню
+    # убрана, но не удалена, вход перенесён сюда.
+    rows.insert(4, [InlineKeyboardButton(text="💼 Мои сделки", callback_data="pd_deals")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@dp.message(F.text == "⚙️ Настройки")
+async def cmd_ps_settings_menu(msg: Message):
+    await msg.answer(
+        "⚙️ *Настройки*\n\nЗдесь редкие функции: площадки, тихие часы, отчёты, "
+        "помощь, сделки и сброс истории.",
+        parse_mode="Markdown",
+        reply_markup=_ps_settings_keyboard(msg.from_user.id),
+    )
+
+
+@dp.callback_query(F.data == "pd_sources")
+async def cb_ps_sources(cb: CallbackQuery):
+    await cb.answer()
+    s = load_settings(cb.from_user.id)
+    await cb.message.answer("Выбери площадки для поиска:",
+                            reply_markup=sources_keyboard(_get_enabled_sources(s)))
+
+
+@dp.callback_query(F.data == "pd_help")
+async def cb_ps_help(cb: CallbackQuery):
+    await cb.answer()
+    await cmd_help(cb.message)
+
+
+@dp.callback_query(F.data == "pd_deals")
+async def cb_ps_deals(cb: CallbackQuery):
+    await cb.answer()
+    await cmd_my_deals(cb.message)
+
+
+@dp.callback_query(F.data == "pd_reset_ask")
+async def cb_ps_reset_ask(cb: CallbackQuery):
+    await cb.answer()
+    await cb.message.answer(
+        "♻️ Сбросить историю просмотров? Сохранённые машины и активный поиск останутся.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Да, сбросить", callback_data="reset_seen"),
+             InlineKeyboardButton(text="Отмена", callback_data="pd_dismiss")],
+        ]))
+
+
+@dp.callback_query(F.data == "pd_quiet")
+async def cb_ps_quiet(cb: CallbackQuery):
+    await cb.answer()
+    p = _ps.get_prefs(cb.from_user.id)
+    rows = [[InlineKeyboardButton(text=f"Начало: {h}:00", callback_data=f"pd_quiet_set|from|{h}")]
+            for h in (21, 22, 23, 0)]
+    rows += [[InlineKeyboardButton(text=f"Конец: {h}:00", callback_data=f"pd_quiet_set|to|{h}")]
+             for h in (7, 8, 9, 10)]
+    await cb.message.answer(
+        f"🌙 Тихие часы: {p['quiet_from']}:00–{p['quiet_to']}:00 МСК\n"
+        "В это время мгновенные уведомления не приходят.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+
+@dp.callback_query(F.data.startswith("pd_quiet_set|"))
+async def cb_ps_quiet_set(cb: CallbackQuery):
+    _, side, hour = cb.data.split("|")
+    _ps.set_pref(cb.from_user.id, "quiet_from" if side == "from" else "quiet_to", int(hour))
+    p = _ps.get_prefs(cb.from_user.id)
+    await cb.answer(f"Тихие часы: {p['quiet_from']}:00–{p['quiet_to']}:00")
+
+
+@dp.callback_query(F.data == "pd_reports")
+async def cb_ps_reports(cb: CallbackQuery):
+    await cb.answer()
+    p = _ps.get_prefs(cb.from_user.id)
+    await cb.message.answer(
+        "📨 Отчёты",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text=f"☀️ Утренний: {'вкл' if p['morning_report'] else 'выкл'}",
+                callback_data="pd_pref|morning_report")],
+            [InlineKeyboardButton(
+                text=f"🌙 Вечерний: {'вкл' if p['evening_report'] else 'выкл'}",
+                callback_data="pd_pref|evening_report")],
+        ]))
+
+
+# ── Фоновые циклы постоянного поиска ─────────────────────────────────
+async def _ps_new_listing_loop():
+    """Мгновенные уведомления о действительно важных новых машинах."""
+    await asyncio.sleep(120)
+    print("  [поиск] цикл уведомлений о новых подходящих авто запущен")
+    while True:
+        try:
+            await asyncio.sleep(180)
+            loop = asyncio.get_running_loop()
+            searches = await loop.run_in_executor(None, _ps.all_active_searches)
+            for s in searches:
+                uid = int(s["user_id"])
+                try:
+                    if not load_settings(uid).get("monitor_enabled"):
+                        continue
+                    prefs = await loop.run_in_executor(None, lambda u=uid: _ps.get_prefs(u))
+                    if not prefs.get("instant_notify"):
+                        continue
+                    if await loop.run_in_executor(None, lambda u=uid: _ps.in_quiet_hours(u)):
+                        continue
+                    items = await loop.run_in_executor(
+                        None, lambda u=uid: _ps.search_listings(u, "fresh", limit=5))
+                    for lst in items:
+                        key = lst["listing_key"]
+                        mk = await loop.run_in_executor(
+                            None, lambda k=key: _ps.refresh_market_price(k))
+                        lst["market_price"] = mk["price"]
+                        lst["market_sample"] = mk["sample"]
+                        # Важное событие: свежая машина ниже рынка.
+                        if not (mk["price"] and mk["price"] > int(lst.get("price") or 0)):
+                            continue
+                        sig = _ps.new_listing_signature(key, int(lst.get("price") or 0))
+                        ok = await loop.run_in_executor(
+                            None, lambda u=uid, k=key, g=sig:
+                            _ps.notify_once(u, "new_listing", k, g))
+                        if not ok:
+                            continue
+                        await bot.send_message(
+                            uid, _ps.format_new_listing_notification(lst),
+                            reply_markup=_ps_card_keyboard(uid, key),
+                            disable_web_page_preview=True)
+                        await asyncio.sleep(0.05)
+                except Exception as e:
+                    print(f"  [поиск] уведомление uid={uid}: {str(e)[:80]}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"  [поиск] ошибка цикла новых: {str(e)[:120]}")
+
+
+async def _ps_saved_events_loop():
+    """События по сохранённым машинам: повторное появление и вариант дешевле."""
+    await asyncio.sleep(240)
+    while True:
+        try:
+            await asyncio.sleep(900)
+            loop = asyncio.get_running_loop()
+            searches = await loop.run_in_executor(None, _ps.all_active_searches)
+            for s in searches:
+                uid = int(s["user_id"])
+                try:
+                    saved = await loop.run_in_executor(None, lambda u=uid: _ps.saved_cars(u))
+                    for car in saved:
+                        key = car["listing_key"]
+                        hist = await loop.run_in_executor(
+                            None, lambda k=key: _track.price_history(k, limit=5))
+                        for h in hist:
+                            if h.get("event_type") != "relisted":
+                                continue
+                            sig = f"relist:{int(h.get('detected_at') or 0)}"
+                            if not await loop.run_in_executor(
+                                    None, lambda u=uid, k=key, g=sig:
+                                    _ps.notify_once(u, "relisted", k, g)):
+                                continue
+                            diff = max(0, int(h.get("prev_price") or 0) - int(h.get("price") or 0))
+                            await bot.send_message(
+                                uid, _ps.format_relisted_notification(car, diff),
+                                reply_markup=_ps_card_keyboard(uid, key),
+                                disable_web_page_preview=True)
+                        cand = await loop.run_in_executor(
+                            None, lambda k=key: _ps.cheaper_similar(uid, k))
+                        if not cand:
+                            continue
+                        sig = f"cheaper:{cand['listing_key']}:{cand['price']}"
+                        if not await loop.run_in_executor(
+                                None, lambda u=uid, k=key, g=sig:
+                                _ps.notify_once(u, "cheaper_similar", k, g)):
+                            continue
+                        await bot.send_message(
+                            uid, _ps.format_cheaper_similar_notification(cand),
+                            reply_markup=_ps_card_keyboard(uid, cand["listing_key"]),
+                            disable_web_page_preview=True)
+                        await asyncio.sleep(0.05)
+                except Exception as e:
+                    print(f"  [поиск] события сохранённых uid={uid}: {str(e)[:80]}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"  [поиск] ошибка цикла сохранённых: {str(e)[:120]}")
+
+
+async def _ps_reports_loop():
+    """Утренний (09:00 МСК) и вечерний (21:00 МСК) отчёты — только при событиях."""
+    await asyncio.sleep(300)
+    sent_marker: dict[str, float] = {}
+    while True:
+        try:
+            await asyncio.sleep(600)
+            now = time.time()
+            msk = datetime.datetime.fromtimestamp(
+                now, datetime.timezone(datetime.timedelta(hours=3)))
+            kind = None
+            if msk.hour == 9:
+                kind = "morning"
+            elif msk.hour == 21:
+                kind = "evening"
+            if not kind:
+                continue
+            day_key = f"{kind}:{msk.strftime('%Y-%m-%d')}"
+            loop = asyncio.get_running_loop()
+            searches = await loop.run_in_executor(None, _ps.all_active_searches)
+            for s in searches:
+                uid = int(s["user_id"])
+                marker = f"{day_key}:{uid}"
+                if sent_marker.get(marker):
+                    continue
+                try:
+                    prefs = await loop.run_in_executor(None, lambda u=uid: _ps.get_prefs(u))
+                    if not prefs.get(f"{kind}_report"):
+                        continue
+                    rep = await loop.run_in_executor(
+                        None,
+                        (lambda u=uid: _ps.morning_report(u)) if kind == "morning"
+                        else (lambda u=uid: _ps.evening_report(u)))
+                    if not rep:
+                        continue
+                    kb = InlineKeyboardMarkup(inline_keyboard=[[
+                        InlineKeyboardButton(text="🚨 Новые за ночь",
+                                             callback_data="pd_cat|fresh|0"),
+                        InlineKeyboardButton(text="📉 Снизили цену",
+                                             callback_data="pd_cat|price_drop|0"),
+                    ]])
+                    await bot.send_message(uid, rep["text"], reply_markup=kb)
+                    sent_marker[marker] = now
+                    await asyncio.sleep(0.05)
+                except Exception as e:
+                    print(f"  [отчёт] uid={uid}: {str(e)[:80]}")
+            # чистим маркеры старше двух суток
+            for k in [k for k, v in sent_marker.items() if now - v > 172800]:
+                sent_marker.pop(k, None)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"  [отчёт] ошибка цикла: {str(e)[:120]}")
+
+
 async def _warmup_cache():
     """Непрерывный фоновый прогрев кэша Авито по всем городам.
 
@@ -19954,6 +20646,15 @@ async def main():
             loop.create_task(_price_watch_loop())
         except Exception as _e:
             print(f"  [наблюдение] не запущен: {str(_e)[:80]}")
+        # Постоянный поиск: пул объявлений, разделы, уведомления и отчёты
+        try:
+            _ps.init_db()
+            loop.create_task(_ps_new_listing_loop())
+            loop.create_task(_ps_saved_events_loop())
+            loop.create_task(_ps_reports_loop())
+            print("  [поиск] постоянный поиск и отчёты запущены")
+        except Exception as _e:
+            print(f"  [поиск] не запущен: {str(_e)[:80]}")
         print("  [тест] цикл уведомлений о конце теста запущен")
         await _diag("циклы созданы")
 
@@ -19985,10 +20686,10 @@ async def main():
         public_commands = [
             BotCommand(command="start",     description="🚀 Главное меню"),
             BotCommand(command="search",    description="🔍 Найти авто"),
-            BotCommand(command="new",       description="🆕 Новые сегодня"),
-            BotCommand(command="favorites", description="🚗 Мой гараж"),
+            BotCommand(command="new",       description="🔥 Новые сегодня"),
+            BotCommand(command="favorites", description="⭐ Сохранённые"),
             BotCommand(command="invite",    description="🤝 Пригласить друга"),
-            BotCommand(command="settings",  description="⚙️ Настройки"),
+            BotCommand(command="settings",  description="🛠 Изменить поиск"),
             BotCommand(command="help",      description="❓ Помощь"),
         ]
         admin_commands = public_commands + [
