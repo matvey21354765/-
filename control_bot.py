@@ -3584,6 +3584,39 @@ def _scrape_autoru_production(
             ),
             "error_message_safe": type(exc).__name__,
         })
+        # Мобильный прокси регулярно отваливается по таймауту (curl 28/56), и
+        # раньше поиск на этом заканчивался — пользователь видел «Auto.ru
+        # временно недоступен». curl_cffi-метод ходит своим путём (прокси, затем
+        # НАПРЯМУЮ) и обычно отвечает, поэтому пробуем его прежде чем сдаться.
+        try:
+            raw = _autoru_cffi_fetch(region, price_min, price_max, brand)
+        except Exception as _ae:
+            print(f"[Auto.ru] запасной cffi-метод: {str(_ae)[:80]}")
+            raw = []
+        if raw:
+            unique_fb: dict[str, dict] = {}
+            for item in raw:
+                ident = _item_identity(item)
+                if ident:
+                    unique_fb[ident] = item
+            normalized_fb = list(unique_fb.values())
+            filtered_fb = [
+                item for item in normalized_fb
+                if in_price_range(item, price_min, price_max)
+            ]
+            _AUTORU_LAST_DIAG.update({
+                "raw": len(raw),
+                "normalized": len(normalized_fb),
+                "after_location": len(normalized_fb),
+                "after_price": len(filtered_fb),
+                "error_type": "",
+                "error_message_safe": "",
+            })
+            return normalize_autoru_result({
+                "items": filtered_fb,
+                "error": None,
+                "meta": dict(_AUTORU_LAST_DIAG),
+            })
         return normalize_autoru_result({
             "items": [],
             "error": _AUTORU_LAST_DIAG["error_type"],
@@ -7141,16 +7174,29 @@ def _avito_legacy_fetch(region: str, price_min: int = 0, price_max: int = 99_000
     seen_u: set[str] = set()
     # В рабочей июльской версии Авито качался НЕСКОЛЬКИМИ страницами (pages=5) —
     # одна страница даёт ~50 объявлений, этого мало для выдачи.
-    _max_pages = max(1, int(os.getenv("AVITO_PAGES", "5")))
+    _max_pages = max(1, int(os.getenv("AVITO_PAGES", "10")))
+    # Одна страница 429/пустышка — не повод бросать пагинацию: следующий запрос
+    # часто проходит. Останавливаемся только после двух промахов подряд.
+    _miss = 0
     for _p in range(page, page + _max_pages):
+        _priceless = False
         text = _try_fetch(_build_url(_p, with_price=True))
         if not text:
+            # Запасной URL без ценового фильтра отдаёт ВСЕ цены — иначе в выдачу
+            # попадали машины втрое дороже бюджета («вне бюджета=49 из 50»).
             text = _try_fetch(_build_url(_p, with_price=False))
+            _priceless = bool(text)
         if not text:
-            break
+            _miss += 1
+            if _miss >= 2:
+                break
+            _avito_pace()
+            continue
         items = _parse_avito_html(text, slug, today)
         if not items:
             items = _avito_items_from_initial_data(text, today)
+        if _priceless:
+            items = [it for it in items if in_price_range(it, price_min, price_max)]
         _added = 0
         for it in items:
             u = it.get("url", "")
@@ -7160,7 +7206,11 @@ def _avito_legacy_fetch(region: str, price_min: int = 0, price_max: int = 99_000
                 _added += 1
         print(f"  [Авито legacy] стр.{_p}: +{_added} (всего {len(out)})")
         if _added == 0:
-            break
+            _miss += 1
+            if _miss >= 2:
+                break
+        else:
+            _miss = 0
         _avito_reset_blocks()
         _avito_pace()   # пауза между страницами, как у человека
     if out:
@@ -7352,20 +7402,19 @@ def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_0
         # запросами (без cookies), пока они отдают объявления.
         _legacy_all: list[dict] = []
         _seen_u: set[str] = set()
-        for _lp in range(1, max(1, pages) + 1):
-            _batch = _avito_legacy_fetch(
-                region, price_min=price_min, price_max=price_max,
-                sort_by_date=sort_by_date,
-                brand=brand if brand and brand != "any" else "", page=_lp,
-            )
-            if not _batch:
-                break
-            for _it in _batch:
-                _u = _it.get("url", "")
-                if _u and _u not in _seen_u:
-                    _seen_u.add(_u)
-                    _legacy_all.append(_it)
-            time.sleep(random.uniform(0.8, 1.8))   # человеческий темп
+        # _avito_legacy_fetch сам обходит страницы (AVITO_PAGES) начиная с page.
+        # Внешний цикл по страницам дублировал бы те же запросы и жёг лимит IP,
+        # поэтому вызываем его ОДИН раз.
+        _batch = _avito_legacy_fetch(
+            region, price_min=price_min, price_max=price_max,
+            sort_by_date=sort_by_date,
+            brand=brand if brand and brand != "any" else "", page=1,
+        )
+        for _it in _batch or []:
+            _u = _it.get("url", "")
+            if _u and _u not in _seen_u:
+                _seen_u.add(_u)
+                _legacy_all.append(_it)
         if _legacy_all:
             print(f"  [Авито legacy] итого {len(_legacy_all)} объявлений")
             return _legacy_all
@@ -7379,6 +7428,7 @@ def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_0
     results: list[dict] = []
     seen: set[str] = set()
     _blocked_streak = 0
+    _empty_streak = 0
     for p in range(1, pages + 1):
         _params = {"categoryId": 9, "locationId": loc, "page": p, "owner": 1}
         if price_min > 0:
@@ -7549,7 +7599,13 @@ def _avito_webjson_search(region: str, price_min: int = 0, price_max: int = 99_0
             _added += 1
         print(f"  [Авито webJSON] стр.{p}: +{_added} (всего {len(results)})")
         if _added == 0:
-            break
+            # Страница без новых карточек бывает и от дедупликации выдачи —
+            # бросаем пагинацию только после ВТОРОЙ пустой подряд.
+            _empty_streak += 1
+            if _empty_streak >= 2:
+                break
+        else:
+            _empty_streak = 0
     print(f"  [Авито webJSON] итого {len(results)}")
     if not results and SPFA_API_KEY:
         _spfa_note_cookie_result(False)
@@ -11148,7 +11204,7 @@ def _avito_cached_result(
                 region, price_min=price_min, price_max=price_max,
                 sort_by_date=sort_by_date,
                 brand="" if brand == "any" else brand,
-                pages=int(os.getenv("AVITO_PAGES", "5")),
+                pages=int(os.getenv("AVITO_PAGES", "10")),
                 allow_buy=_spfa_user_search_active(),
             )
             if _direct:
@@ -11573,7 +11629,7 @@ async def _avito_scheduled_fetch_unlocked(
                 parsed = _avito_webjson_search(
                     region, price_min=price_min, price_max=price_max,
                     sort_by_date=sort_by_date, brand=_brand_q,
-                    pages=int(os.getenv("AVITO_PAGES", "5")),
+                    pages=int(os.getenv("AVITO_PAGES", "10")),
                     allow_buy=_spfa_user_search_active(),
                 )
                 if parsed:
@@ -11590,7 +11646,7 @@ async def _avito_scheduled_fetch_unlocked(
                 if parsed:
                     raise _AvitoJulyDone()
                 _july = _avito_july_scraper(
-                    region, pages=int(os.getenv("AVITO_PAGES", "5")),
+                    region, pages=int(os.getenv("AVITO_PAGES", "10")),
                     price_min=price_min, price_max=price_max,
                     sort_by_date=sort_by_date, brand=_brand_q,
                 )
