@@ -26,11 +26,30 @@ def test_extract_rest_app_items_supported_shapes():
 
 
 def test_provider_selection_has_one_precedence(monkeypatch):
-    monkeypatch.setenv("AVITO_PROVIDER", "rest_app")
+    monkeypatch.delenv("AVITO_FORCE_PROVIDER", raising=False)
+    monkeypatch.setenv("AVITO_PROVIDER", "adspower_worker")
     monkeypatch.setenv("AVITO_SOURCE", "playwright")
-    assert get_avito_provider() == "rest_app"
+    assert get_avito_provider() == "adspower_worker"
     monkeypatch.delenv("AVITO_PROVIDER")
     assert get_avito_provider() == "playwright"
+
+
+def test_rest_app_falls_back_to_webjson(monkeypatch):
+    """rest_app отдаёт ленту по всей РФ — после фильтра по городу остаётся ноль."""
+    monkeypatch.delenv("AVITO_SOURCE", raising=False)
+    monkeypatch.delenv("AVITO_FORCE_PROVIDER", raising=False)
+    monkeypatch.setenv("AVITO_PROVIDER", "rest_app")
+    assert get_avito_provider() == "webjson"
+    monkeypatch.setenv("AVITO_FORCE_PROVIDER", "1")
+    assert get_avito_provider() == "rest_app"
+
+
+def test_default_provider_is_webjson(monkeypatch):
+    monkeypatch.delenv("AVITO_PROVIDER", raising=False)
+    monkeypatch.delenv("AVITO_SOURCE", raising=False)
+    assert get_avito_provider() == "webjson"
+    monkeypatch.setenv("AVITO_PROVIDER", "мусор")
+    assert get_avito_provider() == "webjson"
 
 
 def test_normalizer_supports_safe_aliases():
