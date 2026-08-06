@@ -7582,16 +7582,22 @@ def _avito_legacy_fetch(region: str, price_min: int = 0, price_max: int = 99_000
                 or ("__NEXT_DATA__" in t and (f'"/{slug}/' in t or '"catalog"' in t))
                 or ('"items"' in t and (f'"/{slug}/' in t or '"priceDetailed"' in t)))
 
-    def _try_fetch(u: str) -> str | None:
+    # Пока адрес отдаёт 429/403, продолжать бессмысленно и вредно: каждый
+    # лишний запрос продлевает бан на подсеть (WORKING_CONFIG.md).
+    _blocked_status = [0]
+
+    def _try_fetch(u: str, page_no: int) -> str | None:
         try:
             r = _req.get(u, timeout=10, headers=_HEADERS, proxies=_avito_proxies() or {})
             _avito_ip_budget_spend()
             if r.status_code == 200 and _page_has_listings(r.text or ""):
                 return r.text
-            print(f"  [Авито legacy] стр.{page}: HTTP {r.status_code}, "
+            if r.status_code in (403, 429, 439, 503):
+                _blocked_status[0] = r.status_code
+            print(f"  [Авито legacy] стр.{page_no}: HTTP {r.status_code}, "
                   f"{len(r.text or '')}б, объявлений в разметке нет")
         except Exception as e:
-            print(f"  [Авито legacy] стр.{page}: {str(e)[:70]}")
+            print(f"  [Авито legacy] стр.{page_no}: {str(e)[:70]}")
         return None
 
     out: list[dict] = []
@@ -7613,13 +7619,22 @@ def _avito_legacy_fetch(region: str, price_min: int = 0, price_max: int = 99_000
                   f"отдаём {len(out)} объявлений")
             break
         _priceless = False
-        text = _try_fetch(_build_url(_p, with_price=True))
-        if not text:
+        _blocked_status[0] = 0
+        text = _try_fetch(_build_url(_p, with_price=True), _p)
+        if not text and not _blocked_status[0]:
             # Запасной URL без ценового фильтра отдаёт ВСЕ цены — иначе в выдачу
             # попадали машины втрое дороже бюджета («вне бюджета=49 из 50»).
-            text = _try_fetch(_build_url(_p, with_price=False))
+            # При 429/403 второй запрос не делаем: адрес уже под ограничением.
+            text = _try_fetch(_build_url(_p, with_price=False), _p)
             _priceless = bool(text)
         if not text:
+            if _blocked_status[0]:
+                # Правило рабочей версии: страница заблокирована — остальные
+                # не запрашиваем. Иначе бот сам продлевает бан подсети.
+                print(f"  [Авито legacy] стр.{_p}: HTTP {_blocked_status[0]} — "
+                      f"дальше не идём, отдаём {len(out)}")
+                _avito_note_rate_limit()
+                break
             _miss += 1
             if _miss >= 2:
                 break
@@ -12288,12 +12303,19 @@ async def _avito_scheduled_fetch_unlocked(
                 print(f"[Avito] июльский парсер: {str(_je)[:80]}")
             # 1) web-JSON с cookies от spfa — стр.1 стабильно отдаёт ~49 объявлений
             # (стр.2+ Авито почти всегда блокирует, поэтому берём ТОЛЬКО первую).
-            _allow_buy = _spfa_user_search_active()
-            parsed = _avito_webjson_search(
-                region, price_min=price_min, price_max=price_max,
-                sort_by_date=sort_by_date, brand=_brand_q, pages=1,
-                allow_buy=_allow_buy,
-            )
+            #
+            # ВАЖНО: только если предыдущие пути ничего не дали. Раньше этот
+            # блок выполнялся всегда и затирал уже полученный результат: в
+            # логах «июльский парсер: 49 объявлений ✅», следом «webJSON итого
+            # 0» — и пользователь видел «Avito: 0». Заодно лишние запросы
+            # добивали IP до 429/403 и уводили Авито в cooldown.
+            if not parsed:
+                _allow_buy = _spfa_user_search_active()
+                parsed = _avito_webjson_search(
+                    region, price_min=price_min, price_max=price_max,
+                    sort_by_date=sort_by_date, brand=_brand_q, pages=1,
+                    allow_buy=_allow_buy,
+                )
             # 2) Если web-JSON пуст — мобильный API (без cookies, если IP чистый).
             if not parsed:
                 parsed = _avito_mobile_api_search(
@@ -16246,6 +16268,9 @@ async def _ps_send_start_screen(target, uid: int):
         f"📅 До 3 дней — {counts.get('days3', 0)}",
         f"🤝 Простор для торга — {counts.get('bargain', 0)}",
         f"📉 Снизили цену — {counts.get('price_drop', 0)}",
+        "",
+        "🔔 Как только появится подходящая машина — пришлю сразу.",
+        "Отключить: ⚙️ Настройки → 🌙 Мгновенные.",
     ]
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"🚨 Кто быстрее ({counts.get('fresh', 0)})",
@@ -21813,7 +21838,12 @@ async def _ps_new_listing_loop():
             for s in searches:
                 uid = int(s["user_id"])
                 try:
-                    if not load_settings(uid).get("monitor_enabled"):
+                    # Раньше здесь стояла проверка monitor_enabled — отдельного
+                    # тумблера «⚡ Мониторинг», выключенного по умолчанию. Из-за
+                    # неё «Кто быстрее» молчал почти у всех: активный поиск был,
+                    # а уведомления не приходили. Решает собственная настройка
+                    # instant_notify (включена по умолчанию) плюс тихие часы.
+                    if _subscription_info(uid)["ended"]:
                         continue
                     prefs = await loop.run_in_executor(None, lambda u=uid: _ps.get_prefs(u))
                     if not prefs.get("instant_notify"):

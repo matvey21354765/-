@@ -1536,8 +1536,11 @@ def region_label(slug: str) -> str:
     return REGION_NAMES.get((slug or "").strip().lower(), slug or "")
 
 
+# Регион из ссылки. Второй вариант — путь без домена («/omsk/avtomobili/…»):
+# часть парсеров отдаёт относительные ссылки, и без него объявление
+# оставалось без региона и не проходило фильтр поиска.
 _URL_REGION_RE = re.compile(
-    r"(?:avito\.ru|drom\.ru|youla\.ru|auto\.ru)/([a-z0-9_\-]+)/", re.IGNORECASE)
+    r"(?:(?:avito\.ru|drom\.ru|youla\.ru|auto\.ru)/|^/)([a-z0-9_\-]+)/", re.IGNORECASE)
 
 
 # Города, относящиеся к области поиска: заполняется из control_bot

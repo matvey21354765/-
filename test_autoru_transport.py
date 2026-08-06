@@ -723,3 +723,68 @@ def test_proxy_problem_wins_over_platform_errors():
     reason = cb.avito_unavailable_reason(
         provider="webjson", proxies=None, diag={"reason": "captcha"})
     assert "PROXY_URL" in reason
+
+
+# ── Авито: успешный результат нельзя терять ──────────────────────────
+
+
+def test_successful_parse_is_not_overwritten_by_later_attempt():
+    """В логах было: «июльский парсер: 49 ✅», следом «webJSON итого 0» — и
+    пользователь видел «Avito: 0». Следующие пути идут только при пустом
+    результате."""
+    import inspect
+    src = inspect.getsource(cb._avito_scheduled_fetch_unlocked)
+    start = src.index("Июльский оригинал")
+    tail = src[start:start + 2500]
+    idx = tail.index("_avito_webjson_search")
+    # Перед повторным вызовом webJSON обязана стоять проверка пустоты.
+    assert "if not parsed:" in tail[:idx]
+
+
+def test_blocked_page_stops_pagination():
+    """Правило рабочей версии: страница заблокирована — остальные не берём."""
+    import inspect
+    src = inspect.getsource(cb._avito_legacy_fetch)
+    assert "_blocked_status" in src
+    assert "дальше не идём" in src
+    # При блокировке не делаем второй запрос тем же адресом.
+    assert "if not text and not _blocked_status[0]:" in src
+
+
+def test_relative_listing_url_still_yields_a_region():
+    """Часть парсеров отдаёт ссылки без домена — регион всё равно нужен."""
+    import perekup_search as ps
+    assert ps._region_of_item({"url": "/omsk/avtomobili/vaz_2110_123"}) == "omsk"
+    assert ps._region_of_item(
+        {"url": "https://www.avito.ru/omsk/avtomobili/vaz_2110_123"}) == "omsk"
+
+
+# ── Уведомления ──────────────────────────────────────────────────────
+
+
+def test_instant_notifications_do_not_require_the_monitor_toggle():
+    """«⚡ Мониторинг» выключен по умолчанию, и «Кто быстрее» молчал у всех."""
+    import inspect
+    src = inspect.getsource(cb._ps_new_listing_loop)
+    # Упоминание в комментарии допустимо, проверки быть не должно.
+    assert 'load_settings(uid).get("monitor_enabled")' not in src
+    assert 'instant_notify' in src
+    assert '_subscription_info(uid)["ended"]' in src
+
+
+def test_every_notification_loop_is_started():
+    """Цикл, который не запущен, не пришлёт ни одного уведомления."""
+    import ast
+    import pathlib
+    tree = ast.parse(pathlib.Path(cb.__file__).with_suffix(".py").read_text(encoding="utf-8"))
+    started = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "create_task" and node.args):
+            arg = node.args[0]
+            if isinstance(arg, ast.Call) and isinstance(arg.func, ast.Name):
+                started.add(arg.func.id)
+    for name in ("_ps_new_listing_loop", "_ps_saved_events_loop", "_ps_reports_loop",
+                 "_ps_comeback_loop", "_trial_notification_loop",
+                 "_price_watch_loop", "_scheduled_broadcast_loop"):
+        assert name in started, name
