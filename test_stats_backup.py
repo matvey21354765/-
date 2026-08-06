@@ -163,3 +163,40 @@ class TestRealBackupShape(unittest.TestCase):
         finally:
             cb._USER_REGISTRY.clear()
             cb._USER_REGISTRY.update(backup)
+
+
+class TestRestoreReport(unittest.TestCase):
+    """Ответ команды должен объяснять, что произошло."""
+
+    def test_report_shows_how_many_records_the_file_had(self):
+        """«Добавлено: 0» без числа записей выглядит как поломка, хотя это
+        просто ответ на свежий маленький бэкап."""
+        import inspect
+        src = inspect.getsource(cb.cmd_restore_stats)
+        self.assertIn("В файле записей", src)
+        self.assertIn("вы ответили на свежий бэкап", src)
+
+    def test_report_mentions_the_saved_backup_when_something_changed(self):
+        import inspect
+        src = inspect.getsource(cb.cmd_restore_stats)
+        self.assertIn("Реестр сохранён в новый бэкап", src)
+
+
+class TestRestoreAcceptsBothWays(unittest.TestCase):
+    """Файл можно и приложить к команде, и ответить на него."""
+
+    def test_document_attached_to_the_command_is_read(self):
+        """Файл с подписью /restore_stats — самый естественный способ, и он
+        молча игнорировался: читался только ответ на сообщение."""
+        import inspect
+        src = inspect.getsource(cb.cmd_restore_stats)
+        self.assertIn('doc = getattr(msg, "document", None)', src)
+        self.assertIn("if doc is None and msg.reply_to_message:", src)
+
+    def test_aiogram_command_filter_sees_captions(self):
+        """Подпись к документу тоже считается командой — иначе обработчик
+        вообще не вызовется."""
+        import inspect
+        from aiogram.filters import Command
+        self.assertIn("message.text or message.caption",
+                      inspect.getsource(Command))

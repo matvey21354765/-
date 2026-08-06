@@ -18145,13 +18145,20 @@ async def cmd_restore_stats(msg: Message):
     global _registry_dirty
     before = len(_USER_REGISTRY)
     added = 0
-    doc = getattr(msg.reply_to_message, "document", None) if msg.reply_to_message else None
+    in_file = None
+    # Файл принимаем двумя способами: приложенным к самой команде (подпись к
+    # документу) и ответом на сообщение с ним. Раньше читался только ответ, и
+    # присланный с подписью файл молча игнорировался.
+    doc = getattr(msg, "document", None)
+    if doc is None and msg.reply_to_message:
+        doc = getattr(msg.reply_to_message, "document", None)
     if doc:
         try:
             f = await bot.get_file(doc.file_id)
             buf = await bot.download_file(f.file_path)
             data = json.loads(buf.read().decode("utf-8"))
             users = data.get("users", data if isinstance(data, dict) else {})
+            in_file = len(users)
             added += merge_registry(_USER_REGISTRY, users)
         except Exception as e:
             await msg.answer(f"❌ Файл не прочитался: {str(e)[:120]}")
@@ -18167,11 +18174,22 @@ async def cmd_restore_stats(msg: Message):
     if added:
         _registry_dirty = True
         await _tg_backup_save(force=True)
+    # Сколько записей было в файле — видно сразу: иначе ответ на «свежий»
+    # маленький бэкап выглядит как «восстановление не сработало».
+    _file_line = f"В файле записей: {in_file}\n" if in_file is not None else ""
+    if added:
+        _tail = "Реестр сохранён в новый бэкап."
+    elif in_file is not None and in_file <= before:
+        _tail = ("Все записи из файла уже есть в реестре.\n"
+                 "Если пользователей было больше — вы ответили на свежий бэкап. "
+                 "Пришлите старый файл и ответьте на него этой же командой.")
+    else:
+        _tail = "Новых записей не нашлось — данные уже на месте либо файл пуст."
     await msg.answer(
         f"📦 <b>Восстановление статистики</b>\n\n"
-        f"Было: {before}\nДобавлено: {added}\nСтало: {len(_USER_REGISTRY)}\n\n"
-        + ("Реестр сохранён в новый бэкап." if added
-           else "Новых записей не нашлось — данные уже на месте либо файл пуст."),
+        + _file_line
+        + f"Было: {before}\nДобавлено: {added}\nСтало: {len(_USER_REGISTRY)}\n\n"
+        + _tail,
         parse_mode="HTML")
 
 
