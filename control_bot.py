@@ -18019,7 +18019,11 @@ def merge_registry(target: dict, restored: dict) -> int:
         if _first:
             cur["first_seen"] = min(_first)
         cur["last_seen"] = max(int(cur.get("last_seen") or 0), int(v.get("last_seen") or 0))
-        cur["username"] = cur.get("username") or v.get("username")
+        # Пустое имя не записываем: иначе в записях без username появляется
+        # null, и повторное восстановление меняет реестр на ровном месте.
+        _name = cur.get("username") or v.get("username")
+        if _name:
+            cur["username"] = _name
         for _key in ("trial_start", "trial_days", "bonus_days"):
             if _key not in cur and _key in v:
                 cur[_key] = v[_key]
