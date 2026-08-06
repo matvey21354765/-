@@ -693,3 +693,26 @@ class TestCardWithoutWhyBlock(SearchTestBase):
         card = self.ps.format_card(lst, now=self.now,
                                    reasons=["Ниже рынка на ~60 000 ₽."])
         self.assertIn("Ниже рынка на ~60 000 ₽.", card)
+
+
+class TestLongRunningListings(SearchTestBase):
+    """Объявление, висящее месяцами, — повод торговаться, а не исчезать."""
+
+    def test_sale_age_counted_from_publication(self):
+        key = self.ingest(price=90_000, _published_ts=self.now - 300 * 86400)
+        lst = self.ps.get_pool_listing(key)
+        reasons = self.ps.bargain_reasons(lst)
+        self.assertTrue(any("в продаже уже" in r for r in reasons), reasons)
+        self.assertEqual(self.ps.category_of(lst, self.now), "bargain")
+
+    def test_fresh_listing_is_not_called_long_running(self):
+        key = self.ingest(price=90_000, _published_ts=self.now - 3600)
+        lst = self.ps.get_pool_listing(key)
+        self.assertFalse(any("в продаже уже" in r
+                             for r in self.ps.bargain_reasons(lst)))
+
+    def test_first_seen_still_used_without_publication_date(self):
+        key = self.ingest(price=90_000, _now=self.now - 40 * 86400)
+        lst = self.ps.get_pool_listing(key)
+        self.assertTrue(any("в продаже уже" in r
+                            for r in self.ps.bargain_reasons(lst)))

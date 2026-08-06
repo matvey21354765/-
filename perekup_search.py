@@ -862,9 +862,15 @@ def bargain_reasons(listing: dict) -> list[str]:
     hist = _pt.price_history(listing.get("listing_key") or "", limit=50)
     if any(h.get("event_type") == "relisted" for h in hist):
         reasons.append("объявление размещено повторно")
-    fs = listing.get("first_seen_at")
-    if fs:
-        days = (time.time() - float(fs)) / 86400.0
+    # Срок продажи считаем от публикации, если площадка её отдала: объявление
+    # может висеть годами, а бот увидел его вчера. Долгая продажа — сама по
+    # себе повод торговаться, и такие машины не должны пропадать из выдачи.
+    since = listing.get("published_at") or listing.get("first_seen_at")
+    if since:
+        try:
+            days = (time.time() - float(since)) / 86400.0
+        except (TypeError, ValueError):
+            days = 0.0
         if days >= 14:
             reasons.append(f"в продаже уже {int(days)} дней")
     return reasons

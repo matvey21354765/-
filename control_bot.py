@@ -3185,6 +3185,99 @@ def _autoru_published_ts(offer: dict) -> float | None:
     return None
 
 
+_AUTORU_OFFER_ANCHOR_RE = re.compile(r'"hash":"[0-9a-f]{6,12}","id":"(\d{9,12})"')
+_AUTORU_URL_ID_RE = re.compile(r"/(\d{9,12})-[0-9a-f]{6,12}")
+
+
+def _json_object_around(text: str, pos: int, limit: int = 400_000):
+    """Разбирает JSON-объект, внутри которого находится позиция pos.
+
+    Идём назад до открывающей скобки этого объекта (пропуская вложенные) и
+    вперёд до её пары. Так из HTML-страницы достаётся объявление целиком, а не
+    угаданный по расстоянию кусок.
+    """
+    depth = 0
+    start = None
+    for i in range(pos - 1, max(-1, pos - limit), -1):
+        ch = text[i]
+        if ch == "}":
+            depth += 1
+        elif ch == "{":
+            if depth == 0:
+                start = i
+                break
+            depth -= 1
+    if start is None:
+        return None
+    depth = 0
+    for j in range(start, min(len(text), start + limit)):
+        ch = text[j]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[start:j + 1])
+                except Exception:
+                    return None
+    return None
+
+
+def _autoru_offer_dates(text: str) -> dict:
+    """{id объявления: момент публикации} со страницы выдачи Auto.ru.
+
+    Дата публикации лежит в JSON каждого объявления, встроенном в страницу.
+    Раньше карточки выдачи уходили без даты, и в шапке стояло «бот впервые
+    увидел» вместо реального времени появления машины.
+    """
+    out: dict[str, float] = {}
+    for m in _AUTORU_OFFER_ANCHOR_RE.finditer(text or ""):
+        offer_id = m.group(1)
+        if offer_id in out:
+            continue
+        obj = _json_object_around(text, m.start())
+        if not isinstance(obj, dict):
+            continue
+        ts = _autoru_published_ts(obj)
+        if ts:
+            out[offer_id] = ts
+    return out
+
+
+def _autoru_url_id(url: str) -> str:
+    m = _AUTORU_URL_ID_RE.search(str(url or ""))
+    return m.group(1) if m else ""
+
+
+def _autoru_attach_dates(items: list, text: str) -> int:
+    """Проставляет объявлениям выдачи реальный момент публикации."""
+    if not items:
+        return 0
+    try:
+        dates = _autoru_offer_dates(text)
+    except Exception as exc:                       # noqa: BLE001
+        print(f"  [Auto.ru] даты не разобрались: {type(exc).__name__}")
+        return 0
+    if not dates:
+        return 0
+    filled = 0
+    now = time.time()
+    for item in items:
+        if item.get("_published_ts"):
+            continue
+        ts = dates.get(_autoru_url_id(item.get("url", "")))
+        if not ts:
+            continue
+        item["_published_ts"] = ts
+        item["_days_on_site"] = max(0, int((now - ts) // 86400))
+        item["_date_known"] = True
+        filled += 1
+    if filled:
+        print(f"  [Auto.ru] дата публикации проставлена у {filled} из {len(items)}")
+    return filled
+
+
 def _autoru_card_photo(card) -> str:
     """Фото из карточки выдачи Auto.ru: src, data-src или самый крупный srcset."""
     for img in card.select("img"):
@@ -3360,6 +3453,7 @@ def _autoru_parse_html(text: str, today) -> list[dict]:
             item["_hot_score"] = hot_score(item)
             results.append(item)
         if results:
+            _autoru_attach_dates(results, text)
             print(f"  [Auto.ru] SSR HTML: {len(results)} объявлений")
             return results
     except Exception as exc:
@@ -3404,6 +3498,7 @@ def _autoru_parse_html(text: str, today) -> list[dict]:
             item["_hot_score"] = hot_score(item)
             results.append(item)
         if results:
+            _autoru_attach_dates(results, text)
             print(f"  [Auto.ru] SSR regex: {len(results)} объявлений")
             return results
 
@@ -11403,6 +11498,55 @@ def _avito_status_for_key(key: tuple, now: float | None = None) -> dict:
         }
 
 
+def avito_unavailable_reason(*, proxies=None, rate_limited_until: float = 0.0,
+                             provider: str = "", diag: dict | None = None,
+                             now: float | None = None) -> str:
+    """Почему Авито не отдал объявления — человеческим языком.
+
+    Без этого в боте было только «Авито временно недоступен», и понять, что
+    именно чинить (прокси, пауза после бана, капча), можно было лишь по логам.
+    Порядок проверок — от того, что чинится настройкой, к тому, что зависит
+    от площадки.
+    """
+    now = time.time() if now is None else float(now)
+    if (provider or "disabled") == "disabled":
+        return "провайдер Авито не настроен (AVITO_PROVIDER)"
+    if not proxies:
+        # WORKING_CONFIG.md: с дата-центрового адреса Авито блокирует сразу,
+        # поэтому пустой прокси — самая частая причина нулевой выдачи.
+        return "не задан прокси (PROXY_URL) — Авито блокирует адреса дата-центров"
+    if rate_limited_until > now:
+        return f"пауза после ограничения, осталось {int((rate_limited_until - now) // 60) + 1} мин"
+    reason = str((diag or {}).get("reason") or "")
+    known = {
+        "captcha": "площадка показала капчу",
+        "blocked": "площадка заблокировала запрос",
+        "proxy_connect_forbidden": "прокси отклонил соединение",
+        "proxy_auth": "прокси не пустил (логин или пароль)",
+        "no_cookies": "нет рабочих cookies",
+        "timeout": "площадка не ответила вовремя",
+        "network_error": "ошибка сети",
+        "parse_error": "ответ не распознан",
+    }
+    for key, text in known.items():
+        if key in reason:
+            return text
+    http = (diag or {}).get("http")
+    if http in (403, 429, 503):
+        return f"площадка ответила {http}"
+    return ""
+
+
+def _avito_unavailable_reason_now() -> str:
+    """Причина недоступности Авито по текущему состоянию бота."""
+    return avito_unavailable_reason(
+        proxies=AVITO_PROXIES or _avito_proxies(),
+        rate_limited_until=_AVITO_RATE_LIMIT_UNTIL,
+        provider=AVITO_PROVIDER,
+        diag=_AVITO_LAST_DIAG,
+    )
+
+
 def _avito_stat_text(status: dict, count: int) -> str:
     """Текст статистики Авито для Telegram."""
     st = status.get("status", "blocked")
@@ -11431,6 +11575,8 @@ def _avito_stat_text(status: dict, count: int) -> str:
         _why = _reasons.get(str(_AVITO_LAST_DIAG.get("reason") or "")[:40], "")
     if not _why and _avito_rate_limited():
         _why = "IP ограничен, пауза"
+    if not _why:
+        _why = _avito_unavailable_reason_now()
     return f"🔴 Avito: 0 ({_why})" if _why else "🔴 Avito: 0"
 
 
@@ -18534,9 +18680,14 @@ async def do_search_for_user(uid: int, reply_to, *, send_cards: bool = True,
                             f"🔵 Показываю {len(drom_fallback)} объявлений с Дрома (цена, фото, описание).".replace(",", " ")
                         )
                     else:
+                        # Причину показываем сразу: иначе «временно недоступен»
+                        # выглядит одинаково и при пустом прокси, и при капче.
+                        _why = _avito_unavailable_reason_now()
                         await reply_to.answer(
-                            f"🔵 Авито временно недоступен — показываю {len(drom_fallback)} объявлений с Дрома "
-                            f"(цена, фото, описание)."
+                            f"🔵 Авито не отдал объявления"
+                            + (f" — {_why}" if _why else "")
+                            + f".\nПоказываю {len(drom_fallback)} объявлений с Дрома "
+                              f"(цена, фото, описание)."
                         )
             except Exception as e:
                 print(f"  [fallback] Дром ошибка: {e}")

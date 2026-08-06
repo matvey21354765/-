@@ -657,3 +657,69 @@ def test_announcement_is_scheduled_for_ten_msk():
     assert (when.hour, when.minute) == (10, 0)
     assert "Большое обновление PerekupDrive" in cb._UPDATE_ANNOUNCEMENT_TEXT
     assert "3-дневный бесплатный доступ" in cb._UPDATE_ANNOUNCEMENT_TEXT
+
+
+# ── Дата публикации прямо из выдачи Auto.ru ──────────────────────────
+
+
+def test_offer_dates_read_from_the_search_page():
+    """Дата лежит в JSON каждого объявления на странице выдачи.
+
+    Раньше карточки уходили без даты, и в шапке стояло «бот впервые увидел»
+    вместо времени, когда машина реально появилась.
+    """
+    with open("autoru.html", encoding="utf-8", errors="replace") as fh:
+        html = fh.read()
+    dates = cb._autoru_offer_dates(html)
+    assert len(dates) >= 30
+    assert all(ts > 0 for ts in dates.values())
+
+
+def test_dates_land_on_the_right_cards():
+    import datetime
+    with open("autoru.html", encoding="utf-8", errors="replace") as fh:
+        html = fh.read()
+    items = cb._autoru_parse_html(html, datetime.date.today())
+    dated = [i for i in items if i.get("_published_ts")]
+    assert len(dated) >= len(items) * 0.8
+    for item in dated:
+        # id из ссылки объявления должен совпасть с id, по которому взята дата.
+        assert cb._autoru_url_id(item["url"])
+        assert item["_days_on_site"] >= 0
+        assert item.get("_date_known")
+
+
+def test_json_object_around_finds_the_whole_offer():
+    text = 'x{"counters":{"a":1},"hash":"abc123","id":"1234567890","price":5}y'
+    pos = text.index('"hash"')
+    obj = cb._json_object_around(text, pos)
+    assert obj and obj["id"] == "1234567890" and obj["price"] == 5
+
+
+def test_url_id_extracted_from_listing_link():
+    assert cb._autoru_url_id(
+        "https://auto.ru/cars/used/sale/vaz/2110/1132753426-5871a155/") == "1132753426"
+    assert cb._autoru_url_id("https://auto.ru/cars/used/") == ""
+
+
+# ── Почему Авито молчит ──────────────────────────────────────────────
+
+
+def test_unavailable_reason_names_the_actual_problem():
+    """«Временно недоступен» одинаково выглядел и при пустом прокси, и при капче."""
+    f = cb.avito_unavailable_reason
+    assert "AVITO_PROVIDER" in f(provider="disabled")
+    assert "PROXY_URL" in f(provider="webjson", proxies=None)
+    assert "пауза" in f(provider="webjson", proxies={"http": "x"},
+                        rate_limited_until=1_000_000 + 300, now=1_000_000)
+    assert "капч" in f(provider="webjson", proxies={"http": "x"},
+                       diag={"reason": "captcha detected"})
+    assert "403" in f(provider="webjson", proxies={"http": "x"}, diag={"http": 403})
+    assert f(provider="webjson", proxies={"http": "x"}, diag={}) == ""
+
+
+def test_proxy_problem_wins_over_platform_errors():
+    """Сначала называем то, что чинится настройкой."""
+    reason = cb.avito_unavailable_reason(
+        provider="webjson", proxies=None, diag={"reason": "captcha"})
+    assert "PROXY_URL" in reason
