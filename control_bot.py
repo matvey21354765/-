@@ -1893,6 +1893,40 @@ async def asave_skipped(uid: int, skipped: set):
 
 # ── Фильтры ─────────────────────────────────────────────────────
 
+# Цена в постах ВК/ТГ: только числа с ЯВНЫМ ценовым маркером. Рядом всегда
+# стоят пробег («233 000 км»), год и объём двигателя, поэтому без маркера бот
+# принимал пробег за цену (Elantra 2018 показывалась за 7 000 ₽).
+_PRICE_FULL_RE = re.compile(
+    r"(\d{1,3}(?:[\s\u00a0.,]\d{3})+|\d{5,9})\s*(?:₽|руб\w*|р\.)", re.IGNORECASE)
+# (?<!\d) — иначе «185000т.р.» читается как «5000 т.р.» = 5 млн
+_PRICE_THOUS_RE = re.compile(
+    r"(?<!\d)(\d{1,4})\s*(?:тыс\w*|т\.?\s?р\b|т\.?р\.)", re.IGNORECASE)
+_PRICE_WORD_RE = re.compile(
+    r"цена\D{0,12}?(\d{1,3}(?:[\s\u00a0.,]\d{3})+|\d{4,9})", re.IGNORECASE)
+
+
+def _price_from_post_text(text: str) -> int:
+    """Цена из свободного текста объявления (ВК/Telegram/Юла)."""
+    t = " ".join((text or "").split())
+    if not t:
+        return 0
+    vals: list[int] = []
+    for m in _PRICE_FULL_RE.finditer(t):
+        d = re.sub(r"\D", "", m.group(1))
+        if d:
+            vals.append(int(d))
+    for m in _PRICE_THOUS_RE.finditer(t):
+        d = re.sub(r"\D", "", m.group(1))
+        if d:
+            vals.append(int(d) * 1000)
+    for m in _PRICE_WORD_RE.finditer(t):
+        d = re.sub(r"\D", "", m.group(1))
+        if d:
+            vals.append(int(d))
+    vals = [v for v in vals if 10_000 <= v <= 99_000_000]
+    return max(vals) if vals else 0
+
+
 def parse_price(s: str) -> int | None:
     """Parse one advertised price without gluing unrelated numbers together."""
     text = str(s or "").replace("\xa0", " ").strip().lower()
@@ -18731,7 +18765,8 @@ async def do_search_for_user(uid: int, reply_to, *, send_cards: bool = True,
     for _it in items:
         if _it.get("_price_int", 0):
             continue
-        _p = parse_price(f"{_it.get('title','')} {_it.get('description','')}")
+        _p = _price_from_post_text(
+            f"{_it.get('title','')} {_it.get('description','')}")
         if _p and 10_000 <= _p <= 99_000_000:
             _it["_price_int"] = _p
             _it["price"] = f"{_p:,} ₽".replace(",", " ")

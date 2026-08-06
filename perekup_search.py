@@ -813,15 +813,32 @@ def listing_age_hours(listing: dict, now: float | None = None) -> tuple[float, b
     return max(0.0, (now - float(fs)) / 3600.0), False
 
 
+def _plural(n: int, one: str, few: str, many: str) -> str:
+    """Русское склонение: 1 минуту, 2 минуты, 5 минут."""
+    n = abs(int(n))
+    if n % 10 == 1 and n % 100 != 11:
+        return one
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return few
+    return many
+
+
 def age_label(listing: dict, now: float | None = None) -> str:
     hours, exact = listing_age_hours(listing, now)
     if hours < 1:
-        base = f"{max(1, int(hours * 60))} минут назад"
+        m = max(1, int(hours * 60))
+        base = f"{m} {_plural(m, 'минуту', 'минуты', 'минут')} назад"
     elif hours < 24:
-        base = f"{int(hours)} ч назад"
+        h = int(hours)
+        base = f"{h} {_plural(h, 'час', 'часа', 'часов')} назад"
     else:
-        base = f"{int(hours // 24)} дн назад"
-    return base if exact else f"{base} (бот впервые увидел)"
+        d = int(hours // 24)
+        base = f"{d} {_plural(d, 'день', 'дня', 'дней')} назад"
+    if exact:
+        return base
+    # Точное время публикации площадка не отдала — говорим об этом честно,
+    # но коротко, чтобы не путать с реальным возрастом объявления.
+    return f"{base} (бот впервые увидел)"
 
 
 def category_of(listing: dict, now: float | None = None) -> str:
