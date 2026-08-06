@@ -821,8 +821,8 @@ def test_pause_serves_the_last_successful_result():
     """В паузе отдаём последнюю успешную выдачу, а не пустоту."""
     import inspect
     src = inspect.getsource(cb._avito_cached_result)
-    start = src.index("if _avito_rate_limited():")
-    window = src[start:start + 800]
+    start = src.index("_paused = _avito_rate_limited()")
+    window = src[start:start + 900]
     assert "allow_stale=True" in window
     assert "_AVITO_PRODUCTION_STATE.cached" in window
 
@@ -876,8 +876,8 @@ def test_live_search_uses_the_july_scraper_first():
     july = body.index("_avito_july_scraper")
     webjson = body.index("_avito_webjson_search")
     assert july < webjson, "июльский парсер должен вызываться раньше webJSON"
-    # webJSON — только когда июльский путь пуст.
-    assert "if not _direct:" in body[july:webjson]
+    # webJSON — только когда июльский путь пуст (и мы не в паузе).
+    assert "if not _direct and not _paused:" in body[july:webjson]
 
 
 def test_july_scraper_respects_the_time_budget():
@@ -932,3 +932,48 @@ def test_fallback_respects_the_time_budget():
     src = inspect.getsource(cb._avito_july_scraper)
     tail = src[src.index("дочитываем без фильтра"):]
     assert "_budget" in tail
+
+
+# ── Пауза не должна глушить рабочий путь ─────────────────────────────
+
+
+def test_pause_does_not_silence_the_july_path():
+    """Паузу включают 403 от webJSON, а объявления отдаёт июльский парсер.
+
+    Если в паузу не пробовать вообще ничего, пользователь гарантированно
+    получает ноль — при том что рабочий путь мог бы ответить.
+    """
+    import inspect
+    body = inspect.getsource(cb._avito_cached_result)
+    body = body[body.index('if AVITO_PROVIDER == "webjson":'):]
+    # В паузу сначала отдаём кэш…
+    assert body.index("пауза после ограничения — отдаём") < body.index("_avito_july_scraper(")
+    # …а если его нет — короткий заход июльским парсером.
+    assert "коротким заходом" in body
+    assert "_pages = 2 if _paused" in body
+
+
+def test_webjson_is_skipped_while_paused():
+    """webJSON в паузу не трогаем: его же отказы паузу и включают."""
+    import inspect
+    body = inspect.getsource(cb._avito_cached_result)
+    assert "if not _direct and not _paused:" in body
+
+
+def test_blocked_first_page_skips_the_fallback_too():
+    """Запасной путь бьёт по тому же адресу — при бане это продлевает бан."""
+    import inspect
+    src = inspect.getsource(cb._avito_july_scraper)
+    assert "_AVITO_PAGE1_BLOCKED and not results" in src
+    assert "запасной путь не пробуем" in src
+
+
+def test_cache_is_preferred_over_any_network_call():
+    """Свежий кэш и диск идут раньше любых запросов — так поиск переживает
+    и перезапуск контейнера, и паузу."""
+    import inspect
+    body = inspect.getsource(cb._avito_cached_result)
+    body = body[body.index('if AVITO_PROVIDER == "webjson":'):]
+    net = min(body.index("_avito_july_scraper("), body.index("_avito_webjson_search("))
+    assert body.index("if _cached_now and _fresh_enough") < net
+    assert body.index("выдача из сохранённой на диске") < net

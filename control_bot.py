@@ -7453,7 +7453,11 @@ def _avito_july_scraper(region: str, pages: int = 5, price_min: int = 0, price_m
         _min_results = max(1, int(os.getenv("AVITO_MIN_RESULTS", "25")))
     except (TypeError, ValueError):
         _min_results = 25
-    if len(results) < _min_results and (price_min > 0 or price_max < 99_000_000):
+    # Если первая страница заблокирована, запасной путь бьёт по тому же
+    # адресу и только продлевает бан — правило из WORKING_CONFIG.md.
+    if _AVITO_PAGE1_BLOCKED and not results:
+        print("  [Авито] стр.1 заблокирована — запасной путь не пробуем")
+    elif len(results) < _min_results and (price_min > 0 or price_max < 99_000_000):
         print(f"  [Авито] с ценовым фильтром {len(results)} — дочитываем без фильтра")
         import requests as _req_fb
         fb_results: list[dict] = []
@@ -11849,16 +11853,23 @@ def _avito_cached_result(
         # не отдаём: поднимаем последнюю успешную выдачу из постоянного хранилища.
         # Раньше здесь возвращался пустой список из памяти, и пользователь видел
         # «Avito: 0», хотя объявления были собраны получасом раньше.
-        if _avito_rate_limited():
-            if _cached_now:
-                return _cached_now
+        _paused = _avito_rate_limited()
+        if _paused and _cached_now:
+            return _cached_now
+        if _paused:
             _stale, _meta = _AVITO_PRODUCTION_STATE.cached(
                 _avito_persistent_key(key), allow_stale=True)
             if _stale:
                 print(f"[Avito] пауза после ограничения — отдаём последнюю "
                       f"успешную выдачу: {len(_stale)} объявлений")
                 return list(_stale)
-            return _cached_now
+            # Отдавать нечего. Июльский путь пробуем даже в паузу: это
+            # единственный, который в боевых логах отдаёт объявления, а
+            # webJSON её и вызывает своими 403. Он сам останавливается на
+            # первой же заблокированной странице, поэтому стоит один-два
+            # запроса — дешевле, чем гарантированный ноль у пользователя.
+            print("[Avito] пауза, но кэша нет — пробуем июльский парсер "
+                  "коротким заходом")
         try:
             # ПЕРВЫМ — июльский парсер: именно он в боевых логах отдаёт
             # объявления («brace-JSON (urlPath) извлёк 49», «июльский парсер:
@@ -11866,9 +11877,11 @@ def _avito_cached_result(
             # 403/429. Раньше живой поиск шёл сразу в webJSON и приносил ноль,
             # хотя рабочий путь был рядом и использовался только планировщиком.
             _direct = []
+            # В паузу идём коротким заходом: две страницы вместо десяти.
+            _pages = 2 if _paused else int(os.getenv("AVITO_PAGES", "10"))
             try:
                 _direct = _avito_july_scraper(
-                    region, pages=int(os.getenv("AVITO_PAGES", "10")),
+                    region, pages=_pages,
                     price_min=price_min, price_max=price_max,
                     sort_by_date=sort_by_date,
                     brand="" if brand == "any" else brand,
@@ -11878,8 +11891,9 @@ def _avito_cached_result(
                           f"{len(_direct)} объявлений ✅")
             except Exception as _je:
                 print(f"[Avito] июльский парсер: {str(_je)[:90]}")
-            # webJSON — только если июльский путь ничего не дал.
-            if not _direct:
+            # webJSON — только если июльский путь ничего не дал и мы не в паузе:
+            # именно его 403 и 439 эту паузу обычно и включают.
+            if not _direct and not _paused:
                 _direct = _avito_webjson_search(
                     region, price_min=price_min, price_max=price_max,
                     sort_by_date=sort_by_date,
