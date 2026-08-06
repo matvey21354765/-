@@ -17992,6 +17992,50 @@ def _db_users() -> dict:
 
 # ── Бэкап реестра в Telegram (закреплённый документ) — работает без БД ──
 _BACKUP_MSG_ID = None
+#: Сколько пользователей было в последнем сохранённом бэкапе. Нужен, чтобы не
+#: затирать полную копию частичной.
+_LAST_BACKUP_COUNT = [0]
+#: Копия бэкапа на диске — второй источник восстановления, не зависящий от чата.
+_STATS_BACKUP_FILE = USERS_DIR / "stats_backup.json"
+
+
+def merge_registry(target: dict, restored: dict) -> int:
+    """Вливает восстановленный реестр в текущий, не теряя ни одной записи.
+
+    Счётчики берём максимальные, первое появление — самое раннее: копии из
+    разных источников могут отставать друг от друга.
+    """
+    added = 0
+    for k, v in (restored or {}).items():
+        if not isinstance(v, dict):
+            continue
+        cur = target.get(k)
+        if not cur:
+            target[k] = dict(v)
+            added += 1
+            continue
+        cur["searches"] = max(int(cur.get("searches") or 0), int(v.get("searches") or 0))
+        _first = [x for x in (cur.get("first_seen"), v.get("first_seen")) if x]
+        if _first:
+            cur["first_seen"] = min(_first)
+        cur["last_seen"] = max(int(cur.get("last_seen") or 0), int(v.get("last_seen") or 0))
+        cur["username"] = cur.get("username") or v.get("username")
+        for _key in ("trial_start", "trial_days", "bonus_days"):
+            if _key not in cur and _key in v:
+                cur[_key] = v[_key]
+    return added
+
+
+def _restore_stats_from_disk() -> int:
+    """Поднимает реестр из копии на диске. Возвращает, сколько записей добавлено."""
+    try:
+        if not _STATS_BACKUP_FILE.exists():
+            return 0
+        data = json.loads(_STATS_BACKUP_FILE.read_text(encoding="utf-8"))
+        return merge_registry(_USER_REGISTRY, data.get("users", {}))
+    except Exception as e:
+        print(f"  [stats] копия с диска не прочиталась: {str(e)[:80]}")
+        return 0
 
 
 async def _tg_backup_save(force: bool = False) -> str:
@@ -18017,13 +18061,39 @@ async def _tg_backup_save(force: bool = False) -> str:
             _pinned = True
         except Exception as pe:
             print(f"  [tg-backup] закрепить не удалось: {str(pe)[:60]}")
+        # Старый бэкап удаляем ТОЛЬКО если новый не меньше. Иначе один сбой
+        # восстановления (реестр поднялся частично) стирал последнюю полную
+        # копию — и статистика пропадала безвозвратно.
+        _prev = int(_LAST_BACKUP_COUNT[0] or 0)
+        _now_count = len(_USER_REGISTRY)
         if _BACKUP_MSG_ID and _BACKUP_MSG_ID != msg.message_id:
-            try:
-                await bot.delete_message(admin, _BACKUP_MSG_ID)
-            except Exception:
-                pass
+            if _now_count >= _prev:
+                try:
+                    await bot.delete_message(admin, _BACKUP_MSG_ID)
+                except Exception:
+                    pass
+            else:
+                print(f"  [tg-backup] ⚠️ реестр уменьшился ({_prev} → {_now_count}) — "
+                      f"прежний бэкап оставлен")
+                try:
+                    await bot.send_message(
+                        admin,
+                        f"⚠️ Реестр уменьшился: было {_prev}, стало {_now_count}.\n"
+                        f"Прежний бэкап НЕ удалён — восстановить: ответьте на него "
+                        f"командой <code>/restore_stats</code>.",
+                        parse_mode="HTML")
+                except Exception:
+                    pass
         _BACKUP_MSG_ID = msg.message_id
+        _LAST_BACKUP_COUNT[0] = _now_count
         _registry_dirty = False
+        # Вторая копия — на диск. Переживает перезапуск, если том сохраняется,
+        # и не зависит от того, уцелел ли закреп в чате.
+        try:
+            _STATS_BACKUP_FILE.parent.mkdir(parents=True, exist_ok=True)
+            _STATS_BACKUP_FILE.write_text(payload, encoding="utf-8")
+        except Exception as _fe:
+            print(f"  [tg-backup] копия на диск: {str(_fe)[:60]}")
         return f"✅ сохранено ({len(_USER_REGISTRY)} польз.)" + ("" if _pinned else " ⚠️ но не закреплено")
     except Exception as e:
         print(f"  [tg-backup] {str(e)[:80]}")
@@ -18056,6 +18126,49 @@ async def _tg_backup_restore():
             print(f"  [tg-backup] восстановлено {len(restored)} пользователей из Telegram")
     except Exception as e:
         print(f"  [tg-backup] restore: {str(e)[:80]}")
+
+
+@dp.message(Command("restore_stats"))
+async def cmd_restore_stats(msg: Message):
+    """Восстанавливает статистику из файла бэкапа (админ).
+
+    Способ 1: ответить командой на сообщение с stats_backup.json.
+    Способ 2: просто /restore_stats — возьмём копию с диска и закреплённый
+    документ в чате.
+    """
+    if msg.from_user.id not in ADMIN_IDS:
+        return
+    global _registry_dirty
+    before = len(_USER_REGISTRY)
+    added = 0
+    doc = getattr(msg.reply_to_message, "document", None) if msg.reply_to_message else None
+    if doc:
+        try:
+            f = await bot.get_file(doc.file_id)
+            buf = await bot.download_file(f.file_path)
+            data = json.loads(buf.read().decode("utf-8"))
+            users = data.get("users", data if isinstance(data, dict) else {})
+            added += merge_registry(_USER_REGISTRY, users)
+        except Exception as e:
+            await msg.answer(f"❌ Файл не прочитался: {str(e)[:120]}")
+            return
+    else:
+        added += await asyncio.get_running_loop().run_in_executor(
+            None, _restore_stats_from_disk)
+        try:
+            await _tg_backup_restore()
+        except Exception:
+            pass
+        added = len(_USER_REGISTRY) - before
+    if added:
+        _registry_dirty = True
+        await _tg_backup_save(force=True)
+    await msg.answer(
+        f"📦 <b>Восстановление статистики</b>\n\n"
+        f"Было: {before}\nДобавлено: {added}\nСтало: {len(_USER_REGISTRY)}\n\n"
+        + ("Реестр сохранён в новый бэкап." if added
+           else "Новых записей не нашлось — данные уже на месте либо файл пуст."),
+        parse_mode="HTML")
 
 
 async def _tg_backup_loop():
@@ -22554,10 +22667,20 @@ async def main():
                 cur["username"] = cur.get("username") or _v.get("username")
     except Exception:
         pass
+    # Копия на диске — не зависит от того, уцелел ли закреп в чате.
+    try:
+        _from_disk = await loop.run_in_executor(None, _restore_stats_from_disk)
+        if _from_disk:
+            print(f"  [реестр] с диска восстановлено {_from_disk} пользователей")
+    except Exception:
+        pass
     try:
         await _tg_backup_restore()
     except Exception:
         pass
+    # Запоминаем размер восстановленного реестра: бэкап меньше этого числа не
+    # должен затирать прежнюю копию.
+    _LAST_BACKUP_COUNT[0] = len(_USER_REGISTRY)
     _registry_dirty = True  # сохранить собранный реестр при первом бэкапе
     print(f"  [реестр] загружено пользователей: {len(_USER_REGISTRY)}")
     # Username бота берём ВСЕГДА из Telegram (get_me) — это единственный
