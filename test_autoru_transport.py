@@ -855,8 +855,42 @@ def test_avito_serves_disk_cache_after_restart():
     import inspect
     src = inspect.getsource(cb._avito_cached_result)
     start = src.index('if AVITO_PROVIDER == "webjson":')
-    head = src[start:start + 3000]
+    head = src[start:]
     assert "_AVITO_PRODUCTION_STATE.cached" in head
     assert "выдача из сохранённой на диске" in head
     # Диск проверяется ДО обращения в сеть.
-    assert head.index("_AVITO_PRODUCTION_STATE.cached") < head.index("_avito_webjson_search")
+    assert head.index("выдача из сохранённой на диске") < head.index("_avito_july_scraper")
+
+
+# ── Живой поиск идёт тем путём, который реально отдаёт объявления ────
+
+
+def test_live_search_uses_the_july_scraper_first():
+    """В боевых логах объявления отдаёт именно июльский парсер
+    («brace-JSON (urlPath) извлёк 49», «июльский парсер: 49 ✅»), а webJSON
+    на том же адресе получает 403/429. Живой поиск обязан идти первым путём."""
+    import inspect
+    src = inspect.getsource(cb._avito_cached_result)
+    start = src.index('if AVITO_PROVIDER == "webjson":')
+    body = src[start:]
+    july = body.index("_avito_july_scraper")
+    webjson = body.index("_avito_webjson_search")
+    assert july < webjson, "июльский парсер должен вызываться раньше webJSON"
+    # webJSON — только когда июльский путь пуст.
+    assert "if not _direct:" in body[july:webjson]
+
+
+def test_july_scraper_respects_the_time_budget():
+    """Обход не должен выходить за время, которое ждёт живой поиск."""
+    import inspect
+    src = inspect.getsource(cb._avito_july_scraper)
+    assert "_avito_budget_sec()" in src
+    assert "бюджет" in src
+
+
+def test_july_scraper_stops_when_first_page_is_blocked():
+    """Правило рабочей версии: первая страница заблокирована — дальше не идём."""
+    import inspect
+    src = inspect.getsource(cb._avito_july_scraper)
+    assert "_AVITO_PAGE1_BLOCKED" in src
+    assert "остальные страницы пропускаем" in src

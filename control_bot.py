@@ -7424,7 +7424,15 @@ def _avito_july_scraper(region: str, pages: int = 5, price_min: int = 0, price_m
     # И если первая страница заблокирована — остальные не пробуем вообще.
     results = []
     globals()["_AVITO_PAGE1_BLOCKED"] = False
+    # Бюджет времени: живой поиск ждёт источник ограниченное время, и лучше
+    # отдать собранные страницы, чем быть оборванным на середине с нулём.
+    _budget = _avito_budget_sec()
+    _started = time.time()
     for _p in range(1, pages + 1):
+        if results and (time.time() - _started) >= _budget:
+            print(f"  [Авито] бюджет {_budget:.0f}с исчерпан на стр.{_p} — "
+                  f"отдаём {len(results)} объявлений")
+            break
         _batch = _fetch_page(_p)
         results.extend(_batch)
         if _AVITO_PAGE1_BLOCKED:
@@ -11825,17 +11833,33 @@ def _avito_cached_result(
                 return list(_stale)
             return _cached_now
         try:
-            # В ЖИВОМ поиске важна скорость: webJSON отвечает за секунды и даёт
-            # ~50 объявлений со страницы. Июльский парсер сначала перебирает
-            # API-методы (все 403, ~20с) — для интерактива это слишком долго,
-            # он остаётся для фонового планировщика.
-            _direct = _avito_webjson_search(
-                region, price_min=price_min, price_max=price_max,
-                sort_by_date=sort_by_date,
-                brand="" if brand == "any" else brand,
-                pages=int(os.getenv("AVITO_PAGES", "10")),
-                allow_buy=_spfa_user_search_active(),
-            )
+            # ПЕРВЫМ — июльский парсер: именно он в боевых логах отдаёт
+            # объявления («brace-JSON (urlPath) извлёк 49», «июльский парсер:
+            # 49 объявлений ✅»), тогда как webJSON на том же адресе получает
+            # 403/429. Раньше живой поиск шёл сразу в webJSON и приносил ноль,
+            # хотя рабочий путь был рядом и использовался только планировщиком.
+            _direct = []
+            try:
+                _direct = _avito_july_scraper(
+                    region, pages=int(os.getenv("AVITO_PAGES", "10")),
+                    price_min=price_min, price_max=price_max,
+                    sort_by_date=sort_by_date,
+                    brand="" if brand == "any" else brand,
+                ) or []
+                if _direct:
+                    print(f"[Avito] июльский парсер (живой поиск): "
+                          f"{len(_direct)} объявлений ✅")
+            except Exception as _je:
+                print(f"[Avito] июльский парсер: {str(_je)[:90]}")
+            # webJSON — только если июльский путь ничего не дал.
+            if not _direct:
+                _direct = _avito_webjson_search(
+                    region, price_min=price_min, price_max=price_max,
+                    sort_by_date=sort_by_date,
+                    brand="" if brand == "any" else brand,
+                    pages=int(os.getenv("AVITO_PAGES", "10")),
+                    allow_buy=_spfa_user_search_active(),
+                )
             if _direct:
                 with _AVITO_SCHEDULE_LOCK:
                     entry["items"] = _direct[:500]
