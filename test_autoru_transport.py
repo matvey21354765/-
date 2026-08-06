@@ -650,13 +650,20 @@ def test_missed_broadcast_is_not_sent_days_later():
     assert cb.due_broadcasts(rows, now + 25 * 3600) == []
 
 
-def test_announcement_is_scheduled_for_ten_msk():
-    import datetime
-    msk = datetime.timezone(datetime.timedelta(hours=3))
-    when = datetime.datetime.fromtimestamp(cb._UPDATE_ANNOUNCEMENT_AT, msk)
-    assert (when.hour, when.minute) == (10, 0)
-    assert "Большое обновление PerekupDrive" in cb._UPDATE_ANNOUNCEMENT_TEXT
-    assert "3-дневный бесплатный доступ" in cb._UPDATE_ANNOUNCEMENT_TEXT
+def test_no_broadcast_is_scheduled_by_default():
+    """Плановых рассылок нет: анонс обновления снят с расписания."""
+    import inspect
+    src = inspect.getsource(cb._scheduled_broadcast_loop)
+    assert "schedule_broadcast(" not in src
+    assert "drop_cancelled_broadcasts" in src
+
+
+def test_cancelled_broadcast_is_removed_from_the_schedule():
+    """Даже если строка осталась в файле, отменённая рассылка не уйдёт."""
+    rows = [{"id": "update-2026-08-06", "send_at": 1, "sent_at": None},
+            {"id": "other", "send_at": 2, "sent_at": None}]
+    left = cb.drop_cancelled_broadcasts(rows)
+    assert [r["id"] for r in left] == ["other"]
 
 
 # ── Дата публикации прямо из выдачи Auto.ru ──────────────────────────
