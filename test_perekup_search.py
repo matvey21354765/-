@@ -367,7 +367,7 @@ class TestCardAndSummary(SearchTestBase):
         lst = self.ps.get_pool_listing(key)
         head = self.ps.format_card(lst, now=self.now).splitlines()[0]
         self.assertIn("Опубликовано:", head)
-        self.assertIn("8 дн назад", head)
+        self.assertIn("8 дней назад", head)
         self.assertNotIn("впервые увидел", head)
 
     def test_card_says_when_platform_gave_no_date(self):
