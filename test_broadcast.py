@@ -131,3 +131,20 @@ class TestScheduleIsEmpty(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCorruptedCacheDoesNotBreakMonitor(unittest.TestCase):
+    """Монитор падал с «'str' object has no attribute 'get'» и молчал."""
+
+    def test_strings_are_filtered_out(self):
+        mixed = [{"url": "a"}, "мусор", None, {"url": "b"}, 42]
+        self.assertEqual(cb._only_listings(mixed), [{"url": "a"}, {"url": "b"}])
+
+    def test_non_list_becomes_empty(self):
+        self.assertEqual(cb._only_listings("строка"), [])
+        self.assertEqual(cb._only_listings(None), [])
+
+    def test_monitor_sanitizes_the_cache(self):
+        import inspect
+        src = inspect.getsource(cb._global_monitor_loop)
+        assert "_only_listings" in src

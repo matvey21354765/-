@@ -11797,6 +11797,19 @@ def _avito_cached_result(
         _fresh_enough = (time.time() - float(entry.get("updated_at", 0) or 0)) < 600
         if _cached_now and _fresh_enough:
             return _cached_now
+        # Память пуста после перезапуска контейнера, а на диске лежит последняя
+        # удачная выдача. Раньше бот в этот момент шёл в сеть и, если его
+        # успевали перезапустить снова, пользователь так и видел «Avito: 0».
+        if not _cached_now:
+            _saved, _saved_meta = _AVITO_PRODUCTION_STATE.cached(
+                _avito_persistent_key(key), allow_stale=False)
+            if _saved:
+                with _AVITO_SCHEDULE_LOCK:
+                    entry["items"] = list(_saved)
+                    entry["updated_at"] = float(_saved_meta.get("cached_at") or time.time())
+                print(f"[Avito] выдача из сохранённой на диске: {len(_saved)} "
+                      f"объявлений (возраст {int(_saved_meta.get('age_seconds') or 0)}с)")
+                return list(_saved)
         # Если Авито в паузе после бана — новых запросов не делаем, но и пустоту
         # не отдаём: поднимаем последнюю успешную выдачу из постоянного хранилища.
         # Раньше здесь возвращался пустой список из памяти, и пользователь видел
@@ -18087,6 +18100,18 @@ def _save_cache(uid: int, items: list[dict]):
         pass
 
 
+def _only_listings(value) -> list[dict]:
+    """Оставляет из сохранённого кэша только объявления.
+
+    В кэше попадались строки вместо словарей (обрезанный или старый формат
+    файла), и монитор падал с «'str' object has no attribute 'get'», молча
+    теряя уведомления для пользователя.
+    """
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
 def _load_cache(uid: int) -> list[dict]:
     # Сначала из PostgreSQL
     try:
@@ -18097,14 +18122,14 @@ def _load_cache(uid: int) -> list[dict]:
             row = cur.fetchone()
             cur.close()
             if row:
-                return json.loads(row[0])
+                return _only_listings(json.loads(row[0]))
     except Exception:
         pass
     # Fallback: файл
     try:
         f = user_dir(uid) / "last_search.json"
         if f.exists():
-            return json.loads(f.read_text(encoding="utf-8"))
+            return _only_listings(json.loads(f.read_text(encoding="utf-8")))
     except Exception:
         pass
     return []
@@ -20730,8 +20755,9 @@ async def _global_monitor_loop():
                         continue
 
                     # Считаем рыночную цену по ВСЕМУ каталогу (raw + авито референс) — чем больше, тем точнее
-                    cached = _search_cache.get(uid) or _load_cache(uid)
-                    pool = rank_by_market_price(raw + avito_ref + cached + new_items)
+                    cached = _only_listings(_search_cache.get(uid) or _load_cache(uid))
+                    pool = rank_by_market_price(
+                        _only_listings(raw + avito_ref + cached + new_items))
                     new_urls = {x["url"] for x in new_items}
 
                     # Enrich Avito items with DealScore and seller analysis.

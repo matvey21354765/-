@@ -844,3 +844,19 @@ def test_start_screen_offers_recommendations():
     import inspect
     src = inspect.getsource(cb._ps_send_start_screen)
     assert "pd_recommend" in src
+
+
+def test_avito_serves_disk_cache_after_restart():
+    """После перезапуска память пуста, а на диске лежит последняя выдача.
+
+    Раньше бот в этот момент шёл в сеть, и если контейнер успевали
+    перезапустить снова, поиск так и показывал «Avito: 0».
+    """
+    import inspect
+    src = inspect.getsource(cb._avito_cached_result)
+    start = src.index('if AVITO_PROVIDER == "webjson":')
+    head = src[start:start + 3000]
+    assert "_AVITO_PRODUCTION_STATE.cached" in head
+    assert "выдача из сохранённой на диске" in head
+    # Диск проверяется ДО обращения в сеть.
+    assert head.index("_AVITO_PRODUCTION_STATE.cached") < head.index("_avito_webjson_search")
