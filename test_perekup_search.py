@@ -716,3 +716,61 @@ class TestLongRunningListings(SearchTestBase):
         lst = self.ps.get_pool_listing(key)
         self.assertTrue(any("в продаже уже" in r
                             for r in self.ps.bargain_reasons(lst)))
+
+
+class TestDealersAreHidden(SearchTestBase):
+    """Дилеры и автосалоны в выдаче не нужны — пользователь ищет частника."""
+
+    def setUp(self):
+        super().setUp()
+        self.ps.save_search(1, region="perm", price_max=300_000)
+
+    def test_text_signs_of_a_dealer(self):
+        self.assertTrue(self.ps.is_dealer({"seller": "ООО Рольф"}))
+        self.assertTrue(self.ps.is_dealer({"title": "Автосалон Фаворит"}))
+        self.assertTrue(self.ps.is_dealer({"description": "официальный дилер, тест-драйв"}))
+        self.assertFalse(self.ps.is_dealer({"title": "Лада Гранта",
+                                            "description": "Один хозяин, гараж"}))
+
+    def test_platform_signs_of_a_dealer(self):
+        self.assertTrue(self.ps.is_dealer({"seller_type": "company"}))
+        self.assertTrue(self.ps.is_dealer({"seller_type": "COMMERCIAL"}))
+        self.assertTrue(self.ps.is_dealer({"_is_dealer": True}))
+        self.assertFalse(self.ps.is_dealer({"seller_type": "private"}))
+
+    def test_dealer_listing_never_reaches_the_feed(self):
+        self.ingest(price=200_000, url="https://drom.ru/salon", source="drom",
+                    title="Kia Rio, 2015", seller="ООО Автоцентр",
+                    _photo_url="http://a/1.jpg", description="Официальный дилер, тест-драйв",
+                    _published_ts=self.now - 600)
+        private = self.ingest(price=200_000, url="https://drom.ru/chastnik", source="drom",
+                              title="Kia Rio, 2015", _photo_url="http://a/2.jpg",
+                              description="Один хозяин, вложений не требует",
+                              _published_ts=self.now - 600)
+        keys = [x["listing_key"] for x in self.ps.search_listings(1, "fresh", now=self.now)]
+        self.assertEqual(keys, [private])
+
+    def test_dealer_flag_is_stored_in_the_pool(self):
+        key = self.ingest(price=200_000, url="https://drom.ru/s1", source="drom",
+                          seller="ООО Рольф")
+        self.assertEqual(self.ps.get_pool_listing(key)["is_dealer"], 1)
+
+    def test_repeat_ingest_does_not_clear_the_flag(self):
+        """Второй обход может прийти без имени продавца — салон остаётся салоном."""
+        key = self.ingest(price=200_000, url="https://drom.ru/s2", source="drom",
+                          seller="ООО Рольф")
+        self.ps.ingest_listing(self.item(price=200_000, url="https://drom.ru/s2",
+                                         source="drom"), now=self.now)
+        self.assertEqual(self.ps.get_pool_listing(key)["is_dealer"], 1)
+
+    def test_dealer_prices_do_not_skew_the_market(self):
+        # Цены разные: одинаковые схлопываются дедупликацией эталона.
+        for i, price in enumerate((95_000, 100_000, 105_000)):
+            self.ingest(price=price, url=f"https://avito.ru/p{i}", source="avito",
+                        title="ВАЗ-2114, 2008")
+        for i, price in enumerate((380_000, 400_000, 420_000, 440_000, 460_000)):
+            self.ingest(price=price, url=f"https://avito.ru/d{i}", source="avito",
+                        title="ВАЗ-2114, 2008", seller="ООО Автосалон")
+        res = self.ps.market_price("vaz", "vaz 2114", 2008, "perm")
+        self.assertEqual(res["price"], 100_000)
+        self.assertEqual(res["sample"], 3)

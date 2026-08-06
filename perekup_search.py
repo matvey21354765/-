@@ -80,6 +80,36 @@ _NOT_RUNNING_RE = re.compile(
 )
 _BARGAIN_RE = re.compile(r"(торг|уступ|срочно|обмен)", re.IGNORECASE)
 
+# Дилеры, автосалоны и перепродавцы: их объявления пользователю не нужны —
+# он ищет машину у частника. Список пополняется ботом из DEALER_KEYWORDS,
+# чтобы правила совпадали со старой выдачей.
+DEALER_KEYWORDS: list[str] = [
+    "ооо ", "зао ", "пао ", " ип,", " ип.", "официальный дилер", "автодилер",
+    "автосалон", "автоцентр", "автохолдинг", "автогруп", "автогрупп",
+    "trade-in", "трейд-ин", "автосупермаркет", "car dealer",
+    "в наличии и под заказ", "отдел продаж", "тест-драйв",
+    "гарантия завода", "официальная гарантия", "выкуп авто", "автоподбор",
+    "комиссионная продажа", "кредит и лизинг", "рассрочка от салона",
+]
+#: Значения seller_type площадок, означающие компанию.
+_DEALER_SELLER_TYPES = {"company", "shop", "dealer", "commercial", "professional"}
+
+
+def is_dealer(item: dict) -> bool:
+    """True, если объявление от дилера, салона или перекупа-компании.
+
+    Проверяем и текст (название салона обычно в заголовке, описании или имени
+    продавца), и явные признаки площадки: тип продавца и флаги парсеров.
+    """
+    if item.get("_is_dealer") or item.get("is_dealer"):
+        return True
+    seller_type = str(item.get("seller_type") or item.get("_seller_type") or "").lower()
+    if seller_type in _DEALER_SELLER_TYPES:
+        return True
+    text = " ".join(str(item.get(k) or "") for k in
+                    ("title", "description", "seller", "_seller_name")).lower()
+    return any(k in text for k in DEALER_KEYWORDS)
+
 # «Без ограничения» по цене (та же константа, что и в control_bot.NO_PRICE_LIMIT)
 NO_PRICE_LIMIT = 99_000_000
 
@@ -146,6 +176,10 @@ def init_db() -> None:
         _pool_cols = {r[1] for r in cur.execute("PRAGMA table_info(listing_pool)")}
         if "market_basis" not in _pool_cols:
             cur.execute("ALTER TABLE listing_pool ADD COLUMN market_basis TEXT")
+        # Признак дилера считается один раз при попадании в пул: у объявления
+        # в базе уже нет ни имени продавца, ни типа аккаунта.
+        if "is_dealer" not in _pool_cols:
+            cur.execute("ALTER TABLE listing_pool ADD COLUMN is_dealer INTEGER DEFAULT 0")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_pool_seen ON listing_pool(last_seen_at)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_pool_model ON listing_pool(brand, model, year)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_pool_region ON listing_pool(region, price)")
@@ -500,23 +534,27 @@ def ingest_listing(item: dict, now: float | None = None) -> dict:
             parse_year(item), int(item.get("mileage") or 0), detect_condition(item),
             str(item.get("description") or "")[:1000],
             photo_of(item),
+            1 if is_dealer(item) else 0,
         )
         if row is None:
             conn.execute(
                 """INSERT INTO listing_pool (listing_key, source, title, url, price, region,
                        brand, model, year, mileage, condition, description, photo,
-                       published_at, first_seen_at, last_seen_at, status)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'active')""",
+                       is_dealer, published_at, first_seen_at, last_seen_at, status)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'active')""",
                 (key,) + vals + (pub, now, now),
             )
         else:
             conn.execute(
                 # Пустое фото/описание при повторном обходе НЕ должно затирать
                 # уже сохранённое: иначе у части карточек пропадает картинка.
+                # Признак дилера, наоборот, только усиливаем: если хотя бы один
+                # обход распознал салон, объявление остаётся дилерским.
                 """UPDATE listing_pool SET source=?, title=?, url=?, price=?, region=?,
                        brand=?, model=?, year=?, mileage=?, condition=?,
                        description=COALESCE(NULLIF(?,''), description),
                        photo=COALESCE(NULLIF(?,''), photo),
+                       is_dealer=MAX(COALESCE(is_dealer,0), ?),
                        published_at=COALESCE(?, published_at),
                        last_seen_at=?, status='active'
                  WHERE listing_key=?""",
@@ -604,8 +642,10 @@ def avito_market_price(brand: str, model: str, year: int, region: str = "",
     y_lo = year - MARKET_YEAR_TOLERANCE if year else 0
     y_hi = year + MARKET_YEAR_TOLERANCE if year else 9999
     scope = _region_scope(region)
+    # Дилерские цены заметно выше частных и завышают медиану — в эталон рынка
+    # они не идут (так же считает и обычная выдача бота).
     sql = ["SELECT listing_key, title, description, price, region, condition",
-           "FROM listing_pool WHERE price > 0 AND brand=?"]
+           "FROM listing_pool WHERE price > 0 AND COALESCE(is_dealer,0)=0 AND brand=?"]
     args: list[Any] = [brand]
     src_list = [s for s in (sources or ()) if s]
     if src_list:
@@ -1009,6 +1049,11 @@ def _pool_candidates(user_id: int, category: str, now: float,
     for r in rows:
         d = dict(r)
         if d["listing_key"] in hidden:
+            continue
+        # Дилеры и автосалоны в выдаче не нужны: пользователь ищет частника.
+        # Проверяем и сохранённый признак, и текст — на случай объявлений,
+        # попавших в пул до появления флага.
+        if int(d.get("is_dealer") or 0) or is_dealer(d):
             continue
         if not matches_search(d, search):
             continue

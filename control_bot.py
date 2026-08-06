@@ -21047,6 +21047,16 @@ try:
 except Exception:
     pass
 
+# Единый список признаков дилера: разделы постоянного поиска должны отсекать
+# салоны по тем же словам, что и обычная выдача.
+try:
+    for _kw in DEALER_KEYWORDS:
+        _kw = str(_kw or "").lower()
+        if _kw and _kw not in _ps.DEALER_KEYWORDS:
+            _ps.DEALER_KEYWORDS.append(_kw)
+except Exception:
+    pass
+
 
 def _sync_active_search(uid: int, s: dict | None = None) -> dict | None:
     """Переносит настройки пользователя в постоянный поиск (одна активная запись).
