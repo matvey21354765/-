@@ -67,7 +67,10 @@ requests.get(url, timeout=8, headers=_HEADERS, proxies=_avito_proxies())
   «Avito: 0…3». Теперь, если по городу из ленты набралось меньше
   `AVITO_MIN_REGION_ITEMS` объявлений, бот автоматически дочитывает настоящим
   поиском webJSON — см. `_avito_direct_region_search`. Правильная настройка
-  по-прежнему `AVITO_PROVIDER=webjson`);
+  по-прежнему `AVITO_PROVIDER=webjson`. С 06.08.2026 код сам приводит
+  `rest_app` к `webjson` — вернуть прежнее поведение можно только через
+  `AVITO_FORCE_PROVIDER=1`. Провайдер по умолчанию, если переменная не задана,
+  теперь тоже `webjson`, а не `disabled`);
 - капча Авито публично не решается никем — все рабочие парсеры обходят её
   репутацией IP.
 
