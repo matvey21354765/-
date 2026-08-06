@@ -788,3 +788,52 @@ def test_every_notification_loop_is_started():
                  "_ps_comeback_loop", "_trial_notification_loop",
                  "_price_watch_loop", "_scheduled_broadcast_loop"):
         assert name in started, name
+
+
+# ── Пауза после бана не должна означать пустую выдачу ────────────────
+
+
+def test_rotated_ip_shortens_the_pause(monkeypatch):
+    """Ограничение висит на прежнем адресе: со свежим ждать десять минут незачем."""
+    monkeypatch.setattr(cb, "_AVITO_RATE_LIMIT_UNTIL", 0.0)
+    monkeypatch.setattr(cb, "_rotate_proxy_ip", lambda **kw: True)
+    cb._avito_note_rate_limit(600)
+    left = cb._AVITO_RATE_LIMIT_UNTIL - cb.time.time()
+    assert 0 < left <= 120, left
+
+
+def test_without_rotation_the_pause_stays_long(monkeypatch):
+    monkeypatch.setattr(cb, "_AVITO_RATE_LIMIT_UNTIL", 0.0)
+    monkeypatch.setattr(cb, "_rotate_proxy_ip", lambda **kw: False)
+    cb._avito_note_rate_limit(600)
+    left = cb._AVITO_RATE_LIMIT_UNTIL - cb.time.time()
+    assert left > 300, left
+
+
+def test_pause_serves_the_last_successful_result():
+    """В паузе отдаём последнюю успешную выдачу, а не пустоту."""
+    import inspect
+    src = inspect.getsource(cb._avito_cached_result)
+    start = src.index("if _avito_rate_limited():")
+    window = src[start:start + 800]
+    assert "allow_stale=True" in window
+    assert "_AVITO_PRODUCTION_STATE.cached" in window
+
+
+def test_broken_photo_is_replaced_in_sections():
+    """Telegram на недоступной ссылке отвечает «failed to get HTTP URL».
+
+    В разделах фото проверяется и при отказе подменяется другим со страницы
+    объявления; в обычной выдаче запасного фото нет, поэтому там карточка
+    просто уходит текстом — лишний запрос на каждую карточку не нужен.
+    """
+    import inspect
+    src = inspect.getsource(cb._ps_usable_photo)
+    assert "_photo_is_loadable" in src
+    assert "_fetch_listing_details" in src
+
+
+def test_start_screen_offers_recommendations():
+    import inspect
+    src = inspect.getsource(cb._ps_send_start_screen)
+    assert "pd_recommend" in src

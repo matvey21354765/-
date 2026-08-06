@@ -770,17 +770,32 @@ def _avito_rate_limited() -> bool:
     return time.time() < _AVITO_RATE_LIMIT_UNTIL
 
 def _avito_note_rate_limit(seconds: int = 600) -> None:
-    """Авито ограничил IP. Сразу меняем IP (чтобы забанненный «отдыхал») и
-    выдерживаем общую паузу — иначе бот продолжает долбить и продлевает бан."""
+    """Авито ограничил IP. Сразу меняем IP (чтобы забаненный «отдыхал») и
+    выдерживаем паузу — иначе бот продолжает долбить и продлевает бан.
+
+    Если адрес удалось сменить, длинная пауза не нужна: ограничение висит на
+    прежнем IP, а запрос пойдёт с нового. Раньше бот в любом случае молчал
+    десять минут и всё это время отдавал «Avito: 0».
+    """
     global _AVITO_RATE_LIMIT_UNTIL
     if time.time() < _AVITO_RATE_LIMIT_UNTIL:
         return
-    _AVITO_RATE_LIMIT_UNTIL = time.time() + seconds
-    print(f"  [Авито] IP ограничен → меняем IP и ждём {seconds // 60} мин")
+    rotated = False
     try:
-        _rotate_proxy_ip(min_interval=0)   # освобождаем забаненный адрес
+        rotated = bool(_rotate_proxy_ip(min_interval=0))   # освобождаем адрес
     except Exception:
-        pass
+        rotated = False
+    try:
+        short = max(30, int(os.getenv("AVITO_ROTATED_PAUSE_SEC", "60")))
+    except (TypeError, ValueError):
+        short = 60
+    pause = short if rotated else seconds
+    _AVITO_RATE_LIMIT_UNTIL = time.time() + pause
+    if rotated:
+        print(f"  [Авито] IP ограничен → взят свежий адрес, пауза {pause} с")
+    else:
+        print(f"  [Авито] IP ограничен, сменить адрес не вышло → ждём "
+              f"{pause // 60} мин")
 
 
 # ── Темп запросов к Авито ────────────────────────────────────────────
@@ -11782,8 +11797,19 @@ def _avito_cached_result(
         _fresh_enough = (time.time() - float(entry.get("updated_at", 0) or 0)) < 600
         if _cached_now and _fresh_enough:
             return _cached_now
-        # Если Авито в паузе после бана — даже не пробуем, отдаём кэш мгновенно.
+        # Если Авито в паузе после бана — новых запросов не делаем, но и пустоту
+        # не отдаём: поднимаем последнюю успешную выдачу из постоянного хранилища.
+        # Раньше здесь возвращался пустой список из памяти, и пользователь видел
+        # «Avito: 0», хотя объявления были собраны получасом раньше.
         if _avito_rate_limited():
+            if _cached_now:
+                return _cached_now
+            _stale, _meta = _AVITO_PRODUCTION_STATE.cached(
+                _avito_persistent_key(key), allow_stale=True)
+            if _stale:
+                print(f"[Avito] пауза после ограничения — отдаём последнюю "
+                      f"успешную выдачу: {len(_stale)} объявлений")
+                return list(_stale)
             return _cached_now
         try:
             # В ЖИВОМ поиске важна скорость: webJSON отвечает за секунды и даёт
@@ -16273,6 +16299,9 @@ async def _ps_send_start_screen(target, uid: int):
         "Отключить: ⚙️ Настройки → 🌙 Мгновенные.",
     ]
     kb = InlineKeyboardMarkup(inline_keyboard=[
+        # Первым — готовый ответ на вопрос «что смотреть»: три лучшие машины
+        # из всех разделов с объяснением, почему именно они.
+        [InlineKeyboardButton(text="🎯 Что открыть сейчас", callback_data="pd_recommend")],
         [InlineKeyboardButton(text=f"🚨 Кто быстрее ({counts.get('fresh', 0)})",
                               callback_data="pd_cat|fresh|0"),
          InlineKeyboardButton(text=f"🔥 Новые сегодня ({counts.get('today', 0)})",
@@ -18295,6 +18324,9 @@ async def send_batch(chat_id: int, uid: int, offset: int):
         kb = InlineKeyboardMarkup(inline_keyboard=[row1, row2, row3, row4])
 
         # URL-only режим: не качаем фото на сервер, отдаём Telegram прямую ссылку.
+        # Здесь ссылку заранее не проверяем: это запрос на каждую карточку, а
+        # запасного фото всё равно нет — при отказе карточка уходит текстом.
+        # Проверка с подменой фото живёт в разделах (_ps_usable_photo).
         photo_url = item.get("_photo_url", "")
         if photo_url:
             try:
