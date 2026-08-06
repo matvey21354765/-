@@ -7446,8 +7446,15 @@ def _avito_july_scraper(region: str, pages: int = 5, price_min: int = 0, price_m
     # Глобальный fallback: если 0 результатов — пробуем без ценового фильтра.
     # Авито часто отдаёт CAPTCHA именно на URL с pmin/pmax, поэтому сканируем
     # несколько страниц обычного списка и фильтруем по цене на нашей стороне.
-    if not results and (price_min > 0 or price_max < 99_000_000):
-        print(f"  [Авито] 0 результатов с ценовым фильтром — пробуем без фильтра")
+    # Порог, ниже которого выдача считается бедной и стоит дочитать общий
+    # список. Раньше запасной путь включался только при ПОЛНОМ нуле, поэтому
+    # на узком бюджете (300–500 тыс.) Авито отдавал единицы объявлений.
+    try:
+        _min_results = max(1, int(os.getenv("AVITO_MIN_RESULTS", "25")))
+    except (TypeError, ValueError):
+        _min_results = 25
+    if len(results) < _min_results and (price_min > 0 or price_max < 99_000_000):
+        print(f"  [Авито] с ценовым фильтром {len(results)} — дочитываем без фильтра")
         import requests as _req_fb
         fb_results: list[dict] = []
 
@@ -7519,11 +7526,31 @@ def _avito_july_scraper(region: str, pages: int = 5, price_min: int = 0, price_m
                 print(f"  [Авито] fallback стр.{fb_page} ошибка: {e}")
                 return []
 
-        with ThreadPoolExecutor(max_workers=5) as ex:
-            futs = [ex.submit(_fetch_fallback_page, p) for p in range(1, 4)]
-            for fut in as_completed(futs):
-                fb_results.extend(fut.result())
-        results = fb_results
+        # ПОСЛЕДОВАТЕЛЬНО, а не в пять потоков: одновременные запросы с одного
+        # адреса — главный признак бота, после которого Авито банит подсеть
+        # (WORKING_CONFIG.md). Именно за параллельным запасным путём в логах
+        # шли 429 и 403. Заодно читаем больше страниц: общий список без
+        # ценового фильтра — самый продуктивный источник на узком бюджете.
+        try:
+            _fb_pages = max(1, int(os.getenv("AVITO_FALLBACK_PAGES",
+                                             os.getenv("AVITO_PAGES", "10"))))
+        except (TypeError, ValueError):
+            _fb_pages = 10
+        for _fb_p in range(1, _fb_pages + 1):
+            if (time.time() - _started) >= _budget:
+                print(f"  [Авито] бюджет исчерпан на запасной стр.{_fb_p} — "
+                      f"отдаём {len(fb_results)}")
+                break
+            _fb_batch = _fetch_fallback_page(_fb_p)
+            if not _fb_batch:
+                break
+            fb_results.extend(_fb_batch)
+            if _fb_p < _fb_pages:
+                _avito_pace()
+        # Дополняем то, что уже нашли с ценовым фильтром, а не заменяем его.
+        _known_urls = {it.get("url") for it in results}
+        results = results + [it for it in fb_results
+                             if it.get("url") and it["url"] not in _known_urls]
         print(f"  [Авито] fallback итого: {len(results)} объявлений")
 
     print(f"  [Авито] итого {len(results)} объявлений")

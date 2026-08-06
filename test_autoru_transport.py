@@ -894,3 +894,41 @@ def test_july_scraper_stops_when_first_page_is_blocked():
     src = inspect.getsource(cb._avito_july_scraper)
     assert "_AVITO_PAGE1_BLOCKED" in src
     assert "остальные страницы пропускаем" in src
+
+
+# ── Больше объявлений с Авито, не сжигая адрес ───────────────────────
+
+
+def test_fallback_runs_when_results_are_few_not_only_zero():
+    """На узком бюджете ценовой URL отдаёт единицы объявлений.
+
+    Запасной путь (общий список без ценового фильтра) включался только при
+    полном нуле, поэтому в выдаче стояло «Avito: 6».
+    """
+    import inspect
+    src = inspect.getsource(cb._avito_july_scraper)
+    assert "AVITO_MIN_RESULTS" in src
+    assert "len(results) < _min_results" in src
+
+
+def test_fallback_adds_to_results_instead_of_replacing():
+    import inspect
+    src = inspect.getsource(cb._avito_july_scraper)
+    assert "results = results + [it for it in fb_results" in src
+
+
+def test_fallback_pages_are_sequential():
+    """Пять одновременных запросов с одного адреса — прямой путь к бану."""
+    import inspect
+    src = inspect.getsource(cb._avito_july_scraper)
+    tail = src[src.index("дочитываем без фильтра"):]
+    assert "ThreadPoolExecutor" not in tail
+    assert "_avito_pace()" in tail
+    assert "AVITO_FALLBACK_PAGES" in tail
+
+
+def test_fallback_respects_the_time_budget():
+    import inspect
+    src = inspect.getsource(cb._avito_july_scraper)
+    tail = src[src.index("дочитываем без фильтра"):]
+    assert "_budget" in tail
