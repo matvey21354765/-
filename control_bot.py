@@ -20352,6 +20352,11 @@ async def _trial_notification_loop():
                         if not is_paid and threshold // 24 in notified:
                             notified.append(marker)
                             continue
+                        # Ночью не будим: порог остаётся выполненным, и
+                        # напоминание уйдёт следующей проверкой после тишины.
+                        if await asyncio.get_running_loop().run_in_executor(
+                                None, lambda u=uid_int: _ps.in_quiet_hours(u)):
+                            break
                         what = "подписка" if is_paid else "тестовый период"
                         head = (f"⏳ <b>{what.capitalize()} заканчивается через "
                                 f"{human}</b>")
@@ -20387,8 +20392,15 @@ async def _push_notification_loop():
     """Раз в 2-3 дня отправляет всем пользователям мотивирующее сообщение для возврата в бот."""
     import random as _rnd
     loop = asyncio.get_running_loop()
-    # Первый запуск — подождать сутки чтобы не слать сразу после перезапуска
-    await asyncio.sleep(24 * 3600)
+    # Первый обход — через час. Сутки ожидания означали, что при частых
+    # перезапусках контейнера цикл не срабатывал НИ РАЗУ: он не доживал до
+    # первой проверки. Частота писем при этом не растёт — интервал в 2–3 дня
+    # хранится по пользователю в last_push_notif.txt.
+    try:
+        _first_delay = max(60, int(os.getenv("PUSH_FIRST_DELAY_SEC", "3600")))
+    except (TypeError, ValueError):
+        _first_delay = 3600
+    await asyncio.sleep(_first_delay)
     while True:
         now = time.time()
         if USERS_DIR.exists():
@@ -20410,6 +20422,10 @@ async def _push_notification_loop():
                         txt = await loop.run_in_executor(None, notif_file.read_text)
                         last_sent = float(txt.strip() or 0)
                     if now - last_sent < _PUSH_INTERVAL_SEC:
+                        continue
+                    # Напоминание — не повод будить человека ночью.
+                    if await loop.run_in_executor(
+                            None, lambda u=uid: _ps.in_quiet_hours(u)):
                         continue
                     msg = _rnd.choice(_PUSH_MESSAGES)
                     await bot.send_message(uid, msg)
@@ -22174,13 +22190,28 @@ except (TypeError, ValueError):
     PS_COMEBACK_MAX_HOURS = 168
 
 
-def _ps_last_activity(uid: int) -> float:
-    """Когда пользователь последний раз писал боту."""
+def _ps_last_activity(uid: int, search: dict | None = None) -> float:
+    """Когда пользователь последний раз писал боту.
+
+    Если записи в реестре нет (например, статистика восстанавливается после
+    сбоя), берём время последнего изменения его поиска. Иначе «молчание»
+    считалось от нуля — сотни тысяч часов, — и напоминания не уходили никому.
+    """
     try:
         u = _USER_REGISTRY.get(str(uid)) or {}
-        return float(u.get("last_seen") or u.get("first_seen") or 0)
+        seen = float(u.get("last_seen") or u.get("first_seen") or 0)
     except (TypeError, ValueError):
-        return 0.0
+        seen = 0.0
+    if seen > 0:
+        return seen
+    for _key in ("updated_at", "created_at"):
+        try:
+            value = float((search or {}).get(_key) or 0)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return 0.0
 
 
 async def _ps_comeback_loop():
@@ -22209,7 +22240,13 @@ async def _ps_comeback_loop():
                         continue
                     if await loop.run_in_executor(None, lambda u=uid: _ps.in_quiet_hours(u)):
                         continue
-                    silent_hours = (now - _ps_last_activity(uid)) / 3600.0
+                    _seen_at = _ps_last_activity(uid, s)
+                    if _seen_at <= 0:
+                        # Ни в реестре, ни в поиске нет отметки времени —
+                        # напоминать не по чему, но и молчать вечно нельзя:
+                        # ждём, пока появится первая активность.
+                        continue
+                    silent_hours = (now - _seen_at) / 3600.0
                     if not (PS_COMEBACK_AFTER_HOURS <= silent_hours <= PS_COMEBACK_MAX_HOURS):
                         continue
                     items = await loop.run_in_executor(
