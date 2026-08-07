@@ -105,10 +105,80 @@ class TestExpiryReminder(unittest.TestCase):
         self.assertLess(send, mark)
 
     def test_thresholds_cover_a_three_day_trial(self):
-        hours = [h for h, _ in cb._ACCESS_REMINDERS]
-        self.assertIn(24, hours)
-        self.assertIn(6, hours)
+        hours = [h for h, _, _, _ in cb._ACCESS_REMINDERS]
+        self.assertIn(24, hours)   # за сутки
+        self.assertIn(3, hours)    # за три часа
+        self.assertIn(0, hours)    # в момент окончания
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestExpiryMessages(unittest.TestCase):
+    """Три письма о конце доступа: за сутки, за 3 часа и в момент окончания."""
+
+    def texts(self, is_paid=False):
+        return [fn(0, is_paid) for _, _, fn, _ in cb._ACCESS_REMINDERS]
+
+    def test_three_stages_at_the_right_hours(self):
+        hours = [h for h, _, _, _ in cb._ACCESS_REMINDERS]
+        self.assertEqual(hours, [24, 3, 0])
+
+    def test_texts_do_not_promise_a_working_bot_after_the_end(self):
+        """Доступ закрывается полностью — обещать работу «с задержкой» нельзя."""
+        for text in self.texts() + self.texts(is_paid=True):
+            self.assertNotIn("задержк", text.lower())
+            self.assertNotIn("позже PRO", text)
+
+    def test_texts_say_what_actually_happens(self):
+        day, hours, ended = self.texts()
+        self.assertIn("доступ закроется", day)
+        self.assertIn("перестанет искать", hours)
+        self.assertIn("отключены", ended)
+
+    def test_prices_come_from_the_tariffs(self):
+        week = cb.SUBSCRIPTION_PLANS["week"]["amount"]
+        month = cb.SUBSCRIPTION_PLANS["month"]["amount"]
+        for text in self.texts():
+            if "Неделя" in text:
+                self.assertIn(str(week), text)
+            self.assertIn(str(month), text)
+
+    def test_month_benefit_is_computed_not_hardcoded(self):
+        self.assertAlmostEqual(cb._month_benefit_ratio(), 1.4, places=1)
+
+    def test_paid_subscriber_sees_subscription_wording(self):
+        day, hours, ended = self.texts(is_paid=True)
+        self.assertIn("подписки", day)
+        self.assertIn("подписка", hours)
+        self.assertIn("Подписка закончилась", ended)
+
+    def test_keyboard_offers_both_plans_and_a_call_to_action(self):
+        labels = [b.text for row in cb._access_reminder_keyboard(0, "🔓 Оформить сейчас").inline_keyboard
+                  for b in row]
+        self.assertTrue(any("Неделя" in x for x in labels), labels)
+        self.assertTrue(any("Месяц" in x for x in labels), labels)
+        self.assertIn("🔓 Оформить сейчас", labels)
+
+
+class TestExpiryDelivery(unittest.TestCase):
+    def test_expired_access_reports_negative_time(self):
+        """Отрицательное значение отличает «только что кончился» от «давно»."""
+        src = inspect.getsource(cb._access_left_seconds)
+        self.assertNotIn("max(0.0", src)
+        self.assertIn("может быть отрицательным", src)
+
+    def test_long_expired_users_are_not_pestered(self):
+        src = inspect.getsource(cb._trial_notification_loop)
+        self.assertIn("_ACCESS_ENDED_GRACE_HOURS", src)
+        self.assertGreaterEqual(cb._ACCESS_ENDED_GRACE_HOURS, 1)
+
+    def test_each_stage_is_sent_once(self):
+        src = inspect.getsource(cb._trial_notification_loop)
+        self.assertIn("marker in notified", src)
+        self.assertIn("notified.append(marker)", src)
+
+    def test_discount_is_added_when_the_user_has_one(self):
+        src = inspect.getsource(cb._trial_notification_loop)
+        self.assertIn("_referral_discount_note", src)

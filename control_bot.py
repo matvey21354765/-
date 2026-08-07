@@ -20306,23 +20306,101 @@ async def _price_watch_loop():
 
 
 def _access_left_seconds(uid: int) -> tuple[float, bool]:
-    """(сколько секунд доступа осталось, платная ли подписка)."""
+    """(секунд доступа осталось, платная ли подписка).
+
+    Значение может быть отрицательным — это «доступ закончился столько-то
+    назад». Нужно, чтобы отличить только что истёкший доступ от истёкшего
+    месяц назад и не слать письмо «доступ закончился» кому попало.
+    """
     s = load_settings(uid)
     until = float(s.get("subscription_until", 0) or 0)
     now = time.time()
     if until > now:
         return until - now, True
     t = _trial_info(uid)
-    return max(0.0, float(t["ends_at"]) - now), False
+    left = float(t["ends_at"]) - now
+    # Платил ли когда-нибудь: у такого пользователя речь о подписке, а не о
+    # бесплатном периоде, даже когда она уже закончилась.
+    return left, bool(until > 0)
 
 
-#: Пороги напоминаний в часах. Тест короткий (3 дня), поэтому «за 3 дня»
-#: сработало бы в первый же час — напоминаем за сутки и за шесть часов.
+def _plan_prices_line(uid: int | None = None) -> tuple[int, int]:
+    """(цена недели, цена месяца) для текстов напоминаний."""
+    return (_plan_price(uid, "week")["final"], _plan_price(uid, "month")["final"])
+
+
+def _month_benefit_ratio() -> float:
+    """Во сколько раз месяц выгоднее четырёх недель."""
+    week = int(SUBSCRIPTION_PLANS["week"]["amount"])
+    month = int(SUBSCRIPTION_PLANS["month"]["amount"])
+    return round((week * 4) / month, 1) if month else 1.0
+
+
+def _access_reminder_day(uid: int, is_paid: bool) -> str:
+    """За сутки до конца доступа."""
+    week, month = _plan_prices_line(uid)
+    what = "подписки" if is_paid else "бесплатного доступа"
+    return (
+        f"⏰ <b>До конца {what} остался 1 день</b>\n\n"
+        "Бот ищет выгодные машины под твои фильтры и присылает их первым.\n"
+        "Завтра доступ закроется: поиск, мониторинг и уведомления остановятся.\n\n"
+        "Пока ты не видишь новые объявления — машину забирает другой.\n\n"
+        "💳 Выбери тариф:\n"
+        f"• Неделя — {week} ₽ (попробовать)\n"
+        f"• Месяц — {month} ₽ (выгоднее в {_month_benefit_ratio()} раза)\n\n"
+        "👇 Оформить подписку"
+    )
+
+
+def _access_reminder_hours(uid: int, is_paid: bool) -> str:
+    """За три часа до конца доступа."""
+    week, month = _plan_prices_line(uid)
+    what = "подписка" if is_paid else "бесплатный доступ"
+    return (
+        f"🔥 <b>Через 3 часа заканчивается {what}</b>\n\n"
+        "После этого бот перестанет искать и присылать объявления.\n\n"
+        "Выгодную машину заберёт тот, у кого поиск продолжает работать.\n\n"
+        "Одна удачная сделка — это 50–150 тысяч прибыли.\n"
+        f"Подписка на месяц — {month} ₽."
+    )
+
+
+def _access_reminder_ended(uid: int, is_paid: bool) -> str:
+    """В момент окончания доступа."""
+    week, month = _plan_prices_line(uid)
+    what = "Подписка закончилась" if is_paid else "Бесплатный доступ закончился"
+    return (
+        f"⚡ <b>{what}</b>\n\n"
+        "Поиск, мониторинг и уведомления отключены — новые объявления "
+        "больше не приходят.\n\n"
+        "Восстанови доступ прямо сейчас:\n\n"
+        f"💳 Неделя — {week} ₽\n"
+        f"💳 Месяц — {month} ₽ (рекомендуем)"
+    )
+
+
+#: Пороги напоминаний: (часов до конца, метка, текст, надпись на кнопке).
+#: Тест короткий (3 дня), поэтому «за 3 дня» сработало бы в первый же час.
+#: Ноль — это момент окончания доступа.
 _ACCESS_REMINDERS = (
-    (72, "3 дня"),
-    (24, "1 день"),
-    (6, "6 часов"),
+    (24, "1 день", _access_reminder_day, "💳 Оформить подписку"),
+    (3, "3 часа", _access_reminder_hours, "🔓 Оформить сейчас"),
+    (0, "конец", _access_reminder_ended, "💳 Восстановить доступ"),
 )
+#: Насколько поздно ещё уместно написать «доступ закончился» (часы).
+_ACCESS_ENDED_GRACE_HOURS = 24
+
+
+def _access_reminder_keyboard(uid: int, button: str) -> InlineKeyboardMarkup:
+    """Кнопка оплаты с личной ценой + обычные способы продлить."""
+    rows = []
+    if YOOMONEY_WALLET:
+        for key in SUBSCRIPTION_PLANS:
+            rows.append([InlineKeyboardButton(
+                text=_plan_button_text(uid, key), callback_data=f"yoomoney|{key}")])
+    rows.append([InlineKeyboardButton(text=button, callback_data="open_subscribe")])
+    rows.append([InlineKeyboardButton(text="🎁 Пригласить друга", callback_data="ref_stats")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def _trial_notification_loop():
@@ -20339,17 +20417,19 @@ async def _trial_notification_loop():
                 try:
                     uid_int = int(uid)
                     left, is_paid = _access_left_seconds(uid_int)
-                    if left <= 0:
-                        continue
                     hours_left = left / 3600.0
+                    # Доступ кончился давно — напоминать «только что
+                    # закончился» поздно и навязчиво.
+                    if hours_left < -_ACCESS_ENDED_GRACE_HOURS:
+                        continue
                     notified = u.setdefault("trial_notified", [])
-                    for threshold, human in _ACCESS_REMINDERS:
+                    for threshold, human, build_text, button in _ACCESS_REMINDERS:
                         marker = f"{'sub' if is_paid else 'trial'}:{threshold}"
                         if hours_left > threshold or marker in notified:
                             continue
                         # Старый формат отметок (числа) — чтобы уже
                         # предупреждённые не получили напоминание повторно.
-                        if not is_paid and threshold // 24 in notified:
+                        if not is_paid and threshold and threshold // 24 in notified:
                             notified.append(marker)
                             continue
                         # Ночью не будим: порог остаётся выполненным, и
@@ -20357,26 +20437,18 @@ async def _trial_notification_loop():
                         if await asyncio.get_running_loop().run_in_executor(
                                 None, lambda u=uid_int: _ps.in_quiet_hours(u)):
                             break
-                        what = "подписка" if is_paid else "тестовый период"
-                        head = (f"⏳ <b>{what.capitalize()} заканчивается через "
-                                f"{human}</b>")
-                        if hours_left <= 6:
-                            head = (f"⏳ <b>{what.capitalize()} заканчивается "
-                                    f"сегодня</b>")
+                        text = build_text(uid_int, is_paid)
+                        _discount = _referral_discount_note(uid_int, with_prices=False)
+                        if _discount:
+                            text += "\n\n" + _discount.strip()
                         try:
                             await bot.send_message(
-                                uid_int,
-                                f"{head}\n\n"
-                                "После окончания поиск, мониторинг и уведомления "
-                                "о выгодных авто отключатся.\n\n"
-                                + _referral_discount_note(uid_int)
-                                + "Продлите доступ, чтобы не потерять свежие "
-                                  "объявления.",
-                                parse_mode="HTML",
-                                reply_markup=_subscription_keyboard(uid_int),
+                                uid_int, text, parse_mode="HTML",
+                                reply_markup=_access_reminder_keyboard(uid_int, button),
                             )
                             notified.append(marker)
                             _registry_dirty = True
+                            print(f"  [доступ] напоминание «{human}» → {uid_int}")
                         except Exception:
                             pass
                         break

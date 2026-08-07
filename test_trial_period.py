@@ -192,10 +192,12 @@ class TestAccessExpiryReminders(TrialBase):
             cb.save_settings(uid, s)
 
     def test_thresholds_fit_a_three_day_trial(self):
-        """Порог «за 3 дня» на трёхдневном тесте сработал бы в первый час."""
-        hours = [h for h, _ in cb._ACCESS_REMINDERS]
-        self.assertIn(24, hours)
-        self.assertIn(6, hours)
+        """Порог «за 3 дня» на трёхдневном тесте сработал бы в первый час.
+
+        Ступени: за сутки, за три часа и в момент окончания.
+        """
+        hours = [h for h, _, _, _ in cb._ACCESS_REMINDERS]
+        self.assertEqual(hours, [24, 3, 0])
         self.assertEqual(sorted(hours, reverse=True), hours)
 
 
