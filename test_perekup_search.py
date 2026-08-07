@@ -341,11 +341,19 @@ class TestMarketPrice(SearchTestBase):
         self.assertTrue(res["preliminary"])
 
     def test_refresh_writes_to_pool(self):
+        """Рынок считается по ОСТАЛЬНЫМ объявлениям, без самого себя.
+
+        Иначе медиана тянется к цене объявления, а при единственном похожем
+        просто повторяет её — и объявление отсеивается как «не дешевле рынка».
+        """
         for i, p in enumerate((100_000, 105_000, 110_000, 115_000, 120_000)):
             self.ingest(price=p, url=f"https://avito.ru/m/{i}", title="ВАЗ-2114, 2008")
         key = self.pt.listing_key(self.item(url="https://avito.ru/m/0"))
         self.ps.refresh_market_price(key)
-        self.assertEqual(self.ps.get_pool_listing(key)["market_price"], 110_000)
+        row = self.ps.get_pool_listing(key)
+        # медиана 105/110/115/120 — без собственных 100 000
+        self.assertEqual(row["market_price"], 112_500)
+        self.assertEqual(row["market_sample"], 4)
 
 
 class TestCardAndSummary(SearchTestBase):
@@ -499,9 +507,13 @@ class TestOnlyBest(SearchTestBase):
         self.ps.save_search(1, region="perm", price_max=300_000)
 
     def market(self, price, n=4):
-        """Наполняет пул эталоном Авито, чтобы рынок был известен."""
+        """Наполняет пул эталоном Авито, чтобы рынок был известен.
+
+        Цены слегка разные: одинаковые схлопываются дедупликацией эталона, и
+        выборки не хватает, чтобы оценке рынка можно было доверять.
+        """
         for i in range(n):
-            self.ingest(price=price, url=f"https://avito.ru/ref/{i}",
+            self.ingest(price=price + i * 5_000, url=f"https://avito.ru/ref/{i}",
                         title="ВАЗ-2114, 2008", source="avito",
                         _photo_url="http://a/r.jpg", description=self.GOOD_DESC,
                         _published_ts=self.now - 3600)
@@ -533,8 +545,10 @@ class TestOnlyBest(SearchTestBase):
 
     def test_good_requires_photo_and_description(self):
         """Полной карточка считается только с фото, описанием и ценой не выше рынка."""
+        # market_sample обязателен: по выборке меньше MARKET_TRUST_SAMPLE
+        # оценка рынка не даёт права прятать объявление.
         base = {"photo": "http://a/1.jpg", "description": self.GOOD_DESC,
-                "price": 90_000, "market_price": 150_000}
+                "price": 90_000, "market_price": 150_000, "market_sample": 9}
         self.assertTrue(self.ps.listing_is_good(base))
         self.assertFalse(self.ps.listing_is_good({**base, "photo": ""}))
         self.assertFalse(self.ps.listing_is_good({**base, "description": "ВАЗ 2106"}))
@@ -774,3 +788,64 @@ class TestDealersAreHidden(SearchTestBase):
         res = self.ps.market_price("vaz", "vaz 2114", 2008, "perm")
         self.assertEqual(res["price"], 100_000)
         self.assertEqual(res["sample"], 3)
+
+
+class TestListingIsNotItsOwnMarket(SearchTestBase):
+    """Объявление не может быть эталоном рынка для самого себя.
+
+    Из-за этого медиана из одной записи повторяла цену объявления, оно
+    считалось «не дешевле рынка» и пропадало из разделов — а вместе с ним
+    молчали и мгновенные уведомления «Кто быстрее».
+    """
+
+    only_best = True
+    GOOD_DESC = "Один хозяин, вложений не требует, салон чистый, резина новая"
+
+    def setUp(self):
+        super().setUp()
+        self.ps.save_search(1, region="perm", price_max=500_000)
+
+    def add(self, url, price, ts_offset=-600):
+        return self.ingest(price=price, url=url, source="avito",
+                           title="Kia Rio, 2015", description=self.GOOD_DESC,
+                           _photo_url="http://a/1.jpg",
+                           _published_ts=self.now + ts_offset)
+
+    def test_single_listing_reaches_the_feed(self):
+        key = self.add("https://avito.ru/perm/one", 250_000)
+        keys = [x["listing_key"] for x in self.ps.search_listings(1, "fresh", now=self.now)]
+        self.assertIn(key, keys)
+
+    def test_market_ignores_the_listing_itself(self):
+        key = self.add("https://avito.ru/perm/self", 250_000)
+        res = self.ps.refresh_market_price(key)
+        self.assertEqual(res["sample"], 0)
+        self.assertEqual(res["price"], 0)
+
+    def test_market_counts_only_other_listings(self):
+        key = self.add("https://avito.ru/perm/mine", 250_000)
+        for i, price in enumerate((300_000, 320_000, 340_000, 360_000)):
+            self.add(f"https://avito.ru/perm/ref{i}", price, ts_offset=-5 * 3600)
+        res = self.ps.refresh_market_price(key)
+        self.assertEqual(res["sample"], 4)
+        self.assertEqual(res["price"], 330_000)
+
+    def test_tiny_sample_never_hides_a_listing(self):
+        """По одному-двум похожим объявлениям прятать машину нельзя."""
+        self.assertTrue(self.ps.not_above_market(
+            {"price": 300_000, "market_price": 250_000, "market_sample": 1}))
+        self.assertTrue(self.ps.not_above_market(
+            {"price": 300_000, "market_price": 250_000, "market_sample": 2}))
+
+    def test_trusted_sample_still_hides_overpriced(self):
+        self.assertFalse(self.ps.not_above_market(
+            {"price": 300_000, "market_price": 250_000, "market_sample": 9}))
+        self.assertTrue(self.ps.not_above_market(
+            {"price": 200_000, "market_price": 250_000, "market_sample": 9}))
+
+    def test_overpriced_listing_is_hidden_when_market_is_known(self):
+        for i, price in enumerate((300_000, 320_000, 340_000, 360_000)):
+            self.add(f"https://avito.ru/perm/r{i}", price, ts_offset=-5 * 3600)
+        dear = self.add("https://avito.ru/perm/dear", 480_000)
+        keys = [x["listing_key"] for x in self.ps.search_listings(1, "fresh", now=self.now)]
+        self.assertNotIn(dear, keys)

@@ -627,7 +627,8 @@ def _region_scope(region: str) -> list[str]:
 
 
 def avito_market_price(brand: str, model: str, year: int, region: str = "",
-                       condition: str = "", sources: Iterable[str] = ("avito",)) -> dict:
+                       condition: str = "", sources: Iterable[str] = ("avito",),
+                       exclude_key: str = "") -> dict:
     """Медиана очищенных похожих объявлений.
 
     sources — площадки-эталоны. По умолчанию Авито; market_price() переходит на
@@ -666,6 +667,11 @@ def avito_market_price(brand: str, model: str, year: int, region: str = "",
     prices: list[int] = []
     seen_titles: set[tuple] = set()
     for r in rows:
+        # Само объявление не может быть эталоном для себя: при одном похожем
+        # объявлении «рынок» становился равен его же цене, и объявление
+        # отсеивалось как «не дешевле рынка».
+        if exclude_key and r.get("listing_key") == exclude_key:
+            continue
         if _JUNK_RE.search(f"{r.get('title','')} {r.get('description','')}"):
             continue
         if condition and r.get("condition") and r["condition"] != condition:
@@ -692,7 +698,7 @@ def avito_market_price(brand: str, model: str, year: int, region: str = "",
 
 
 def market_price(brand: str, model: str, year: int, region: str = "",
-                 condition: str = "") -> dict:
+                 condition: str = "", exclude_key: str = "") -> dict:
     """Рыночная цена: сперва по Авито, при пустой выборке — по всем площадкам.
 
     Раньше рынок считался только по Авито. Когда Авито ничего не отдаёт (а это
@@ -700,10 +706,12 @@ def market_price(brand: str, model: str, year: int, region: str = "",
     выдачи, и «ниже рынка» было не с чем сравнивать. Дром/Auto.ru/Юла в пуле
     уже есть — по ним и считаем, честно помечая основу оценки.
     """
-    res = avito_market_price(brand, model, year, region, condition, ("avito",))
+    res = avito_market_price(brand, model, year, region, condition, ("avito",),
+                             exclude_key=exclude_key)
     if int(res.get("sample") or 0) > 0:
         return {**res, "basis": "avito"}
-    res = avito_market_price(brand, model, year, region, condition, ())
+    res = avito_market_price(brand, model, year, region, condition, (),
+                             exclude_key=exclude_key)
     return {**res, "basis": "all" if int(res.get("sample") or 0) else ""}
 
 
@@ -714,7 +722,7 @@ def refresh_market_price(key: str) -> dict:
         return {"price": 0, "sample": 0, "preliminary": True, "basis": ""}
     res = market_price(lst.get("brand", ""), lst.get("model", ""),
                        int(lst.get("year") or 0), lst.get("region", ""),
-                       lst.get("condition", ""))
+                       lst.get("condition", ""), exclude_key=key)
     with _conn() as conn:
         conn.execute(
             "UPDATE listing_pool SET market_price=?, market_sample=?, market_basis=? "
@@ -977,16 +985,26 @@ def has_description(listing: dict) -> bool:
     return len(desc) >= MIN_DESCRIPTION_CHARS
 
 
+#: Минимум похожих объявлений, при котором оценке рынка можно доверять
+#: настолько, чтобы ПРЯТАТЬ по ней объявления.
+MARKET_TRUST_SAMPLE = 3
+
+
 def not_above_market(listing: dict) -> bool:
-    """Цена не выше известного рынка. Неизвестный рынок не считается минусом.
+    """Цена не выше рынка — если рынок вообще известен и ему можно верить.
 
     Требовать «строго ниже рынка» на этапе отбора нельзя: рынок известен не по
     каждой модели, и жёсткое условие выкидывало из выдачи почти всё — из 134
     подходящих объявлений до пользователя доходило 17.
+
+    Оценка по одному-двум похожим объявлениям — это шум: медиана из одной
+    записи просто повторяет чужую цену, и по ней нельзя прятать машину.
     """
     market = int(listing.get("market_price") or 0)
     price = int(listing.get("price") or 0)
     if not market or not price:
+        return True
+    if int(listing.get("market_sample") or 0) < MARKET_TRUST_SAMPLE:
         return True
     return price < market
 
