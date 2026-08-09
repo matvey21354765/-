@@ -841,6 +841,39 @@ def _avito_pace_delay(now: float | None = None, last: float | None = None,
     return round(max(0.0, target - max(0.0, gap)), 3)
 
 
+#: Сколько максимум ждём headless-браузер на ОДИН запрос. Без ограничения он
+#: ждёт до полутора минут и в одиночку съедает весь бюджет обхода, из-за чего
+#: поиск обрывается таймаутом и Авито отдаёт ноль. В WORKING_CONFIG.md
+#: Playwright и так помечен как медленный и ненадёжный.
+try:
+    _AVITO_BROWSER_MAX_SEC = max(25, int(os.getenv("AVITO_BROWSER_MAX_SEC", "40")))
+except (TypeError, ValueError):
+    _AVITO_BROWSER_MAX_SEC = 40
+#: Запас, меньше которого браузер запускать бессмысленно.
+_AVITO_BROWSER_MIN_SEC = _AVITO_BROWSER_MAX_SEC + 5
+#: Цепочка API-методов (мобильный API + поисковики) ВЫКЛЮЧЕНА по умолчанию:
+#: замер показал ~33 секунды впустую, оба пути помечены в WORKING_CONFIG.md
+#: как нерабочие. Включается через AVITO_ENABLE_API_CHAIN=1.
+_AVITO_API_CHAIN_ENABLED = os.getenv("AVITO_ENABLE_API_CHAIN", "0").strip() in ("1", "true", "yes", "on")
+
+#: Браузерный запасной путь ВЫКЛЮЧЕН по умолчанию. Замер: один вызов не
+#: укладывается даже в две минуты, игнорируя собственный таймаут, и в одиночку
+#: срывает весь обход — поиск обрывается, Авито отдаёт ноль. В
+#: WORKING_CONFIG.md Playwright значится в списке «что НЕ работает» («капча и
+#: зависания, к тому же медленно»). Включается через AVITO_BROWSER_FALLBACK=1.
+_AVITO_BROWSER_ENABLED = os.getenv("AVITO_BROWSER_FALLBACK", "0").strip() in ("1", "true", "yes", "on")
+
+
+def _avito_browser_timeout_ms(seconds_left: float) -> int:
+    """timeout_ms для _avito_fetch_html, чтобы вызов уложился в отведённое время.
+
+    Обёртка ждёт (timeout_ms * 2 + wait_ms) / 1000 + 20 секунд, поэтому
+    считаем обратным ходом от допустимой длительности вызова.
+    """
+    wall = min(max(0.0, seconds_left) - 10, _AVITO_BROWSER_MAX_SEC)
+    return int(max(5_000, min(30_000, ((wall - 20) * 1000 - 4_000) / 2)))
+
+
 def _avito_budget_sec() -> float:
     """Сколько секунд парсер Авито может тратить на обход страниц.
 
@@ -7136,13 +7169,18 @@ def _avito_july_scraper(region: str, pages: int = 5, price_min: int = 0, price_m
         return []
 
     # ── Метод 1: API / мобильный сайт / cloudscraper ─────────────
-    print(f"  [Авито] пробуем API-методы для {region}…")
-    api_results = _avito_api_fetch(region, pages, price_min, price_max, today, sort_by_date=sort_by_date, brand=brand)
-    if api_results:
-        print(f"  [Авито] API-метод дал {len(api_results)} объявлений")
-        return api_results
-    # API-методы не дали результатов — пробуем прямой HTML-скрейпинг (методы 2-3)
-    print(f"  [Авито] API дал 0 — пробуем HTML-скрейпинг…")
+    # По умолчанию ВЫКЛЮЧЕН. Замер: цепочка стоит ~33 секунды и отдаёт ноль —
+    # мобильный API возвращает 429, поисковики отдают заглушки. И то и другое
+    # значится в WORKING_CONFIG.md в списке «что НЕ работает». Эти секунды
+    # нужнее самому обходу страниц: из-за них он не укладывался в таймаут
+    # поиска, и Авито показывал ноль. Включается AVITO_ENABLE_API_CHAIN=1.
+    if _AVITO_API_CHAIN_ENABLED:
+        print(f"  [Авито] пробуем API-методы для {region}…")
+        api_results = _avito_api_fetch(region, pages, price_min, price_max, today, sort_by_date=sort_by_date, brand=brand)
+        if api_results:
+            print(f"  [Авито] API-метод дал {len(api_results)} объявлений")
+            return api_results
+        print(f"  [Авито] API дал 0 — пробуем HTML-скрейпинг…")
 
     def _build_url(p: int) -> str:
         qs_parts = ["seller_type=1"]  # только частники
@@ -7169,6 +7207,12 @@ def _avito_july_scraper(region: str, pages: int = 5, price_min: int = 0, price_m
         "Referer": "https://www.avito.ru/",
     }
 
+    # Бюджет времени: живой поиск ждёт источник ограниченное время, и лучше
+    # отдать собранные страницы, чем быть оборванным на середине с нулём.
+    _budget = _avito_budget_sec()
+    _started = time.time()
+    _deadline = _started + _budget
+
     def _fetch_page(p: int) -> list[dict]:
         url = _build_url(p)
         url_has_price_filter = price_max < 99_000_000 or price_min > 0
@@ -7194,7 +7238,17 @@ def _avito_july_scraper(region: str, pages: int = 5, price_min: int = 0, price_m
             # 2. Headless-браузер с прокси (SOCKS5 поддерживает HTTPS, HTTP — нет)
             if AVITO_PROXIES and AVITO_PROXY_PROTOCOL == "http":
                 return None  # HTTP-прокси не поддерживает CONNECT для HTTPS
-            html = _avito_fetch_html(fetch_url)
+            # Браузер ждёт до полутора минут на запрос и вызывается дважды на
+            # страницу — этого хватает, чтобы весь поиск оборвался по таймауту
+            # и Авито отдал ноль. Запускаем его, только если бюджет позволяет.
+            if not _AVITO_BROWSER_ENABLED:
+                return None
+            _left = _deadline - time.time()
+            if _left < _AVITO_BROWSER_MIN_SEC:
+                print(f"  [Авито] на браузер не осталось времени ({int(_left)}с) — пропускаем")
+                return None
+            html = _avito_fetch_html(
+                fetch_url, timeout_ms=_avito_browser_timeout_ms(_left))
             if html and _page_has_listings(html):
                 return html
             return None
@@ -7424,12 +7478,10 @@ def _avito_july_scraper(region: str, pages: int = 5, price_min: int = 0, price_m
     # И если первая страница заблокирована — остальные не пробуем вообще.
     results = []
     globals()["_AVITO_PAGE1_BLOCKED"] = False
-    # Бюджет времени: живой поиск ждёт источник ограниченное время, и лучше
-    # отдать собранные страницы, чем быть оборванным на середине с нулём.
-    _budget = _avito_budget_sec()
-    _started = time.time()
     for _p in range(1, pages + 1):
-        if results and (time.time() - _started) >= _budget:
+        # Бюджет проверяем ВСЕГДА, а не только когда что-то уже нашли: при
+        # нулевом улове обход шёл минутами и обрывался таймаутом поиска.
+        if (time.time() - _started) >= _budget:
             print(f"  [Авито] бюджет {_budget:.0f}с исчерпан на стр.{_p} — "
                   f"отдаём {len(results)} объявлений")
             break

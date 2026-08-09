@@ -977,3 +977,48 @@ def test_cache_is_preferred_over_any_network_call():
     net = min(body.index("_avito_july_scraper("), body.index("_avito_webjson_search("))
     assert body.index("if _cached_now and _fresh_enough") < net
     assert body.index("выдача из сохранённой на диске") < net
+
+
+# ── Авито должен укладываться во время, которое его ждут ─────────────
+
+
+def test_browser_fallback_is_off_by_default():
+    """Замер: один вызов браузера не укладывается и в две минуты, игнорируя
+    свой таймаут, и в одиночку срывает весь обход. В WORKING_CONFIG.md
+    Playwright и так помечен как нерабочий."""
+    assert cb._AVITO_BROWSER_ENABLED is False
+
+
+def test_dead_api_chain_is_off_by_default():
+    """Мобильный API и поисковики стоят ~33 секунды и отдают ноль."""
+    assert cb._AVITO_API_CHAIN_ENABLED is False
+
+
+def test_browser_timeout_fits_the_remaining_budget():
+    """Обёртка ждёт (timeout*2 + wait)/1000 + 20 секунд — считаем обратно."""
+    for left in (120, 60, 46):
+        ms = cb._avito_browser_timeout_ms(left)
+        wall = (ms * 2 + 4000) / 1000 + 20
+        assert wall <= cb._AVITO_BROWSER_MAX_SEC + 1, (left, wall)
+        assert wall <= left, (left, wall)
+
+
+def test_browser_is_skipped_without_spare_time():
+    import inspect
+    src = inspect.getsource(cb._avito_july_scraper)
+    assert "_AVITO_BROWSER_MIN_SEC" in src
+    assert "на браузер не осталось времени" in src
+
+
+def test_budget_is_checked_even_with_zero_results():
+    """При нулевом улове обход шёл минутами и обрывался таймаутом поиска."""
+    import inspect
+    src = inspect.getsource(cb._avito_july_scraper)
+    assert "if (time.time() - _started) >= _budget:" in src
+    assert "if results and (time.time() - _started)" not in src
+
+
+def test_deadline_is_known_before_pages_are_fetched():
+    import inspect
+    src = inspect.getsource(cb._avito_july_scraper)
+    assert src.index("_deadline = _started + _budget") < src.index("def _fetch_page")
