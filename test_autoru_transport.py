@@ -1022,3 +1022,49 @@ def test_deadline_is_known_before_pages_are_fetched():
     import inspect
     src = inspect.getsource(cb._avito_july_scraper)
     assert src.index("_deadline = _started + _budget") < src.index("def _fetch_page")
+
+
+# ── Маршруты Авито: пул РФ SOCKS5 и память об отказах ────────────────
+
+
+def test_july_scraper_tries_the_socks_pool():
+    """WORKING_CONFIG.md обещает пул РФ SOCKS5 после основного прокси, но в
+    рабочем пути его не было: без PROXY_URL запросы уходили с адреса
+    дата-центра, который Авито банит сразу."""
+    import inspect
+    src = inspect.getsource(cb._avito_july_scraper)
+    assert "_avito_socks_routes()" in src
+    assert "_avito_remember_route" in src
+
+
+def test_dead_route_is_not_retried():
+    """Три встроенных SOCKS5 успели умереть, и перебор на каждой странице
+    съедал больше половины бюджета обхода."""
+    cb._AVITO_DEAD_ROUTES.clear()
+    cb._avito_remember_route(None)
+    total = len(cb._avito_socks_routes())
+    assert total >= 1
+    cb._avito_mark_route_dead("РФ-socks1")
+    assert len(cb._avito_socks_routes()) == total - 1
+    cb._AVITO_DEAD_ROUTES.clear()
+
+
+def test_dead_mark_expires():
+    cb._AVITO_DEAD_ROUTES.clear()
+    now = 1_000_000.0
+    cb._avito_mark_route_dead("РФ-socks1", now=now)
+    assert len(cb._avito_socks_routes(now=now + 10)) == 2
+    later = now + cb._AVITO_DEAD_ROUTE_COOLDOWN + 1
+    assert len(cb._avito_socks_routes(now=later)) == 3
+    cb._AVITO_DEAD_ROUTES.clear()
+
+
+def test_successful_route_is_tried_first_and_revived():
+    cb._AVITO_DEAD_ROUTES.clear()
+    cb._avito_mark_route_dead("РФ-socks3")
+    cb._avito_remember_route("РФ-socks3")          # ответил — снимаем пометку
+    routes = cb._avito_socks_routes()
+    assert routes[0][0] == "РФ-socks3"
+    assert len(routes) == 3
+    cb._AVITO_DEAD_ROUTES.clear()
+    cb._avito_remember_route(None)

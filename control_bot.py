@@ -874,6 +874,51 @@ def _avito_browser_timeout_ms(seconds_left: float) -> int:
     return int(max(5_000, min(30_000, ((wall - 20) * 1000 - 4_000) / 2)))
 
 
+#: Маршрут, через который Авито ответил в прошлый раз. Пробуем его первым:
+#: перебор мёртвых прокси на каждой странице съедает бюджет обхода.
+_AVITO_LAST_GOOD_ROUTE: "str | None" = None
+#: Маршруты, которые не отвечают: {тег: до какого времени не трогать}.
+_AVITO_DEAD_ROUTES: "dict[str, float]" = {}
+try:
+    _AVITO_DEAD_ROUTE_COOLDOWN = max(60, int(os.getenv("AVITO_DEAD_ROUTE_SEC", "900")))
+except (TypeError, ValueError):
+    _AVITO_DEAD_ROUTE_COOLDOWN = 900
+
+
+def _avito_remember_route(tag: "str | None") -> None:
+    """Запоминает удачный маршрут и снимает с него пометку «мёртвый»."""
+    global _AVITO_LAST_GOOD_ROUTE
+    _AVITO_LAST_GOOD_ROUTE = tag
+    if tag:
+        _AVITO_DEAD_ROUTES.pop(tag, None)
+
+
+def _avito_mark_route_dead(tag: str, now: float | None = None) -> None:
+    """Прокси не отвечает — не трогаем его ближайшее время.
+
+    Три встроенных SOCKS5 из рабочей версии успели умереть, и перебор на
+    КАЖДОЙ странице съедал больше половины бюджета обхода.
+    """
+    _AVITO_DEAD_ROUTES[tag] = (time.time() if now is None else now) \
+        + _AVITO_DEAD_ROUTE_COOLDOWN
+
+
+def _avito_socks_routes(now: float | None = None) -> "list[tuple[str, dict]]":
+    """Пул РФ SOCKS5 для Авито: живые маршруты, удачный — первым.
+
+    WORKING_CONFIG.md: «чистые российские IP, которые Авито обычно пропускают».
+    Нужен прежде всего там, где основного прокси нет: с адреса дата-центра
+    Авито блокирует сразу.
+    """
+    now = time.time() if now is None else now
+    routes = [(f"РФ-socks{i}", px)
+              for i, px in enumerate(_ru_socks_proxy_dicts(), 1)
+              if _AVITO_DEAD_ROUTES.get(f"РФ-socks{i}", 0) <= now]
+    if _AVITO_LAST_GOOD_ROUTE:
+        routes.sort(key=lambda r: r[0] != _AVITO_LAST_GOOD_ROUTE)
+    return routes
+
+
 def _avito_budget_sec() -> float:
     """Сколько секунд парсер Авито может тратить на обход страниц.
 
@@ -7227,14 +7272,34 @@ def _avito_july_scraper(region: str, pages: int = 5, price_min: int = 0, price_m
             )
 
         def _try_fetch(fetch_url: str) -> str | None:
-            """Пробуем: быстрый прямой запрос → headless-браузер (только без прокси)."""
+            """Основной прокси → пул РФ SOCKS5 → (по желанию) браузер."""
             # 1. Прямой запрос через прокси (если есть) или напрямую
             try:
                 r2 = _req.get(fetch_url, timeout=8, headers=_HEADERS, proxies=_avito_proxies())
                 if r2.status_code == 200 and _page_has_listings(r2.text):
+                    _avito_remember_route(None)
                     return r2.text
             except Exception:
                 pass
+            # 2. Пул РФ SOCKS5 — другой класс адресов, чем основной прокси и
+            # тем более чем адрес сервера, который Авито банит сразу. В
+            # WORKING_CONFIG.md этот шаг описан, но в рабочем пути его не было:
+            # без PROXY_URL запросы уходили с дата-центрового IP и получали бан.
+            for _tag, _px in _avito_socks_routes():
+                if _deadline - time.time() < 12:
+                    break
+                try:
+                    _avito_pace()
+                    r3 = _req.get(fetch_url, timeout=10, headers=_HEADERS, proxies=_px)
+                    if r3.status_code == 200 and _page_has_listings(r3.text):
+                        print(f"  [Авито] прошло через {_tag}")
+                        _avito_remember_route(_tag)
+                        return r3.text
+                except Exception as _se:
+                    # Не достучались — маршрут мёртв, больше не тратим на него
+                    # время в этом обходе и ближайшие минуты.
+                    _avito_mark_route_dead(_tag)
+                    print(f"  [Авито] {_tag} не отвечает: {str(_se)[:60]}")
             # 2. Headless-браузер с прокси (SOCKS5 поддерживает HTTPS, HTTP — нет)
             if AVITO_PROXIES and AVITO_PROXY_PROTOCOL == "http":
                 return None  # HTTP-прокси не поддерживает CONNECT для HTTPS
