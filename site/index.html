@@ -101,35 +101,36 @@
   .halo::after{content:"";position:absolute;top:-5px;left:50%;width:9px;height:9px;margin-left:-4px;border-radius:50%;
     background:var(--accent-hi); box-shadow:0 0 16px var(--accent-hi)}
   @keyframes spin{to{transform:rotate(360deg)}}
-  .phone{position:relative; flex:none; width:214px; border-radius:34px; padding:7px;
+  .phone{position:relative; flex:none; width:188px; border-radius:30px; padding:6px;
     background:linear-gradient(160deg,#2a2144,#0d0a18 45%,#241b3d);
     box-shadow:0 50px 90px -30px rgba(0,0,0,.9), 0 0 0 1px rgba(176,140,255,.16)}
-  .screen{background:var(--ground-2); border-radius:28px; overflow:hidden; padding:13px 11px 8px}
-  .notch{width:64px;height:4px;border-radius:3px;background:#241c3b;margin:0 auto 12px}
+  .screen{background:var(--ground-2); border-radius:25px; overflow:hidden; padding:11px 9px 7px}
+  .notch{width:56px;height:4px;border-radius:3px;background:#241c3b;margin:0 auto 12px}
   .app-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
   .app-top .wordmark{height:10px}
   .app-top .wordmark path{stroke-width:3.4}
-  .avatar{width:24px;height:24px;border-radius:50%;background:linear-gradient(140deg,#6d4bd0,#2b2247);border:1px solid var(--line)}
-  .tabs{display:flex;justify-content:space-between;gap:8px;font-size:9.5px;color:var(--ink-3);border-bottom:1px solid var(--line-soft);padding-bottom:9px}
+  .avatar{width:20px;height:20px;border-radius:50%;background:linear-gradient(140deg,#6d4bd0,#2b2247);border:1px solid var(--line)}
+  .tabs{display:flex;justify-content:space-between;gap:6px;font-size:8.5px;color:var(--ink-3);border-bottom:1px solid var(--line-soft);padding-bottom:9px}
   .tabs b{color:var(--ink);font-weight:650;position:relative}
   .tabs b::after{content:"";position:absolute;left:0;right:0;bottom:-10px;height:2px;background:var(--accent-hi);border-radius:2px}
   .chips{display:flex;gap:5px;margin:12px 0 10px}
-  .chip{font-size:9.5px;padding:4px 9px;border-radius:999px;border:1px solid var(--line);color:var(--ink-3);white-space:nowrap}
+  .chip{font-size:8.5px;padding:3px 8px;border-radius:999px;border:1px solid var(--line);color:var(--ink-3);white-space:nowrap}
   .chip.on{background:var(--accent);border-color:var(--accent);color:#fff}
-  .mk{border:1px solid var(--line-soft);border-radius:14px;padding:11px;margin-bottom:9px;background:rgba(21,15,38,.6)}
-  .mk-head{display:flex;align-items:center;gap:7px;font-size:10px;color:var(--ink-3);margin-bottom:7px}
-  .dot{width:14px;height:14px;border-radius:50%;display:grid;place-items:center;font-size:8px;font-weight:800;color:#0b0817}
-  .mk-head strong{color:var(--ink-2);font-size:10px;letter-spacing:.06em}
-  .tag{margin-left:auto;font-size:8.5px;white-space:nowrap;padding:2px 6px;border-radius:999px;background:rgba(61,220,151,.12);color:var(--yes);border:1px solid rgba(61,220,151,.28)}
-  .q{font-size:12.5px;font-weight:600;line-height:1.35;margin-bottom:6px}
+  .mk{border:1px solid var(--line-soft);border-radius:12px;padding:9px;margin-bottom:8px;background:rgba(21,15,38,.6)}
+  .mk-head{display:flex;align-items:center;gap:6px;font-size:9px;color:var(--ink-3);margin-bottom:7px}
+  .coin{flex:none;display:block;width:14px;height:14px}
+  .coin svg{width:100%;height:100%;display:block;border-radius:50%}
+  .mk-head strong{color:var(--ink-2);font-size:9px;letter-spacing:.06em}
+  .tag{margin-left:auto;font-size:7.5px;white-space:nowrap;padding:2px 6px;border-radius:999px;background:rgba(61,220,151,.12);color:var(--yes);border:1px solid rgba(61,220,151,.28)}
+  .q{font-size:11px;font-weight:600;line-height:1.35;margin-bottom:5px}
   .mk-body{display:flex;align-items:flex-end;gap:8px}
-  .spark{flex:1;height:44px}
+  .spark{flex:1;height:38px}
   .odds{text-align:right;line-height:1.05}
-  .odds b{font-size:19px;font-weight:800;letter-spacing:-.03em}
+  .odds b{font-size:17px;font-weight:800;letter-spacing:-.03em}
   .odds span{font-size:9.5px;font-weight:700;letter-spacing:.1em}
   .mk-foot{display:flex;align-items:center;justify-content:space-between;margin-top:9px}
-  .vol{font-size:9.5px;color:var(--ink-3);border:1px solid var(--line-soft);border-radius:6px;padding:3px 7px}
-  .mini{font-size:10px;font-weight:700;background:var(--accent);color:#fff;border-radius:7px;padding:4px 12px}
+  .vol{font-size:8.5px;color:var(--ink-3);border:1px solid var(--line-soft);border-radius:6px;padding:3px 7px}
+  .mini{font-size:9px;font-weight:700;background:var(--accent);color:#fff;border-radius:7px;padding:4px 12px}
   .tabbar{display:flex;align-items:center;justify-content:space-between;padding:10px 8px 4px;border-top:1px solid var(--line-soft);margin-top:4px;font-size:8.5px;color:var(--ink-3)}
   .tabbar i{display:block;width:15px;height:15px;margin:0 auto 4px;border-radius:4px;border:1.4px solid currentColor;font-style:normal}
   .tabbar .act{color:var(--accent-hi)}
@@ -160,6 +161,7 @@
   .ticker{border-block:1px solid var(--line-soft); background:rgba(16,12,29,.5); overflow:hidden; padding:14px 0}
   .track{display:flex; gap:56px; width:max-content; animation:slide 38s linear infinite}
   @keyframes slide{to{transform:translateX(-50%)}}
+  .tick-coin{width:17px;height:17px}
   .tick{display:flex;align-items:center;gap:10px;font-size:13px;color:var(--ink-2);white-space:nowrap}
   .tick b{color:var(--ink);font-weight:650}
   .tick i{font-style:normal;font-weight:700}
@@ -322,7 +324,7 @@
           <div class="chips"><span class="chip on">Trending</span><span class="chip">New</span><span class="chip">Sports</span></div>
 
           <div class="mk">
-            <div class="mk-head"><span class="dot" style="background:var(--warn)">S</span><strong>SIGMA</strong><span>15m</span><span class="tag">High confidence</span></div>
+            <div class="mk-head"><span class="coin"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="12" fill="#F7931A"/><g fill="none" stroke="#fff" stroke-width="1.7" stroke-linecap="round"><path d="M9 6.6v10.8M11.6 5.4v1.6M11.6 17.4v1.6M14 5.4v1.6M14 17.4v1.6"/><path d="M9 6.6h4.6a2.5 2.5 0 010 5H9M9 11.6h5.2a2.6 2.6 0 010 5.2H9"/></g></svg></span><strong>SIGMA</strong><span>15m</span><span class="tag">High conf.</span></div>
             <p class="q">Will Bitcoin close above $70,000 on May 31?</p>
             <div class="mk-body">
               <svg class="spark" viewBox="0 0 130 44" preserveAspectRatio="none" aria-hidden="true">
@@ -336,7 +338,7 @@
           </div>
 
           <div class="mk">
-            <div class="mk-head"><span class="dot" style="background:var(--accent-hi)">I</span><strong>IMPULSE</strong><span>5m</span></div>
+            <div class="mk-head"><span class="coin"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="12" fill="#627EEA"/><g fill="#fff"><path d="M12 4.2v5.9l4.9 2.2z" opacity=".65"/><path d="M12 4.2 7.1 12.3l4.9-2.2z"/><path d="M12 16.1v3.7l4.9-6.6z" opacity=".65"/><path d="M12 19.8v-3.7l-4.9-2.9z"/><path d="m12 15.2 4.9-2.9-4.9-2.2z" opacity=".35"/><path d="m7.1 12.3 4.9 2.9v-5.1z" opacity=".8"/></g></svg></span><strong>IMPULSE</strong><span>5m</span></div>
             <p class="q">Ethereum to hit $4,000 in May?</p>
             <div class="mk-body">
               <svg class="spark" viewBox="0 0 130 44" preserveAspectRatio="none" aria-hidden="true">
@@ -348,7 +350,7 @@
           </div>
 
           <div class="mk">
-            <div class="mk-head"><span class="dot" style="background:var(--no)">H</span><strong>HARVEST</strong><span>15m</span></div>
+            <div class="mk-head"><span class="coin"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="12" fill="#2E7D6B"/><g fill="none" stroke="#fff" stroke-width="1.6" stroke-linecap="round"><path d="M5.5 9.6 12 6l6.5 3.6M6.8 11v5.4M10.3 11v5.4M13.7 11v5.4M17.2 11v5.4M5.6 18.4h12.8"/></g></svg></span><strong>HARVEST</strong><span>15m</span></div>
             <p class="q">Fed will cut rates before June?</p>
             <div class="mk-body">
               <svg class="spark" viewBox="0 0 130 44" preserveAspectRatio="none" aria-hidden="true">
@@ -391,18 +393,18 @@
 
   <div class="ticker" aria-label="Активные рынки">
     <div class="track">
-      <span class="tick">Bitcoin &gt; $70K · May 31 <b class="num">68%</b> <i class="up">▲ 4.2</i></span>
+      <span class="tick"><span class="coin tick-coin"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="12" fill="#F7931A"/><g fill="none" stroke="#fff" stroke-width="1.7" stroke-linecap="round"><path d="M9 6.6v10.8M11.6 5.4v1.6M11.6 17.4v1.6M14 5.4v1.6M14 17.4v1.6"/><path d="M9 6.6h4.6a2.5 2.5 0 010 5H9M9 11.6h5.2a2.6 2.6 0 010 5.2H9"/></g></svg></span>Bitcoin &gt; $70K · May 31 <b class="num">68%</b> <i class="up">▲ 4.2</i></span>
       <span class="tick">Fed cuts before June <b class="num">41%</b> <i class="down">▼ 2.8</i></span>
       <span class="tick">Champions League final <b class="num">57%</b> <i class="up">▲ 1.1</i></span>
-      <span class="tick">ETH ETF approved in Q3 <b class="num">33%</b> <i class="down">▼ 0.6</i></span>
+      <span class="tick"><span class="coin tick-coin"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="12" fill="#627EEA"/><g fill="#fff"><path d="M12 4.2v5.9l4.9 2.2z" opacity=".65"/><path d="M12 4.2 7.1 12.3l4.9-2.2z"/><path d="M12 16.1v3.7l4.9-6.6z" opacity=".65"/><path d="M12 19.8v-3.7l-4.9-2.9z"/></g></svg></span>ETH ETF approved in Q3 <b class="num">33%</b> <i class="down">▼ 0.6</i></span>
       <span class="tick">US CPI below 3% <b class="num">72%</b> <i class="up">▲ 3.4</i></span>
-      <span class="tick">SOL &gt; $250 · June <b class="num">24%</b> <i class="down">▼ 1.9</i></span>
-      <span class="tick" aria-hidden="true">Bitcoin &gt; $70K · May 31 <b class="num">68%</b> <i class="up">▲ 4.2</i></span>
+      <span class="tick"><span class="coin tick-coin"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="12" fill="#111827"/><g fill="#14F195"><path d="M7 8.6h10l-2 2H5z"/><path d="M7 11h10l-2 2H5z" fill="#9945FF"/><path d="M7 13.4h10l-2 2H5z"/></g></svg></span>SOL &gt; $250 · June <b class="num">24%</b> <i class="down">▼ 1.9</i></span>
+      <span class="tick" aria-hidden="true"><span class="coin tick-coin"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="12" fill="#F7931A"/><g fill="none" stroke="#fff" stroke-width="1.7" stroke-linecap="round"><path d="M9 6.6v10.8M11.6 5.4v1.6M11.6 17.4v1.6M14 5.4v1.6M14 17.4v1.6"/><path d="M9 6.6h4.6a2.5 2.5 0 010 5H9M9 11.6h5.2a2.6 2.6 0 010 5.2H9"/></g></svg></span>Bitcoin &gt; $70K · May 31 <b class="num">68%</b> <i class="up">▲ 4.2</i></span>
       <span class="tick" aria-hidden="true">Fed cuts before June <b class="num">41%</b> <i class="down">▼ 2.8</i></span>
       <span class="tick" aria-hidden="true">Champions League final <b class="num">57%</b> <i class="up">▲ 1.1</i></span>
-      <span class="tick" aria-hidden="true">ETH ETF approved in Q3 <b class="num">33%</b> <i class="down">▼ 0.6</i></span>
+      <span class="tick" aria-hidden="true"><span class="coin tick-coin"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="12" fill="#627EEA"/><g fill="#fff"><path d="M12 4.2v5.9l4.9 2.2z" opacity=".65"/><path d="M12 4.2 7.1 12.3l4.9-2.2z"/><path d="M12 16.1v3.7l4.9-6.6z" opacity=".65"/><path d="M12 19.8v-3.7l-4.9-2.9z"/></g></svg></span>ETH ETF approved in Q3 <b class="num">33%</b> <i class="down">▼ 0.6</i></span>
       <span class="tick" aria-hidden="true">US CPI below 3% <b class="num">72%</b> <i class="up">▲ 3.4</i></span>
-      <span class="tick" aria-hidden="true">SOL &gt; $250 · June <b class="num">24%</b> <i class="down">▼ 1.9</i></span>
+      <span class="tick" aria-hidden="true"><span class="coin tick-coin"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="12" fill="#111827"/><g fill="#14F195"><path d="M7 8.6h10l-2 2H5z"/><path d="M7 11h10l-2 2H5z" fill="#9945FF"/><path d="M7 13.4h10l-2 2H5z"/></g></svg></span>SOL &gt; $250 · June <b class="num">24%</b> <i class="down">▼ 1.9</i></span>
     </div>
   </div>
 
