@@ -101,16 +101,16 @@
   .halo::after{content:"";position:absolute;top:-5px;left:50%;width:9px;height:9px;margin-left:-4px;border-radius:50%;
     background:var(--accent-hi); box-shadow:0 0 16px var(--accent-hi)}
   @keyframes spin{to{transform:rotate(360deg)}}
-  .phone{position:relative; flex:none; width:252px; border-radius:38px; padding:8px;
+  .phone{position:relative; flex:none; width:214px; border-radius:34px; padding:7px;
     background:linear-gradient(160deg,#2a2144,#0d0a18 45%,#241b3d);
     box-shadow:0 50px 90px -30px rgba(0,0,0,.9), 0 0 0 1px rgba(176,140,255,.16)}
-  .screen{background:var(--ground-2); border-radius:34px; overflow:hidden; padding:16px 14px 10px}
-  .notch{width:78px;height:5px;border-radius:3px;background:#241c3b;margin:0 auto 14px}
+  .screen{background:var(--ground-2); border-radius:28px; overflow:hidden; padding:13px 11px 8px}
+  .notch{width:64px;height:4px;border-radius:3px;background:#241c3b;margin:0 auto 12px}
   .app-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
   .app-top .wordmark{height:10px}
   .app-top .wordmark path{stroke-width:3.4}
   .avatar{width:24px;height:24px;border-radius:50%;background:linear-gradient(140deg,#6d4bd0,#2b2247);border:1px solid var(--line)}
-  .tabs{display:flex;justify-content:space-between;gap:8px;font-size:10px;color:var(--ink-3);border-bottom:1px solid var(--line-soft);padding-bottom:9px}
+  .tabs{display:flex;justify-content:space-between;gap:8px;font-size:9.5px;color:var(--ink-3);border-bottom:1px solid var(--line-soft);padding-bottom:9px}
   .tabs b{color:var(--ink);font-weight:650;position:relative}
   .tabs b::after{content:"";position:absolute;left:0;right:0;bottom:-10px;height:2px;background:var(--accent-hi);border-radius:2px}
   .chips{display:flex;gap:5px;margin:12px 0 10px}
@@ -135,15 +135,17 @@
   .tabbar .act{color:var(--accent-hi)}
   .plus{width:34px;height:34px;border-radius:50%;background:var(--accent);display:grid;place-items:center;color:#fff;font-size:18px;font-weight:400;box-shadow:0 6px 20px -4px rgba(123,77,255,.9);margin-top:-14px}
 
-  .side{position:relative; flex:none; width:238px; display:flex; flex-direction:column; gap:14px}
-  .side-l{margin-top:22px}
-  .side-r{margin-top:58px}
+  .side{position:relative; flex:none; width:230px; display:flex; flex-direction:column; gap:14px}
+  .side-l{margin-top:16px}
+  .side-r{margin-top:46px}
   .card{background:linear-gradient(165deg,rgba(21,15,38,.94),rgba(11,8,23,.94));
     border:1px solid var(--line); border-radius:18px; padding:16px;
     box-shadow:0 30px 60px -34px rgba(0,0,0,.95)}
   .card-head{display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--ink-2)}
   .card-head b{color:var(--ink);font-size:13px;font-weight:700}
-  .pnl{font-size:23px;font-weight:800;color:var(--yes);letter-spacing:-.03em;margin-top:8px}
+  .pnl{font-size:23px;font-weight:800;color:var(--yes);letter-spacing:-.03em}
+  .delta{font-size:11px;font-weight:700;color:var(--yes);background:rgba(61,220,151,.12);
+    border:1px solid rgba(61,220,151,.26);border-radius:999px;padding:2px 7px}
   .pnl-label{font-size:10px;color:var(--ink-3);letter-spacing:.14em;text-transform:uppercase;margin-top:12px}
   .insight{display:flex;gap:11px;padding:11px 0;border-top:1px solid var(--line-soft)}
   .insight:first-of-type{border-top:0}
@@ -295,16 +297,15 @@
         <div class="card">
           <div class="card-head"><b>Portfolio</b><span>All time</span></div>
           <p class="pnl-label" style="margin-top:10px">PnL</p>
-          <p class="pnl num">+$4,230.00</p>
-          <svg viewBox="0 0 200 72" style="width:100%;height:78px;margin-top:12px" aria-hidden="true">
-            <defs><linearGradient id="g2" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3DDC97" stop-opacity=".26"/><stop offset="1" stop-color="#3DDC97" stop-opacity="0"/></linearGradient></defs>
-            <g stroke="#1A1430" stroke-width="1"><path d="M0 16h200M0 36h200M0 56h200"/></g>
-            <path d="M0 58 14 54 28 59 42 47 56 51 70 42 84 45 98 33 112 37 126 26 140 29 154 19 168 22 182 12 196 8" fill="none" stroke="#3DDC97" stroke-width="1.8" stroke-linejoin="round"/>
-            <path d="M0 58 14 54 28 59 42 47 56 51 70 42 84 45 98 33 112 37 126 26 140 29 154 19 168 22 182 12 196 8V72H0z" fill="url(#g2)"/>
-            <circle cx="196" cy="8" r="3" fill="#3DDC97"/>
-            <circle cx="196" cy="8" r="6.5" fill="#3DDC97" opacity=".18"/>
+          <p style="display:flex;align-items:baseline;gap:9px"><span class="pnl num">+$4,230.00</span><span class="delta num">+37.2%</span></p>
+          <svg viewBox="0 0 200 78" style="width:100%;height:84px;margin-top:12px" aria-hidden="true">
+            <defs><linearGradient id="g2" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3DDC97" stop-opacity=".22"/><stop offset="1" stop-color="#3DDC97" stop-opacity="0"/></linearGradient></defs>
+            <g stroke="#1A1430" stroke-width="1"><path d="M0 8h200M0 30h200M0 52h200M0 71h200"/></g>
+            <path d="M0.0 68.0 4.7 66.5 9.3 62.9 14.0 56.7 18.6 55.7 23.3 51.8 27.9 55.1 32.6 51.3 37.2 52.6 41.9 47.0 46.5 40.1 51.2 38.9 55.8 37.9 60.5 34.8 65.1 32.7 69.8 30.2 74.4 26.3 79.1 28.0 83.7 24.0 88.4 23.4 93.0 18.6 97.7 13.9 102.3 15.2 107.0 16.5 111.6 18.6 116.3 19.1 120.9 18.4 125.6 15.0 130.2 17.0 134.9 17.8 139.5 21.6 144.2 21.3 148.8 8.1 153.5 10.0 158.1 9.9 162.8 14.0 167.4 5.1 172.1 8.0 176.7 8.3 181.4 4.0 186.0 9.8 190.7 6.5 195.3 8.2 200.0 6.3" fill="none" stroke="#3DDC97" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>
+            <path d="M0.0 68.0 4.7 66.5 9.3 62.9 14.0 56.7 18.6 55.7 23.3 51.8 27.9 55.1 32.6 51.3 37.2 52.6 41.9 47.0 46.5 40.1 51.2 38.9 55.8 37.9 60.5 34.8 65.1 32.7 69.8 30.2 74.4 26.3 79.1 28.0 83.7 24.0 88.4 23.4 93.0 18.6 97.7 13.9 102.3 15.2 107.0 16.5 111.6 18.6 116.3 19.1 120.9 18.4 125.6 15.0 130.2 17.0 134.9 17.8 139.5 21.6 144.2 21.3 148.8 8.1 153.5 10.0 158.1 9.9 162.8 14.0 167.4 5.1 172.1 8.0 176.7 8.3 181.4 4.0 186.0 9.8 190.7 6.5 195.3 8.2 200.0 6.3 L200 78 L0 78z" fill="url(#g2)"/>
+            <circle cx="200" cy="6.3" r="2.6" fill="#3DDC97"/>
           </svg>
-          <div style="display:flex;justify-content:space-between;font-size:9.5px;color:var(--ink-3);margin-top:6px" class="num">
+          <div style="display:flex;justify-content:space-between;font-size:9px;color:var(--ink-3);margin-top:7px" class="num">
             <span>Feb</span><span>Mar</span><span>Apr</span><span>May</span>
           </div>
         </div>
@@ -317,8 +318,8 @@
             <span style="display:flex;align-items:center;gap:8px"><span class="ring" style="width:16px;height:16px"></span><svg class="wordmark" viewBox="0 0 162 40" role="img" aria-label="AURA"><path d="M2 37 16 3 30 37M50 3v20c0 7.7 5.4 13 12 13s12-5.3 12-13V3M94 37V3h13c5.5 0 9.5 4.2 9.5 9.5S112.5 22 107 22H94M105.5 22 118 37M132 37 146 3 160 37"/></svg></span>
             <span class="avatar"></span>
           </div>
-          <div class="tabs"><b>Feed</b><span>Markets</span><span>Strategies</span><span>Portfolio</span><span>AI</span></div>
-          <div class="chips"><span class="chip on">Trending</span><span class="chip">New</span><span class="chip">Sports</span><span class="chip">Crypto</span></div>
+          <div class="tabs"><b>Feed</b><span>Markets</span><span>Strategies</span><span>Portfolio</span></div>
+          <div class="chips"><span class="chip on">Trending</span><span class="chip">New</span><span class="chip">Sports</span></div>
 
           <div class="mk">
             <div class="mk-head"><span class="dot" style="background:var(--warn)">S</span><strong>SIGMA</strong><span>15m</span><span class="tag">High confidence</span></div>
@@ -326,8 +327,8 @@
             <div class="mk-body">
               <svg class="spark" viewBox="0 0 130 44" preserveAspectRatio="none" aria-hidden="true">
                 <defs><linearGradient id="g1" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#B08CFF" stop-opacity=".38"/><stop offset="1" stop-color="#B08CFF" stop-opacity="0"/></linearGradient></defs>
-                <path d="M0 36 8 33 16 35 24 28 32 31 40 24 48 27 56 19 64 22 72 15 80 18 88 12 96 15 104 9 112 11 120 6 130 4" fill="none" stroke="#B08CFF" stroke-width="1.5"/>
-                <path d="M0 36 8 33 16 35 24 28 32 31 40 24 48 27 56 19 64 22 72 15 80 18 88 12 96 15 104 9 112 11 120 6 130 4V44H0z" fill="url(#g1)"/>
+                <path d="M0.0 40.0 3.9 38.7 7.9 33.3 11.8 32.3 15.8 30.8 19.7 26.0 23.6 25.8 27.6 21.7 31.5 15.9 35.5 17.2 39.4 15.6 43.3 14.7 47.3 18.8 51.2 17.8 55.2 19.1 59.1 17.8 63.0 18.9 67.0 15.1 70.9 17.9 74.8 20.3 78.8 20.8 82.7 23.4 86.7 20.9 90.6 17.8 94.5 18.9 98.5 19.8 102.4 19.9 106.4 15.6 110.3 14.3 114.2 14.1 118.2 12.3 122.1 7.9 126.1 10.8 130.0 4.0" fill="none" stroke="#B08CFF" stroke-width="1.5"/>
+                <path d="M0.0 40.0 3.9 38.7 7.9 33.3 11.8 32.3 15.8 30.8 19.7 26.0 23.6 25.8 27.6 21.7 31.5 15.9 35.5 17.2 39.4 15.6 43.3 14.7 47.3 18.8 51.2 17.8 55.2 19.1 59.1 17.8 63.0 18.9 67.0 15.1 70.9 17.9 74.8 20.3 78.8 20.8 82.7 23.4 86.7 20.9 90.6 17.8 94.5 18.9 98.5 19.8 102.4 19.9 106.4 15.6 110.3 14.3 114.2 14.1 118.2 12.3 122.1 7.9 126.1 10.8 130.0 4.0 L130 44 L0 44z" fill="url(#g1)"/>
               </svg>
               <span class="odds num"><b>68%</b><br><span class="up">YES</span></span>
             </div>
@@ -339,7 +340,7 @@
             <p class="q">Ethereum to hit $4,000 in May?</p>
             <div class="mk-body">
               <svg class="spark" viewBox="0 0 130 44" preserveAspectRatio="none" aria-hidden="true">
-                <path d="M0 34 10 30 20 33 30 25 40 28 50 20 60 23 70 16 80 18 90 11 100 14 110 8 120 10 130 5" fill="none" stroke="#8f6bff" stroke-width="1.5"/>
+                <path d="M0.0 27.4 3.9 34.6 7.9 37.1 11.8 40.0 15.8 35.7 19.7 38.7 23.6 37.1 27.6 34.2 31.5 32.7 35.5 38.7 39.4 35.9 43.3 33.8 47.3 36.1 51.2 33.4 55.2 28.3 59.1 28.7 63.0 23.7 67.0 20.8 70.9 27.4 74.8 25.2 78.8 28.8 82.7 18.3 86.7 17.4 90.6 17.3 94.5 14.4 98.5 13.6 102.4 10.5 106.4 7.9 110.3 9.3 114.2 6.8 118.2 4.0 122.1 10.9 126.1 6.7 130.0 7.5" fill="none" stroke="#8f6bff" stroke-width="1.5"/>
               </svg>
               <span class="odds num"><b>72%</b><br><span class="up">YES</span></span>
             </div>
@@ -351,7 +352,7 @@
             <p class="q">Fed will cut rates before June?</p>
             <div class="mk-body">
               <svg class="spark" viewBox="0 0 130 44" preserveAspectRatio="none" aria-hidden="true">
-                <path d="M0 10 12 14 24 11 36 18 48 15 60 22 72 20 84 27 96 24 108 31 120 29 130 35" fill="none" stroke="#FF4D6D" stroke-width="1.5"/>
+                <path d="M0.0 4.0 3.9 5.7 7.9 9.6 11.8 9.5 15.8 14.1 19.7 18.2 23.6 20.4 27.6 22.8 31.5 23.9 35.5 25.9 39.4 32.7 43.3 32.6 47.3 29.0 51.2 31.5 55.2 33.9 59.1 35.3 63.0 35.7 67.0 36.3 70.9 33.2 74.8 32.8 78.8 32.9 82.7 35.2 86.7 35.2 90.6 34.7 94.5 32.3 98.5 31.1 102.4 32.8 106.4 39.0 110.3 37.3 114.2 38.2 118.2 37.9 122.1 39.8 126.1 40.0 130.0 38.3" fill="none" stroke="#FF4D6D" stroke-width="1.5"/>
               </svg>
               <span class="odds num"><b>41%</b><br><span class="down">NO</span></span>
             </div>
