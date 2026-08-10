@@ -1,0 +1,533 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="AURA — Telegram-бот для торговли на рынках предсказаний Polymarket. Сигналы, стратегии и копитрейдинг в одном месте.">
+<meta name="theme-color" content="#08060F">
+<meta property="og:title" content="AURA — Predict. Play. Profit.">
+<meta property="og:description" content="Все рынки Polymarket — спорт, политика, экономика, крипта — из Telegram-бота.">
+<meta property="og:type" content="website">
+<title>AURA — Predict. Play. Profit.</title>
+<style>
+  :root{
+    --ground:#08060F; --ground-2:#0B0817; --surface:#100C1D; --surface-2:#150F26;
+    --line:#241C3B; --line-soft:#1A1430;
+    --ink:#F4F1FB; --ink-2:#B6ADCE; --ink-3:#7C7396;
+    --accent:#7B4DFF; --accent-hi:#B08CFF; --accent-dim:#3A2A78;
+    --yes:#3DDC97; --no:#FF4D6D; --warn:#FFC24B;
+    --maxw:1180px;
+    --display:"Helvetica Neue",Helvetica,"Arial Black",Arial,sans-serif;
+    --body:ui-sans-serif,system-ui,"Helvetica Neue",Arial,sans-serif;
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  body{
+    margin:0; background:var(--ground); color:var(--ink);
+    font-family:var(--body); font-size:16px; line-height:1.55;
+    -webkit-font-smoothing:antialiased;
+    overflow-x:hidden;
+  }
+  a{color:inherit;text-decoration:none}
+  :focus-visible{outline:2px solid var(--accent-hi); outline-offset:3px; border-radius:6px}
+  .wrap{max-width:var(--maxw); margin-inline:auto; padding-inline:24px}
+  .eyebrow{
+    font-size:11px; font-weight:700; letter-spacing:.28em; text-transform:uppercase;
+    color:var(--accent-hi); margin:0;
+  }
+  .eyebrow.muted{color:var(--ink-3)}
+  h1,h2,h3{font-family:var(--display); font-weight:800; letter-spacing:-.035em; text-wrap:balance; margin:0}
+  h1{font-size:clamp(38px,5.6vw,66px); line-height:1.02}
+  h2{font-size:clamp(28px,3.6vw,44px); line-height:1.06}
+  h3{font-size:17px; letter-spacing:-.01em; font-weight:700}
+  p{margin:0}
+  .num{font-variant-numeric:tabular-nums}
+
+  /* ---------- glow field ---------- */
+  .field{position:fixed; inset:0; z-index:0; pointer-events:none;
+    background:
+      radial-gradient(60% 45% at 62% 6%, rgba(123,77,255,.28), transparent 70%),
+      radial-gradient(40% 40% at 8% 34%, rgba(90,50,190,.16), transparent 72%),
+      radial-gradient(50% 30% at 50% 100%, rgba(123,77,255,.12), transparent 70%);
+  }
+  .content{position:relative; z-index:1}
+
+  /* ---------- nav ---------- */
+  header{position:sticky; top:0; z-index:20; backdrop-filter:blur(14px);
+    background:linear-gradient(to bottom, rgba(8,6,15,.92), rgba(8,6,15,.62));
+    border-bottom:1px solid var(--line-soft)}
+  .nav{display:flex; align-items:center; gap:32px; height:72px}
+  .logo{display:flex; align-items:center; gap:14px}
+  .ring{width:26px;height:26px;border-radius:50%;border:1.5px solid var(--accent-hi);
+    box-shadow:0 0 14px rgba(176,140,255,.75), inset 0 0 10px rgba(123,77,255,.5)}
+  .wordmark{display:block; height:18px; width:auto; overflow:visible}
+  .wordmark path{fill:none; stroke:var(--ink); stroke-width:2.6; stroke-linecap:butt; stroke-linejoin:miter}
+  .nav-links{display:flex; gap:30px; margin-left:auto; font-size:14px; color:var(--ink-2)}
+  .nav-links a{position:relative; padding:6px 0}
+  .nav-links a::after{content:"";position:absolute;left:0;right:100%;bottom:0;height:1px;background:var(--accent-hi);transition:right .25s ease}
+  .nav-links a:hover{color:var(--ink)}
+  .nav-links a:hover::after{right:0}
+  .btn{display:inline-flex;align-items:center;gap:10px;font-weight:650;font-size:14px;
+    border-radius:999px;padding:11px 22px;border:1px solid transparent;transition:transform .18s ease, box-shadow .25s ease, background .25s ease}
+  .btn-primary{background:var(--accent);color:#fff;box-shadow:0 8px 30px -8px rgba(123,77,255,.9)}
+  .btn-primary:hover{background:#8b62ff;transform:translateY(-1px);box-shadow:0 14px 40px -10px rgba(123,77,255,1)}
+  .btn-ghost{color:var(--ink-2);border-color:var(--line)}
+  .btn-ghost:hover{color:var(--ink);border-color:var(--accent-dim)}
+  .nav .btn{margin-left:8px}
+
+  /* ---------- hero ---------- */
+  .hero{display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:40px; align-items:center;
+    padding:72px 0 88px}
+  .hero h1 span{background:linear-gradient(96deg,var(--accent-hi),#8f6bff 55%,#5f36e0);
+    -webkit-background-clip:text;background-clip:text;color:transparent}
+  .lede{color:var(--ink-2); font-size:18px; max-width:38ch; margin-top:22px}
+  .cta-row{display:flex; gap:18px; align-items:center; margin-top:34px; flex-wrap:wrap}
+  .hero-note{margin-top:12px;font-size:13px;color:var(--ink-3)}
+  .traits{display:flex; gap:26px; flex-wrap:wrap; margin-top:52px; padding-top:26px; border-top:1px solid var(--line-soft)}
+  .trait{display:flex;align-items:center;gap:9px;font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--ink-2)}
+  .trait svg{stroke:var(--accent-hi)}
+
+  /* ---------- device ---------- */
+  .stage{position:relative; display:flex; justify-content:center; align-items:center; gap:16px}
+  .halo{position:absolute; left:2%; top:50%; margin-top:-215px; width:430px; height:430px; border-radius:50%;
+    border:1px solid rgba(176,140,255,.35); box-shadow:0 0 90px rgba(123,77,255,.28);
+    animation:spin 34s linear infinite}
+  .halo::after{content:"";position:absolute;top:-5px;left:50%;width:9px;height:9px;margin-left:-4px;border-radius:50%;
+    background:var(--accent-hi); box-shadow:0 0 16px var(--accent-hi)}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .phone{position:relative; flex:none; width:252px; border-radius:38px; padding:8px;
+    background:linear-gradient(160deg,#2a2144,#0d0a18 45%,#241b3d);
+    box-shadow:0 50px 90px -30px rgba(0,0,0,.9), 0 0 0 1px rgba(176,140,255,.16)}
+  .screen{background:var(--ground-2); border-radius:34px; overflow:hidden; padding:16px 14px 10px}
+  .notch{width:78px;height:5px;border-radius:3px;background:#241c3b;margin:0 auto 14px}
+  .app-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
+  .app-top .wordmark{height:10px}
+  .app-top .wordmark path{stroke-width:3.4}
+  .avatar{width:24px;height:24px;border-radius:50%;background:linear-gradient(140deg,#6d4bd0,#2b2247);border:1px solid var(--line)}
+  .tabs{display:flex;justify-content:space-between;gap:8px;font-size:10px;color:var(--ink-3);border-bottom:1px solid var(--line-soft);padding-bottom:9px}
+  .tabs b{color:var(--ink);font-weight:650;position:relative}
+  .tabs b::after{content:"";position:absolute;left:0;right:0;bottom:-10px;height:2px;background:var(--accent-hi);border-radius:2px}
+  .chips{display:flex;gap:5px;margin:12px 0 10px}
+  .chip{font-size:9.5px;padding:4px 9px;border-radius:999px;border:1px solid var(--line);color:var(--ink-3);white-space:nowrap}
+  .chip.on{background:var(--accent);border-color:var(--accent);color:#fff}
+  .mk{border:1px solid var(--line-soft);border-radius:14px;padding:11px;margin-bottom:9px;background:rgba(21,15,38,.6)}
+  .mk-head{display:flex;align-items:center;gap:7px;font-size:10px;color:var(--ink-3);margin-bottom:7px}
+  .dot{width:14px;height:14px;border-radius:50%;display:grid;place-items:center;font-size:8px;font-weight:800;color:#0b0817}
+  .mk-head strong{color:var(--ink-2);font-size:10px;letter-spacing:.06em}
+  .tag{margin-left:auto;font-size:8.5px;white-space:nowrap;padding:2px 6px;border-radius:999px;background:rgba(61,220,151,.12);color:var(--yes);border:1px solid rgba(61,220,151,.28)}
+  .q{font-size:12.5px;font-weight:600;line-height:1.35;margin-bottom:6px}
+  .mk-body{display:flex;align-items:flex-end;gap:8px}
+  .spark{flex:1;height:44px}
+  .odds{text-align:right;line-height:1.05}
+  .odds b{font-size:19px;font-weight:800;letter-spacing:-.03em}
+  .odds span{font-size:9.5px;font-weight:700;letter-spacing:.1em}
+  .mk-foot{display:flex;align-items:center;justify-content:space-between;margin-top:9px}
+  .vol{font-size:9.5px;color:var(--ink-3);border:1px solid var(--line-soft);border-radius:6px;padding:3px 7px}
+  .mini{font-size:10px;font-weight:700;background:var(--accent);color:#fff;border-radius:7px;padding:4px 12px}
+  .tabbar{display:flex;align-items:center;justify-content:space-between;padding:10px 8px 4px;border-top:1px solid var(--line-soft);margin-top:4px;font-size:8.5px;color:var(--ink-3)}
+  .tabbar i{display:block;width:15px;height:15px;margin:0 auto 4px;border-radius:4px;border:1.4px solid currentColor;font-style:normal}
+  .tabbar .act{color:var(--accent-hi)}
+  .plus{width:34px;height:34px;border-radius:50%;background:var(--accent);display:grid;place-items:center;color:#fff;font-size:18px;font-weight:400;box-shadow:0 6px 20px -4px rgba(123,77,255,.9);margin-top:-14px}
+
+  .side{position:relative; flex:none; width:214px; display:flex; flex-direction:column; gap:14px}
+  .card{background:linear-gradient(165deg,rgba(21,15,38,.94),rgba(11,8,23,.94));
+    border:1px solid var(--line); border-radius:18px; padding:16px;
+    box-shadow:0 30px 60px -34px rgba(0,0,0,.95)}
+  .card-head{display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--ink-2)}
+  .card-head b{color:var(--ink);font-size:13px;font-weight:700}
+  .pnl{font-size:23px;font-weight:800;color:var(--yes);letter-spacing:-.03em;margin-top:8px}
+  .pnl-label{font-size:10px;color:var(--ink-3);letter-spacing:.14em;text-transform:uppercase;margin-top:12px}
+  .insight{display:flex;gap:11px;padding:11px 0;border-top:1px solid var(--line-soft)}
+  .insight:first-of-type{border-top:0}
+  .ico{flex:none;width:26px;height:26px;border-radius:8px;display:grid;place-items:center;
+    background:rgba(123,77,255,.14);border:1px solid rgba(123,77,255,.3)}
+  .insight b{display:block;font-size:12px;font-weight:650}
+  .insight p{font-size:11px;color:var(--ink-3);line-height:1.45}
+  .card-link{display:flex;justify-content:space-between;align-items:center;font-size:12px;font-weight:650;
+    margin-top:6px;padding-top:12px;border-top:1px solid var(--line-soft);color:var(--ink)}
+
+  /* ---------- ticker ---------- */
+  .ticker{border-block:1px solid var(--line-soft); background:rgba(16,12,29,.5); overflow:hidden; padding:14px 0}
+  .track{display:flex; gap:56px; width:max-content; animation:slide 38s linear infinite}
+  @keyframes slide{to{transform:translateX(-50%)}}
+  .tick{display:flex;align-items:center;gap:10px;font-size:13px;color:var(--ink-2);white-space:nowrap}
+  .tick b{color:var(--ink);font-weight:650}
+  .tick i{font-style:normal;font-weight:700}
+  .up{color:var(--yes)} .down{color:var(--no)}
+
+  /* ---------- sections ---------- */
+  section{padding:104px 0}
+  .sec-head{text-align:center; display:flex; flex-direction:column; gap:14px; align-items:center; margin-bottom:52px}
+  .sec-head p.sub{color:var(--ink-2); max-width:52ch}
+  .grid6{display:grid; grid-template-columns:repeat(3,1fr); gap:18px}
+  .tool{background:linear-gradient(170deg,rgba(21,15,38,.8),rgba(11,8,23,.65));
+    border:1px solid var(--line-soft); border-radius:18px; padding:24px; display:flex; flex-direction:column; gap:12px;
+    transition:border-color .25s ease, transform .25s ease, background .25s ease}
+  .tool:hover{border-color:var(--accent-dim); transform:translateY(-3px); background:linear-gradient(170deg,rgba(30,21,55,.9),rgba(13,10,26,.7))}
+  .tool .ico{width:38px;height:38px;border-radius:11px}
+  .tool p{color:var(--ink-3); font-size:14px; line-height:1.6}
+  .tool .arrow{margin-top:auto;color:var(--accent-hi);font-size:15px}
+
+  /* ---------- ecosystem ---------- */
+  .eco{display:grid; grid-template-columns:minmax(0,4fr) minmax(0,6fr); gap:56px; align-items:center}
+  .eco-copy p.sub{color:var(--ink-2); margin-top:20px; max-width:34ch}
+  .eco-link{display:inline-flex;gap:10px;align-items:center;margin-top:28px;font-weight:650;color:var(--accent-hi);font-size:14px}
+  .orbit{position:relative; aspect-ratio:1/.82}
+  .orbit > svg{position:absolute; inset:0; width:100%; height:100%}
+  .core{position:absolute; left:50%; top:50%; width:104px; height:104px; margin:-52px 0 0 -52px;
+    border-radius:50%; border:1.5px solid var(--accent-hi); box-shadow:0 0 44px rgba(123,77,255,.75), inset 0 0 26px rgba(123,77,255,.4)}
+  .node{position:absolute; display:flex; gap:11px; align-items:center; padding:12px 14px; width:190px;
+    border:1px solid var(--line); border-radius:14px; background:rgba(16,12,29,.92); backdrop-filter:blur(6px)}
+  .node .ico{flex:none; width:28px; height:28px}
+  .node .ico svg{width:15px; height:15px}
+  .node b{display:block;font-size:13px;font-weight:700;line-height:1.25}
+  .node p{font-size:11px;color:var(--ink-3);line-height:1.35;margin-top:2px}
+  .n1{left:50%; top:0; transform:translateX(-50%)}
+  .n2{right:0; top:30%}
+  .n3{left:0; top:30%}
+  .n4{left:6%; bottom:2%}
+  .n5{right:6%; bottom:2%}
+
+  /* ---------- cta ---------- */
+  .cta{position:relative; overflow:hidden; border:1px solid var(--line); border-radius:26px;
+    background:linear-gradient(120deg,#150e2e,#0c0819 60%);
+    padding:64px 56px; display:flex; align-items:center; justify-content:space-between; gap:40px; flex-wrap:wrap}
+  .cta svg.streak{position:absolute; inset:0; width:100%; height:100%; pointer-events:none}
+  .cta h2 em{font-style:normal;color:var(--accent-hi)}
+  .cta .cta-row{margin-top:0}
+
+  /* ---------- footer ---------- */
+  footer{border-top:1px solid var(--line-soft); padding:64px 0 44px; background:var(--ground-2)}
+  .foot{display:grid; grid-template-columns:2fr repeat(3,1fr) 1.2fr; gap:36px}
+  .foot h4{font-size:11px;letter-spacing:.24em;text-transform:uppercase;color:var(--ink-3);margin:0 0 16px;font-weight:700}
+  .foot ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:10px;font-size:14px;color:var(--ink-2)}
+  .foot ul a:hover{color:var(--ink)}
+  .tagline{font-size:10px;letter-spacing:.34em;color:var(--ink-3);margin-top:14px;padding-left:.34em}
+  .social{display:flex;gap:12px}
+  .social a{width:38px;height:38px;border-radius:11px;border:1px solid var(--line);display:grid;place-items:center;color:var(--ink-2);transition:.2s}
+  .social a:hover{color:var(--ink);border-color:var(--accent-dim);background:rgba(123,77,255,.1)}
+  .legal{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap;margin-top:52px;padding-top:24px;
+    border-top:1px solid var(--line-soft); font-size:12px; color:var(--ink-3)}
+
+  @media (max-width:960px){
+    .hero{grid-template-columns:1fr; padding:48px 0 64px; gap:8px}
+    .stage{flex-direction:column; gap:20px; padding-bottom:8px}
+    .side{width:100%; max-width:340px; flex-direction:row}
+    .side .card{flex:1}
+    .halo{display:none}
+    .grid6{grid-template-columns:repeat(2,1fr)}
+    .eco{grid-template-columns:1fr}
+    .orbit{display:none}
+    .eco-mobile{display:grid; grid-template-columns:1fr 1fr; gap:12px}
+    .foot{grid-template-columns:1fr 1fr}
+    section{padding:72px 0}
+    .cta{padding:40px 28px}
+  }
+  @media (min-width:961px){.eco-mobile{display:none}}
+  @media (max-width:620px){
+    .grid6{grid-template-columns:1fr}
+    .side{flex-direction:column}
+    .nav-links{display:none}
+    .foot{grid-template-columns:1fr}
+  }
+  @media (prefers-reduced-motion:reduce){
+    *{animation:none !important; transition:none !important}
+  }
+</style>
+
+<div class="field" aria-hidden="true"></div>
+<div class="content">
+
+<header>
+  <div class="wrap nav">
+    <a class="logo" href="#top">
+      <span class="ring" aria-hidden="true"></span>
+      <svg class="wordmark" viewBox="0 0 162 40" role="img" aria-label="AURA"><path d="M2 37 16 3 30 37M50 3v20c0 7.7 5.4 13 12 13s12-5.3 12-13V3M94 37V3h13c5.5 0 9.5 4.2 9.5 9.5S112.5 22 107 22H94M105.5 22 118 37M132 37 146 3 160 37"/></svg>
+    </a>
+    <nav class="nav-links">
+      <a href="#product">Product</a>
+      <a href="#tools">Strategies</a>
+      <a href="#ecosystem">Ecosystem</a>
+      <a href="#community">Community</a>
+    </nav>
+    <a class="btn btn-primary" href="#waitlist">Launch App</a>
+  </div>
+</header>
+
+<main id="top">
+  <div class="wrap hero" id="product">
+    <div>
+      <p class="eyebrow">Predict. Play. Profit.</p>
+      <h1 style="margin-top:20px">Everything you need to trade <span>prediction markets.</span></h1>
+      <p class="lede">Every Polymarket market — sports, politics, economy, crypto — traded from a Telegram bot. Signals, strategies and copy trading in one place.</p>
+      <div class="cta-row">
+        <a class="btn btn-primary" href="#waitlist">Launch App <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 11L11 3M11 3H4.5M11 3v6.5"/></svg></a>
+        <a class="btn btn-ghost" href="#tools">Explore product</a>
+      </div>
+      <p class="hero-note">Closed beta. Access opens in waves — waitlist first.</p>
+
+      <div class="traits">
+        <span class="trait"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke-width="1.4"><path d="M8 1.5l1.5 4L13.5 7l-4 1.5L8 12.5 6.5 8.5 2.5 7l4-1.5z"/></svg> Smart</span>
+        <span class="trait"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke-width="1.4"><path d="M9 1.5L3.5 9h4l-.5 5.5L12.5 7h-4z"/></svg> Fast</span>
+        <span class="trait"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke-width="1.4"><path d="M8 1.5l5 2v4c0 3-2.2 5.6-5 7-2.8-1.4-5-4-5-7v-4z"/></svg> Non-custodial</span>
+        <span class="trait"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke-width="1.4"><circle cx="8" cy="8" r="5.5"/></svg> Connected</span>
+      </div>
+    </div>
+
+    <div class="stage">
+      <div class="halo" aria-hidden="true"></div>
+
+      <div class="phone" role="img" aria-label="Скриншот приложения AURA: лента рынков Polymarket с вероятностями 68%, 72% и 41%">
+        <div class="screen">
+          <div class="notch"></div>
+          <div class="app-top">
+            <span style="display:flex;align-items:center;gap:8px"><span class="ring" style="width:16px;height:16px"></span><svg class="wordmark" viewBox="0 0 162 40" role="img" aria-label="AURA"><path d="M2 37 16 3 30 37M50 3v20c0 7.7 5.4 13 12 13s12-5.3 12-13V3M94 37V3h13c5.5 0 9.5 4.2 9.5 9.5S112.5 22 107 22H94M105.5 22 118 37M132 37 146 3 160 37"/></svg></span>
+            <span class="avatar"></span>
+          </div>
+          <div class="tabs"><b>Feed</b><span>Markets</span><span>Strategies</span><span>Portfolio</span><span>AI</span></div>
+          <div class="chips"><span class="chip on">Trending</span><span class="chip">New</span><span class="chip">Sports</span><span class="chip">Crypto</span></div>
+
+          <div class="mk">
+            <div class="mk-head"><span class="dot" style="background:var(--warn)">S</span><strong>SIGMA</strong><span>15m</span><span class="tag">High confidence</span></div>
+            <p class="q">Will Bitcoin close above $70,000 on May 31?</p>
+            <div class="mk-body">
+              <svg class="spark" viewBox="0 0 130 44" preserveAspectRatio="none" aria-hidden="true">
+                <defs><linearGradient id="g1" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#B08CFF" stop-opacity=".38"/><stop offset="1" stop-color="#B08CFF" stop-opacity="0"/></linearGradient></defs>
+                <path d="M0 36 8 33 16 35 24 28 32 31 40 24 48 27 56 19 64 22 72 15 80 18 88 12 96 15 104 9 112 11 120 6 130 4" fill="none" stroke="#B08CFF" stroke-width="1.5"/>
+                <path d="M0 36 8 33 16 35 24 28 32 31 40 24 48 27 56 19 64 22 72 15 80 18 88 12 96 15 104 9 112 11 120 6 130 4V44H0z" fill="url(#g1)"/>
+              </svg>
+              <span class="odds num"><b>68%</b><br><span class="up">YES</span></span>
+            </div>
+            <div class="mk-foot"><span class="vol num">$1.2M vol.</span><span class="mini">Trade</span></div>
+          </div>
+
+          <div class="mk">
+            <div class="mk-head"><span class="dot" style="background:var(--accent-hi)">I</span><strong>IMPULSE</strong><span>5m</span></div>
+            <p class="q">Ethereum to hit $4,000 in May?</p>
+            <div class="mk-body">
+              <svg class="spark" viewBox="0 0 130 44" preserveAspectRatio="none" aria-hidden="true">
+                <path d="M0 34 10 30 20 33 30 25 40 28 50 20 60 23 70 16 80 18 90 11 100 14 110 8 120 10 130 5" fill="none" stroke="#8f6bff" stroke-width="1.5"/>
+              </svg>
+              <span class="odds num"><b>72%</b><br><span class="up">YES</span></span>
+            </div>
+            <div class="mk-foot"><span class="vol num">$850K vol.</span><span class="mini">Trade</span></div>
+          </div>
+
+          <div class="mk">
+            <div class="mk-head"><span class="dot" style="background:var(--no)">H</span><strong>HARVEST</strong><span>15m</span></div>
+            <p class="q">Fed will cut rates before June?</p>
+            <div class="mk-body">
+              <svg class="spark" viewBox="0 0 130 44" preserveAspectRatio="none" aria-hidden="true">
+                <path d="M0 10 12 14 24 11 36 18 48 15 60 22 72 20 84 27 96 24 108 31 120 29 130 35" fill="none" stroke="#FF4D6D" stroke-width="1.5"/>
+              </svg>
+              <span class="odds num"><b>41%</b><br><span class="down">NO</span></span>
+            </div>
+            <div class="mk-foot"><span class="vol num">$600K vol.</span><span class="mini">Trade</span></div>
+          </div>
+
+          <div class="tabbar">
+            <span class="act"><i></i>Feed</span>
+            <span><i></i>Markets</span>
+            <span class="plus" aria-hidden="true">+</span>
+            <span><i></i>Portfolio</span>
+            <span><i></i>Profile</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="side">
+        <div class="card">
+          <div class="card-head"><b>Portfolio</b><span>All time</span></div>
+          <p class="pnl-label" style="margin-top:10px">PnL</p>
+          <p class="pnl num">+$4,230.00</p>
+          <svg viewBox="0 0 200 72" style="width:100%;height:78px;margin-top:12px" aria-hidden="true">
+            <defs><linearGradient id="g2" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3DDC97" stop-opacity=".26"/><stop offset="1" stop-color="#3DDC97" stop-opacity="0"/></linearGradient></defs>
+            <g stroke="#1A1430" stroke-width="1"><path d="M0 16h200M0 36h200M0 56h200"/></g>
+            <path d="M0 58 14 54 28 59 42 47 56 51 70 42 84 45 98 33 112 37 126 26 140 29 154 19 168 22 182 12 196 8" fill="none" stroke="#3DDC97" stroke-width="1.8" stroke-linejoin="round"/>
+            <path d="M0 58 14 54 28 59 42 47 56 51 70 42 84 45 98 33 112 37 126 26 140 29 154 19 168 22 182 12 196 8V72H0z" fill="url(#g2)"/>
+            <circle cx="196" cy="8" r="3" fill="#3DDC97"/>
+            <circle cx="196" cy="8" r="6.5" fill="#3DDC97" opacity=".18"/>
+          </svg>
+          <div style="display:flex;justify-content:space-between;font-size:9.5px;color:var(--ink-3);margin-top:6px" class="num">
+            <span>Feb</span><span>Mar</span><span>Apr</span><span>May</span>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="insight">
+            <span class="ico"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#B08CFF" stroke-width="1.4"><circle cx="8" cy="8" r="6"/><circle cx="8" cy="8" r="2"/></svg></span>
+            <span><b>AI Insights</b><p>Updated 2m ago</p></span>
+          </div>
+          <div class="insight">
+            <span class="ico"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#B08CFF" stroke-width="1.4"><path d="M2 12l4-5 3 3 5-7"/></svg></span>
+            <span><b>Market overview</b><p>Strong momentum in crypto markets.</p></span>
+          </div>
+          <div class="insight">
+            <span class="ico"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#B08CFF" stroke-width="1.4"><path d="M3 13V6M8 13V3M13 13V9"/></svg></span>
+            <span><b>High confidence</b><p>3 high-probability setups detected.</p></span>
+          </div>
+          <a class="card-link" href="#tools">View AI picks <span aria-hidden="true">→</span></a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="ticker" aria-label="Активные рынки">
+    <div class="track">
+      <span class="tick">Bitcoin &gt; $70K · May 31 <b class="num">68%</b> <i class="up">▲ 4.2</i></span>
+      <span class="tick">Fed cuts before June <b class="num">41%</b> <i class="down">▼ 2.8</i></span>
+      <span class="tick">Champions League final <b class="num">57%</b> <i class="up">▲ 1.1</i></span>
+      <span class="tick">ETH ETF approved in Q3 <b class="num">33%</b> <i class="down">▼ 0.6</i></span>
+      <span class="tick">US CPI below 3% <b class="num">72%</b> <i class="up">▲ 3.4</i></span>
+      <span class="tick">SOL &gt; $250 · June <b class="num">24%</b> <i class="down">▼ 1.9</i></span>
+      <span class="tick" aria-hidden="true">Bitcoin &gt; $70K · May 31 <b class="num">68%</b> <i class="up">▲ 4.2</i></span>
+      <span class="tick" aria-hidden="true">Fed cuts before June <b class="num">41%</b> <i class="down">▼ 2.8</i></span>
+      <span class="tick" aria-hidden="true">Champions League final <b class="num">57%</b> <i class="up">▲ 1.1</i></span>
+      <span class="tick" aria-hidden="true">ETH ETF approved in Q3 <b class="num">33%</b> <i class="down">▼ 0.6</i></span>
+      <span class="tick" aria-hidden="true">US CPI below 3% <b class="num">72%</b> <i class="up">▲ 3.4</i></span>
+      <span class="tick" aria-hidden="true">SOL &gt; $250 · June <b class="num">24%</b> <i class="down">▼ 1.9</i></span>
+    </div>
+  </div>
+
+  <section id="tools">
+    <div class="wrap">
+      <div class="sec-head">
+        <p class="eyebrow muted">Everything in one place</p>
+        <h2>Powerful tools for every trader</h2>
+        <p class="sub">От сигнала до исполнения — без переключения между вкладками, кошельками и чатами.</p>
+      </div>
+      <div class="grid6">
+        <article class="tool">
+          <span class="ico"><svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="#B08CFF" stroke-width="1.3"><path d="M7 3a2.5 2.5 0 00-2.5 2.5A2.5 2.5 0 003 8c0 1 .6 1.9 1.5 2.3V13a2.5 2.5 0 005 0V3.5A.5.5 0 007 3zM13 3a2.5 2.5 0 012.5 2.5A2.5 2.5 0 0117 8c0 1-.6 1.9-1.5 2.3V13a2.5 2.5 0 01-5 0"/></svg></span>
+          <h3>Smart Strategies</h3>
+          <p>Готовые стратегии на базе AI, которые ищут сетапы с высокой вероятностью.</p>
+          <span class="arrow" aria-hidden="true">→</span>
+        </article>
+        <article class="tool">
+          <span class="ico"><svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="#B08CFF" stroke-width="1.3"><path d="M3 16V4M3 16h14M6 13l3-4 3 2 4-6"/></svg></span>
+          <h3>Trading</h3>
+          <p>Быстрое исполнение, низкие комиссии и стакан Polymarket прямо в боте.</p>
+          <span class="arrow" aria-hidden="true">→</span>
+        </article>
+        <article class="tool">
+          <span class="ico"><svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="#B08CFF" stroke-width="1.3"><circle cx="7" cy="6" r="2.5"/><circle cx="14" cy="7" r="2"/><path d="M2.5 16c0-2.5 2-4 4.5-4s4.5 1.5 4.5 4M14 11c2 0 3.5 1.3 3.5 3.2"/></svg></span>
+          <h3>Copy Trading</h3>
+          <p>Подписка на топ-трейдеров: их сделки повторяются автоматически.</p>
+          <span class="arrow" aria-hidden="true">→</span>
+        </article>
+        <article class="tool">
+          <span class="ico"><svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="#B08CFF" stroke-width="1.3"><circle cx="10" cy="10" r="7"/><path d="M10 3v7l5 3.5"/></svg></span>
+          <h3>Portfolio</h3>
+          <p>PnL, открытые позиции и история — аналитика в реальном времени.</p>
+          <span class="arrow" aria-hidden="true">→</span>
+        </article>
+        <article class="tool">
+          <span class="ico"><svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="#B08CFF" stroke-width="1.3"><path d="M10 2l1.8 4.7L16.5 8.5 11.8 10.3 10 15l-1.8-4.7L3.5 8.5 8.2 6.7z"/></svg></span>
+          <h3>AI Assistant</h3>
+          <p>Разбор рынка, новостной контекст и объяснение, почему сигнал сработал.</p>
+          <span class="arrow" aria-hidden="true">→</span>
+        </article>
+        <article class="tool">
+          <span class="ico"><svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="#B08CFF" stroke-width="1.3"><path d="M11 2L4 11h5l-1 7 7-9h-5z"/></svg></span>
+          <h3>Alerts &amp; Track</h3>
+          <p>Уведомления о движении вероятностей и о сделках, за которыми вы следите.</p>
+          <span class="arrow" aria-hidden="true">→</span>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section id="ecosystem" style="padding-top:20px">
+    <div class="wrap eco">
+      <div class="eco-copy">
+        <p class="eyebrow muted">The AURA ecosystem</p>
+        <h2 style="margin-top:16px">All connected.<br>All in sync.</h2>
+        <p class="sub">От сигнала до исполнения: один аккаунт, один портфель, одинаковый опыт в боте, мини-аппе и вебе.</p>
+        <a class="eco-link" href="#waitlist">Explore ecosystem <span aria-hidden="true">→</span></a>
+
+        <div class="eco-mobile" style="margin-top:28px">
+          <div class="card"><b style="font-size:13px">Telegram Bot</b><p style="font-size:12px;color:var(--ink-3)">Сигналы и сделки</p></div>
+          <div class="card"><b style="font-size:13px">Mini App</b><p style="font-size:12px;color:var(--ink-3)">Полный трейдинг</p></div>
+          <div class="card"><b style="font-size:13px">Community</b><p style="font-size:12px;color:var(--ink-3)">Чат и разборы</p></div>
+          <div class="card"><b style="font-size:13px">Web Platform</b><p style="font-size:12px;color:var(--ink-3)">Аналитика</p></div>
+        </div>
+      </div>
+
+      <div class="orbit" aria-hidden="true">
+        <svg viewBox="0 0 600 500" fill="none">
+          <ellipse cx="300" cy="250" rx="215" ry="175" stroke="#4A3B7A" stroke-width="1.2" stroke-dasharray="3 7"/>
+          <path d="M300 75a215 175 0 01186 87" stroke="#8f6bff" stroke-width="1.6" opacity=".85"/>
+          <path d="M114 337a215 175 0 00186 88" stroke="#8f6bff" stroke-width="1.6" opacity=".55"/>
+          <path d="M300 425a215 175 0 00186-88" stroke="#B08CFF" stroke-width="1.6" opacity=".7"/>
+        </svg>
+        <span class="core"></span>
+
+        <div class="node n1"><span class="ico"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#B08CFF" stroke-width="1.3"><path d="M14.5 2L1.5 7l4 1.5L13 3.5 7 9.5V14l2.5-3"/></svg></span><span><b>Telegram Bot</b><p>Сигналы и сделки</p></span></div>
+        <div class="node n2"><span class="ico"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#B08CFF" stroke-width="1.3"><rect x="4.5" y="1.5" width="7" height="13" rx="1.6"/><path d="M7 12.5h2"/></svg></span><span><b>Mini App</b><p>Полный трейдинг</p></span></div>
+        <div class="node n3"><span class="ico"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#B08CFF" stroke-width="1.3"><circle cx="6" cy="6" r="2"/><circle cx="11.5" cy="7" r="1.6"/><path d="M2 13c0-2 1.8-3.2 4-3.2S10 11 10 13"/></svg></span><span><b>Community</b><p>Чат и разборы</p></span></div>
+        <div class="node n4"><span class="ico"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#B08CFF" stroke-width="1.3"><path d="M2 8h3M8 2v3M8 11v3M11 8h3"/><rect x="5" y="5" width="6" height="6" rx="1.4"/></svg></span><span><b>Alerts</b><p>Пуши по рынкам</p></span></div>
+        <div class="node n5"><span class="ico"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#B08CFF" stroke-width="1.3"><rect x="1.5" y="3" width="13" height="8.5" rx="1.4"/><path d="M6 14h4"/></svg></span><span><b>Web Platform</b><p>Аналитика</p></span></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="waitlist" style="padding-top:20px">
+    <div class="wrap">
+      <div class="cta">
+        <svg class="streak" viewBox="0 0 1100 260" preserveAspectRatio="none" aria-hidden="true">
+          <path d="M-20 250C240 250 300 60 620 60s340 130 520 130" stroke="#7B4DFF" stroke-width="1.4" fill="none" opacity=".55"/>
+          <path d="M-20 220C260 220 320 110 640 110s320 100 500 100" stroke="#B08CFF" stroke-width="1" fill="none" opacity=".3"/>
+        </svg>
+        <div>
+          <p class="eyebrow">Closed beta</p>
+          <h2 style="margin-top:14px">The future of<br>prediction markets<br><em>starts with you.</em></h2>
+        </div>
+        <div class="cta-row">
+          <a class="btn btn-primary" href="#community">Launch App <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 11L11 3M11 3H4.5M11 3v6.5"/></svg></a>
+          <a class="btn btn-ghost" href="#community">Join community <span aria-hidden="true">→</span></a>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer id="community">
+  <div class="wrap">
+    <div class="foot">
+      <div>
+        <span class="logo"><span class="ring" aria-hidden="true"></span><svg class="wordmark" viewBox="0 0 162 40" role="img" aria-label="AURA"><path d="M2 37 16 3 30 37M50 3v20c0 7.7 5.4 13 12 13s12-5.3 12-13V3M94 37V3h13c5.5 0 9.5 4.2 9.5 9.5S112.5 22 107 22H94M105.5 22 118 37M132 37 146 3 160 37"/></svg></span>
+        <p class="tagline">PREDICT. PLAY. PROFIT.</p>
+      </div>
+      <div>
+        <h4>Product</h4>
+        <ul><li><a href="#tools">Strategies</a></li><li><a href="#tools">Markets</a></li><li><a href="#tools">Portfolio</a></li><li><a href="#tools">AI Assistant</a></li></ul>
+      </div>
+      <div>
+        <h4>Company</h4>
+        <ul><li><a href="#product">About</a></li><li><a href="#ecosystem">Ecosystem</a></li><li><a href="#waitlist">Beta access</a></li><li><a href="#community">Contact</a></li></ul>
+      </div>
+      <div>
+        <h4>Resources</h4>
+        <ul><li><a href="#tools">Help center</a></li><li><a href="#tools">Docs</a></li><li><a href="#tools">Blog</a></li><li><a href="#community">Community</a></li></ul>
+      </div>
+      <div>
+        <h4>Stay connected</h4>
+        <div class="social">
+          <a href="#community" aria-label="Telegram"><svg width="17" height="17" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M14.5 2L1.5 7l4 1.5L13 3.5 7 9.5V14l2.5-3"/></svg></a>
+          <a href="#community" aria-label="X"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 2l12 12M14 2L2 14"/></svg></a>
+          <a href="#community" aria-label="Discord"><svg width="17" height="17" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M5.5 4.5C7 4 9 4 10.5 4.5c1.6 1.4 2.4 3.6 2.3 6-1 .8-2 1.3-3 1.5l-.7-1.2M5.5 4.5c-1.6 1.4-2.4 3.6-2.3 6 1 .8 2 1.3 3 1.5l.7-1.2"/><circle cx="6.3" cy="8.5" r=".9"/><circle cx="9.7" cy="8.5" r=".9"/></svg></a>
+          <a href="mailto:hi@aura.trade" aria-label="Email"><svg width="17" height="17" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="1.5" y="3.5" width="13" height="9" rx="1.5"/><path d="M2 4.5l6 4 6-4"/></svg></a>
+        </div>
+      </div>
+    </div>
+    <div class="legal">
+      <span>© 2026 AURA. Все рынки предоставлены Polymarket.</span>
+      <span>Торговля на рынках предсказаний связана с риском потери средств.</span>
+    </div>
+  </div>
+</footer>
+</div>
+
+</body>
+</html>
