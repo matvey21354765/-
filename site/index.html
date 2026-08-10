@@ -101,22 +101,25 @@
     background:var(--accent-hi); box-shadow:0 0 16px var(--accent-hi)}
   @keyframes spin{to{transform:rotate(360deg)}}
   .phone{position:relative; flex:none; width:188px; border-radius:30px; padding:6px;
-    transform:scale(.74); transform-origin:center; margin-inline:-25px; margin-block:-88px;
+    transform:scale(.92); transform-origin:center; margin-inline:-8px; margin-block:-16px;
     background:linear-gradient(160deg,#2a2144,#0d0a18 45%,#241b3d);
     box-shadow:0 50px 90px -30px rgba(0,0,0,.9), 0 0 0 1px rgba(176,140,255,.16)}
   .screen{background:var(--ground-2); border-radius:25px; overflow:hidden; padding:11px 9px 7px}
-  .notch{width:56px;height:4px;border-radius:3px;background:#241c3b;margin:0 auto 12px}
-  .app-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
+  .notch{width:56px;height:4px;border-radius:3px;background:#241c3b;margin:0 auto 10px}
+  .app-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:11px}
   .app-top .wordmark{height:10px}
   .app-top .wordmark path{stroke-width:3.4}
   .avatar{width:20px;height:20px;border-radius:50%;background:linear-gradient(140deg,#6d4bd0,#2b2247);border:1px solid var(--line)}
   .tabs{display:flex;justify-content:space-between;gap:6px;font-size:8.5px;color:var(--ink-3);border-bottom:1px solid var(--line-soft);padding-bottom:9px}
   .tabs b{color:var(--ink);font-weight:650;position:relative}
   .tabs b::after{content:"";position:absolute;left:0;right:0;bottom:-10px;height:2px;background:var(--accent-hi);border-radius:2px}
-  .chips{display:flex;gap:5px;margin:12px 0 10px}
+  .chips{display:flex;gap:5px;margin:10px 0 9px}
   .chip{font-size:8.5px;padding:3px 8px;border-radius:999px;border:1px solid var(--line);color:var(--ink-3);white-space:nowrap}
   .chip.on{background:var(--accent);border-color:var(--accent);color:#fff}
-  .mk{border:1px solid var(--line-soft);border-radius:12px;padding:9px;margin-bottom:8px;background:rgba(21,15,38,.6)}
+  .feed{height:212px; overflow:hidden;
+    -webkit-mask-image:linear-gradient(180deg,#000 78%,transparent 100%);
+    mask-image:linear-gradient(180deg,#000 78%,transparent 100%)}
+  .mk{border:1px solid var(--line-soft);border-radius:12px;padding:8px;margin-bottom:7px;background:rgba(21,15,38,.6)}
   .mk-head{display:flex;align-items:center;gap:6px;font-size:9px;color:var(--ink-3);margin-bottom:7px}
   .coin{flex:none;display:block;width:14px;height:14px}
   .coin svg{width:100%;height:100%;display:block;border-radius:50%}
@@ -124,7 +127,7 @@
   .tag{margin-left:auto;font-size:7.5px;white-space:nowrap;padding:2px 6px;border-radius:999px;background:rgba(61,220,151,.12);color:var(--yes);border:1px solid rgba(61,220,151,.28)}
   .q{font-size:11px;font-weight:600;line-height:1.35;margin-bottom:5px}
   .mk-body{display:flex;align-items:flex-end;gap:8px}
-  .spark{flex:1;height:38px}
+  .spark{flex:1;height:32px}
   .odds{text-align:right;line-height:1.05}
   .odds b{font-size:17px;font-weight:800;letter-spacing:-.03em}
   .odds span{font-size:9.5px;font-weight:700;letter-spacing:.1em}
@@ -322,6 +325,7 @@
           <div class="tabs"><b>Feed</b><span>Markets</span><span>Strategies</span><span>Portfolio</span></div>
           <div class="chips"><span class="chip on">Trending</span><span class="chip">New</span><span class="chip">Sports</span></div>
 
+          <div class="feed">
           <div class="mk">
             <div class="mk-head"><span class="coin"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="12" fill="#F7931A"/><g fill="none" stroke="#fff" stroke-width="1.7" stroke-linecap="round"><path d="M9 6.6v10.8M11.6 5.4v1.6M11.6 17.4v1.6M14 5.4v1.6M14 17.4v1.6"/><path d="M9 6.6h4.6a2.5 2.5 0 010 5H9M9 11.6h5.2a2.6 2.6 0 010 5.2H9"/></g></svg></span><strong>SIGMA</strong><span>15m</span><span class="tag">High conf.</span></div>
             <p class="q">Will Bitcoin close above $70,000 on May 31?</p>
@@ -358,6 +362,7 @@
               <span class="odds num"><b>41%</b><br><span class="down">NO</span></span>
             </div>
             <div class="mk-foot"><span class="vol num">$600K vol.</span><span class="mini">Trade</span></div>
+          </div>
           </div>
 
           <div class="tabbar">
