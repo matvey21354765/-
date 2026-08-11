@@ -29,6 +29,14 @@ FRESH_HOURS = 2
 TODAY_HOURS = 24
 DAYS3_HOURS = 72
 
+#: Сколько минут только что найденное объявление БЕЗ даты публикации остаётся
+#: кандидатом на мгновенное уведомление. Раздел «Кто быстрее» показывает только
+#: машины с точной датой, но её отдают не все площадки: в бою Drom, Auto.ru и
+#: Юла почти всегда присылают выдачу без даты, объявление попадало в «Новые
+#: сегодня» — и уведомление не уходило никогда. Такие объявления берём в
+#: кандидаты, идём за настоящей датой на страницу и решаем уже по ней.
+NOTIFY_UNDATED_MINUTES = 45
+
 CATEGORIES = ("fresh", "today", "days3", "bargain", "price_drop", "saved")
 
 CATEGORY_TITLES = {
@@ -1050,8 +1058,13 @@ def _ensure_market(listing: dict, budget: list[int]) -> dict:
 
 
 def _pool_candidates(user_id: int, category: str, now: float,
-                     *, only_best: bool | None = None) -> list[dict]:
-    """Объявления пула, подходящие под активный поиск и раздел."""
+                     *, only_best: bool | None = None,
+                     accept=None) -> list[dict]:
+    """Объявления пула, подходящие под активный поиск и раздел.
+
+    `accept(listing, now) -> bool` заменяет проверку раздела: так цикл
+    уведомлений берёт не только «Кто быстрее», но и свежие находки без даты.
+    """
     search = get_active_search(user_id)
     if not search:
         return []
@@ -1075,7 +1088,10 @@ def _pool_candidates(user_id: int, category: str, now: float,
             continue
         if not matches_search(d, search):
             continue
-        if category_of(d, now) != category:
+        if accept is not None:
+            if not accept(d, now):
+                continue
+        elif category_of(d, now) != category:
             continue
         if strict:
             # Рынок считаем только для уже отобранных — это локальный SQL,
@@ -1099,6 +1115,45 @@ def search_listings(user_id: int, category: str, *, offset: int = 0,
     out = _pool_candidates(user_id, category, now, only_best=only_best)
     out.sort(key=listing_rank)
     return out[offset:offset + limit]
+
+
+def is_notify_candidate(listing: dict, now: float | None = None) -> bool:
+    """Стоит ли идти на страницу этого объявления ради уведомления.
+
+    Точная дата есть → обычное правило «Кто быстрее». Даты нет → объявление
+    годится, только если бот нашёл его прямо сейчас: со страницы доберётся
+    настоящая дата, и уже она решит, отправлять ли уведомление.
+    """
+    now = time.time() if now is None else float(now)
+    hours, exact = listing_age_hours(listing, now)
+    if exact:
+        return hours < FRESH_HOURS
+    return hours * 60.0 < NOTIFY_UNDATED_MINUTES
+
+
+def should_notify_now(listing: dict, now: float | None = None) -> bool:
+    """Отправлять ли уведомление после захода на страницу объявления.
+
+    Дата с площадки главнее: если оказалось, что машина висит третий день,
+    уведомление не уходит, даже когда бот увидел её минуту назад.
+    """
+    now = time.time() if now is None else float(now)
+    hours, exact = listing_age_hours(listing, now)
+    if exact:
+        return hours < FRESH_HOURS
+    # Дату не отдала и страница объявления. Тогда «свежесть» — это факт, что
+    # объявления не было в пуле при прошлом обходе; такое уведомление честно
+    # подписано «бот впервые увидел».
+    return hours * 60.0 < NOTIFY_UNDATED_MINUTES
+
+
+def notify_candidates(user_id: int, *, limit: int,
+                      now: float | None = None) -> list[dict]:
+    """Кандидаты на мгновенное уведомление «Кто быстрее»."""
+    now = time.time() if now is None else float(now)
+    out = _pool_candidates(user_id, "fresh", now, accept=is_notify_candidate)
+    out.sort(key=listing_rank)
+    return out[:max(0, int(limit))]
 
 
 def listing_rank(listing: dict) -> tuple:

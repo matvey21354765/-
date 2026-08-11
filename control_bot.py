@@ -22283,6 +22283,30 @@ async def cb_ps_reports(cb: CallbackQuery):
 # ── Фоновые циклы постоянного поиска ─────────────────────────────────
 #: Сколько «Кто быстрее» отправлять одному пользователю за один проход цикла.
 PS_FRESH_NOTIFY_PER_CYCLE = max(1, int(os.getenv("PS_FRESH_NOTIFY_PER_CYCLE", "5")))
+#: Потолок уведомлений на человека в час. Нужен на первом проходе после
+#: перезапуска: весь свежесобранный пул разом попадает в кандидаты, и без
+#: потолка человек получил бы сотню сообщений подряд.
+PS_FRESH_NOTIFY_PER_HOUR = max(PS_FRESH_NOTIFY_PER_CYCLE,
+                               int(os.getenv("PS_FRESH_NOTIFY_PER_HOUR", "12")))
+#: uid → моменты отправленных уведомлений (скользящий час).
+_PS_NOTIFY_SENT: dict[int, list[float]] = {}
+
+
+def _ps_notify_budget(uid: int, now: float | None = None) -> int:
+    """Сколько уведомлений человеку ещё можно отправить в этом часу."""
+    now = time.time() if now is None else float(now)
+    marks = [t for t in _PS_NOTIFY_SENT.get(uid, []) if now - t < 3600]
+    if marks:
+        _PS_NOTIFY_SENT[uid] = marks
+    else:
+        _PS_NOTIFY_SENT.pop(uid, None)
+    return max(0, min(PS_FRESH_NOTIFY_PER_CYCLE,
+                      PS_FRESH_NOTIFY_PER_HOUR - len(marks)))
+
+
+def _ps_notify_mark(uid: int, now: float | None = None) -> None:
+    _PS_NOTIFY_SENT.setdefault(uid, []).append(
+        time.time() if now is None else float(now))
 
 
 async def _ps_new_listing_loop():
@@ -22316,17 +22340,28 @@ async def _ps_new_listing_loop():
                         continue
                     if await loop.run_in_executor(None, lambda u=uid: _ps.in_quiet_hours(u)):
                         continue
+                    budget = _ps_notify_budget(uid)
+                    if budget <= 0:
+                        continue
+                    # Не «раздел fresh», а кандидаты: в разделе только машины с
+                    # точной датой публикации, а её отдают далеко не все
+                    # площадки. Из-за этого свежие находки Drom/Auto.ru/Юлы
+                    # уходили в «Новые сегодня», и уведомление не приходило
+                    # никогда — раздел жил, а клиент молчания не понимал.
                     items = await loop.run_in_executor(
-                        None, lambda u=uid: _ps.search_listings(
-                            u, "fresh", limit=PS_FRESH_NOTIFY_PER_CYCLE * 3))
+                        None, lambda u=uid: _ps.notify_candidates(
+                            u, limit=PS_FRESH_NOTIFY_PER_CYCLE * 3))
                     # Сначала заходим на страницу объявления за фото, описанием
                     # и датой публикации — уведомление уходит уже полным.
                     await _ps_enrich_from_pages(
                         loop, items, budget=PS_FRESH_NOTIFY_PER_CYCLE * 3)
+                    # Дата со страницы главнее: объявление, которое бот увидел
+                    # только что, но висит третий день, уведомления не стоит.
+                    items = [x for x in items if _ps.should_notify_now(x)]
                     items.sort(key=_ps.listing_rank)
                     sent = 0
                     for lst in items:
-                        if sent >= PS_FRESH_NOTIFY_PER_CYCLE:
+                        if sent >= budget:
                             break
                         key = lst["listing_key"]
                         try:
@@ -22358,6 +22393,7 @@ async def _ps_new_listing_loop():
                                 uid, text, reply_markup=kb,
                                 disable_web_page_preview=True)
                         sent += 1
+                        _ps_notify_mark(uid)
                         await asyncio.sleep(0.05)
                 except Exception as e:
                     print(f"  [поиск] уведомление uid={uid}: {str(e)[:80]}")

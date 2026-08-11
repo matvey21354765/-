@@ -779,6 +779,20 @@ def test_instant_notifications_do_not_require_the_monitor_toggle():
     assert '_subscription_info(uid)["ended"]' in src
 
 
+def test_notifications_do_not_depend_on_the_platform_date():
+    """Раздел «Кто быстрее» требует точной даты, а её отдают не все площадки.
+
+    Пока цикл брал именно раздел, свежие находки Drom/Auto.ru/Юлы уходили в
+    «Новые сегодня» и уведомление не приходило никогда.
+    """
+    import inspect
+    src = inspect.getsource(cb._ps_new_listing_loop)
+    assert "_ps.notify_candidates(" in src
+    assert '_ps.search_listings(\n' not in src
+    # Дата со страницы проверяется уже после захода на неё.
+    assert src.index("_ps_enrich_from_pages") < src.index("should_notify_now")
+
+
 def test_every_notification_loop_is_started():
     """Цикл, который не запущен, не пришлёт ни одного уведомления."""
     import ast

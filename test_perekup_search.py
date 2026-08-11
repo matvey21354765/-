@@ -849,3 +849,72 @@ class TestListingIsNotItsOwnMarket(SearchTestBase):
         dear = self.add("https://avito.ru/perm/dear", 480_000)
         keys = [x["listing_key"] for x in self.ps.search_listings(1, "fresh", now=self.now)]
         self.assertNotIn(dear, keys)
+
+
+class TestNotifyCandidates(SearchTestBase):
+    """Кандидаты на уведомление, когда площадка не отдала дату публикации.
+
+    Раздел «Кто быстрее» показывает только объявления с точной датой. В бою
+    её отдают редко: свежая находка попадала в «Новые сегодня», и мгновенное
+    уведомление не уходило ни разу. Теперь бот берёт её в кандидаты, идёт за
+    датой на страницу объявления и решает уже по настоящей дате.
+    """
+
+    GOOD_DESC = "Один хозяин, вложений не требует, салон чистый, резина новая"
+
+    def setUp(self):
+        super().setUp()
+        self.ps.save_search(1, region="perm", price_max=500_000)
+
+    def add(self, url, price=250_000, *, published=None, seen_minutes_ago=3):
+        kw = {}
+        if published is not None:
+            kw["_published_ts"] = published
+        key = self.ingest(price=price, url=url, source="avito",
+                          title="Kia Rio, 2015", description=self.GOOD_DESC,
+                          _photo_url="http://a/1.jpg", **kw)
+        with self.ps._conn() as conn:
+            conn.execute("UPDATE listing_pool SET first_seen_at=? WHERE listing_key=?",
+                         (self.now - seen_minutes_ago * 60, key))
+        return key
+
+    def keys(self, limit=15):
+        return [x["listing_key"]
+                for x in self.ps.notify_candidates(1, limit=limit, now=self.now)]
+
+    def test_undated_find_is_a_candidate(self):
+        key = self.add("https://avito.ru/perm/nodate")
+        self.assertEqual(self.ps.category_of(
+            self.ps.get_pool_listing(key), self.now), "today")
+        self.assertIn(key, self.keys())
+
+    def test_dated_fresh_is_still_a_candidate(self):
+        key = self.add("https://avito.ru/perm/dated", published=self.now - 600)
+        self.assertIn(key, self.keys())
+
+    def test_undated_but_long_known_is_not_a_candidate(self):
+        key = self.add("https://avito.ru/perm/old",
+                       seen_minutes_ago=self.ps.NOTIFY_UNDATED_MINUTES + 30)
+        self.assertNotIn(key, self.keys())
+
+    def test_dated_old_listing_is_not_a_candidate(self):
+        """Бот увидел объявление только что, но висит оно третий день."""
+        key = self.add("https://avito.ru/perm/stale", published=self.now - 70 * 3600)
+        self.assertNotIn(key, self.keys())
+
+    def test_page_date_cancels_the_notification(self):
+        """Дата со страницы главнее момента, когда бот увидел объявление."""
+        lst = {"first_seen_at": self.now - 120, "listing_key": "k",
+               "title": "x", "description": ""}
+        self.assertTrue(self.ps.should_notify_now(lst, self.now))
+        lst["published_at"] = self.now - 50 * 3600  # добрали со страницы
+        self.assertFalse(self.ps.should_notify_now(lst, self.now))
+
+    def test_page_date_confirms_the_notification(self):
+        lst = {"first_seen_at": self.now - 120, "listing_key": "k",
+               "published_at": self.now - 900, "title": "x", "description": ""}
+        self.assertTrue(self.ps.should_notify_now(lst, self.now))
+
+    def test_candidates_respect_the_active_search(self):
+        key = self.add("https://avito.ru/perm/dear", price=900_000)
+        self.assertNotIn(key, self.keys())
